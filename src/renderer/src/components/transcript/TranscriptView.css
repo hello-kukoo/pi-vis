@@ -1,0 +1,450 @@
+/* ─────────────────────────────────────────────────────────────────────
+   Transcript — the chat surface.
+   The chat window is a *conversational* space, not a page-level layout,
+   so we keep its outer padding modest (the MCM "massive" pools are
+   reserved for the page-level outer views: PiNotFound, Settings, etc.).
+   The shelf effect lives at the section level, not per-message: each
+   block sits flush-left within a sensible max-width.
+   ───────────────────────────────────────────────────────────────────── */
+
+.transcript-view {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--mcm-base) var(--mcm-large);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.transcript-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mcm-base);
+  flex: 1;
+}
+
+.show-earlier-btn {
+  background: none;
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-subtext0);
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  padding: 0.571rem 1.143rem;
+  cursor: pointer;
+  align-self: center;
+  margin-bottom: var(--mcm-base);
+}
+
+.show-earlier-btn:hover {
+  border-color: var(--ctp-overlay0);
+  color: var(--ctp-text);
+}
+
+/* ── Block architecture ───────────────────────────────────────────────
+   The "shelf" effect: each speaker block indents its content further to
+   the right of the flush-left axis. */
+.transcript-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.714rem;        /* ≈10px */
+  max-width: 100%;
+  text-align: left;
+}
+
+.transcript-block__label {
+  font-family: var(--font-display);
+  font-size: 0.786em;   /* ≈11px @ 14px root */
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-overlay1);
+}
+
+.transcript-block--user {
+  align-items: flex-end;
+}
+
+.transcript-block--user .transcript-block__bubble {
+  /* User bubble — right-aligned, capped at two-thirds of the panel width
+     so the assistant column on the left keeps the dominant axis. */
+  max-width: 66.6667%;
+}
+
+.transcript-block__bubble {
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-md);
+  padding: 0.714rem 1rem;     /* ≈10/14 — symmetric, top/bottom 10px, left/right 14px */
+  color: var(--ctp-text);
+  line-height: var(--mcm-line-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-display);
+  font-size: 1em;
+}
+
+.transcript-block--assistant .transcript-block__label {
+  color: var(--ctp-mauve);
+}
+
+/* Body content (assistant text) — flush-left, capped at 80% width.
+   Inside the user bubble, the content fills the bubble (which is itself
+   capped at two-thirds of the panel), so the text should not be
+   re-capped by this rule. */
+.transcript-block__content {
+  color: var(--ctp-text);
+  font-family: var(--font-display);
+  font-size: 1em;
+  line-height: var(--mcm-line-body);
+  letter-spacing: var(--mcm-track-body);
+  max-width: 80%;
+}
+
+.transcript-block--user .transcript-block__content {
+  /* Fill the user bubble (the 2/3 cap is already on the bubble itself). */
+  max-width: 100%;
+}
+
+.transcript-block__images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.571rem;
+  margin-bottom: 0.286rem;
+}
+
+.transcript-block__image-thumb {
+  max-width: 14.286rem;
+  max-height: 14.286rem;
+  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--ctp-surface1);
+  object-fit: cover;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.transcript-block__image-thumb:hover {
+  border-color: var(--ctp-mauve);
+}
+
+/* Thinking — always visible, italic — uses the display font's true
+   italic variant for architectural contrast.  Capped at 80% width to
+   match the assistant content column. */
+.thinking-block {
+  font-family: var(--font-display);
+  font-size: 1em;
+  font-style: italic;
+  color: var(--color-thinking);
+  line-height: var(--mcm-line-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 80%;
+}
+
+/* ── Tool/bash cards (terminal boxes) ────────────────────────────────
+   Header layout: MCM label (tool name) · monospace subject (file path /
+   command).  The label uses the UI font per the typography spec; the
+   subject falls through to the code font because it's a literal value. */
+.tool-card {
+  position: relative;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface0);
+  border-radius: var(--mcm-radius-md);
+  padding: 0.571rem 0.857rem;     /* ≈8/12 */
+}
+
+.tool-card:hover {
+  border-color: var(--ctp-surface1);
+}
+
+.tool-card--error {
+  background: color-mix(in srgb, var(--ctp-red) 9%, var(--ctp-mantle));
+  border-color: color-mix(in srgb, var(--ctp-red) 35%, var(--ctp-surface0));
+}
+
+.tool-card--error:hover {
+  border-color: color-mix(in srgb, var(--ctp-red) 50%, var(--ctp-surface0));
+}
+
+.tool-card__header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.571rem;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  min-width: 0;
+  /* Children carry their own type: tool name = label, subject = code. */
+}
+
+button.tool-card__header {
+  cursor: pointer;
+}
+
+/* Reserve the bottom-right corner for the expand arrow */
+.tool-card--expandable .tool-card__header {
+  padding-right: 1.857rem;
+}
+
+.tool-card__name {
+  /* MCM label: UI font · uppercase · wide architectural tracking. */
+  font-family: var(--font-display);
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-text);
+  flex-shrink: 0;
+}
+
+.tool-card__name--bash {
+  color: var(--ctp-green);
+}
+
+.tool-card__subject {
+  /* Subject is a literal value (file path / command) — monospace. */
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
+  color: var(--ctp-teal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tool-card__subject--command {
+  color: var(--ctp-text);
+}
+
+.tool-card__spinner {
+  font-size: 0.786em;       /* ≈11px @ 14px root */
+}
+
+.tool-card__badge {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  color: var(--ctp-red);
+  background: color-mix(in srgb, var(--ctp-red) 18%, var(--ctp-mantle));
+  border-radius: 0.214em;
+  padding: 0.071em 0.429em;
+}
+
+.tool-card__body {
+  margin-top: 0.429rem;
+  padding-right: 1.714rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.429rem;
+}
+
+.tool-card__args,
+.tool-card__output {
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.tool-card__args {
+  color: var(--ctp-overlay1);
+  max-height: 17.143rem;
+  overflow-y: auto;
+}
+
+.tool-card__output {
+  color: var(--ctp-subtext0);
+  max-height: 28.571rem;
+  overflow-y: auto;
+}
+
+.tool-card__more {
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  font-style: italic;     /* True italic variant for "more" notes */
+  color: var(--ctp-overlay0);
+}
+
+.tool-card__expand {
+  position: absolute;
+  right: 0.357rem;
+  bottom: 0.357rem;
+  width: 1.571em;          /* ≈22px @ 14px root */
+  height: 1.571em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--ctp-surface0) 60%, transparent);
+  border: none;
+  border-radius: 0.286em;
+  color: var(--ctp-overlay1);
+  cursor: pointer;
+  padding: 0;
+}
+
+.tool-card__expand:hover {
+  background: var(--ctp-surface1);
+  color: var(--ctp-text);
+}
+
+.tool-card__expand svg {
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+.tool-card--open .tool-card__expand svg {
+  transform: rotate(180deg);
+}
+
+/* Working indicator shown while the agent is running */
+.working-row {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
+  padding: 0.286rem 0;
+  color: var(--ctp-subtext0);
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+}
+
+.working-row__label {
+  font-style: italic;
+}
+
+/* Compaction marker — a thin architectural line */
+.compaction-marker {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
+  padding: 0.571rem 0;
+}
+
+.compaction-marker__line {
+  flex: 1;
+  height: 1px;
+  background: var(--ctp-surface1);
+}
+
+.compaction-marker__label {
+  font-family: var(--font-display);
+  font-size: 0.786em;     /* ≈11px @ 14px root */
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-overlay0);
+  white-space: nowrap;
+}
+
+.compaction-marker__summary {
+  width: 100%;
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  color: var(--ctp-subtext0);
+  font-style: italic;
+  line-height: var(--mcm-line-body);
+  margin-top: 0.286rem;
+}
+
+/* Custom message */
+.transcript-block--custom {
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  color: var(--ctp-overlay1);
+  font-style: italic;
+  padding: 0.286rem 0;
+  line-height: var(--mcm-line-body);
+}
+
+/* ── Markdown content (assistant responses) ───────────────────────── */
+.transcript-block__content p {
+  margin: 0 0 var(--mcm-tight);
+}
+.transcript-block__content p:last-child { margin-bottom: 0; }
+
+.transcript-block__content ul,
+.transcript-block__content ol {
+  padding-left: 1.4em;
+  margin: 0 0 var(--mcm-tight);
+}
+
+.transcript-block__content li { margin: 0.2em 0; }
+
+.transcript-block__content blockquote {
+  border-left: 2px solid var(--ctp-surface1);
+  padding-left: 0.714rem;
+  color: var(--ctp-subtext0);
+  margin: 0 0 var(--mcm-tight);
+  font-style: italic;
+}
+
+.transcript-block__content h1,
+.transcript-block__content h2,
+.transcript-block__content h3 {
+  color: var(--ctp-text);
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.transcript-block__content a {
+  color: var(--ctp-blue);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--ctp-blue) 30%, transparent);
+}
+
+.transcript-block__content a:hover { border-bottom-color: var(--ctp-blue); }
+
+.transcript-block__content table {
+  border-collapse: collapse;
+  font-size: 0.929em;
+  margin: var(--mcm-tight) 0;
+  font-family: var(--font-code);
+}
+
+.transcript-block__content th,
+.transcript-block__content td {
+  border: 1px solid var(--ctp-surface1);
+  padding: 0.286rem 0.571rem;
+  text-align: left;
+}
+
+.transcript-block__content th {
+  background: var(--ctp-surface0);
+  font-weight: 600;
+}
+
+/* Code block from shiki */
+.transcript-block__content .shiki {
+  border-radius: var(--mcm-radius-sm);
+  padding: 0.857rem;
+  overflow-x: auto;
+  margin: var(--mcm-tight) 0;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
+}
+
+.code-block--plain {
+  background: var(--ctp-mantle);
+  border-radius: var(--mcm-radius-sm);
+  padding: 0.857rem;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
+  margin: var(--mcm-tight) 0;
+  color: var(--ctp-text);
+}

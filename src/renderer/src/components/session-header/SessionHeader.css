@@ -1,0 +1,214 @@
+/* Session header — slim chrome strip. The session name uses the MCM
+   label style (uppercase, wide tracking); the model/thinking pickers
+   follow the same architectural-signage convention. */
+
+.session-header {
+  height: 3rem;       /* ≈42px @ 14px root */
+  background: var(--ctp-mantle);
+  border-bottom: 1px solid var(--ctp-surface0);
+  display: flex;
+  align-items: center;
+  padding: 0 0.857rem;
+  gap: 0.857rem;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+}
+
+.session-header__name {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-header__name-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  font-weight: 600;
+  color: var(--ctp-subtext1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 14.286rem;
+  padding: 0.286rem 0.429rem;
+  border-radius: var(--mcm-radius-sm);
+}
+
+.session-header__name-btn:hover {
+  background: var(--ctp-surface0);
+  color: var(--ctp-text);
+}
+
+.session-header__name-input {
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-mauve);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-text);
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  padding: 0.286rem 0.429rem;
+  outline: none;
+  width: 12.857rem;
+}
+
+.session-header__controls {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
+  flex-shrink: 0;
+}
+
+.session-header__model-picker {
+  position: relative;
+}
+
+.session-header__picker-btn {
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-subtext0);
+  font-family: var(--font-code);
+  font-size: 0.857em;
+  /* 1.4 line-height gives descenders ('g' in "high", 'y' in "xhigh")
+     enough vertical room without clipping. */
+  line-height: 1.4;
+  padding: 0.214rem 0.571rem;
+  cursor: pointer;
+}
+
+.session-header__picker-btn:hover {
+  border-color: var(--ctp-overlay0);
+  color: var(--ctp-text);
+}
+
+.session-header__picker-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  color: var(--ctp-overlay0);
+}
+
+.session-header__dropdown {
+  position: absolute;
+  top: calc(100% + 0.286rem);
+  right: 0;
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-md);
+  min-width: 14.286rem;
+  max-height: 21.429rem;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 0.286rem 1.143rem rgba(0, 0, 0, 0.4);
+}
+
+.session-header__dropdown-search {
+  position: sticky;
+  top: 0;
+  padding: 0.571rem 0.571rem 0.286rem;
+  background: var(--ctp-surface0);
+}
+
+.session-header__dropdown-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-text);
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  padding: 0.429rem 0.571rem;
+  outline: none;
+}
+
+.session-header__dropdown-search-input:focus {
+  border-color: var(--ctp-mauve);
+}
+
+.session-header__dropdown-search-input::placeholder {
+  color: var(--ctp-overlay0);
+}
+
+.session-header__dropdown-empty {
+  padding: 0.857rem;
+  font-family: var(--font-code);
+  font-size: 0.857em;
+  color: var(--ctp-overlay0);
+  text-align: center;
+}
+
+.session-header__dropdown-item {
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.571rem 0.857rem;
+  font-family: var(--font-code);
+  font-size: 0.857em;
+  line-height: 1.3;
+  color: var(--ctp-subtext0);
+}
+
+.session-header__dropdown-item:hover {
+  background: var(--ctp-surface1);
+  color: var(--ctp-text);
+}
+
+.session-header__dropdown-item--active {
+  color: var(--ctp-mauve);
+}
+
+.session-header__dropdown-item--highlighted {
+  background: var(--ctp-surface1);
+  color: var(--ctp-text);
+}
+
+.session-header__match {
+  background: var(--ctp-surface2);
+  color: var(--ctp-mauve);
+  border-radius: 0.143em;
+  padding: 0 0.071em;
+}
+
+.session-header__context {
+  display: flex;
+  align-items: center;
+  gap: 0.429rem;
+}
+
+.context-meter {
+  width: 4.286rem;
+  height: 0.286rem;
+  background: var(--ctp-surface1);
+  border-radius: 0.143em;
+  overflow: hidden;
+}
+
+.context-meter__fill {
+  height: 100%;
+  background: var(--ctp-mauve);
+  border-radius: 0.143em;
+  transition: width 0.3s ease;
+}
+
+.context-meter__fill[style*="width: 8"] {
+  background: var(--ctp-peach);
+}
+
+.context-meter__fill[style*="width: 9"],
+.context-meter__fill[style*="width: 100"] {
+  background: var(--ctp-red);
+}
+
+.session-header__meta {
+  font-family: var(--font-code);
+  font-size: 0.786em;
+  color: var(--ctp-overlay0);
+  white-space: nowrap;
+  letter-spacing: 0;
+  text-transform: none;
+}

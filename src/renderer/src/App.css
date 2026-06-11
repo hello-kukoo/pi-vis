@@ -1,0 +1,79 @@
+/* ─────────────────────────────────────────────────────────────────────
+   App shell layout. All measurements use rem/em so the architecture
+   scales with the user's base font size.
+   ───────────────────────────────────────────────────────────────────── */
+
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 2.857rem 1fr;
+  /* Sidebar width is set inline by the React component, in px — it's a
+     user-controlled chrome measurement, not typography. */
+  grid-template-columns: var(--sidebar-width, 15.714rem) 1fr;
+  grid-template-areas:
+    "titlebar titlebar"
+    "sidebar main";
+}
+
+.app--setup {
+  background: var(--color-bg);
+}
+
+.titlebar {
+  grid-area: titlebar;
+}
+
+.sidebar {
+  grid-area: sidebar;
+}
+
+.app__main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.app__session {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app__empty {
+  /* MCM-style empty state: vast outer margins, flush-left axis, body
+     content offset to the right. */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  height: 100%;
+  gap: var(--mcm-base);
+  padding: var(--mcm-large) var(--mcm-massive);
+  text-align: left;
+}
+
+.app__empty-hint {
+  /* Flush-left, indented to the right of an imagined header */
+  margin-left: 10%;
+  padding-left: var(--mcm-large);
+  font-size: 1em;
+  line-height: var(--mcm-line-body);
+  color: var(--ctp-overlay0);
+}
+
+.app-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--ctp-base);
+}
+
+.app-loading__text {
+  color: var(--ctp-overlay0);
+  font-size: 1em;
+}

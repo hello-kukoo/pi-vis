@@ -1,0 +1,29 @@
+import React from "react";
+import "./DiffBlock.css";
+
+interface DiffBlockProps {
+  diff: string;
+}
+
+export function DiffBlock({ diff }: DiffBlockProps): React.ReactElement {
+  const lines = diff.split("\n");
+  return (
+    <div className="diff-block">
+      {lines.map((line, i) => {
+        const cls = line.startsWith("+") && !line.startsWith("+++")
+          ? "diff-block__line diff-block__line--add"
+          : line.startsWith("-") && !line.startsWith("---")
+            ? "diff-block__line diff-block__line--del"
+            : line.startsWith("@@")
+              ? "diff-block__line diff-block__line--hunk"
+              : "diff-block__line";
+        return (
+          // eslint-disable-next-line react/no-array-index-key
+          <div key={i} className={cls}>
+            <span className="diff-block__text">{line}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

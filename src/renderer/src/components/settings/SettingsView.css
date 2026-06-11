@@ -1,0 +1,230 @@
+/* ─────────────────────────────────────────────────────────────────────
+   Settings modal.
+   The MCM character here lives in the typography (uppercase, wide
+   architectural tracking on section titles) rather than in dramatic
+   outer margins — a 520px modal can't afford pools of negative space
+   without its rows looking orphaned.
+   ───────────────────────────────────────────────────────────────────── */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 17, 27, 0.6);
+  backdrop-filter: blur(0.286rem);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  padding: var(--mcm-base);
+}
+
+.settings-panel {
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-lg);
+  width: 100%;
+  max-width: 37.143rem;     /* ≈520px */
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0.571rem 2.857rem rgba(0, 0, 0, 0.5);
+}
+
+.settings-panel__header {
+  display: flex;
+  align-items: center;
+  padding: 0.857rem 1rem;    /* ≈12/14 */
+  border-bottom: 1px solid var(--ctp-surface1);
+}
+
+.settings-panel__title {
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: 1em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-text);
+}
+
+.settings-panel__close {
+  background: none;
+  border: none;
+  color: var(--ctp-overlay0);
+  cursor: pointer;
+  font-size: 1.429em;
+  line-height: 1;
+  padding: 0.143rem 0.429rem;
+}
+
+.settings-panel__close:hover { color: var(--ctp-text); }
+
+.settings-panel__body {
+  overflow-y: auto;
+  padding: 1rem 1.143rem;          /* ≈14/16 */
+  display: flex;
+  flex-direction: column;
+  gap: var(--mcm-base);             /* standard section separation */
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.571rem;                   /* tight grouping within a section */
+}
+
+.settings-section__title {
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-subtext0);
+  margin-bottom: 0.143rem;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
+}
+
+.settings-label {
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  color: var(--ctp-subtext0);
+  min-width: 4.286rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+
+.settings-value {
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  color: var(--ctp-text);
+  flex: 1;
+}
+
+.settings-value--mono {
+  font-family: var(--font-code);
+  color: var(--ctp-teal);
+}
+
+.settings-btn {
+  background: var(--ctp-surface1);
+  border: none;
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-subtext0);
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+  padding: 0.429rem 0.714rem;
+}
+
+.settings-btn:hover { background: var(--ctp-surface2); color: var(--ctp-text); }
+
+.settings-select, .settings-input {
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-text);
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  padding: 0.429rem 0.571rem;
+  flex: 1;
+  outline: none;
+}
+
+.settings-select:focus, .settings-input:focus { border-color: var(--ctp-mauve); }
+
+.settings-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.429rem;
+}
+
+.settings-stepper__btn {
+  background: var(--ctp-surface1);
+  border: none;
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-text);
+  cursor: pointer;
+  font-size: 1em;
+  width: 1.714rem;
+  height: 1.714rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-stepper__btn:hover { background: var(--ctp-surface2); }
+
+.settings-stepper__val {
+  font-family: var(--font-code);
+  font-size: 0.929em;
+  color: var(--ctp-text);
+  min-width: 2.571rem;
+  text-align: center;
+}
+
+.settings-hint {
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  color: var(--ctp-overlay0);
+  line-height: var(--mcm-line-body);
+}
+
+.settings-hint code {
+  font-family: var(--font-code);
+  background: var(--ctp-surface1);
+  padding: 0.1em 0.3em;
+  border-radius: 0.214em;
+  font-size: 0.929em;
+}
+
+/* Toggle switch */
+.settings-toggle {
+  width: 2.571rem;
+  height: 1.429rem;
+  border-radius: 0.714rem;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.settings-toggle--on {
+  background: var(--ctp-mauve);
+}
+
+.settings-toggle--off {
+  background: var(--ctp-surface1);
+}
+
+.settings-toggle__knob {
+  position: absolute;
+  top: 0.143rem;
+  left: 0.143rem;
+  width: 1.143rem;
+  height: 1.143rem;
+  border-radius: 50%;
+  background: var(--ctp-base);
+  transition: transform 0.2s;
+}
+
+.settings-toggle--on .settings-toggle__knob {
+  transform: translateX(1.143rem);
+}
+
+.settings-toggle--off .settings-toggle__knob {
+  transform: translateX(0);
+}

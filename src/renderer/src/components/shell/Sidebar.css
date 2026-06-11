@@ -1,0 +1,238 @@
+/* ─────────────────────────────────────────────────────────────────────
+   Sidebar — workspace tree. Compact chrome (12–13px), but the workspace
+   name uses the MCM label style: uppercase, wide architectural tracking,
+   flat 1.0 line-height. Paths and metadata stay in the small em size
+   so they read as secondary information.
+   ───────────────────────────────────────────────────────────────────── */
+
+.sidebar {
+  min-width: 11.429rem;   /* ≈160px */
+  max-width: 35.714rem;   /* ≈500px */
+  background: var(--color-sidebar);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ctp-surface0);
+  overflow: hidden;
+  position: relative;
+}
+
+.sidebar__draghandle {
+  position: absolute;
+  top: 0;
+  right: -0.214rem;
+  width: 0.429rem;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.sidebar__workspaces {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.571rem 0;     /* ≈8px */
+}
+
+.sidebar__workspace {
+  position: relative;
+  border-bottom: 1px solid var(--ctp-surface0);
+}
+
+.sidebar__workspace-header {
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.571rem 0.857rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.143rem;
+  font-family: var(--font-display);
+}
+
+.sidebar__workspace-header:hover {
+  background: var(--ctp-surface0);
+}
+
+.sidebar__workspace--active .sidebar__workspace-header {
+  background: var(--ctp-surface0);
+}
+
+.sidebar__workspace-name {
+  font-family: var(--font-code);
+  font-size: 0.929em;     /* ≈13px @ 14px root */
+  font-weight: 600;
+  color: var(--ctp-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar__workspace-path {
+  font-family: var(--font-code);
+  font-size: 0.786em;     /* ≈11px @ 14px root */
+  color: var(--ctp-overlay0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+
+.sidebar__sessions {
+  padding: 0.286rem 0;     /* ≈4px */
+  background: var(--ctp-mantle);
+}
+
+.sidebar__session {
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.429rem 0.857rem 0.429rem 1.429rem; /* 6/12/6/20 */
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.429rem;
+  color: var(--ctp-subtext0);
+  font-family: var(--font-display);
+  font-size: 0.857em;     /* ≈12px @ 14px root */
+  font-weight: 500;
+  line-height: var(--mcm-line-label);
+}
+
+.sidebar__session:hover {
+  background: var(--ctp-surface0);
+  color: var(--ctp-text);
+}
+
+.sidebar__session--active {
+  background: var(--ctp-surface0);
+  color: var(--ctp-text);
+}
+
+.sidebar__session-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar__session-preview {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ctp-overlay1);
+}
+
+.sidebar__session-meta {
+  font-size: 0.929em;
+  color: var(--ctp-overlay0);
+  flex-shrink: 0;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.sidebar__new-session {
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.429rem 0.857rem 0.429rem 1.429rem;
+  text-align: left;
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  color: var(--ctp-overlay1);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: var(--mcm-line-label);
+}
+
+.sidebar__new-session:hover {
+  color: var(--ctp-mauve);
+}
+
+.sidebar__footer {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--ctp-surface0);
+}
+
+.sidebar__add-workspace {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.857rem;
+  text-align: left;
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: var(--mcm-line-label);
+  color: var(--ctp-overlay1);
+  flex: 1;
+}
+
+.sidebar__add-workspace:hover {
+  color: var(--ctp-blue);
+}
+
+.sidebar__settings-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.857rem 0.857rem 0.857rem 0.286rem;
+  font-size: 1em;
+  color: var(--ctp-overlay1);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.sidebar__settings-btn:hover {
+  color: var(--ctp-mauve);
+}
+
+.sidebar__remove-workspace {
+  position: absolute;
+  top: 0.571rem;
+  right: 0.571rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ctp-overlay0);
+  font-size: 1.143em;     /* ≈16px @ 14px root */
+  line-height: 1;
+  padding: 0.143rem 0.286rem;
+  display: none;
+}
+
+.sidebar__workspace:hover .sidebar__remove-workspace {
+  display: block;
+}
+
+.sidebar__remove-workspace:hover {
+  color: var(--ctp-red);
+}
+
+/* Status dots */
+.status-dot {
+  font-size: 0.714em;     /* ≈10px @ 14px root */
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.status-dot--idle { color: var(--ctp-overlay0); }
+.status-dot--starting { color: var(--ctp-yellow); }
+.status-dot--attention { color: var(--ctp-peach); }
+.status-dot--exited { color: var(--ctp-overlay0); }
+.status-dot--failed { color: var(--ctp-red); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-dot--streaming {
+  color: var(--ctp-mauve);
+  animation: pulse 1s ease-in-out infinite;
+}

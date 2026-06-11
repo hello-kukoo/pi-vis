@@ -1,0 +1,32 @@
+/* Title bar — a thin chrome strip. Doubles as the OS-level drag region for
+   the whole window (-webkit-app-region: drag) so the user can grab it to
+   move the window.  The title is rendered as plain "Pi-Vis" (no uppercasing)
+   and inset from the left so the macOS traffic-light buttons don't overlap.
+
+   Vertical alignment: the title sits toward the bottom of the bar, so the
+   brand mark reads as a peer of the menu-bar contents below it rather than
+   being centered or pushed to the top with the traffic lights. */
+
+.titlebar {
+  height: 2.714rem;       /* ≈38px @ 14px root */
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  /* Left padding clears the macOS traffic-light buttons (red / yellow /
+     green) on all current macOS versions.  Generous enough that the title
+     reads as a peer of the lights, not crammed against them. */
+  padding: 0 1rem 0.5rem 6.5rem;
+  background: var(--color-sidebar);
+  border-bottom: 1px solid var(--ctp-surface0);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.titlebar__title {
+  font-family: var(--font-display);
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ctp-overlay1);
+  /* The label is the brand mark — leave its case alone ("Pi-Vis"). */
+}

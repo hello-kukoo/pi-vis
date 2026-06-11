@@ -1,0 +1,122 @@
+:root {
+  /* Catppuccin Mocha palette */
+  --ctp-base: #1e1e2e;
+  --ctp-mantle: #181825;
+  --ctp-crust: #11111b;
+  --ctp-surface0: #313244;
+  --ctp-surface1: #45475a;
+  --ctp-surface2: #585b70;
+  --ctp-overlay0: #6c7086;
+  --ctp-overlay1: #7f849c;
+  --ctp-overlay2: #9399b2;
+  --ctp-subtext0: #a6adc8;
+  --ctp-subtext1: #bac2de;
+  --ctp-text: #cdd6f4;
+  --ctp-lavender: #b4befe;
+  --ctp-blue: #89b4fa;
+  --ctp-sapphire: #74c7ec;
+  --ctp-sky: #89dceb;
+  --ctp-teal: #94e2d5;
+  --ctp-green: #a6e3a1;
+  --ctp-yellow: #f9e2af;
+  --ctp-peach: #fab387;
+  --ctp-maroon: #eba0ac;
+  --ctp-red: #f38ba8;
+  --ctp-mauve: #cba6f7;
+  --ctp-pink: #f5c2e7;
+  --ctp-flamingo: #f2cdcd;
+  --ctp-rosewater: #f5e0dc;
+
+  /* Semantic tokens */
+  --color-bg: var(--ctp-base);
+  --color-sidebar: var(--ctp-mantle);
+  --color-modal: var(--ctp-surface0);
+  --color-text: var(--ctp-text);
+  --color-subtext: var(--ctp-subtext0);
+  --color-accent: var(--ctp-mauve);
+  --color-accent2: var(--ctp-blue);
+  --color-border: var(--ctp-overlay0);
+  --color-tool-bg: var(--ctp-surface0);
+  --color-diff-add: var(--ctp-green);
+  --color-diff-del: var(--ctp-red);
+  --color-error: var(--ctp-red);
+  --color-thinking: var(--ctp-subtext0);
+  --color-user-accent: var(--ctp-blue);
+
+  /* ── Font variables (overridden by settings) ──────────────────────────
+     --font-size-base is applied to the <html> root from JS, so 1rem = the
+     user's chosen base size. The other sizes are em ratios that scale
+     fluidly with the base.  */
+  --font-display: "Inter", system-ui, -apple-system, sans-serif;
+  --font-code: "IBM Plex Mono", "Menlo", "Monaco", "Courier New", monospace;
+  --font-size-base: 14px;
+  --font-size-code: 0.929em;
+  --font-size-small: 0.857em;
+
+  /* ── MCM Spacing tokens (relative to root font size) ─────────────────
+     The entire layout breathes off these four tokens.  Changing the root
+     font size scales the whole architecture seamlessly. */
+  --mcm-tight: 0.5rem;   /* Grouping related items close together */
+  --mcm-base: 1.5rem;    /* Standard element / paragraph separation */
+  --mcm-large: 3.5rem;   /* Asymmetric breathing room / section spacing */
+  --mcm-massive: 6rem;   /* Outer view padding — pools of negative space */
+
+  /* ── MCM Typography scale (unitless multipliers + em tracking) ─────── */
+  --mcm-line-display: 1.1;       /* Tight, block-print feel */
+  --mcm-line-body: 1.6;          /* Generous, airy reading rhythm */
+  --mcm-line-code: 1.5;          /* Standard code editor cadence */
+  --mcm-line-label: 1.0;         /* Flat for uppercase labels */
+  --mcm-track-display: -0.025em; /* Negative: characters compress tightly */
+  --mcm-track-label: 0.13em;     /* Wide, architectural */
+  --mcm-track-body: 0;           /* Default layout tracking */
+
+  /* Border radius — gentle corners, in em so they scale with the type. */
+  --mcm-radius-sm: 0.286em;
+  --mcm-radius-md: 0.5em;
+  --mcm-radius-lg: 0.857em;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Root sizing — the user-controlled base size sets the rem anchor. */
+html {
+  font-size: var(--font-size-base);
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  line-height: var(--mcm-line-body);
+  letter-spacing: var(--mcm-track-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 0.4em;
+  height: 0.4em;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ctp-surface2);
+}

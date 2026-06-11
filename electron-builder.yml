@@ -1,0 +1,42 @@
+appId: dev.pivis.app
+productName: Pi-Vis
+directories:
+  buildResources: resources
+  output: release/${version}
+files:
+  - out/**/*
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.{js,ts}"
+  - "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+  - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+  - "!{tsconfig,tsconfig.*}.json"
+  - "!vite.*.{js,ts}"
+  - "!{karma,rollup,webpack}.config.{js,ts}"
+  - "!{.mocharc,.prettierrc}.{js,cjs,yml,yaml}"
+asarUnpack:
+  - resources/**
+mac:
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Not required
+    NSCameraUsageDescription: Not required
+  notarize: false
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+    - target: zip
+win:
+  executableName: pi-vis
+  target:
+    - target: nsis
+linux:
+  target:
+    - target: AppImage
+    - target: snap
+  category: Development
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always

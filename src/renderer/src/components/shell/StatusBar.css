@@ -1,0 +1,35 @@
+/* Status bar — terminal-style footer. Monospace, in the MCM code style
+   (1.5 line-height), so it reads as architectural notation against the
+   UI type above it. */
+
+.statusbar {
+  background: var(--ctp-mantle);
+  border-top: 1px solid var(--ctp-surface0);
+  padding: 0.429rem 1rem;     /* ≈6/14 */
+  display: flex;
+  flex-direction: column;
+  gap: 0.143rem;
+  flex-shrink: 0;
+}
+
+.statusbar__line {
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  line-height: 1.4;
+  color: var(--ctp-subtext0);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.statusbar__line--split {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.143rem;
+}
+
+.statusbar__model {
+  color: var(--ctp-overlay1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

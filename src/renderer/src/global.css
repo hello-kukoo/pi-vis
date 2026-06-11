@@ -1,0 +1,133 @@
+/* ─────────────────────────────────────────────────────────────────────
+   Mid-Century Modern typography & layout system
+   All measurements are rem (root) or em (element).  The architecture
+   scales fluidly when the user changes the root font size from settings.
+   ───────────────────────────────────────────────────────────────────── */
+
+/* ── MCM Display Headers (large UI headers) ─────────────────────────────
+   Variable UI font · tight line-height · negative tracking · flush-left.
+   Mimics heavy block-print type, set off with a loose bottom margin. */
+h1, h2,
+.mcm-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  line-height: var(--mcm-line-display);
+  letter-spacing: var(--mcm-track-display);
+  text-align: left;
+  margin-bottom: var(--mcm-base);
+}
+
+h1 { font-size: 2em; }
+h2 { font-size: 1.5em; }
+
+h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: var(--mcm-track-display);
+  text-align: left;
+}
+
+/* ── MCM Body copy ──────────────────────────────────────────────────────
+   Variable UI font · airy 1.6 rhythm · default tracking. */
+.mcm-body, p {
+  font-family: var(--font-display);
+  line-height: var(--mcm-line-body);
+  letter-spacing: var(--mcm-track-body);
+}
+
+/* ── MCM Labels (small metadata, tags, buttons) ─────────────────────────
+   Variable UI font · uppercase · exceptionally wide tracking · flat
+   line-height.  Architectural signage.
+
+   IMPORTANT: scoped to the utility class only — NOT all buttons.  Applying
+   this to every <button> on the page would force uppercase on chrome that
+   intentionally renders plain text (session names, model picker, etc.). */
+.mcm-label {
+  font-family: var(--font-display);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--mcm-track-label);
+  line-height: var(--mcm-line-label);
+}
+
+button {
+  font-family: inherit;
+}
+
+input, textarea, select {
+  font-family: inherit;
+}
+
+/* ── MCM Code (terminal, editor, syntax-highlighted blocks) ─────────────
+   Monospace font · 1.5 line-height.  Comments/notes use the font's true
+   italic variant for architectural contrast against block code. */
+code, pre, .mcm-code {
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
+}
+
+code em, code i, pre em, pre i,
+.mcm-comment, .mcm-note {
+  font-style: italic;
+}
+
+/* Inline code (used inside markdown text) */
+.mcm-inline-code {
+  font-family: var(--font-code);
+  font-size: 0.929em;        /* relative to the surrounding paragraph */
+  background: var(--ctp-surface0);
+  padding: 0.1em 0.3em;
+  border-radius: 0.214em;
+  color: var(--ctp-text);
+}
+
+/* shiki: guarantee true italic for comment-colored tokens even if the
+   bundled theme doesn't set fontStyle.  Catppuccin Mocha's comment color
+   is overlay1 / overlay0, so we cover the whole range. */
+.shiki span[style*="color:#6c7086"],
+.shiki span[style*="color:#7f849c"],
+.shiki span[style*="color:#9399b2"] {
+  font-style: italic !important;
+}
+
+/* ── MCM Layout primitives ────────────────────────────────────────────── */
+
+/* Deep, dramatic outer margins — vast pools of negative space. */
+.mcm-container {
+  padding: var(--mcm-large) var(--mcm-massive);
+}
+
+/* Asymmetric grid: headers flush-left, body indented to the right.
+   Creates the structural "shelf" effect characteristic of MCM layouts. */
+.mcm-shelf {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--mcm-base);
+  align-items: start;
+}
+
+.mcm-shelf__body {
+  /* Indent further to the right of the corresponding header */
+  padding-left: var(--mcm-large);
+  margin-left: 10%;
+  min-width: 0;
+}
+
+/* Shared spinner — takes its color from currentColor */
+.spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  color: var(--ctp-mauve);
+  animation: spinner-spin 0.8s linear infinite;
+}
+
+@keyframes spinner-spin {
+  to { transform: rotate(360deg); }
+}

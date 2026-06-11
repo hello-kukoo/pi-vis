@@ -1,0 +1,41 @@
+/* DiffBlock — terminal-style diff. Strictly monospace, in the MCM
+   code style. The line heights are in em so they match the user's
+   code font size, and the colors carry semantic meaning. */
+
+.diff-block {
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-overlay0);
+  border-radius: var(--mcm-radius-sm);
+  overflow: hidden;
+  margin: 0.286rem 0;
+}
+
+.diff-block__line {
+  padding: 0 0.857rem;
+  white-space: pre;
+  color: var(--ctp-subtext0);
+  /* 1.43em ≈ 20px @ 14px root — fits the 1.5 line-height in code */
+  min-height: 1.43em;
+  line-height: 1.5;
+}
+
+.diff-block__line--add {
+  background: rgba(166, 227, 161, 0.12);
+  color: var(--ctp-green);
+}
+
+.diff-block__line--del {
+  background: rgba(243, 139, 168, 0.12);
+  color: var(--ctp-red);
+}
+
+.diff-block__line--hunk {
+  color: var(--ctp-sapphire);
+  background: rgba(116, 199, 236, 0.06);
+}
+
+.diff-block__text {
+  display: block;
+}
