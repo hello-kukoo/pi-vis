@@ -1,9 +1,14 @@
 import type { SessionId } from "@shared/ids.js";
 import { beforeEach, describe, expect, it } from "vitest";
-import { useSessionsStore } from "./sessions-store.js";
+import {
+  computeOpenTabs,
+  persistOpenTabs,
+  useSessionsStore,
+} from "./sessions-store.js";
 
 const SESSION_A = "session-a" as SessionId;
 const SESSION_B = "session-b" as SessionId;
+const SESSION_C = "session-c" as SessionId;
 const WORKSPACE = "/tmp/test-workspace";
 
 /**
@@ -118,5 +123,92 @@ describe("sessions store - session name from pi", () => {
     });
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionName).toBe("A's name");
     expect(useSessionsStore.getState().sessions.get(SESSION_B)?.sessionName).toBe("B's name");
+  });
+});
+
+describe("createSession(name) and tab lifecycle", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+  });
+
+  it("createSession records name + file and does NOT steal focus", () => {
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/f/a.jsonl", "Named");
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.sessionName).toBe("Named");
+    expect(s?.sessionFile).toBe("/f/a.jsonl");
+    expect(useSessionsStore.getState().activeSessionId).toBeNull();
+  });
+
+  it("removeSession removes from sessions and workspace, clears activeSessionId only when pointing at it", () => {
+    useSessionsStore.getState().addWorkspace(WORKSPACE);
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE);
+    useSessionsStore.getState().setActiveSession(SESSION_A);
+
+    useSessionsStore.getState().removeSession(SESSION_A);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)).toBeUndefined();
+    expect(useSessionsStore.getState().activeSessionId).toBeNull();
+    // B is still there, and the workspace's activeSessions list no longer mentions A.
+    const ws = useSessionsStore.getState().workspaces.get(WORKSPACE);
+    expect(ws?.activeSessions).toEqual([SESSION_B]);
+
+    useSessionsStore.getState().setActiveSession(SESSION_B);
+    useSessionsStore.getState().removeSession(SESSION_B);
+    expect(useSessionsStore.getState().activeSessionId).toBeNull();
+  });
+
+  it("setSessionFile sets once, second call is ignored", () => {
+    useSessionsStore.getState().addWorkspace(WORKSPACE);
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    useSessionsStore.getState().setSessionFile(SESSION_A, "/first.jsonl");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionFile).toBe("/first.jsonl");
+    useSessionsStore.getState().setSessionFile(SESSION_A, "/second.jsonl");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionFile).toBe("/first.jsonl");
+  });
+
+  it("computeOpenTabs includes only sessions with a file, in insertion order, with active file from activeSessionId", () => {
+    useSessionsStore.getState().addWorkspace(WORKSPACE);
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/a.jsonl");
+    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE); // no file
+    useSessionsStore.getState().createSession(SESSION_C, WORKSPACE, "/c.jsonl");
+    useSessionsStore.getState().setActiveSession(SESSION_C);
+
+    const { openTabs, activeSessionFile } = computeOpenTabs(
+      useSessionsStore.getState().sessions,
+      useSessionsStore.getState().activeSessionId,
+    );
+    expect(openTabs).toEqual([
+      { workspacePath: WORKSPACE, sessionFile: "/a.jsonl" },
+      { workspacePath: WORKSPACE, sessionFile: "/c.jsonl" },
+    ]);
+    expect(activeSessionFile).toBe("/c.jsonl");
+
+    useSessionsStore.getState().setActiveSession(SESSION_B); // no file
+    const result2 = computeOpenTabs(
+      useSessionsStore.getState().sessions,
+      useSessionsStore.getState().activeSessionId,
+    );
+    expect(result2.activeSessionFile).toBeNull();
+    expect(result2.openTabs).toEqual([
+      { workspacePath: WORKSPACE, sessionFile: "/a.jsonl" },
+      { workspacePath: WORKSPACE, sessionFile: "/c.jsonl" },
+    ]);
+  });
+
+  it("computeOpenTabs returns empty arrays for an empty map", () => {
+    const { openTabs, activeSessionFile } = computeOpenTabs(new Map(), null);
+    expect(openTabs).toEqual([]);
+    expect(activeSessionFile).toBeNull();
+  });
+
+  it("persistOpenTabs under node does not throw", () => {
+    useSessionsStore.getState().addWorkspace(WORKSPACE);
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/a.jsonl");
+    expect(() => persistOpenTabs()).not.toThrow();
   });
 });

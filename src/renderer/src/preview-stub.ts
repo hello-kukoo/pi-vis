@@ -88,6 +88,7 @@ function seedDemoSession(): void {
   store.setActiveWorkspace(DEMO_WORKSPACE);
   store.createSession(DEMO_SESSION_ID, DEMO_WORKSPACE);
   store.setSessionStatus(DEMO_SESSION_ID, "ready");
+  store.setActiveSession(DEMO_SESSION_ID);
 
   store.seedHistory(DEMO_SESSION_ID, [
     {

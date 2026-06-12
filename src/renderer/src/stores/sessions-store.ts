@@ -7,6 +7,7 @@ import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { ModelInfo, SessionStats } from "@shared/pi-protocol/responses.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { create } from "zustand";
+import { useSettingsStore } from "./settings-store.js";
 import {
   type TranscriptState,
   addBashBlock,
@@ -53,7 +54,9 @@ interface SessionsStore {
   removeWorkspace: (path: string) => void;
   setWorkspaceSessions: (path: string, sessions: SessionSummary[]) => void;
 
-  createSession: (sessionId: SessionId, workspacePath: string, sessionFile?: string) => void;
+  createSession: (sessionId: SessionId, workspacePath: string, sessionFile?: string, name?: string) => void;
+  removeSession: (sessionId: SessionId) => void;
+  setSessionFile: (sessionId: SessionId, sessionFile: string) => void;
   setSessionStatus: (sessionId: SessionId, status: SessionStatus, error?: string) => void;
   applyEvent: (sessionId: SessionId, event: PiEvent) => void;
   seedHistory: (sessionId: SessionId, history: TranscriptBlock[]) => void;
@@ -117,7 +120,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
-  createSession: (sessionId, workspacePath, sessionFile) => {
+  createSession: (sessionId, workspacePath, sessionFile, name) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       sessions.set(sessionId, {
@@ -125,6 +128,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         workspacePath,
         sessionFile,
         status: "starting",
+        sessionName: name,
         transcript: createTranscriptState(),
         isStreaming: false,
         pendingDialogs: [],
@@ -141,8 +145,42 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           activeSessions: [...ws.activeSessions, sessionId],
         });
       }
-      return { sessions, workspaces, activeSessionId: sessionId };
+      return { sessions, workspaces };
     });
+  },
+
+  removeSession: (sessionId) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.delete(sessionId);
+      const workspaces = new Map(state.workspaces);
+      const ws = workspaces.get(s.workspacePath);
+      if (ws) {
+        workspaces.set(s.workspacePath, {
+          ...ws,
+          activeSessions: ws.activeSessions.filter((id) => id !== sessionId),
+        });
+      }
+      return {
+        sessions,
+        workspaces,
+        activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
+      };
+    });
+  },
+
+  setSessionFile: (sessionId, sessionFile) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      if (s.sessionFile) return {};
+      sessions.set(sessionId, { ...s, sessionFile });
+      return { sessions };
+    });
+    persistOpenTabs();
   },
 
   setSessionStatus: (sessionId, status, error) => {
@@ -424,3 +462,37 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     set({ activeWorkspacePath: path });
   },
 }));
+
+// ── Module-level exports (pure) ──────────────────────────────────────
+
+/**
+ * Compute the durable open-tab snapshot for settings. Insertion order
+ * preserves the user's tab order; only sessions with a known file are
+ * included (cold tabs without a path are not yet durable).
+ */
+export function computeOpenTabs(
+  sessions: Map<SessionId, SessionViewState>,
+  activeSessionId: SessionId | null,
+): {
+  openTabs: Array<{ workspacePath: string; sessionFile: string }>;
+  activeSessionFile: string | null;
+} {
+  const openTabs: Array<{ workspacePath: string; sessionFile: string }> = [];
+  for (const s of sessions.values()) {
+    if (s.sessionFile) {
+      openTabs.push({ workspacePath: s.workspacePath, sessionFile: s.sessionFile });
+    }
+  }
+  const active = activeSessionId ? sessions.get(activeSessionId) : null;
+  const activeSessionFile = active?.sessionFile ?? null;
+  return { openTabs, activeSessionFile };
+}
+
+/**
+ * Persist the current open-tab snapshot. No-op in node (vitest).
+ */
+export function persistOpenTabs(): void {
+  if (typeof window === "undefined" || !window.pivis) return;
+  const { sessions, activeSessionId } = useSessionsStore.getState();
+  void useSettingsStore.getState().update(computeOpenTabs(sessions, activeSessionId));
+}
