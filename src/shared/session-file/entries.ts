@@ -19,9 +19,12 @@ const BaseEntrySchema = z.object({
 
 export const MessageEntrySchema = BaseEntrySchema.extend({
   type: z.literal("message"),
-  role: z.enum(["user", "assistant"]),
+  role: z.enum(["user", "assistant", "toolResult"]),
   content: z.unknown(),
   display: z.boolean().optional(),
+  toolCallId: z.string().optional(),
+  toolName: z.string().optional(),
+  isError: z.boolean().optional(),
 });
 
 export const ModelChangeEntrySchema = BaseEntrySchema.extend({
