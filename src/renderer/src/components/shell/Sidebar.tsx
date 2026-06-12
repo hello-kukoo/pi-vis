@@ -35,6 +35,7 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
     removeWorkspace,
     refreshWorkspaceSessions,
     openSessionTab,
+    closeSessionTab,
     setActiveSession,
     setActiveWorkspace,
   } = useSessionsStore();
@@ -154,10 +155,18 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
                     if (s.sessionFile != null) return true;
                     return s.transcript.blocks.length > 0;
                   }).map((s) => (
-                    <button
+                    <div
                       key={s.sessionId}
+                      role="button"
+                      tabIndex={0}
                       className={`sidebar__session sidebar__session--live ${activeSessionId === s.sessionId ? "sidebar__session--active" : ""}`}
                       onClick={() => setActiveSession(s.sessionId)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setActiveSession(s.sessionId);
+                        }
+                      }}
                     >
                       {s.isStreaming ? (
                         <StreamingIndicator isStreaming />
@@ -167,7 +176,17 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
                       <span className="sidebar__session-name">
                         {s.sessionName ?? s.sessionTitle ?? "New session"}
                       </span>
-                    </button>
+                      <button
+                        className="sidebar__session-close"
+                        title="Close tab"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void closeSessionTab(s.sessionId);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
                   ))}
 
                   {/* Stored sessions */}

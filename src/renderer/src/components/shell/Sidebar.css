@@ -117,6 +117,18 @@
   text-overflow: ellipsis;
 }
 
+.sidebar__session-close {
+  margin-left: auto;
+  opacity: 0;
+  background: none;
+  border: none;
+  color: var(--ctp-overlay0);
+  cursor: pointer;
+}
+.sidebar__session:hover .sidebar__session-close {
+  opacity: 1;
+}
+
 .sidebar__session-preview {
   flex: 1;
   white-space: nowrap;

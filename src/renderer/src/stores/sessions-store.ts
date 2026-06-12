@@ -60,6 +60,7 @@ interface SessionsStore {
     sessionFile?: string,
     opts?: { focus?: boolean; persist?: boolean },
   ) => Promise<SessionId | null>;
+  closeSessionTab: (sessionId: SessionId) => Promise<void>;
   removeSession: (sessionId: SessionId) => void;
   setSessionFile: (sessionId: SessionId, sessionFile: string) => void;
   setSessionStatus: (sessionId: SessionId, status: SessionStatus, error?: string) => void;
@@ -496,6 +497,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       console.error("Failed to open session:", err);
       return null;
     }
+  },
+
+  closeSessionTab: async (sessionId) => {
+    if (typeof window !== "undefined" && window.pivis) {
+      await window.pivis.invoke("session.close", { sessionId }).catch(console.error);
+    }
+    get().removeSession(sessionId);
+    persistOpenTabs();
   },
 
   setActiveSession: (sessionId) => {
