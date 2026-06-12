@@ -58,21 +58,6 @@ export function initIpc(win: BrowserWindow): void {
   });
 
   ipcMain.handle(
-    "session.start",
-    async (_evt, args: { workspacePath: string; resumeFile?: string }) => {
-      // WP7b compat shim — removed in WP7b.
-      const settings = getSettings();
-      const piInfo = await locatePi(settings.piBinaryPath);
-      if (!piInfo) throw new Error("pi binary not found. Please install pi or set the path in settings.");
-
-      if (!registry) throw new Error("Registry not initialized");
-      const id = registry.openSession(args.workspacePath, args.resumeFile);
-      registry.activateSession(id, piInfo.path);
-      return id;
-    },
-  );
-
-  ipcMain.handle(
     "session.open",
     async (_evt, args: { workspacePath: string; sessionFile?: string }) => {
       if (!registry) throw new Error("Registry not initialized");

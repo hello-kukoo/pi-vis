@@ -55,6 +55,11 @@ interface SessionsStore {
   setWorkspaceSessions: (path: string, sessions: SessionSummary[]) => void;
 
   createSession: (sessionId: SessionId, workspacePath: string, sessionFile?: string, name?: string) => void;
+  openSessionTab: (
+    workspacePath: string,
+    sessionFile?: string,
+    opts?: { focus?: boolean; persist?: boolean },
+  ) => Promise<SessionId | null>;
   removeSession: (sessionId: SessionId) => void;
   setSessionFile: (sessionId: SessionId, sessionFile: string) => void;
   setSessionStatus: (sessionId: SessionId, status: SessionStatus, error?: string) => void;
@@ -127,7 +132,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionId,
         workspacePath,
         sessionFile,
-        status: "starting",
+        status: "cold",
         sessionName: name,
         transcript: createTranscriptState(),
         isStreaming: false,
@@ -454,8 +459,59 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     }
   },
 
+  openSessionTab: async (workspacePath, sessionFile, opts) => {
+    if (typeof window === "undefined" || !window.pivis) return null;
+    const focus = opts?.focus ?? true;
+    const persist = opts?.persist ?? true;
+    try {
+      // Renderer-side dedupe: a session already open with the same file is reused.
+      if (sessionFile) {
+        for (const s of get().sessions.values()) {
+          if (s.sessionFile === sessionFile) {
+            if (focus) get().setActiveSession(s.sessionId);
+            return s.sessionId;
+          }
+        }
+      }
+      const { sessionId, name } = await window.pivis.invoke("session.open", {
+        workspacePath,
+        sessionFile,
+      });
+      get().createSession(sessionId, workspacePath, sessionFile, name ?? undefined);
+      if (sessionFile) {
+        try {
+          const history = await window.pivis.invoke("session.loadHistory", { sessionId });
+          if (Array.isArray(history) && history.length > 0) {
+            get().seedHistory(sessionId, history);
+          }
+        } catch {
+          /* no history — fine */
+        }
+      }
+      if (focus) get().setActiveSession(sessionId);
+      if (persist) persistOpenTabs();
+      return sessionId;
+    } catch (err) {
+      // Missing file at restore lands here — tab is silently skipped.
+      console.error("Failed to open session:", err);
+      return null;
+    }
+  },
+
   setActiveSession: (sessionId) => {
     set({ activeSessionId: sessionId });
+    if (sessionId && typeof window !== "undefined" && window.pivis) {
+      const s = get().sessions.get(sessionId);
+      if (s && (s.status === "cold" || s.status === "exited" || s.status === "failed")) {
+        // Activation triggers a session.activate; the main process emits
+        // statusChanged("starting") which App.tsx applies. Re-invoking
+        // activate before that lands is no-op'd by main's idempotency.
+        window.pivis.invoke("session.activate", { sessionId }).catch((err) => {
+          get().setSessionStatus(sessionId, "failed", String(err));
+        });
+      }
+    }
+    persistOpenTabs();
   },
 
   setActiveWorkspace: (path) => {

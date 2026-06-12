@@ -32,9 +32,11 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const addToast = useSessionsStore((s) => s.addToast);
   const session = sessions.get(sessionId);
   const isStreaming = session?.isStreaming ?? false;
+  const live = session?.status === "starting" || session?.status === "ready";
 
   // Load available commands once
   useEffect(() => {
+    if (!live) return;
     window.pivis.invoke("session.sendCommand", {
       sessionId,
       command: { type: "get_commands" },
@@ -44,7 +46,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         setStreamCommands(raw.commands as SlashCommandInfo[]);
       }
     }).catch(() => { /* ignore */ });
-  }, [sessionId]);
+  }, [sessionId, live]);
 
   const allSlashCommands = [
     ...KNOWN_SLASH_COMMANDS,

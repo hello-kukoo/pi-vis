@@ -31,10 +31,6 @@ export interface IpcInvokeContract {
   "workspace.pick": { req: void; res: string | null };
   "workspace.recents": { req: void; res: string[] };
   "workspace.listSessions": { req: { workspacePath: string }; res: SessionSummary[] };
-  "session.start": {
-    req: { workspacePath: string; resumeFile?: string | undefined };
-    res: SessionId;
-  };
   "session.open": {
     req: { workspacePath: string; sessionFile?: string | undefined };
     res: { sessionId: SessionId; name: string | null };

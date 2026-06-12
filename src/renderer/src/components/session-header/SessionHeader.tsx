@@ -35,6 +35,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   const setCurrentModel = useSessionsStore((s) => s.setCurrentModel);
   const setStats = useSessionsStore((s) => s.setStats);
   const setSessionName = useSessionsStore((s) => s.setSessionName);
+  const setSessionFile = useSessionsStore((s) => s.setSessionFile);
   const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
   const setThinkingLevel = useSessionsStore((s) => s.setThinkingLevel);
   const addToast = useSessionsStore((s) => s.addToast);
@@ -61,8 +62,14 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   // coercion. The dropdown itself always reflects what pi reports.
   const lastRequestedThinkingLevelRef = useRef<ThinkingLevel | null>(null);
 
+  // Cold-aware gate. A boolean on purpose: starting→ready doesn't re-fire
+  // effects, but cold→starting does. Sessions whose process is alive get
+  // to drive their models/stats/get_state effects.
+  const live = session?.status === "starting" || session?.status === "ready";
+
   // Load models and apply last-used model preference
   useEffect(() => {
+    if (!live) return;
     modelAppliedRef.current = false;
     window.pivis
       .invoke("session.sendCommand", {
@@ -103,18 +110,19 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
         }
       })
       .catch(() => {});
-  }, [sessionId, settings.lastUsedModel, setAvailableModels, setCurrentModel]);
+  }, [sessionId, live, settings.lastUsedModel, setAvailableModels, setCurrentModel]);
 
   // Authoritative state on mount / session switch: seed the store with pi's
   // current model and thinking level. This makes the dropdown match pi even
   // before any user interaction or `thinking_level_changed` event arrives.
   useEffect(() => {
+    if (!live) return;
     let cancelled = false;
     void window.pivis
       .invoke("session.sendCommand", { sessionId, command: { type: "get_state" } })
       .then((res) => {
         if (cancelled) return;
-        const raw = res?.data as { thinkingLevel?: unknown; model?: { id?: unknown }; sessionName?: unknown } | undefined;
+        const raw = res?.data as { thinkingLevel?: unknown; model?: { id?: unknown }; sessionName?: unknown; sessionFile?: unknown } | undefined;
         if (!raw) return;
         if (typeof raw.thinkingLevel === "string") {
           const parsed = ThinkingLevelSchema.safeParse(raw.thinkingLevel);
@@ -128,15 +136,19 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
         if (typeof raw.sessionName === "string" && raw.sessionName) {
           setSessionName(sessionId, raw.sessionName);
         }
+        if (typeof raw.sessionFile === "string" && raw.sessionFile) {
+          setSessionFile(sessionId, raw.sessionFile);
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [sessionId, setThinkingLevel, setCurrentModel, setSessionName]);
+  }, [sessionId, live, setThinkingLevel, setCurrentModel, setSessionName, setSessionFile]);
 
   // Poll stats after each agent_end and periodically while streaming
   useEffect(() => {
+    if (!live) return;
     const fetchStats = () => {
       window.pivis
         .invoke("session.sendCommand", {
@@ -147,7 +159,9 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
           if (res.success && res.data) {
             const parsed = SessionStatsSchema.safeParse(res.data);
             if (parsed.success) {
-              setStats(sessionId, parsed.data as SessionStats);
+              const stats = parsed.data as SessionStats;
+              setStats(sessionId, stats);
+              if (stats.sessionFile) setSessionFile(sessionId, stats.sessionFile);
             }
           }
         })
@@ -157,7 +171,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     fetchStats();
     const interval = setInterval(fetchStats, 60_000);
     return () => clearInterval(interval);
-  }, [sessionId, session?.workspacePath, setStats]);
+  }, [sessionId, live, session?.workspacePath, setStats, setSessionFile]);
 
   // Listen for agent_end to refresh stats
   useEffect(() => {

@@ -388,6 +388,15 @@ const stub = {
         return [];
       case "session.loadHistory":
         return [];
+      case "session.open":
+        return { sessionId: `demo-${Date.now()}` as SessionId, name: null };
+      case "session.activate": {
+        const { sessionId } = req as { sessionId: SessionId };
+        setTimeout(() => emit("session.statusChanged", { sessionId, status: "ready" }), 50);
+        return undefined;
+      }
+      case "session.close":
+        return undefined;
       case "session.sendCommand":
         return handleSendCommand(req);
       case "app.versions":

@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import { useSessionsStore } from "../../stores/sessions-store.js";
+import { persistOpenTabs, useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
-import { SessionStatsSchema } from "@shared/pi-protocol/responses.js";
 import "./Sidebar.css";
 
 function StatusDot({ status, hasPendingDialog }: { status: SessionStatus; hasPendingDialog: boolean }): React.ReactElement {
@@ -35,12 +34,11 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
     addWorkspace,
     removeWorkspace,
     refreshWorkspaceSessions,
-    createSession,
+    openSessionTab,
     setActiveSession,
     setActiveWorkspace,
-    seedHistory,
   } = useSessionsStore();
-  const { settings, update: updateSettings } = useSettingsStore();
+  const { settings, loaded: settingsLoaded } = useSettingsStore();
   const sidebarRef = useRef<HTMLElement>(null);
   const isDragging = useRef(false);
 
@@ -75,30 +73,12 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
   }, [addWorkspace, setActiveWorkspace, refreshWorkspaceSessions]);
 
   const handleNewSession = useCallback(async (workspacePath: string) => {
-    try {
-      const sessionId = await window.pivis.invoke("session.start", { workspacePath });
-      createSession(sessionId, workspacePath);
-      setActiveSession(sessionId);
-    } catch (err) {
-      console.error("Failed to start session:", err);
-    }
-  }, [createSession, setActiveSession]);
+    void openSessionTab(workspacePath);
+  }, [openSessionTab]);
 
   const handleResumeSession = useCallback(async (workspacePath: string, filePath: string, makeActive = true) => {
-    try {
-      const sessionId = await window.pivis.invoke("session.start", { workspacePath, resumeFile: filePath });
-      createSession(sessionId, workspacePath, filePath);
-      if (makeActive) setActiveSession(sessionId);
-
-      // Load history
-      const history = await window.pivis.invoke("session.loadHistory", { sessionId });
-      if (history.length > 0) {
-        seedHistory(sessionId, history);
-      }
-    } catch (err) {
-      console.error("Failed to resume session:", err);
-    }
-  }, [createSession, setActiveSession, seedHistory]);
+    void openSessionTab(workspacePath, filePath, { focus: makeActive });
+  }, [openSessionTab]);
 
   // Load recents on mount
   useEffect(() => {
@@ -112,6 +92,35 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
       }
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Restore previously open tabs once both workspaces and settings are ready.
+  // Cold-open each tab, then activate exactly one (the previously-active one)
+  // — the rest stay cold until focused. Sequential await is deliberate: it
+  // gives the byFile guard and renderer dedupe deterministic ordering, and
+  // cold opens are cheap (no process spawn).
+  const sessionRestoredRef = useRef(false);
+  useEffect(() => {
+    if (sessionRestoredRef.current) return;
+    if (!settingsLoaded) return;
+    if (workspaces.size === 0) return;
+    sessionRestoredRef.current = true;
+
+    const targetFile = settings.activeSessionFile;
+    const workspacePaths = Array.from(workspaces.keys());
+    const toRestore = (settings.openTabs ?? []).filter((t) =>
+      workspacePaths.includes(t.workspacePath),
+    );
+
+    void (async () => {
+      let targetId: SessionId | null = null;
+      for (const t of toRestore) {
+        const id = await openSessionTab(t.workspacePath, t.sessionFile, { focus: false, persist: false });
+        if (id && t.sessionFile === targetFile) targetId = id;
+      }
+      if (targetId) setActiveSession(targetId);
+      persistOpenTabs();
+    })();
+  }, [settingsLoaded, workspaces.size, settings.openTabs, settings.activeSessionFile, openSessionTab, setActiveSession]);
 
   return (
     <aside className="sidebar" ref={sidebarRef} style={{ width }}>
@@ -138,8 +147,11 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
                 <div className="sidebar__sessions">
                   {/* Live sessions pinned on top */}
                   {activeSessionsForWs.filter((s) => {
-                    // Hide empty sessions unless they are the active one
+                    // The active tab is always visible. Cold tabs with a file
+                    // are durable — they must appear even with no transcript.
+                    // Otherwise hide empty transcripts.
                     if (s.sessionId === activeSessionId) return true;
+                    if (s.sessionFile != null) return true;
                     return s.transcript.blocks.length > 0;
                   }).map((s) => (
                     <button
