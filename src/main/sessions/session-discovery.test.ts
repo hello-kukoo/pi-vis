@@ -31,14 +31,28 @@ function writeSession(workspace: string, fileName: string, lines: object[]): str
   return filePath;
 }
 
+// Helpers that build entries in the REAL pi v3 nested shape.
+function userEntry(id: string, parentId: string, text: string) {
+  return {
+    id,
+    parentId,
+    timestamp: "2024-01-01T00:00:00Z",
+    type: "message",
+    message: { role: "user", content: [{ type: "text", text }], timestamp: 1_700_000_000_000 },
+  };
+}
+function sessionInfo(id: string, parentId: string, name: string) {
+  return { id, parentId, timestamp: "2024-01-01T00:00:00Z", type: "session_info", name };
+}
+
 describe("listSessionsForWorkspace", () => {
   it("returns the last session_info name in file order", async () => {
     const cwd = path.join(root, "workspace-A");
     const filePath = writeSession("workspace-A", "session1.jsonl", [
       { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
-      { id: "e1", type: "message", role: "user", content: [{ type: "text", text: "hello" }] },
-      { id: "e2", type: "session_info", name: "First" },
-      { id: "e3", type: "session_info", name: "Second" },
+      userEntry("e1", "abc", "hello"),
+      sessionInfo("e2", "e1", "First"),
+      sessionInfo("e3", "e2", "Second"),
     ]);
 
     const summaries = await listSessionsForWorkspace(cwd);
@@ -53,27 +67,27 @@ describe("listSessionsForWorkspace", () => {
     const cwd = path.join(root, "workspace-A");
     writeSession("workspace-A", "session1.jsonl", [
       { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
-      { id: "e1", type: "message", role: "user", content: [{ type: "text", text: "hi" }] },
+      userEntry("e1", "abc", "hi"),
     ]);
 
     const summaries = await listSessionsForWorkspace(cwd);
     expect(summaries).toHaveLength(1);
     expect(summaries[0]?.name).toBeUndefined();
+    expect(summaries[0]?.messageCount).toBe(1);
   });
 
   it("invalidates the cache when the file is rewritten with a new name", async () => {
     const cwd = path.join(root, "workspace-A");
     const filePath = writeSession("workspace-A", "session1.jsonl", [
       { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
-      { id: "e1", type: "message", role: "user", content: [{ type: "text", text: "hi" }] },
-      { id: "e2", type: "session_info", name: "Initial" },
+      userEntry("e1", "abc", "hi"),
+      sessionInfo("e2", "e1", "Initial"),
     ]);
 
     const first = await listSessionsForWorkspace(cwd);
     expect(first[0]?.name).toBe("Initial");
 
-    // Append a new session_info entry and bump mtime so the cache invalidates.
-    fs.appendFileSync(filePath, JSON.stringify({ id: "e3", type: "session_info", name: "Third" }) + "\n");
+    fs.appendFileSync(filePath, JSON.stringify({ id: "e3", parentId: "e2", timestamp: "2024-01-01T00:00:01Z", type: "session_info", name: "Third" }) + "\n");
     const future = new Date(Date.now() + 5000);
     fs.utimesSync(filePath, future, future);
 
@@ -86,8 +100,8 @@ describe("listSessionsForWorkspace", () => {
     fs.mkdirSync(path.join(root, "workspace-B"), { recursive: true });
     writeSession("workspace-B", "session1.jsonl", [
       { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd: otherCwd },
-      { id: "e1", type: "message", role: "user", content: [{ type: "text", text: "nope" }] },
-      { id: "e2", type: "session_info", name: "Other" },
+      userEntry("e1", "abc", "nope"),
+      sessionInfo("e2", "e1", "Other"),
     ]);
 
     const summaries = await listSessionsForWorkspace(path.join(root, "workspace-A"));
@@ -98,14 +112,39 @@ describe("listSessionsForWorkspace", () => {
     const cwd = path.join(root, "workspace-A");
     const filePath = writeSession("workspace-A", "session1.jsonl", [
       { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
-      { id: "e1", type: "message", role: "user", content: [{ type: "text", text: "hi" }] },
-      { id: "e2", type: "session_info", name: "First" },
-      { id: "e3", type: "session_info", name: "" },
+      userEntry("e1", "abc", "hi"),
+      sessionInfo("e2", "e1", "First"),
+      { id: "e3", parentId: "e2", timestamp: "2024-01-01T00:00:01Z", type: "session_info", name: "" },
     ]);
 
     const meta = extractSessionMeta(filePath);
     expect(meta.name).toBe("First");
     expect(meta.preview).toBe("hi");
     expect(meta.messageCount).toBe(1);
+  });
+
+  it("extractSessionMeta reads user message from the real nested shape (not top-level role)", () => {
+    const cwd = path.join(root, "workspace-A");
+    const filePath = writeSession("workspace-A", "session1.jsonl", [
+      { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
+      userEntry("e1", "abc", "real-shape-here"),
+    ]);
+    const meta = extractSessionMeta(filePath);
+    expect(meta.preview).toBe("real-shape-here");
+    expect(meta.messageCount).toBe(1);
+  });
+
+  it("old flat shape (top-level role) yields messageCount === 0", () => {
+    // Pins the read path: real pi never writes the flat shape, so this is
+    // a regression guard. If a future change accidentally read top-level
+    // role again, this test fails.
+    const cwd = path.join(root, "workspace-A");
+    const filePath = writeSession("workspace-A", "session1.jsonl", [
+      { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
+      { id: "e1", parentId: "abc", timestamp: "2024-01-01T00:00:00Z", type: "message", role: "user", content: [{ type: "text", text: "FLAT" }] },
+    ]);
+    const meta = extractSessionMeta(filePath);
+    expect(meta.messageCount).toBe(0);
+    expect(meta.preview).toBe("");
   });
 });

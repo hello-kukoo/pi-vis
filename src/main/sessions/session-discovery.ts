@@ -41,16 +41,20 @@ export function extractSessionMeta(filePath: string): { preview: string; message
       if (!line.trim()) continue;
       try {
         const entry = JSON.parse(line) as Record<string, unknown>;
-        if (entry["type"] === "message" && entry["role"] === "user") {
-          messageCount++;
-          if (!preview) {
-            const content = entry["content"];
-            if (typeof content === "string") {
-              preview = content.slice(0, 100);
-            } else if (Array.isArray(content)) {
-              const first = content[0] as Record<string, unknown> | undefined;
-              if (first && typeof first["text"] === "string") {
-                preview = first["text"].slice(0, 100);
+        if (entry["type"] === "message") {
+          // Real pi v3 nests message data under a `message` key.
+          const msg = entry["message"] as Record<string, unknown> | undefined;
+          if (msg && msg["role"] === "user") {
+            messageCount++;
+            if (!preview) {
+              const body = msg["content"];
+              if (typeof body === "string") {
+                preview = body.slice(0, 100);
+              } else if (Array.isArray(body)) {
+                const first = body[0] as Record<string, unknown> | undefined;
+                if (first && typeof first["text"] === "string") {
+                  preview = first["text"].slice(0, 100);
+                }
               }
             }
           }

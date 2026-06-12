@@ -4,6 +4,16 @@ import type { TranscriptBlock } from "@shared/ipc-contract.js";
 
 type EntryMap = Map<string, Record<string, unknown>>;
 
+function entryTime(e: Record<string, unknown>): number {
+  const t = e["timestamp"];
+  if (typeof t === "number") return t;
+  if (typeof t === "string") {
+    const p = Date.parse(t);
+    return Number.isNaN(p) ? 0 : p;
+  }
+  return 0;
+}
+
 function parseEntries(filePath: string): { header: Record<string, unknown> | null; entries: EntryMap } {
   const entries: EntryMap = new Map();
   let header: Record<string, unknown> | null = null;
@@ -46,12 +56,9 @@ function walkActiveChain(entries: EntryMap): Array<Record<string, unknown>> {
     (e) => typeof e["id"] === "string" && !hasChild.has(e["id"] as string),
   );
 
-  // Pick the leaf with highest timestamp (v1 limitation — see module docstring)
-  const leaf = leaves.sort((a, b) => {
-    const ta = typeof a["timestamp"] === "number" ? a["timestamp"] : 0;
-    const tb = typeof b["timestamp"] === "number" ? b["timestamp"] : 0;
-    return tb - ta;
-  })[0];
+  // Pick the leaf with highest timestamp. Real pi writes entry-level
+  // timestamps as ISO strings, so accept both shapes here.
+  const leaf = leaves.sort((a, b) => entryTime(b) - entryTime(a))[0];
 
   if (!leaf) return [];
 
@@ -113,8 +120,9 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
         break;
       }
       case "message": {
-        const role = entry.role;
-        const content = entry.content;
+        const msg = entry.message;
+        const role = msg.role;
+        const content = msg.content;
 
         if (role === "toolResult") {
           // Extract result text from toolResult content array
@@ -129,14 +137,14 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
             }
           }
           // Find the matching tool_call block (created from the preceding assistant message)
-          const toolCallId = entry.toolCallId as string | undefined;
+          const toolCallId = msg.toolCallId;
           let matched = false;
           if (toolCallId) {
             for (let i = blocks.length - 1; i >= 0; i--) {
               const b = blocks[i];
               if (b?.type === "tool_call" && (b.data as Record<string, unknown>)["toolCallId"] === toolCallId) {
                 (b.data as Record<string, unknown>)["outputText"] = outputText;
-                (b.data as Record<string, unknown>)["isError"] = entry.isError as boolean ?? false;
+                (b.data as Record<string, unknown>)["isError"] = msg.isError ?? false;
                 (b.data as Record<string, unknown>)["isStreaming"] = false;
                 matched = true;
                 break;
@@ -150,10 +158,10 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
               type: "tool_call",
               data: {
                 toolCallId: toolCallId ?? "",
-                toolName: entry.toolName as string ?? "",
+                toolName: msg.toolName ?? "",
                 input: undefined,
                 outputText,
-                isError: entry.isError as boolean ?? false,
+                isError: msg.isError ?? false,
                 isStreaming: false,
               },
             });

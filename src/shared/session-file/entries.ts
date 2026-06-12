@@ -17,24 +17,31 @@ const BaseEntrySchema = z.object({
   timestamp: z.string().or(z.number()).optional(),
 });
 
-export const MessageEntrySchema = BaseEntrySchema.extend({
-  type: z.literal("message"),
+// Real pi v3 nests message data under a `message` key. The body carries
+// role/content + toolResult-specific fields; entry-level fields (id, parentId,
+// timestamp) live on the envelope.
+const MessageBodySchema = z.object({
   role: z.enum(["user", "assistant", "toolResult"]),
   content: z.unknown(),
-  display: z.boolean().optional(),
   toolCallId: z.string().optional(),
   toolName: z.string().optional(),
   isError: z.boolean().optional(),
+}).passthrough();
+
+export const MessageEntrySchema = BaseEntrySchema.extend({
+  type: z.literal("message"),
+  message: MessageBodySchema,
 });
 
 export const ModelChangeEntrySchema = BaseEntrySchema.extend({
   type: z.literal("model_change"),
-  model: z.string(),
+  provider: z.string().optional(),
+  modelId: z.string().optional(),
 });
 
 export const ThinkingLevelChangeEntrySchema = BaseEntrySchema.extend({
   type: z.literal("thinking_level_change"),
-  level: z.string(),
+  thinkingLevel: z.string().optional(),
 });
 
 export const CompactionEntrySchema = BaseEntrySchema.extend({
