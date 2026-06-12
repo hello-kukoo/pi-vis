@@ -4,7 +4,10 @@ import os from "os";
 import { SessionHeaderSchema } from "@shared/session-file/entries.js";
 import type { SessionSummary } from "@shared/ipc-contract.js";
 
-const SESSIONS_DIR = path.join(os.homedir(), ".pi", "agent", "sessions");
+// Read per call so tests can override PIVIS_SESSIONS_DIR.
+function getSessionsDir(): string {
+  return process.env["PIVIS_SESSIONS_DIR"] ?? path.join(os.homedir(), ".pi", "agent", "sessions");
+}
 
 // Cache: filePath → { mtime, summary }
 const cache = new Map<string, { mtime: number; summary: SessionSummary }>();
@@ -27,9 +30,10 @@ function readFirstLine(filePath: string): string | null {
   }
 }
 
-function extractPreview(filePath: string): { preview: string; messageCount: number } {
+export function extractSessionMeta(filePath: string): { preview: string; messageCount: number; name: string | null } {
   let preview = "";
   let messageCount = 0;
+  let name: string | null = null;
   try {
     const content = fs.readFileSync(filePath, "utf8");
     const lines = content.split("\n");
@@ -51,14 +55,18 @@ function extractPreview(filePath: string): { preview: string; messageCount: numb
             }
           }
         }
+        if (entry["type"] === "session_info" && typeof entry["name"] === "string" && entry["name"]) {
+          name = entry["name"];
+        }
       } catch { /* skip bad lines */ }
     }
   } catch { /* ignore */ }
-  return { preview, messageCount };
+  return { preview, messageCount, name };
 }
 
 export async function listSessionsForWorkspace(workspacePath: string): Promise<SessionSummary[]> {
   const results: SessionSummary[] = [];
+  const SESSIONS_DIR = getSessionsDir();
 
   if (!fs.existsSync(SESSIONS_DIR)) return results;
 
@@ -114,11 +122,12 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
         continue;
       }
 
-      const { preview, messageCount } = extractPreview(filePath);
+      const { preview, messageCount, name } = extractSessionMeta(filePath);
 
       const summary: SessionSummary = {
         filePath,
         id: header.data.id,
+        ...(name ? { name } : {}),
         mtime,
         preview,
         messageCount,
