@@ -190,4 +190,87 @@ test.describe("Pi-Vis restore + name round trip", () => {
     rmrf(folders.workspaceDir);
     rmrf(folders.piSessionsDir);
   });
+
+  test("renderer reload adopts sessions without errors or tab loss", async () => {
+    test.setTimeout(120_000);
+    fs.chmodSync(FAKE_PI, 0o755);
+
+    const folders = await makeFolders();
+
+    // Capture main-process stderr from the start of the FIRST launch so we can
+    // assert no `Error occurred in handler` ever lands in the terminal across
+    // the reload + double-click sequence.
+    const errs: string[] = [];
+    const stderrHook = (app: ElectronApplication): void => {
+      app.process().stderr?.on("data", (d: Buffer | string) => {
+        errs.push(typeof d === "string" ? d : d.toString("utf8"));
+      });
+    };
+
+    // ── First run: create one session with a transcript ────────────────
+    const first = await launchApp(folders);
+    const { window, app } = first;
+    stderrHook(app);
+
+    await window.getByRole("button", { name: "+ New session" }).click();
+    await expect(window.locator(".session-header__picker-btn").first()).toContainText("fake-model", { timeout: 15_000 });
+
+    const textarea = window.locator(".composer__textarea");
+    await textarea.fill("hello");
+    await textarea.press("Enter");
+    await expect(window.locator("body")).toContainText("your pi coding agent", { timeout: 15_000 });
+
+    await expect
+      .poll(async () => {
+        const s = await readSettings(folders.settingsDir);
+        const tabs = (s["openTabs"] as Array<unknown> | undefined) ?? [];
+        return tabs.length === 1;
+      }, { timeout: 15_000 })
+      .toBe(true);
+
+    // ── Reload: same settings dir, same process. The renderer's webContents
+    //    is reloaded, the main process (and SessionRegistry) survive. The
+    //    boot restore runs again and must adopt — not fail.
+    await window.reload();
+    await window.waitForLoadState("domcontentloaded");
+
+    // Exactly 1 live row after reload (regression for the silent-wipe bug).
+    await expect(window.locator(".sidebar__session--live")).toHaveCount(1, { timeout: 15_000 });
+    // Transcript is re-seeded from the file by loadHistory.
+    await expect(window.locator("body")).toContainText("your pi coding agent", { timeout: 10_000 });
+
+    // The wipe bug: before the fix, the restore loop's failed opens returned
+    // null, the sessions map was empty, and the final persistOpenTabs() wrote
+    // openTabs: [] — silently dropping the user's saved tabs. Pin openTabs=1.
+    await expect
+      .poll(async () => {
+        const s = await readSettings(folders.settingsDir);
+        const tabs = (s["openTabs"] as Array<unknown> | undefined) ?? [];
+        return tabs.length;
+      }, { timeout: 5_000, intervals: [200, 500, 1_000] })
+      .toBe(1);
+
+    // No IPC handler error should have been logged.
+    expect(errs.join("")).not.toContain("Error occurred in handler");
+
+    // ── Double-click coverage on a stored row ─────────────────────────
+    // Close the live tab to make it a stored (resumable) row, then rapid-double-click it.
+    const closeBtn = window.locator(".sidebar__session--live .sidebar__session-close").first();
+    await closeBtn.click();
+    await expect(window.locator(".sidebar__session--live")).toHaveCount(0, { timeout: 5_000 });
+
+    const storedRow = window.locator(".sidebar__session--stored").first();
+    await expect(storedRow).toBeVisible({ timeout: 5_000 });
+    await storedRow.dblclick();
+
+    // Adopted (not double-created): exactly 1 live row.
+    await expect(window.locator(".sidebar__session--live")).toHaveCount(1, { timeout: 10_000 });
+    // Still no IPC handler error from the double-click race.
+    expect(errs.join("")).not.toContain("Error occurred in handler");
+
+    await app.close();
+    rmrf(folders.settingsDir);
+    rmrf(folders.workspaceDir);
+    rmrf(folders.piSessionsDir);
+  });
 });

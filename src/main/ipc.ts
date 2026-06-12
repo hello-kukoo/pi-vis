@@ -65,14 +65,26 @@ export function initIpc(win: BrowserWindow): void {
       let preview: string | null = null;
       if (args.sessionFile) {
         if (!fs.existsSync(args.sessionFile)) {
-          throw new Error(`Session file not found: ${args.sessionFile}`);
+          return { outcome: "missing" as const };
         }
         const meta = extractSessionMeta(args.sessionFile);
         name = meta.name;
         preview = meta.preview || null;
+        const existing = registry.getByFile(args.sessionFile);
+        if (existing && existing.status !== "exited" && existing.status !== "failed") {
+          return {
+            outcome: "existing" as const,
+            sessionId: existing.sessionId,
+            name,
+            preview,
+            sessionStatus: existing.status,
+          };
+        }
+        // exited/failed records fall through: openSession clears the stale
+        // byFile mapping and creates a fresh cold record (existing behavior).
       }
       const sessionId = registry.openSession(args.workspacePath, args.sessionFile);
-      return { sessionId, name, preview };
+      return { outcome: "opened" as const, sessionId, name, preview, sessionStatus: "cold" as const };
     },
   );
 

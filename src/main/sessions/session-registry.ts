@@ -177,6 +177,11 @@ export class SessionRegistry {
     return this.sessions.get(sessionId);
   }
 
+  getByFile(sessionFile: string): SessionRecord | undefined {
+    const id = this.byFile.get(path.resolve(sessionFile));
+    return id ? this.sessions.get(id) : undefined;
+  }
+
   stopAll(): void {
     for (const rec of this.sessions.values()) {
       rec.proc?.stop();

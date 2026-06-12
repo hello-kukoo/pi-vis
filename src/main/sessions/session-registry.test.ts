@@ -167,6 +167,46 @@ describe("SessionRegistry", () => {
     expect(statusChanges.every((s) => s.sessionId !== id)).toBe(true);
   });
 
+  it("getByFile returns the record after openSession(ws, fileA); undefined for unknown; undefined after close", () => {
+    const fileA = join(sessionsDir, "lookup-a.jsonl");
+    fs.writeFileSync(fileA, "");
+    const id = registry.openSession(workspaceDir, fileA);
+
+    const found = registry.getByFile(fileA);
+    expect(found).toBeDefined();
+    expect(found?.sessionId).toBe(id);
+
+    // Unknown path returns undefined.
+    expect(registry.getByFile(join(sessionsDir, "nope.jsonl"))).toBeUndefined();
+
+    // After close, the byFile slot is freed and getByFile returns undefined.
+    registry.closeSession(id);
+    expect(registry.getByFile(fileA)).toBeUndefined();
+  });
+
+  it("getByFile still returns an exited record (handler uses it to decide on a fresh open)", async () => {
+    const fileA = join(sessionsDir, "exited-lookup.jsonl");
+    fs.writeFileSync(fileA, "");
+    const id = registry.openSession(workspaceDir, fileA);
+    registry.activateSession(id, FAKE_PI);
+
+    const proc = registry.getSession(id)?.proc;
+    expect(proc).toBeDefined();
+    if (!proc) return;
+
+    proc.stop();
+    await waitFor(
+      () => statusChanges.some((s) => s.sessionId === id && s.status === "exited"),
+      5000,
+      "exited status",
+    );
+
+    const found = registry.getByFile(fileA);
+    expect(found).toBeDefined();
+    expect(found?.sessionId).toBe(id);
+    expect(found?.status).toBe("exited");
+  }, 15_000);
+
   it("noteSessionFile sets once and ignores later changes", () => {
     const id = registry.openSession(workspaceDir);
     const fileA = join(sessionsDir, "first.jsonl");

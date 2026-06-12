@@ -60,6 +60,7 @@ interface SessionsStore {
     sessionFile?: string,
     name?: string,
     title?: string,
+    status?: SessionStatus,
   ) => void;
   openSessionTab: (
     workspacePath: string,
@@ -132,14 +133,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
-  createSession: (sessionId, workspacePath, sessionFile, name, title) => {
+  createSession: (sessionId, workspacePath, sessionFile, name, title, status) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       sessions.set(sessionId, {
         sessionId,
         workspacePath,
         sessionFile,
-        status: "cold",
+        status: status ?? "cold",
         sessionTitle: title,
         sessionName: name,
         transcript: createTranscriptState(),
@@ -484,6 +485,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     const persist = opts?.persist ?? true;
     try {
       // Renderer-side dedupe: a session already open with the same file is reused.
+      // (Fast path; main's session.open is also idempotent so this is not load-bearing.)
       if (sessionFile) {
         for (const s of get().sessions.values()) {
           if (s.sessionFile === sessionFile) {
@@ -492,17 +494,36 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           }
         }
       }
-      const { sessionId, name, preview } = await window.pivis.invoke("session.open", {
+      // session.open is idempotent and non-throwing: it returns
+      //   { outcome: "opened" | "existing", sessionId, name, preview, sessionStatus }
+      // when the file exists, or { outcome: "missing" } for stale tab entries.
+      // "existing" means the file is already open in the main registry — we
+      // adopt the existing record instead of failing, so renderer reloads and
+      // double-clicks on a stored row are both lossless.
+      const res = await window.pivis.invoke("session.open", {
         workspacePath,
         sessionFile,
       });
+      if (res.outcome === "missing") return null; // stale tab: skip; restore's final persist prunes it
+      const { sessionId, name, preview, sessionStatus } = res;
+
+      // A concurrent openSessionTab for the same file may have already adopted
+      // this id (double-click TOCTOU) — never recreate/reseed an existing record.
+      if (get().sessions.has(sessionId)) {
+        if (focus) get().setActiveSession(sessionId);
+        return sessionId;
+      }
+
       get().createSession(
         sessionId,
         workspacePath,
         sessionFile,
         name ?? undefined,
         preview ?? undefined,
+        res.outcome === "existing" ? sessionStatus : "cold",
       );
+      // loadHistory + seedHistory exactly as before. For adopted sessions pi
+      // persists entries as it goes, so the file IS the transcript.
       if (sessionFile) {
         try {
           const history = await window.pivis.invoke("session.loadHistory", { sessionId });
@@ -517,7 +538,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       if (persist) persistOpenTabs();
       return sessionId;
     } catch (err) {
-      // Missing file at restore lands here — tab is silently skipped.
       console.error("Failed to open session:", err);
       return null;
     }

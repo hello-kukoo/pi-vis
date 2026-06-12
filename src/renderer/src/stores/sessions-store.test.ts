@@ -162,6 +162,14 @@ describe("createSession(name) and tab lifecycle", () => {
     expect(useSessionsStore.getState().activeSessionId).toBeNull();
   });
 
+  it("createSession sixth arg sets status; omitted arg defaults to cold", () => {
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/f/a.jsonl", undefined, undefined, "ready");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.status).toBe("ready");
+
+    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE, "/f/b.jsonl");
+    expect(useSessionsStore.getState().sessions.get(SESSION_B)?.status).toBe("cold");
+  });
+
   it("setSessionFile sets once, second call is ignored", () => {
     useSessionsStore.getState().addWorkspace(WORKSPACE);
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);

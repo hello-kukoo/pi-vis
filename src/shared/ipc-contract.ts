@@ -33,7 +33,15 @@ export interface IpcInvokeContract {
   "workspace.listSessions": { req: { workspacePath: string }; res: SessionSummary[] };
   "session.open": {
     req: { workspacePath: string; sessionFile?: string | undefined };
-    res: { sessionId: SessionId; name: string | null; preview: string | null };
+    res:
+      | {
+          outcome: "opened" | "existing";
+          sessionId: SessionId;
+          name: string | null;
+          preview: string | null;
+          sessionStatus: SessionStatus;
+        }
+      | { outcome: "missing" };
   };
   "session.activate": { req: { sessionId: SessionId }; res: void };
   "session.close": { req: { sessionId: SessionId }; res: void };
