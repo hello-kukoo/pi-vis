@@ -20,9 +20,10 @@ export const AppSettingsSchema = z.object({
     .nullable()
     .default(null),
   lastUsedThinkingLevel: ThinkingLevelSchema.nullable().default(null),
-  openSessions: z
+  openTabs: z
     .array(z.object({ workspacePath: z.string(), sessionFile: z.string() }))
     .default([]),
+  activeSessionFile: z.string().nullable().default(null),
   window: z
     .object({
       x: z.number(),

@@ -39,11 +39,9 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
     setActiveWorkspace,
     seedHistory,
   } = useSessionsStore();
-  const { settings, loaded: settingsLoaded, update: updateSettings } = useSettingsStore();
-  const openSessionsRef = useRef(settings.openSessions);
+  const { settings, update: updateSettings } = useSettingsStore();
   const sidebarRef = useRef<HTMLElement>(null);
   const isDragging = useRef(false);
-  useEffect(() => { openSessionsRef.current = settings.openSessions; }, [settings.openSessions]);
 
   // Sidebar resize via drag handle
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -80,38 +78,10 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
       const sessionId = await window.pivis.invoke("session.start", { workspacePath });
       createSession(sessionId, workspacePath);
       setActiveSession(sessionId);
-
-      // Persist newly created sessions: poll get_session_stats until the
-      // sessionFile is known, then register it in openSessions.
-      let attempts = 0;
-      const registerFile = () => {
-        window.pivis.invoke("session.sendCommand", {
-          sessionId,
-          command: { type: "get_session_stats" },
-        }).then((res) => {
-          if (!res.success || !res.data) return;
-          const parsed = SessionStatsSchema.safeParse(res.data);
-          if (!parsed.success || !parsed.data.sessionFile) {
-            if (++attempts < 6) setTimeout(registerFile, 2000);
-            return;
-          }
-          void updateSettings({
-            openSessions: [
-              { workspacePath, sessionFile: parsed.data.sessionFile },
-              ...(openSessionsRef.current ?? []).filter(
-                (s) => !(s.workspacePath === workspacePath && s.sessionFile === parsed.data.sessionFile),
-              ),
-            ],
-          });
-        }).catch(() => {
-          if (++attempts < 6) setTimeout(registerFile, 2000);
-        });
-      };
-      setTimeout(registerFile, 2000);
     } catch (err) {
       console.error("Failed to start session:", err);
     }
-  }, [createSession, setActiveSession, updateSettings]);
+  }, [createSession, setActiveSession]);
 
   const handleResumeSession = useCallback(async (workspacePath: string, filePath: string, makeActive = true) => {
     try {
@@ -124,20 +94,10 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
       if (history.length > 0) {
         seedHistory(sessionId, history);
       }
-
-      // Persist so this session is restored on next launch
-      void updateSettings({
-        openSessions: [
-          { workspacePath, sessionFile: filePath },
-          ...(openSessionsRef.current ?? []).filter(
-            (s) => !(s.workspacePath === workspacePath && s.sessionFile === filePath),
-          ),
-        ],
-      });
     } catch (err) {
       console.error("Failed to resume session:", err);
     }
-  }, [createSession, setActiveSession, seedHistory, updateSettings]);
+  }, [createSession, setActiveSession, seedHistory]);
 
   // Load recents on mount
   useEffect(() => {
@@ -151,28 +111,6 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
       }
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Restore previously open sessions once both workspaces and settings are ready.
-  // Uses a ref so this runs at most once per app session regardless of re-renders.
-  const sessionRestoredRef = useRef(false);
-  useEffect(() => {
-    if (sessionRestoredRef.current) return;
-    if (!settingsLoaded) return;
-    if (workspaces.size === 0) return;
-
-    sessionRestoredRef.current = true;
-
-    const workspacePaths = Array.from(workspaces.keys());
-    const toRestore = (settings.openSessions ?? []).filter((s) =>
-      workspacePaths.includes(s.workspacePath),
-    );
-
-    let first = true;
-    for (const { workspacePath, sessionFile } of toRestore) {
-      void handleResumeSession(workspacePath, sessionFile, first);
-      first = false;
-    }
-  }, [settingsLoaded, workspaces.size, handleResumeSession, settings.openSessions]);
 
   return (
     <aside className="sidebar" ref={sidebarRef} style={{ width }}>

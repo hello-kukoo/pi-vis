@@ -366,7 +366,8 @@ const settingsState = {
   },
   recentWorkspaces: [DEMO_WORKSPACE],
   lastUsedModel: null,
-  openSessions: [],
+  openTabs: [],
+  activeSessionFile: null,
   window: undefined,
 };
 

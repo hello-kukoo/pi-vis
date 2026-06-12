@@ -136,18 +136,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   }, [sessionId, setThinkingLevel, setCurrentModel, setSessionName]);
 
   // Poll stats after each agent_end and periodically while streaming
-  const sessionFileRegisteredRef = useRef(false);
-  // Use a ref so the polling callback always sees fresh settings without restarting the interval
-  const openSessionsRef = useRef(settings.openSessions);
   useEffect(() => {
-    openSessionsRef.current = settings.openSessions;
-  }, [settings.openSessions]);
-  useEffect(() => {
-    sessionFileRegisteredRef.current = false;
-  }, [sessionId]);
-
-  useEffect(() => {
-    const workspacePath = session?.workspacePath;
     const fetchStats = () => {
       window.pivis
         .invoke("session.sendCommand", {
@@ -159,20 +148,6 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
             const parsed = SessionStatsSchema.safeParse(res.data);
             if (parsed.success) {
               setStats(sessionId, parsed.data as SessionStats);
-
-              // Register this session's file in openSessions once we learn it
-              const file = parsed.data.sessionFile;
-              if (file && workspacePath && !sessionFileRegisteredRef.current) {
-                sessionFileRegisteredRef.current = true;
-                void updateSettings({
-                  openSessions: [
-                    { workspacePath, sessionFile: file },
-                    ...(openSessionsRef.current ?? []).filter(
-                      (s) => !(s.workspacePath === workspacePath && s.sessionFile === file),
-                    ),
-                  ],
-                });
-              }
             }
           }
         })
@@ -182,7 +157,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     fetchStats();
     const interval = setInterval(fetchStats, 60_000);
     return () => clearInterval(interval);
-  }, [sessionId, session?.workspacePath, setStats, updateSettings]);
+  }, [sessionId, session?.workspacePath, setStats]);
 
   // Listen for agent_end to refresh stats
   useEffect(() => {
