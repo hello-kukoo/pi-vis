@@ -150,6 +150,13 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
 
               {isActiveWs && (
                 <div className="sidebar__sessions">
+                  <button
+                    className="sidebar__new-session"
+                    onClick={() => handleNewSession(ws.path)}
+                  >
+                    + New session
+                  </button>
+
                   {/* Live sessions pinned on top */}
                   {activeSessionsForWs.filter((s) => {
                     // The active tab is always visible. Cold tabs with a file
@@ -216,12 +223,6 @@ export function Sidebar({ onOpenSettings, width, onResize }: { onOpenSettings: (
                     );
                   })}
 
-                  <button
-                    className="sidebar__new-session"
-                    onClick={() => handleNewSession(ws.path)}
-                  >
-                    + New session
-                  </button>
                 </div>
               )}
 
