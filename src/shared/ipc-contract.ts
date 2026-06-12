@@ -15,7 +15,7 @@ export interface SessionSummary {
   cwd: string;
 }
 
-export type SessionStatus = "starting" | "ready" | "exited" | "failed";
+export type SessionStatus = "cold" | "starting" | "ready" | "exited" | "failed";
 
 export interface TranscriptBlock {
   id: string;
@@ -35,6 +35,12 @@ export interface IpcInvokeContract {
     req: { workspacePath: string; resumeFile?: string | undefined };
     res: SessionId;
   };
+  "session.open": {
+    req: { workspacePath: string; sessionFile?: string | undefined };
+    res: { sessionId: SessionId; name: string | null };
+  };
+  "session.activate": { req: { sessionId: SessionId }; res: void };
+  "session.close": { req: { sessionId: SessionId }; res: void };
   "session.loadHistory": { req: { sessionId: SessionId }; res: TranscriptBlock[] };
   "session.sendCommand": {
     req: { sessionId: SessionId; command: PiRpcCommand };
@@ -44,7 +50,6 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; response: ExtensionUiResponse };
     res: void;
   };
-  "session.stop": { req: { sessionId: SessionId }; res: void };
   "settings.get": { req: void; res: AppSettings };
   "settings.set": { req: Partial<AppSettings>; res: AppSettings };
   "app.versions": { req: void; res: { app: string; electron: string; node: string } };

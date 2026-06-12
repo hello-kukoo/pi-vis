@@ -226,6 +226,7 @@
 .status-dot--attention { color: var(--ctp-peach); }
 .status-dot--exited { color: var(--ctp-overlay0); }
 .status-dot--failed { color: var(--ctp-red); }
+.status-dot--cold { color: var(--ctp-surface2); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

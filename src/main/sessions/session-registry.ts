@@ -37,12 +37,12 @@ export class SessionRegistry {
     this.onStatusChanged = onStatusChanged;
   }
 
-  startSession(
-    piPath: string,
-    workspacePath: string,
-    sessionFile?: string,
-  ): SessionId {
-    // Block double-open on same session file
+  /**
+   * Create a cold record for a session. Does NOT spawn a process; the
+   * renderer learns the id from the invoke result, and activation happens
+   * on focus (see activateSession).
+   */
+  openSession(workspacePath: string, sessionFile?: string): SessionId {
     if (sessionFile) {
       const resolved = path.resolve(sessionFile);
       const existing = this.byFile.get(resolved);
@@ -60,7 +60,7 @@ export class SessionRegistry {
       sessionId,
       workspacePath,
       sessionFile,
-      status: "starting",
+      status: "cold",
     };
     this.sessions.set(sessionId, record);
 
@@ -68,13 +68,43 @@ export class SessionRegistry {
       this.byFile.set(path.resolve(sessionFile), sessionId);
     }
 
+    // No onStatusChanged emit — the renderer learns the id from the invoke result.
+    return sessionId;
+  }
+
+  /**
+   * Spawn the pi process for an existing cold record. Idempotent: a second
+   * call while a process is alive is a no-op. Re-spawns after exit.
+   */
+  activateSession(sessionId: SessionId, piPath: string): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+
+    if (record.proc && (record.status === "starting" || record.status === "ready")) {
+      return;
+    }
+
+    record.error = undefined;
+    record.status = "starting";
     this.onStatusChanged(sessionId, "starting");
 
     try {
-      const proc = new PiProcess(piPath, workspacePath, sessionFile);
+      const proc = new PiProcess(piPath, record.workspacePath, record.sessionFile);
       record.proc = proc;
 
+      const readyTimer = setTimeout(() => {
+        if (record.proc !== proc) return;
+        if (record.status === "starting") {
+          record.status = "ready";
+          this.onStatusChanged(sessionId, "ready");
+        }
+      }, 2000);
+      readyTimer.unref?.();
+
       proc.on("event", (event) => {
+        if (record.proc !== proc) return;
         if (record.status === "starting") {
           record.status = "ready";
           this.onStatusChanged(sessionId, "ready");
@@ -83,48 +113,68 @@ export class SessionRegistry {
       });
 
       proc.on("uiRequest", (req) => {
+        if (record.proc !== proc) return;
         this.onUiRequest(sessionId, req);
       });
 
       proc.on("exit", (code) => {
+        // The timer must never leak. Clear before the generation guard.
         clearTimeout(readyTimer);
+        if (record.proc !== proc) return;
         record.status = "exited";
-        record.error = code !== 0 ? `Exited with code ${code}` : undefined;
+        record.error = code !== 0 && code !== null ? `Exited with code ${code}` : undefined;
         this.onStatusChanged(sessionId, "exited", record.error);
       });
 
       proc.on("error", (err) => {
+        if (record.proc !== proc) return;
         record.status = "failed";
         record.error = err.message;
         this.onStatusChanged(sessionId, "failed", err.message);
       });
-
-      // Mark ready after a brief delay if no events arrive (some pi versions emit nothing initially)
-      const readyTimer = setTimeout(() => {
-        if (record.status === "starting") {
-          record.status = "ready";
-          this.onStatusChanged(sessionId, "ready");
-        }
-      }, 2000);
-      readyTimer.unref?.();
     } catch (err) {
       record.status = "failed";
       record.error = err instanceof Error ? err.message : String(err);
       this.onStatusChanged(sessionId, "failed", record.error);
     }
+  }
 
-    return sessionId;
+  /**
+   * Note the session file for a record that didn't have one at open time.
+   * No-op if the record is missing, already has a file, or byFile already
+   * maps the path.
+   */
+  noteSessionFile(sessionId: SessionId, sessionFile: string): void {
+    const rec = this.sessions.get(sessionId);
+    if (!rec) return;
+    if (rec.sessionFile) return;
+    const resolved = path.resolve(sessionFile);
+    if (this.byFile.has(resolved)) return;
+    rec.sessionFile = sessionFile;
+    this.byFile.set(resolved, sessionId);
+  }
+
+  /**
+   * Tear down a session: detach the proc so the generation guards swallow
+   * the upcoming exit event, then stop the process, then remove the record.
+   */
+  closeSession(sessionId: SessionId): void {
+    const rec = this.sessions.get(sessionId);
+    if (!rec) return;
+    const proc = rec.proc;
+    rec.proc = undefined;
+    proc?.stop();
+    this.sessions.delete(sessionId);
+    if (rec.sessionFile) {
+      const resolved = path.resolve(rec.sessionFile);
+      if (this.byFile.get(resolved) === sessionId) {
+        this.byFile.delete(resolved);
+      }
+    }
   }
 
   getSession(sessionId: SessionId): SessionRecord | undefined {
     return this.sessions.get(sessionId);
-  }
-
-  stopSession(sessionId: SessionId): void {
-    const rec = this.sessions.get(sessionId);
-    if (rec?.proc) {
-      rec.proc.stop();
-    }
   }
 
   stopAll(): void {

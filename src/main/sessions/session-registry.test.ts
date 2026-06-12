@@ -1,0 +1,180 @@
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import fs from "fs";
+import os from "os";
+import { SessionRegistry } from "./session-registry.js";
+import type { PiEvent } from "@shared/pi-protocol/events.js";
+import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
+import type { SessionId } from "@shared/ids.js";
+import type { SessionStatus } from "@shared/ipc-contract.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const FAKE_PI = join(__dirname, "../../../tests/fixtures/fake-pi.mjs");
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5000, label = "condition"): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`Timed out waiting for ${label} after ${timeoutMs}ms`);
+}
+
+describe("SessionRegistry", () => {
+  let sessionsDir: string;
+  let workspaceDir: string;
+  let statusChanges: Array<{ sessionId: SessionId; status: SessionStatus; error?: string | undefined }>;
+  let registry: SessionRegistry;
+
+  beforeAll(() => {
+    fs.chmodSync(FAKE_PI, 0o755);
+  });
+
+  beforeEach(() => {
+    sessionsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-reg-sessions-"));
+    workspaceDir = fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "pivis-reg-ws-")));
+    process.env.FAKE_PI_SESSIONS_DIR = sessionsDir;
+
+    statusChanges = [];
+    registry = new SessionRegistry(
+      (_sid: SessionId, _ev: PiEvent) => {},
+      (_sid: SessionId, _req: ExtensionUiRequest) => {},
+      (sessionId, status, error) => {
+        statusChanges.push({ sessionId, status, error });
+      },
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.FAKE_PI_SESSIONS_DIR;
+    try {
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+    try {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  });
+
+  it("openSession creates a cold record without spawning", () => {
+    const id = registry.openSession(workspaceDir);
+    const rec = registry.getSession(id);
+    expect(rec).toBeDefined();
+    expect(rec?.status).toBe("cold");
+    expect(rec?.proc).toBeUndefined();
+    expect(statusChanges.filter((s) => s.sessionId === id)).toHaveLength(0);
+  });
+
+  it("double-open guard rejects opening the same file twice while cold", () => {
+    // First create a file on disk via fake-pi so we can reference it.
+    const fileA = join(sessionsDir, "test-a.jsonl");
+    fs.writeFileSync(fileA, "");
+    const id1 = registry.openSession(workspaceDir, fileA);
+    expect(id1).toBeDefined();
+    expect(() => registry.openSession(workspaceDir, fileA)).toThrow(/already open/);
+  });
+
+  it("activateSession transitions cold → starting → ready and exposes the proc", async () => {
+    const id = registry.openSession(workspaceDir);
+    registry.activateSession(id, FAKE_PI);
+
+    const rec = registry.getSession(id);
+    expect(rec).toBeDefined();
+    // We should have seen at least the "starting" event.
+    const starting = statusChanges.find((s) => s.sessionId === id && s.status === "starting");
+    expect(starting).toBeDefined();
+    expect(rec?.proc).toBeDefined();
+
+    // The proc is live — a get_state roundtrip should land.
+    const proc = rec?.proc;
+    expect(proc).toBeDefined();
+    if (!proc) return;
+    const res = await proc.sendCommand({ type: "get_state" });
+    expect(res.success).toBe(true);
+
+    await waitFor(
+      () => statusChanges.some((s) => s.sessionId === id && s.status === "ready"),
+      5000,
+      "ready status",
+    );
+    expect(statusChanges.some((s) => s.sessionId === id && s.status === "ready")).toBe(true);
+  }, 15_000);
+
+  it("activateSession is idempotent while a process is alive", () => {
+    const id = registry.openSession(workspaceDir);
+    registry.activateSession(id, FAKE_PI);
+    const first = registry.getSession(id)?.proc;
+    expect(first).toBeDefined();
+    registry.activateSession(id, FAKE_PI);
+    const second = registry.getSession(id)?.proc;
+    expect(second).toBe(first);
+  });
+
+  it("activateSession respawns after the previous process exits", async () => {
+    const id = registry.openSession(workspaceDir);
+    registry.activateSession(id, FAKE_PI);
+    const first = registry.getSession(id)?.proc;
+    expect(first).toBeDefined();
+    if (!first) return;
+
+    first.stop();
+    await waitFor(
+      () => statusChanges.some((s) => s.sessionId === id && s.status === "exited"),
+      5000,
+      "exited status",
+    );
+
+    statusChanges.length = 0;
+    registry.activateSession(id, FAKE_PI);
+    await waitFor(
+      () => statusChanges.some((s) => s.sessionId === id && s.status === "ready"),
+      5000,
+      "ready after respawn",
+    );
+    const second = registry.getSession(id)?.proc;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+
+    // Stale exit events from the old proc must not perturb the new state.
+    await new Promise((r) => setTimeout(r, 500));
+    const stillReady = statusChanges.filter((s) => s.sessionId === id && s.status === "exited");
+    expect(stillReady).toHaveLength(0);
+    expect(registry.getSession(id)?.status).toBe("ready");
+  }, 15_000);
+
+  it("closeSession removes the record and frees the byFile slot", async () => {
+    const fileA = join(sessionsDir, "test-a.jsonl");
+    fs.writeFileSync(fileA, "");
+    const id = registry.openSession(workspaceDir, fileA);
+    registry.closeSession(id);
+    expect(registry.getSession(id)).toBeUndefined();
+
+    // Re-opening with the same file should now succeed.
+    const id2 = registry.openSession(workspaceDir, fileA);
+    expect(id2).toBeDefined();
+    expect(id2).not.toBe(id);
+
+    // No status changes should have been emitted for the closed id after the close call.
+    const afterClose = statusChanges.filter(
+      (s) => s.sessionId === id && statusChanges.indexOf(s) > statusChanges.findIndex((x) => x.sessionId === id),
+    );
+    // The above may be brittle; simpler assertion: nothing after the close event.
+    expect(statusChanges.every((s) => s.sessionId !== id)).toBe(true);
+  });
+
+  it("noteSessionFile sets once and ignores later changes", () => {
+    const id = registry.openSession(workspaceDir);
+    const fileA = join(sessionsDir, "first.jsonl");
+    const fileB = join(sessionsDir, "second.jsonl");
+    registry.noteSessionFile(id, fileA);
+    expect(registry.getSession(id)?.sessionFile).toBe(fileA);
+
+    registry.noteSessionFile(id, fileB);
+    expect(registry.getSession(id)?.sessionFile).toBe(fileA);
+  });
+});

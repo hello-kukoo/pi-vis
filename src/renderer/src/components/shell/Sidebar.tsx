@@ -9,6 +9,7 @@ import "./Sidebar.css";
 function StatusDot({ status, hasPendingDialog }: { status: SessionStatus; hasPendingDialog: boolean }): React.ReactElement {
   if (hasPendingDialog) return <span className="status-dot status-dot--attention" title="Needs attention">▲</span>;
   switch (status) {
+    case "cold": return <span className="status-dot status-dot--cold" title="Not running">◌</span>;
     case "starting": return <span className="status-dot status-dot--starting" title="Starting">◌</span>;
     case "ready": return <span className="status-dot status-dot--idle" title="Idle">◌</span>;
     case "exited": return <span className="status-dot status-dot--exited" title="Exited">✕</span>;

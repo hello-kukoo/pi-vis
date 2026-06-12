@@ -1,8 +1,9 @@
 import { ipcMain, app } from "electron";
 import type { BrowserWindow } from "electron";
+import fs from "fs";
 import { locatePi, clearPiLocationCache } from "./pi/locate-pi.js";
 import { SessionRegistry } from "./sessions/session-registry.js";
-import { listSessionsForWorkspace } from "./sessions/session-discovery.js";
+import { listSessionsForWorkspace, extractSessionMeta } from "./sessions/session-discovery.js";
 import { loadHistory } from "./sessions/history-loader.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { pickWorkspace, getRecentWorkspaces } from "./workspaces.js";
@@ -11,6 +12,7 @@ import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
 import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
+import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
 
 let registry: SessionRegistry | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -58,15 +60,44 @@ export function initIpc(win: BrowserWindow): void {
   ipcMain.handle(
     "session.start",
     async (_evt, args: { workspacePath: string; resumeFile?: string }) => {
+      // WP7b compat shim — removed in WP7b.
       const settings = getSettings();
       const piInfo = await locatePi(settings.piBinaryPath);
       if (!piInfo) throw new Error("pi binary not found. Please install pi or set the path in settings.");
 
       if (!registry) throw new Error("Registry not initialized");
-      const sessionId = registry.startSession(piInfo.path, args.workspacePath, args.resumeFile);
-      return sessionId;
+      const id = registry.openSession(args.workspacePath, args.resumeFile);
+      registry.activateSession(id, piInfo.path);
+      return id;
     },
   );
+
+  ipcMain.handle(
+    "session.open",
+    async (_evt, args: { workspacePath: string; sessionFile?: string }) => {
+      if (!registry) throw new Error("Registry not initialized");
+      let name: string | null = null;
+      if (args.sessionFile) {
+        if (!fs.existsSync(args.sessionFile)) {
+          throw new Error(`Session file not found: ${args.sessionFile}`);
+        }
+        name = extractSessionMeta(args.sessionFile).name;
+      }
+      const sessionId = registry.openSession(args.workspacePath, args.sessionFile);
+      return { sessionId, name };
+    },
+  );
+
+  ipcMain.handle("session.activate", async (_evt, args: { sessionId: SessionId }) => {
+    const settings = getSettings();
+    const piInfo = await locatePi(settings.piBinaryPath);
+    if (!piInfo) throw new Error("pi binary not found. Please install pi or set the path in settings.");
+    registry?.activateSession(args.sessionId, piInfo.path);
+  });
+
+  ipcMain.handle("session.close", async (_evt, args: { sessionId: SessionId }) => {
+    registry?.closeSession(args.sessionId);
+  });
 
   ipcMain.handle("session.loadHistory", async (_evt, args: { sessionId: SessionId }) => {
     const rec = registry?.getSession(args.sessionId);
@@ -76,10 +107,26 @@ export function initIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     "session.sendCommand",
-    async (_evt, args: { sessionId: SessionId; command: PiRpcCommand }) => {
+    async (_evt, args: { sessionId: SessionId; command: PiRpcCommand }): Promise<PiRpcResponse> => {
       const rec = registry?.getSession(args.sessionId);
       if (!rec?.proc) throw new Error(`No active process for session ${args.sessionId}`);
-      return rec.proc.sendCommand(args.command);
+      const res = await rec.proc.sendCommand(args.command);
+
+      // Harvest the session file from responses that carry it, so a brand-new
+      // session's tab becomes durable the moment pi reports a path. This is
+      // what makes the byFile double-open guard and loadHistory work later.
+      if (
+        (args.command.type === "get_session_stats" || args.command.type === "get_state") &&
+        res.success && res.data && typeof res.data === "object" &&
+        typeof (res.data as Record<string, unknown>)["sessionFile"] === "string"
+      ) {
+        registry?.noteSessionFile(
+          args.sessionId,
+          (res.data as Record<string, unknown>)["sessionFile"] as string,
+        );
+      }
+
+      return res;
     },
   );
 
@@ -91,10 +138,6 @@ export function initIpc(win: BrowserWindow): void {
       rec.proc.sendUiResponse(JSON.stringify(args.response));
     },
   );
-
-  ipcMain.handle("session.stop", async (_evt, args: { sessionId: SessionId }) => {
-    registry?.stopSession(args.sessionId);
-  });
 
   ipcMain.handle("settings.get", async () => {
     return getSettings();
