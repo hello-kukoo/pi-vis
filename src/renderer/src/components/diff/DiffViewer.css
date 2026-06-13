@@ -212,8 +212,9 @@
 }
 
 /* Rail */
+/* position/width of the rail are set via inline style + drag-resize. */
 .diff-rail {
-  width: 16rem;
+  position: relative;
   flex-shrink: 0;
   border-right: 1px solid var(--ctp-surface0);
   background: var(--ctp-mantle);
@@ -267,12 +268,27 @@
   text-align: center;
 }
 
-.diff-rail__item {
+/* ── File tree rows ──────────────────────────────────────────────── */
+
+/* Indent cell: a thin column that provides indentation + guide line. */
+.diff-tree__indent-cell {
+  display: inline-block;
+  width: 0.857rem;
+  min-width: 0.857rem;
+  flex-shrink: 0;
+  border-left: 1px solid var(--ctp-surface0);
+  margin-right: 0;
+  height: 100%;
+  align-self: stretch;
+}
+
+.diff-tree__row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.357rem;
   width: 100%;
   padding: 0.286rem 0.5rem;
+  padding-left: 0.214rem;
   border-radius: var(--mcm-radius-sm);
   border: 1px solid transparent;
   background: transparent;
@@ -281,42 +297,115 @@
   font-size: var(--font-size-small);
   text-align: left;
   color: var(--ctp-text);
+  white-space: nowrap;
+  min-width: 0;
 }
 
-.diff-rail__item:hover {
+.diff-tree__row:hover {
   background: var(--ctp-surface0);
 }
 
-.diff-rail__item--active {
+.diff-tree__row--active {
   background: var(--ctp-surface0);
   border-color: var(--ctp-surface1);
   box-shadow: inset 2px 0 0 var(--ctp-mauve);
 }
 
-.diff-rail__item-dirname {
-  color: var(--ctp-overlay1);
+.diff-tree__row--dir {
+  color: var(--ctp-subtext1);
+  font-weight: 500;
+}
+
+.diff-tree__row--dir:hover {
+  color: var(--ctp-text);
+}
+
+/* Chevron is an SVG arrow; rotated 90° via transition when open. */
+.diff-tree__chevron {
+  flex-shrink: 0;
+  width: 1rem;
+  min-width: 1rem;
+  height: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ctp-subtext0);
+  transition: transform 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-tree__chevron {
+    transition: none;
+  }
+}
+
+.diff-tree__chevron--open {
+  transform: rotate(90deg);
+}
+
+.diff-tree__dir-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 1;
   min-width: 0;
-  direction: rtl;
-  text-align: left;
 }
 
-.diff-rail__item-basename {
-  color: var(--ctp-text);
+/* Left-truncated label for compressed dir paths — shows the tail. */
+.diff-tree__label--truncate-tail {
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+
+.diff-tree__dir-counts {
+  margin-left: auto;
+  font-family: var(--font-code);
+  font-size: 0.857em;
+  display: flex;
+  gap: 0.357rem;
   flex-shrink: 0;
+}
+
+/* File label: stem (truncatable) + extension (always visible). */
+.diff-tree__file-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+  display: flex;
+  gap: 0;
+}
+
+.diff-tree__file-stem {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+  color: var(--ctp-text);
   font-weight: 500;
 }
 
-.diff-rail__item-path {
-  min-width: 0;
-  overflow: hidden;
+.diff-tree__file-ext {
+  flex-shrink: 0;
+  color: var(--ctp-subtext0);
+  font-weight: 500;
 }
-.diff-rail__item-arrow {
-  color: var(--ctp-overlay1);
+
+/* Drag handle on the right edge of the rail. */
+.diff-rail__draghandle {
+  position: absolute;
+  top: 0;
+  right: -0.214rem;
+  width: 0.429rem;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
 }
+
+/* ── End file tree rows ───────────────────────────────────────────── */
 
 .diff-rail__item-counts {
   margin-left: auto;

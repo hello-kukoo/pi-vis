@@ -25,6 +25,7 @@ export const AppSettingsSchema = z.object({
   // toggle. Default is "unified" — split view is opt-in and only
   // used when the window is wide enough.
   diffViewMode: z.enum(["unified", "split"]).default("unified"),
+  diffRailWidth: z.number().default(280),
   window: z
     .object({
       x: z.number(),

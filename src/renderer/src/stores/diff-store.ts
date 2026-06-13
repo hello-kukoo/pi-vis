@@ -62,13 +62,15 @@ export interface DiffStore {
   // mutators
   openViewer: (sessionId: SessionId, root: string) => void;
   closeViewer: () => void;
-  refresh: () => Promise<void>;
+  refresh: (forceRetokenize?: boolean) => Promise<void>;
   ensureFileLoaded: (path: string) => Promise<void>;
   expandGap: (path: string, gapIndex: number, dir: "up" | "down" | "all") => void;
   toggleCollapsed: (path: string) => void;
   setViewMode: (mode: "unified" | "split") => void;
   setFilter: (text: string) => void;
   select: (path: string) => void;
+  railWidth: number;
+  setRailWidth: (w: number) => void;
   refreshBadge: (root: string) => Promise<void>;
   clearBadge: () => void;
 }
@@ -90,6 +92,11 @@ function totals(files: GitChangedFile[]): { insertions: number; deletions: numbe
 
 function isStale(generation: number, my: number): boolean {
   return generation !== my;
+}
+
+/** Cheap signature for a changed file — used to detect actual changes across refreshes. */
+function fileSig(f: GitChangedFile): string {
+  return `${f.status}\0${f.insertions}\0${f.deletions}\0${f.binary ? 1 : 0}\0${f.oldPath ?? ""}`;
 }
 
 // ── Store factory ─────────────────────────────────────────────────────
@@ -118,6 +125,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     selectedPath: null,
     filter: "",
     viewMode: "unified",
+    railWidth: 280,
     fileState: new Map(),
 
     badge: null,
@@ -163,7 +171,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       if (root !== null) void get().refreshBadge(root);
     },
 
-    refresh: async () => {
+    refresh: async (forceRetokenize?: boolean) => {
       const root = get().root;
       if (root === null) return;
       const myGen = ++generation;
@@ -184,7 +192,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         return;
       }
       if (isStale(generation, myGen)) return;
-      handleChangesResult(set, get, res, isFirst);
+      handleChangesResult(set, get, res, isFirst, forceRetokenize);
     },
 
     ensureFileLoaded: async (path) => {
@@ -295,6 +303,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       set({ selectedPath: path });
     },
 
+    setRailWidth: (w) => {
+      set({ railWidth: w });
+    },
+
     refreshBadge: async (root) => {
       // Debounce: rapid calls (e.g. multiple agent_end events) collapse
       // to a single IPC roundtrip.
@@ -376,6 +388,7 @@ function handleChangesResult(
   get: () => DiffStore,
   res: GitChangesResult,
   isFirst: boolean,
+  forceRetokenize?: boolean,
 ): void {
   if (res.kind === "not-a-repo" || res.kind === "git-missing") {
     set({ phase: res.kind, errorMessage: null, files: [], repoRoot: null, truncated: false });
@@ -385,12 +398,47 @@ function handleChangesResult(
     set({ phase: "error", errorMessage: res.message });
     return;
   }
-  // Auto-collapse: files beyond the first 50 start collapsed.
+
+  // Build signatures for previous files to detect changes.
+  const prevFiles = get().files;
+  const prevFileState = get().fileState;
+  const prevSigs = new Map<string, string>();
+  for (const pf of prevFiles) {
+    prevSigs.set(pf.path, fileSig(pf));
+  }
+
+  // Reconcile: reuse FileState for files whose signature is unchanged,
+  // create idle for new/changed files.
   const fileState = new Map<string, FileState>();
   for (let i = 0; i < res.files.length; i++) {
     const f = res.files[i]!;
-    fileState.set(f.path, { status: "idle", collapsed: i >= 50 });
+    const prev = prevFileState.get(f.path);
+    const prevSig = prevSigs.get(f.path);
+    const sig = fileSig(f);
+
+    if (prev && prevSig === sig && !forceRetokenize && prev.status !== "error") {
+      // Signature unchanged — reuse the previous FileState verbatim.
+      // This preserves parsed diff models, Shiki tokens, gaps, and
+      // collapse state so the diff viewer doesn't flash/reload.
+      fileState.set(f.path, prev);
+    } else if (prev && forceRetokenize && prevSig === sig && prev.status === "ready") {
+      // Same file, same signature, but force re-tokenization (e.g.
+      // color scheme changed). Keep model/gaps/collapsed but null
+      // out tokens so the section re-tokenizes with the new theme.
+      fileState.set(f.path, {
+        ...prev,
+        oldTokens: null,
+        newTokens: null,
+      });
+    } else {
+      // Changed or new file — start idle so ensureFileLoaded reloads.
+      fileState.set(f.path, {
+        status: "idle",
+        collapsed: prev?.collapsed ?? i >= 50,
+      });
+    }
   }
+
   set({
     phase: "ready",
     errorMessage: null,
