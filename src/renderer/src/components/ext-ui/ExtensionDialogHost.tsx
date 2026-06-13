@@ -78,7 +78,7 @@ function SelectDialog({ request, onRespond }: DialogProps): React.ReactElement {
         }
       }}
     >
-      <div className="ext-dialog__title ext-dialog__title--question">
+      <div className="ext-dialog__title">
         {req.title}
         {typeof req.timeout === "number" && req.timeout > 0 && (
           <span className="ext-dialog__countdown">

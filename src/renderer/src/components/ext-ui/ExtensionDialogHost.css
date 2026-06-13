@@ -72,18 +72,23 @@
   max-height: 60vh;
 }
 
+/* Dialog title is the extension's question/prompt — dynamic content
+   from an untrusted source, not a static label. It must read as body
+   copy (display font, sentence case, normal tracking). The
+   uppercase + wide-tracking treatment is reserved for small static
+   labels (buttons, the cancel chip, the countdown hint) and lives
+   on the `.mcm-label` utility / individual element rules below. */
 .ext-dialog__title {
   font-family: var(--font-display);
-  font-size: 0.929em; /* ≈13px @ 14px root */
+  font-size: 1em;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: var(--mcm-track-label);
-  line-height: var(--mcm-line-label);
+  line-height: var(--mcm-line-body);
   color: var(--ctp-text);
   display: flex;
   align-items: baseline;
   gap: 0.571rem;
   justify-content: space-between;
+  word-break: break-word;
 }
 
 .ext-dialog__countdown {
@@ -123,17 +128,6 @@
   padding: 0.714rem 1rem;
   line-height: 1.3;
   transition: background 0.1s, border-color 0.1s, color 0.1s;
-}
-
-/* Select-dialog question heading: human-language prompt, not a label.
-   Other dialogs (confirm/input/editor) keep the uppercase treatment
-   on .ext-dialog__title. */
-.ext-dialog__title--question {
-  text-transform: none;
-  letter-spacing: normal;
-  font-size: 1em;
-  font-weight: 500;
-  color: var(--ctp-text);
 }
 
 /* Selected/hovered option: full mauve wash. The whole dialog already
@@ -190,14 +184,19 @@
   border-color: var(--ctp-mauve);
 }
 
+/* The editor textarea is user-typed content (a freeform response to
+   the extension's prompt), so it uses the display font like
+   `.ext-dialog__input` — never the code font. The code font is for
+   syntax-highlighted blocks, the terminal, and other machine-text
+   surfaces; user input always renders in the display face. */
 .ext-dialog__editor {
   background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface1);
   border-radius: var(--mcm-radius-sm);
   color: var(--ctp-text);
-  font-family: var(--font-code);
-  font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  font-family: var(--font-display);
+  font-size: 1em;
+  line-height: var(--mcm-line-body);
   height: 14.286rem; /* ≈200px */
   outline: none;
   padding: 0.714rem 0.857rem;
