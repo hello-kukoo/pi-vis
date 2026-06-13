@@ -47,8 +47,6 @@ function resetSettings(): void {
           code: { family: "IBM Plex Mono", sizePx: 14 },
         },
         recentWorkspaces: ["/Users/romil/src/pi-vis"],
-        openTabs: [],
-        activeSessionFile: null,
       },
       null,
       2,
@@ -220,28 +218,30 @@ test.describe("Real-pi verification (mandatory manual check, automated)", () => 
     });
     console.log(`[c] renamed to ${RENAME}`);
 
-    // Wait for settings.json to be durably updated with the new tab.
+    // Wait for the freshly-written session file to appear on disk.
+    // We no longer track openTabs / activeSessionFile in settings (tab
+    // restore was removed in this release), so the proof of life for
+    // a successful prompt is just "a jsonl file for this session
+    // exists in the sessions dir". Match any `*.jsonl` (don't pin a
+    // date prefix).
     await expect
       .poll(
         async () => {
-          const s = readSettings();
-          const tabs = s["openTabs"] as Array<{ sessionFile: string }> | undefined;
-          const target = tabs?.find((t) => t.sessionFile && fs.existsSync(t.sessionFile));
-          const settingsOk =
-            !!s["activeSessionFile"] &&
-            typeof s["activeSessionFile"] === "string" &&
-            (s["activeSessionFile"] as string).endsWith(".jsonl");
-          return { tabs: tabs?.length ?? 0, target: target?.sessionFile, settingsOk };
+          const all = fs.readdirSync(SESSIONS_DIR).flatMap((sub) => {
+            try {
+              return fs
+                .readdirSync(join(SESSIONS_DIR, sub))
+                .filter((f) => f.endsWith(".jsonl"))
+                .map((f) => join(SESSIONS_DIR, sub, f));
+            } catch {
+              return [];
+            }
+          });
+          return all.length > 0 ? all : null;
         },
         { timeout: 30_000 },
       )
-      .toEqual(expect.objectContaining({ tabs: expect.any(Number), settingsOk: true }));
-
-    // Verify the file actually exists on disk now.
-    const preQuit = readSettings();
-    const activeFile = preQuit["activeSessionFile"] as string;
-    expect(fs.existsSync(activeFile)).toBe(true);
-    console.log(`[c] activeSessionFile exists: ${activeFile}`);
+      .toEqual(expect.arrayContaining([expect.stringMatching(/\.jsonl$/)]));
 
     const procCountBeforeQuit = countPiProcs();
     console.log(`[c] pi procs before quit: ${procCountBeforeQuit - baseline}`);

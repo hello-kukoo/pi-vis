@@ -7,7 +7,7 @@
 // and render plain text — misaligned colors are worse than no colors.
 
 import type { ThemedToken } from "shiki";
-import { getHighlighter } from "../shiki.js";
+import { getHighlighter, getShikiTheme } from "../shiki.js";
 
 // ── Language map ───────────────────────────────────────────────────────
 
@@ -79,9 +79,12 @@ export async function tokenizeLines(
     // shiki's `lang` parameter is typed as the union of bundled
     // languages; our LANG_BY_EXT values are the same set but TS
     // doesn't know that. The runtime will reject unknown langs.
+    // The theme is the active one for the current color scheme
+    // (see shiki.ts:setShikiScheme); Latte / Frappé / Macchiato /
+    // Mocha are all bundled up front.
     result = await highlighter.codeToTokens(text, {
       lang: lang as never,
-      theme: "catppuccin-mocha",
+      theme: getShikiTheme(),
     });
   } catch {
     return null;

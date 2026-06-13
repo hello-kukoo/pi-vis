@@ -10,6 +10,7 @@ import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDiffStore } from "../../stores/diff-store.js";
+import { useSettingsStore } from "../../stores/settings-store.js";
 import { DiffFileSection } from "./DiffFileSection.js";
 import "./DiffViewer.css";
 
@@ -91,6 +92,17 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       window.removeEventListener("focus", onFocus);
     };
   }, [visible, sessionId, refresh]);
+
+  // ── Re-tokenize open diff when the color scheme changes ───────────
+  // CSS variables don't reach Shiki's baked-in hex tokens, so a scheme
+  // switch needs a full reload of the file model. refresh() resets
+  // fileState; the lazy load effect re-tokenizes with the new theme.
+  const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally only re-run on colorScheme; visible is checked inside, refresh is stable
+  useEffect(() => {
+    if (!visible) return;
+    void refresh();
+  }, [colorScheme, visible, refresh]);
 
   // ── ResizeObserver → split-view auto-fallback ─────────────────────
   const contentRef = useRef<HTMLDivElement | null>(null);

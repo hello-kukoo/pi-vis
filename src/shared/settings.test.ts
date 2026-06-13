@@ -2,32 +2,46 @@ import { describe, expect, it } from "vitest";
 import { AppSettingsSchema } from "./settings.js";
 
 describe("AppSettingsSchema", () => {
-  it("returns openTabs=[] and activeSessionFile=null for an empty input", () => {
+  it("returns sensible defaults for an empty input", () => {
     const parsed = AppSettingsSchema.parse({});
-    expect(parsed.openTabs).toEqual([]);
-    expect(parsed.activeSessionFile).toBeNull();
+    // Tab persistence is gone: openTabs / activeSessionFile must not
+    // appear on the parsed type at all.
+    expect("openTabs" in parsed).toBe(false);
+    expect("activeSessionFile" in parsed).toBe(false);
+    // Catppuccin flavor defaults to Mocha (dark) — the pre-existing
+    // baseline so first-launch UI is unchanged.
+    expect(parsed.colorScheme).toBe("mocha");
   });
 
-  it("strips the legacy openSessions key on parse (plain z.object)", () => {
+  it("strips the legacy openTabs / activeSessionFile / openSessions keys on parse (plain z.object)", () => {
+    // Regression: a user's existing settings.json may still have
+    // openTabs / activeSessionFile from before we removed tab
+    // persistence. The schema must not fail to parse — and the
+    // legacy keys must be dropped, since the store no longer reads
+    // or writes them.
     const result = AppSettingsSchema.safeParse({
       openSessions: [{ workspacePath: "/a", sessionFile: "/b.jsonl" }],
+      openTabs: [{ workspacePath: "/a", sessionFile: "/b.jsonl" }],
+      activeSessionFile: "/b.jsonl",
     });
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect("openSessions" in result.data).toBe(false);
-    expect(result.data.openTabs).toEqual([]);
-    expect(result.data.activeSessionFile).toBeNull();
+    expect("openTabs" in result.data).toBe(false);
+    expect("activeSessionFile" in result.data).toBe(false);
   });
 
-  it("preserves explicit openTabs and activeSessionFile across a round trip", () => {
-    const entry = { workspacePath: "/ws", sessionFile: "/sessions/x.jsonl" };
-    const result = AppSettingsSchema.safeParse({
-      openTabs: [entry],
-      activeSessionFile: "/sessions/x.jsonl",
-    });
-    expect(result.success).toBe(true);
-    if (!result.success) return;
-    expect(result.data.openTabs).toEqual([entry]);
-    expect(result.data.activeSessionFile).toBe("/sessions/x.jsonl");
+  it("accepts and round-trips every valid colorScheme flavor", () => {
+    for (const flavor of ["mocha", "macchiato", "frappe", "latte"] as const) {
+      const result = AppSettingsSchema.safeParse({ colorScheme: flavor });
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(result.data.colorScheme).toBe(flavor);
+    }
+  });
+
+  it("rejects an unknown colorScheme flavor", () => {
+    const result = AppSettingsSchema.safeParse({ colorScheme: "frappuccino" });
+    expect(result.success).toBe(false);
   });
 });

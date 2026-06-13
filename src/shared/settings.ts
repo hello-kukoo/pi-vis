@@ -17,8 +17,9 @@ export const AppSettingsSchema = z.object({
   recentWorkspaces: z.array(z.string()).default([]),
   lastUsedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().default(null),
   lastUsedThinkingLevel: ThinkingLevelSchema.nullable().default(null),
-  openTabs: z.array(z.object({ workspacePath: z.string(), sessionFile: z.string() })).default([]),
-  activeSessionFile: z.string().nullable().default(null),
+  // Catppuccin flavor applied at runtime via CSS vars (and Shiki themes).
+  // Enum literals must match the keys exported from catppuccin.ts.
+  colorScheme: z.enum(["latte", "frappe", "macchiato", "mocha"]).default("mocha"),
   // Diff viewer preference (WP5d). Persisted across sessions; the
   // viewer seeds its own state from this on open and writes back on
   // toggle. Default is "unified" — split view is opt-in and only

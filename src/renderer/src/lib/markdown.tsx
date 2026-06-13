@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useSettingsStore } from "../stores/settings-store.js";
 import { getHighlighter, highlightCode } from "./shiki.js";
 
 // Kick off highlighter init immediately so it's ready when needed
@@ -17,17 +18,19 @@ function CodeBlock({ className, children }: CodeBlockProps): React.ReactElement 
   const lang = className?.replace("language-", "") ?? "text";
   const code = String(children ?? "").replace(/\n$/, "");
   const [html, setHtml] = useState<string | null>(null);
+  const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
 
   useEffect(() => {
     let cancelled = false;
+    const theme = `catppuccin-${colorScheme}`;
     getHighlighter().then((h) => {
       if (cancelled) return;
       try {
-        const result = h.codeToHtml(code, { lang, theme: "catppuccin-mocha" });
+        const result = h.codeToHtml(code, { lang, theme });
         if (!cancelled) setHtml(result);
       } catch {
         try {
-          const result = h.codeToHtml(code, { lang: "text", theme: "catppuccin-mocha" });
+          const result = h.codeToHtml(code, { lang: "text", theme });
           if (!cancelled) setHtml(result);
         } catch {
           /* ignore */
@@ -37,7 +40,7 @@ function CodeBlock({ className, children }: CodeBlockProps): React.ReactElement 
     return () => {
       cancelled = true;
     };
-  }, [code, lang]);
+  }, [code, lang, colorScheme]);
 
   if (html) {
     return (

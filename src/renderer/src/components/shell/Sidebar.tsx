@@ -2,7 +2,7 @@ import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
 import type React from "react";
 import { useCallback, useEffect, useRef } from "react";
-import { persistOpenTabs, useSessionsStore } from "../../stores/sessions-store.js";
+import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import "./Sidebar.css";
 
@@ -83,7 +83,6 @@ export function Sidebar({
   const closeSessionTab = useSessionsStore((s) => s.closeSessionTab);
   const setActiveSession = useSessionsStore((s) => s.setActiveSession);
   const setActiveWorkspace = useSessionsStore((s) => s.setActiveWorkspace);
-  const settings = useSettingsStore((s) => s.settings);
   const settingsLoaded = useSettingsStore((s) => s.loaded);
   const sidebarRef = useRef<HTMLElement>(null);
   const isDragging = useRef(false);
@@ -128,6 +127,24 @@ export function Sidebar({
     [openSessionTab],
   );
 
+  // Selecting a different workspace should land you in a fresh session in
+  // the target workspace — launch parity. Selecting the already-active
+  // workspace collapses it (same as before). The empty session you leave
+  // behind disappears from the sidebar via the live-session filter
+  // (it has no transcript content), but its pi process keeps running
+  // until the app quits — existing hide-not-close semantics.
+  const handleSelectWorkspace = useCallback(
+    (path: string) => {
+      if (activeWorkspacePath === path) {
+        setActiveWorkspace(null);
+        return;
+      }
+      setActiveWorkspace(path);
+      void openSessionTab(path);
+    },
+    [activeWorkspacePath, setActiveWorkspace, openSessionTab],
+  );
+
   const handleResumeSession = useCallback(
     (workspacePath: string, filePath: string, makeActive = true) => {
       void openSessionTab(workspacePath, filePath, { focus: makeActive });
@@ -152,45 +169,27 @@ export function Sidebar({
       .catch(console.error);
   }, []);
 
-  // Restore previously open tabs once both workspaces and settings are ready.
-  // Cold-open each tab, then activate exactly one (the previously-active one)
-  // — the rest stay cold until focused. Sequential await is deliberate: it
-  // gives the byFile guard and renderer dedupe deterministic ordering, and
-  // cold opens are cheap (no process spawn).
-  const sessionRestoredRef = useRef(false);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: restoration is gated by the sessionRestoredRef and settingsLoaded
+  // One-shot boot: open a single new session in the most-recently-used
+  // workspace (the first inserted entry of the workspaces Map = first
+  // recent loaded by the "load recents on mount" effect above). We
+  // intentionally do NOT restore previously open tabs — that's the
+  // explicit behaviour change in this release. The MRU workspace
+  // ordering itself is driven by main; recents[] on disk is kept
+  // most-recent-first.
+  const bootSessionRef = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-shot boot effect gated by bootSessionRef
   useEffect(() => {
-    if (sessionRestoredRef.current) return;
+    if (bootSessionRef.current) return;
     if (!settingsLoaded) return;
     if (workspaces.size === 0) return;
-    sessionRestoredRef.current = true;
+    bootSessionRef.current = true;
 
-    const targetFile = settings.activeSessionFile;
-    const workspacePaths = Array.from(workspaces.keys());
-    const toRestore = (settings.openTabs ?? []).filter((t) =>
-      workspacePaths.includes(t.workspacePath),
-    );
-
-    void (async () => {
-      let targetId: SessionId | null = null;
-      for (const t of toRestore) {
-        const id = await openSessionTab(t.workspacePath, t.sessionFile, {
-          focus: false,
-          persist: false,
-        });
-        if (id && t.sessionFile === targetFile) targetId = id;
-      }
-      if (targetId) setActiveSession(targetId);
-      persistOpenTabs();
-    })();
-  }, [
-    settingsLoaded,
-    workspaces.size,
-    settings.openTabs,
-    settings.activeSessionFile,
-    openSessionTab,
-    setActiveSession,
-  ]);
+    const mru = Array.from(workspaces.keys())[0];
+    if (mru) {
+      setActiveWorkspace(mru);
+      void openSessionTab(mru); // new cold session, focused + activated
+    }
+  }, [settingsLoaded, workspaces.size, openSessionTab, setActiveWorkspace]);
 
   return (
     <aside className="sidebar" ref={sidebarRef}>
@@ -210,7 +209,7 @@ export function Sidebar({
               <button
                 type="button"
                 className="sidebar__workspace-header"
-                onClick={() => setActiveWorkspace(isActiveWs ? null : ws.path)}
+                onClick={() => handleSelectWorkspace(ws.path)}
                 title={ws.path}
               >
                 <span className="sidebar__workspace-name">
@@ -229,16 +228,19 @@ export function Sidebar({
                     + New session
                   </button>
 
-                  {/* Live sessions pinned on top */}
+                  {/* Live sessions pinned on top, newest-opened first. */}
                   {activeSessionsForWs
                     .filter((s) => {
-                      // The active tab is always visible. Cold tabs with a file
-                      // are durable — they must appear even with no transcript.
-                      // Otherwise hide empty transcripts.
+                      // The active tab is always visible. Otherwise show a row
+                      // only if it has real transcript content — an empty
+                      // session (no messages yet) disappears once you switch
+                      // away, even after pi has assigned it a file. This is
+                      // safe because resumed stored sessions always seed a
+                      // transcript (blocks > 0) and open focused.
                       if (s.sessionId === activeSessionId) return true;
-                      if (s.sessionFile != null) return true;
                       return s.transcript.blocks.length > 0;
                     })
+                    .reverse() // newest-opened first
                     .map((s) => (
                       <div
                         key={s.sessionId}

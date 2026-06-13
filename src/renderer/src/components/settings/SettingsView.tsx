@@ -1,3 +1,4 @@
+import type { AppSettings } from "@shared/settings.js";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { useSettingsStore } from "../../stores/settings-store.js";
@@ -74,6 +75,26 @@ export function SettingsView({ onClose }: { onClose: () => void }): React.ReactE
                 <span className="settings-value settings-value--mono">{piInfo.version}</span>
               </div>
             )}
+          </section>
+
+          {/* Color scheme */}
+          <section className="settings-section">
+            <h3 className="settings-section__title">Color scheme</h3>
+            <div className="settings-row">
+              <span className="settings-label">Theme</span>
+              <select
+                className="settings-select"
+                value={settings.colorScheme}
+                onChange={(e) =>
+                  update({ colorScheme: e.target.value as AppSettings["colorScheme"] })
+                }
+              >
+                <option value="mocha">Catppuccin Mocha (dark)</option>
+                <option value="macchiato">Catppuccin Macchiato (dark)</option>
+                <option value="frappe">Catppuccin Frappé (dark)</option>
+                <option value="latte">Catppuccin Latte (light)</option>
+              </select>
+            </div>
           </section>
 
           {/* Display font */}

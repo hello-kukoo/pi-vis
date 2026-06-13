@@ -8,7 +8,6 @@ import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-proto
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { create } from "zustand";
 import type { PickerRequest } from "../lib/commands/execute.js";
-import { useSettingsStore } from "./settings-store.js";
 import {
   type TranscriptState,
   addBashBlock,
@@ -70,7 +69,7 @@ interface SessionsStore {
   openSessionTab: (
     workspacePath: string,
     sessionFile?: string,
-    opts?: { focus?: boolean; persist?: boolean },
+    opts?: { focus?: boolean },
   ) => Promise<SessionId | null>;
   closeSessionTab: (sessionId: SessionId) => Promise<void>;
   removeSession: (sessionId: SessionId) => void;
@@ -217,7 +216,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, { ...s, sessionFile });
       return { sessions };
     });
-    persistOpenTabs();
   },
 
   setSessionStatus: (sessionId, status, error) => {
@@ -515,7 +513,11 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
    *   1. Update sessionFile (may be undefined for a lazy new_session).
    *   2. Clear the transcript (the new session is empty until loadHistory).
    *   3. Update sessionName if pi provided one.
-   *   4. Persist openTabs so a restart resumes on the new file.
+   *
+   * (Tab-persistence was removed: openTabs is no longer tracked in
+   * settings, so there is no step 4. The session stays in memory for
+   * this run; a relaunch will open a fresh session in the MRU
+   * workspace.)
    */
   adoptSessionFile: async (sessionId, sessionFile, sessionName) => {
     set((state) => {
@@ -532,7 +534,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, next);
       return { sessions };
     });
-    persistOpenTabs();
   },
 
   /** Refresh the discovered command list (extension / prompt / skill). */
@@ -620,7 +621,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   openSessionTab: async (workspacePath, sessionFile, opts) => {
     if (typeof window === "undefined" || !window.pivis) return null;
     const focus = opts?.focus ?? true;
-    const persist = opts?.persist ?? true;
     try {
       // Renderer-side dedupe: a session already open with the same file is reused.
       // (Fast path; main's session.open is also idempotent so this is not load-bearing.)
@@ -642,7 +642,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         workspacePath,
         sessionFile,
       });
-      if (res.outcome === "missing") return null; // stale tab: skip; restore's final persist prunes it
+      if (res.outcome === "missing") return null; // stale tab: skip; the cold-open call site decides whether to surface a new session
       const { sessionId, name, preview, sessionStatus } = res;
 
       // A concurrent openSessionTab for the same file may have already adopted
@@ -673,7 +673,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         }
       }
       if (focus) get().setActiveSession(sessionId);
-      if (persist) persistOpenTabs();
       return sessionId;
     } catch (err) {
       console.error("Failed to open session:", err);
@@ -686,7 +685,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       await window.pivis.invoke("session.close", { sessionId }).catch(console.error);
     }
     get().removeSession(sessionId);
-    persistOpenTabs();
   },
 
   setActiveSession: (sessionId) => {
@@ -702,44 +700,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         });
       }
     }
-    persistOpenTabs();
   },
 
   setActiveWorkspace: (path) => {
     set({ activeWorkspacePath: path });
   },
 }));
-
-// ── Module-level exports (pure) ──────────────────────────────────────
-
-/**
- * Compute the durable open-tab snapshot for settings. Insertion order
- * preserves the user's tab order; only sessions with a known file are
- * included (cold tabs without a path are not yet durable).
- */
-export function computeOpenTabs(
-  sessions: Map<SessionId, SessionViewState>,
-  activeSessionId: SessionId | null,
-): {
-  openTabs: Array<{ workspacePath: string; sessionFile: string }>;
-  activeSessionFile: string | null;
-} {
-  const openTabs: Array<{ workspacePath: string; sessionFile: string }> = [];
-  for (const s of sessions.values()) {
-    if (s.sessionFile) {
-      openTabs.push({ workspacePath: s.workspacePath, sessionFile: s.sessionFile });
-    }
-  }
-  const active = activeSessionId ? sessions.get(activeSessionId) : null;
-  const activeSessionFile = active?.sessionFile ?? null;
-  return { openTabs, activeSessionFile };
-}
-
-/**
- * Persist the current open-tab snapshot. No-op in node (vitest).
- */
-export function persistOpenTabs(): void {
-  if (typeof window === "undefined" || !window.pivis) return;
-  const { sessions, activeSessionId } = useSessionsStore.getState();
-  void useSettingsStore.getState().update(computeOpenTabs(sessions, activeSessionId));
-}

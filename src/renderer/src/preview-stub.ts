@@ -367,8 +367,7 @@ const settingsState = {
   },
   recentWorkspaces: [DEMO_WORKSPACE],
   lastUsedModel: null,
-  openTabs: [],
-  activeSessionFile: null,
+  colorScheme: "mocha" as const,
   window: undefined,
 };
 

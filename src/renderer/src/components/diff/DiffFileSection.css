@@ -59,6 +59,15 @@
   text-align: left;
 }
 
+.diff-file__sep {
+  /* Separator slash lives outside the RTL dirname span so a trailing
+     neutral `/` is never reordered to the front (which would produce
+     a stray leading slash + missing separator like
+     `…/settingsSettingsView.tsx`). */
+  color: var(--ctp-overlay1);
+  flex-shrink: 0;
+}
+
 .diff-file__basename {
   color: var(--ctp-text);
   font-weight: 500;

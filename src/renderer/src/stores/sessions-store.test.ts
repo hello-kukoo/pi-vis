@@ -1,7 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import { ExtensionUiRequestSchema } from "@shared/pi-protocol/extension-ui.js";
 import { beforeEach, describe, expect, it } from "vitest";
-import { computeOpenTabs, persistOpenTabs, useSessionsStore } from "./sessions-store.js";
+import { useSessionsStore } from "./sessions-store.js";
 
 const SESSION_A = "session-a" as SessionId;
 const SESSION_B = "session-b" as SessionId;
@@ -178,45 +178,17 @@ describe("createSession(name) and tab lifecycle", () => {
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionFile).toBe("/first.jsonl");
   });
 
-  it("computeOpenTabs includes only sessions with a file, in insertion order, with active file from activeSessionId", () => {
-    useSessionsStore.getState().addWorkspace(WORKSPACE);
-    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/a.jsonl");
-    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE); // no file
-    useSessionsStore.getState().createSession(SESSION_C, WORKSPACE, "/c.jsonl");
-    useSessionsStore.getState().setActiveSession(SESSION_C);
-
-    const { openTabs, activeSessionFile } = computeOpenTabs(
-      useSessionsStore.getState().sessions,
-      useSessionsStore.getState().activeSessionId,
-    );
-    expect(openTabs).toEqual([
-      { workspacePath: WORKSPACE, sessionFile: "/a.jsonl" },
-      { workspacePath: WORKSPACE, sessionFile: "/c.jsonl" },
-    ]);
-    expect(activeSessionFile).toBe("/c.jsonl");
-
-    useSessionsStore.getState().setActiveSession(SESSION_B); // no file
-    const result2 = computeOpenTabs(
-      useSessionsStore.getState().sessions,
-      useSessionsStore.getState().activeSessionId,
-    );
-    expect(result2.activeSessionFile).toBeNull();
-    expect(result2.openTabs).toEqual([
-      { workspacePath: WORKSPACE, sessionFile: "/a.jsonl" },
-      { workspacePath: WORKSPACE, sessionFile: "/c.jsonl" },
-    ]);
-  });
-
-  it("computeOpenTabs returns empty arrays for an empty map", () => {
-    const { openTabs, activeSessionFile } = computeOpenTabs(new Map(), null);
-    expect(openTabs).toEqual([]);
-    expect(activeSessionFile).toBeNull();
-  });
-
-  it("persistOpenTabs under node does not throw", () => {
-    useSessionsStore.getState().addWorkspace(WORKSPACE);
-    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE, "/a.jsonl");
-    expect(() => persistOpenTabs()).not.toThrow();
+  it("computeOpenTabs / persistOpenTabs are no longer exported (tab persistence is gone)", () => {
+    // Tab-restore was removed: settings no longer tracks openTabs /
+    // activeSessionFile, so the store no longer needs to compute or
+    // persist them. This test pins that removal — if either symbol
+    // reappears, import resolution fails and the suite is loud.
+    expect(
+      (useSessionsStore as unknown as Record<string, unknown>)["computeOpenTabs"],
+    ).toBeUndefined();
+    expect(
+      (useSessionsStore as unknown as Record<string, unknown>)["persistOpenTabs"],
+    ).toBeUndefined();
   });
 });
 

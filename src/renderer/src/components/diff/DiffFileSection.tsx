@@ -509,12 +509,19 @@ function PathPart({ path }: { path: string }): React.ReactElement {
   if (slash === -1) {
     return <span className="diff-file__basename">{path}</span>;
   }
-  const dir = path.slice(0, slash + 1);
-  const base = path.slice(slash + 1);
+  // Split the directory and filename into separate spans. The dirname
+  // is rendered in an RTL container so long paths truncate from the
+  // left; a trailing neutral `/` inside that container is reordered
+  // to the front, producing a stray leading slash and a missing
+  // separator (e.g. `…/settingsSettingsView.tsx`). Render the slash
+  // as its own non-truncating span *outside* the RTL context.
   return (
     <>
-      <span className="diff-file__dirname">{dir}</span>
-      <span className="diff-file__basename">{base}</span>
+      <span className="diff-file__dirname">{path.slice(0, slash)}</span>
+      <span className="diff-file__sep" aria-hidden>
+        /
+      </span>
+      <span className="diff-file__basename">{path.slice(slash + 1)}</span>
     </>
   );
 }
