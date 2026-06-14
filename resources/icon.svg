@@ -1,0 +1,27 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="piG" x1="222" y1="272" x2="750" y2="730" gradientUnits="userSpaceOnUse">
+    <stop offset="0%" stop-color="#f5c2e7"/>
+    <stop offset="45%" stop-color="#cba6f7"/>
+    <stop offset="100%" stop-color="#89b4fa"/>
+  </linearGradient>
+  <radialGradient id="halo" cx="512" cy="490" r="500" gradientUnits="userSpaceOnUse">
+    <stop offset="0%"   stop-color="#cba6f7" stop-opacity="0.22"/>
+    <stop offset="45%"  stop-color="#cba6f7" stop-opacity="0.09"/>
+    <stop offset="100%" stop-color="#cba6f7" stop-opacity="0"/>
+  </radialGradient>
+  <clipPath id="clip">
+    <rect width="1024" height="1024" rx="229"/>
+  </clipPath>
+</defs>
+<g clip-path="url(#clip)">
+  <rect width="1024" height="1024" fill="#1e1e2e"/>
+  <rect width="1024" height="320" fill="#24273a"/>
+  <ellipse cx="512" cy="490" rx="500" ry="440" fill="url(#halo)"/>
+  <g fill="url(#piG)">
+    <rect x="222" y="272" width="580" height="60" rx="30"/>
+    <path d="M 320 332 L 320 680 Q 320 712 350 712 Q 380 712 380 680 L 380 332 Z"/>
+    <path d="M 644 332 L 644 678 C 644 714 661 737 688 736 C 715 735 729 713 723 689 L 707 671 L 707 332 Z"/>
+  </g>
+</g>
+</svg>
