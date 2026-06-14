@@ -237,7 +237,11 @@ function AssistantBlock({
   return (
     <div className="transcript-block transcript-block--assistant">
       {showLabel && <div className="transcript-block__label">Pi</div>}
-      {data.thinkingContent && <div className="thinking-block">{data.thinkingContent}</div>}
+      {data.thinkingContent && (
+        <div className="thinking-block">
+          <Markdown>{data.thinkingContent}</Markdown>
+        </div>
+      )}
       {data.textContent && (
         <div className="transcript-block__content">
           <Markdown>{data.textContent}</Markdown>

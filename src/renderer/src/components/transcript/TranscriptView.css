@@ -130,16 +130,76 @@
 
 /* Thinking — always visible, italic — uses the display font's true
    italic variant for architectural contrast.  Capped at 80% width to
-   match the assistant content column. */
+   match the assistant content column.
+
+   Markdown children (p, ul, ol, h1–h3, code, .shiki) are laid out here
+   so headings, lists, and code blocks render correctly inside the
+   thinking block.  Cascaded italic + color keep the whole block in the
+   thinking voice.  Fenced code blocks (.shiki, pre) intentionally reset
+   font-style: normal for readability — same as output rendering. */
 .thinking-block {
   font-family: var(--font-display);
   font-size: 1em;
   font-style: italic;
   color: var(--color-thinking);
   line-height: var(--mcm-line-body);
-  white-space: pre-wrap;
   word-break: break-word;
   max-width: 80%;
+}
+
+.thinking-block p {
+  margin: 0 0 var(--mcm-tight);
+}
+.thinking-block p:last-child {
+  margin-bottom: 0;
+}
+
+.thinking-block ul,
+.thinking-block ol {
+  padding-left: 1.4em;
+  margin: 0 0 var(--mcm-tight);
+}
+
+.thinking-block li {
+  margin: 0.2em 0;
+}
+
+.thinking-block h1,
+.thinking-block h2,
+.thinking-block h3 {
+  color: var(--color-thinking);
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.thinking-block a {
+  color: var(--color-thinking);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-thinking) 30%, transparent);
+}
+
+.thinking-block a:hover {
+  border-bottom-color: var(--color-thinking);
+}
+
+.thinking-block code {
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+}
+
+.thinking-block pre {
+  font-style: normal;
+  margin: var(--mcm-tight) 0;
+}
+
+.thinking-block .shiki {
+  border-radius: var(--mcm-radius-sm);
+  padding: 0.857rem;
+  overflow-x: auto;
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--mcm-line-code);
 }
 
 /* ── Tool/bash cards (terminal boxes) ────────────────────────────────
