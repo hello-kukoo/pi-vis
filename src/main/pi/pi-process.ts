@@ -41,7 +41,12 @@ export class PiProcess extends EventEmitter {
   public stderrLog: string[] = [];
   public readonly sessionFile?: string | undefined;
 
-  constructor(piPath: string, workspacePath: string, sessionFile?: string) {
+  constructor(
+    piPath: string,
+    workspacePath: string,
+    sessionFile?: string,
+    env?: Record<string, string>,
+  ) {
     super();
     this.sessionFile = sessionFile;
     const args = ["--mode", "rpc"];
@@ -49,7 +54,7 @@ export class PiProcess extends EventEmitter {
 
     this.proc = spawn(piPath, args, {
       cwd: workspacePath,
-      env: process.env,
+      env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -90,6 +95,10 @@ export class PiProcess extends EventEmitter {
       this.stderrLog.push(line);
       if (this.stderrLog.length > 500) this.stderrLog.shift();
     });
+
+    this.proc.stdout?.on("error", (err) => console.error("[pi-process] stdout error", err));
+    this.proc.stderr?.on("error", (err) => console.error("[pi-process] stderr error", err));
+    this.proc.stdin?.on("error", (err) => console.error("[pi-process] stdin error", err));
 
     this.proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       this.rejectAllPending(new Error(`pi process exited with code ${code}`));

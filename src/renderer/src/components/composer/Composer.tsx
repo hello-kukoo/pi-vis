@@ -113,7 +113,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
     if (typingElsewhere) return;
     el.focus();
-  }, [sessionId]);
+  }, []);
 
   // ── Attachment handling ─────────────────────────────────────────────
 

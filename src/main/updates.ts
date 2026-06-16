@@ -9,16 +9,16 @@
  * Honors PI_OFFLINE and PI_SKIP_VERSION_CHECK env vars.
  */
 
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
-import { locatePi, clearPiLocationCache } from "./pi/locate-pi.js";
 import { getLoginShellEnv } from "./auth.js";
+import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { getSettings } from "./settings-store.js";
 
-import type { UpdateStatus, PiUpdateStatus, ExtensionUpdate } from "@shared/updates.js";
+import type { ExtensionUpdate, PiUpdateStatus, UpdateStatus } from "@shared/updates.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -262,6 +262,9 @@ export async function runUpdate(
     child.stderr?.on("data", (chunk: string) => {
       onProgress(runId, chunk);
     });
+
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
 
     const exitCode = await new Promise<number>((resolve) => {
       child.on("close", resolve);

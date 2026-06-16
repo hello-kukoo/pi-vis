@@ -48,9 +48,7 @@ const XTERM_THEME = {
 } as const;
 
 function resolveMonoFont(): string {
-  const fromVar = getComputedStyle(document.documentElement)
-    .getPropertyValue("--font-code")
-    .trim();
+  const fromVar = getComputedStyle(document.documentElement).getPropertyValue("--font-code").trim();
   return fromVar || "ui-monospace, Menlo, monospace";
 }
 

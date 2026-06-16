@@ -1,14 +1,33 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { useUpdatesStore } from "../../stores/updates-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
+import { useUpdatesStore } from "../../stores/updates-store.js";
 import "./UpdateBanner.css";
 
 export function UpdateBanner(): React.ReactElement | null {
   const status = useUpdatesStore((s) => s.status);
   const dismiss = useUpdatesStore((s) => s.dismiss);
   const settings = useSettingsStore((s) => s.settings);
-  const [showDetails, setShowDetails] = useState(false);
+  const [, setShowDetails] = useState(false);
+
+  // All hooks must run unconditionally and before any early return — the
+  // guards below short-circuit on most renders, so the useCallbacks have to
+  // live above them or the hook count changes between renders (which throws
+  // "Rendered more hooks than during the previous render" and white-screens
+  // the whole app, since this banner is outside the session ErrorBoundary).
+  const handleDismiss = useCallback(() => {
+    dismiss();
+  }, [dismiss]);
+
+  const handleUpdateNow = useCallback(() => {
+    // Open the update progress modal by triggering the update
+    window.dispatchEvent(new CustomEvent("pivis:run-update", { detail: { target: "all" } }));
+  }, []);
+
+  const handleDetails = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("pivis:open-settings"));
+    setShowDetails(true);
+  }, []);
 
   // If update checking is disabled, never show
   if (!settings.updateCheckEnabled) return null;
@@ -26,20 +45,6 @@ export function UpdateBanner(): React.ReactElement | null {
   const hasExtUpdates = extUpdates.length > 0;
 
   if (!hasPiUpdate && !hasExtUpdates) return null;
-
-  const handleDismiss = useCallback(() => {
-    dismiss();
-  }, [dismiss]);
-
-  const handleUpdateNow = useCallback(() => {
-    // Open the update progress modal by triggering the update
-    window.dispatchEvent(new CustomEvent("pivis:run-update", { detail: { target: "all" } }));
-  }, []);
-
-  const handleDetails = useCallback(() => {
-    window.dispatchEvent(new CustomEvent("pivis:open-settings"));
-    setShowDetails(true);
-  }, []);
 
   // Build the message
   const parts: string[] = [];

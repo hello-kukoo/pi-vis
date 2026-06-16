@@ -106,7 +106,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
           setChecking(false);
         });
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setStatus, updatesStatus]);
 
   // ── Pi recheck ────────────────────────────────────────────────────────
 
@@ -534,10 +534,11 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
               {updateStatus && (
                 <div className="settings-update-meta">
                   <span className="settings-hint">
-                    Last checked{" "}
-                    {fmtTimeAgo(updateStatus.checkedAt)}
+                    Last checked {fmtTimeAgo(updateStatus.checkedAt)}
                   </span>
-                  {checking && <span className="settings-hint settings-hint--checking">Checking…</span>}
+                  {checking && (
+                    <span className="settings-hint settings-hint--checking">Checking…</span>
+                  )}
                 </div>
               )}
 

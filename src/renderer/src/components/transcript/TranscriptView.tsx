@@ -208,17 +208,19 @@ function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
       <div className="transcript-block__bubble user-content">
         {data.images && data.images.length > 0 && (
           <div className="transcript-block__images">
-            {data.images.map((img, i) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: image order is stable for a given user message
-              <a key={i} href={img} target="_blank" rel="noreferrer">
-                <img
-                  src={img}
-                  // biome-ignore lint/a11y/noRedundantAlt: alt describes which attached image, not "what"
-                  alt={`Attached image ${i + 1}`}
-                  className="transcript-block__image-thumb"
-                />
-              </a>
-            ))}
+            {data.images
+              .filter((img) => /^(data:image\/|file:|https?:)/.test(img))
+              .map((img, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: image order is stable for a given user message
+                <a key={i} href={img} target="_blank" rel="noreferrer">
+                  <img
+                    src={img}
+                    // biome-ignore lint/a11y/noRedundantAlt: alt describes which attached image, not "what"
+                    alt={`Attached image ${i + 1}`}
+                    className="transcript-block__image-thumb"
+                  />
+                </a>
+              ))}
           </div>
         )}
         <div className="transcript-block__content">{data.content}</div>

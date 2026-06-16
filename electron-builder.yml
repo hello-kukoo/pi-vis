@@ -20,6 +20,7 @@ asarUnpack:
   - node_modules/@homebridge/node-pty-prebuilt-multiarch/build/**
   - node_modules/proper-lockfile/**
 mac:
+  entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: Not required

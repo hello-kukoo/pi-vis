@@ -10,8 +10,8 @@
  */
 
 import os from "node:os";
-import { locatePi } from "./pi/locate-pi.js";
 import { getLoginShellEnv } from "./auth.js";
+import { locatePi } from "./pi/locate-pi.js";
 import { getSettings } from "./settings-store.js";
 
 // Dynamic import for node-pty — it's a native module that may not be

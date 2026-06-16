@@ -5,6 +5,11 @@
   "main": "./out/main/index.js",
   "author": "Pi-Vis",
   "homepage": ".",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "<REPLACE: git remote URL, e.g. https://github.com/owner/pi-vis.git>"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "dev:renderer": "vite --config vite.renderer.config.ts",

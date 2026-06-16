@@ -27,7 +27,7 @@
 ```
 src/
 ├── main/                    # Electron main process
-│   ├── index.ts             # Entry: BrowserWindow creation, IPC init, settings/window persistence, background update check
+│   ├── index.ts             # Entry: BrowserWindow creation, IPC init, settings/window persistence, background update check, CSP, navigation hardening (external links open in OS browser)
 │   ├── ipc.ts               # All ipcMain.handle() registrations — the main-process API surface (auth, pty, updates)
 │   ├── auth.ts              # Auth file management: read/write ~/.pi/agent/auth.json with proper-lockfile, login-shell env detection, fs.watch
 │   ├── pty.ts               # Embedded terminal (node-pty) for pi /login OAuth flow
@@ -35,9 +35,9 @@ src/
 │   ├── settings-store.ts    # Reads/writes ~/Library/Application Support/pi-vis/settings.json
 │   ├── workspaces.ts        # Workspace picker (OS dialog), recents management
 │   ├── pi/                  # Pi subprocess management
-│   │   ├── pi-process.ts    # Wraps a single `pi --mode rpc` child process; correlated RPC over JSONL
+│   │   ├── pi-process.ts    # Wraps a single `pi --mode rpc` child process; spawned with login-shell env (PATH etc.); correlated RPC over JSONL
 │   │   ├── jsonl-stream.ts  # Byte-level JSONL parser (splits on \n only, never Unicode separators)
-│   │   └── locate-pi.ts     # Finds pi binary via $SHELL, which, or user override; caches result
+│   │   └── locate-pi.ts     # Finds pi binary via $SHELL/which/override; validates `--version` with login-shell env (pi's `env node` shebang needs node on PATH); caches result
 │   ├── sessions/            # Session lifecycle
 │   │   ├── session-registry.ts   # SessionId → PiProcess lifecycle; MAX_IDLE_PROCESSES=10
 │   │   ├── session-discovery.ts  # Scans ~/.pi/agent/sessions/ for workspace-linked session files
@@ -50,7 +50,7 @@ src/
 │
 ├── renderer/src/            # React 19 SPA
 │   ├── App.tsx              # Root: wires IPC event listeners, layout (TitleBar + Sidebar + UpdateBanner + main area)
-│   ├── main.tsx             # React entry, loads settings + preview-stub in browser mode
+│   ├── main.tsx             # React entry; wraps <App> in a top-level ErrorBoundary; preview-stub only loads when import.meta.env.DEV
 │   ├── preview-stub.ts      # Stubs window.pivis for standalone browser dev (demo session + streaming)
 │   ├── components/
 │   │   ├── composer/        # Textarea input: prompts, !bash, /slash commands, image attach, autocomplete
@@ -61,6 +61,7 @@ src/
 │   │   ├── updates/         # UpdateProgress (modal with streaming `pi update` output via AnsiText)
 │   │   ├── diff/            # DiffViewerHost, DiffFileSection (Shiki-highlighted unified/split diffs)
 │   │   ├── ext-ui/          # ExtensionDialogHost (select/confirm/input/editor dialogs + toasts)
+│   │   ├── ErrorBoundary.tsx # React error boundary (reloadable card) — used at TWO levels: top-level in main.tsx (whole shell) + per-session in App; prevents render crashes from white-screening
 │   │   ├── pickers/         # AppPickerHost (model picker, thinking level picker)
 │   │   ├── session-header/  # SessionHeader (model dropdown, thinking level, token stats, session name)
 │   │   ├── settings/        # SettingsView (fonts, pi path, color scheme, diff view mode, Account, Updates)
@@ -211,6 +212,10 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `~/.pi/agent/settings.json` | Pi settings including `packages[]` for extension management |
 | `~/.pi/agent/npm/node_modules/` | Installed pi extension packages |
 | `~/Library/Application Support/pi-vis/settings.json` | App settings |
+| `build/entitlements.mac.plist` | macOS hardened runtime entitlements for signing (allow-jit, allow-unsigned-executable-memory, disable-library-validation) |
+| `.github/workflows/ci.yml` | CI workflow (typecheck, lint, test, build on push/PR) |
+| `src/main/index.ts` | Main entry: BrowserWindow creation, IPC init, CSP, navigation hardening (external links open in OS browser, no in-app navigation) |
+| `src/renderer/src/components/ErrorBoundary.tsx` | React error boundary — catches render crashes without white-screening the app |
 | `src/shared/ipc-contract.ts` | The typed IPC boundary — start here when adding new main↔renderer communication |
 | `src/shared/pi-protocol/` | Source of truth for all pi RPC types |
 | `src/shared/auth.ts` | Provider definitions (transcribed from pi's docs/providers.md) |

@@ -18,12 +18,13 @@ import "@fontsource/ibm-plex-mono/700-italic.css";
 import React from "react";
 import ReactDOM from "react-dom/client";
 
-// Stub pivis API when running outside Electron (preview mode)
-if (!("pivis" in window)) {
+// Stub pivis API when running in browser preview (dev) mode
+if (import.meta.env.DEV && !("pivis" in window)) {
   await import("./preview-stub.js");
 }
 
 import { App } from "./App.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import "./theme/theme.css";
 import "./global.css";
 
@@ -32,6 +33,13 @@ if (!root) throw new Error("No #root element");
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <App />
+    {/* Top-level safety net: any uncaught render error in the app shell
+        (TitleBar, Sidebar, UpdateBanner, Settings, modals, …) shows a
+        reloadable error card instead of silently white-screening the whole
+        window. The per-session ErrorBoundary inside App stays for granular
+        recovery of transcript/composer crashes. */}
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

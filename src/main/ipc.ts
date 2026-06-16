@@ -9,14 +9,15 @@ import { app, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
 import {
   getAuthStatus,
-  saveApiKey,
+  getLoginShellEnv,
   removeProvider,
+  saveApiKey,
   startAuthWatch,
   stopAuthWatch,
 } from "./auth.js";
 import { getChanges, getFileDiff } from "./git/git.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
-import { initPty, startPty, writePty, resizePty, killPty, killAllPtys } from "./pty.js";
+import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
 import { loadHistory } from "./sessions/history-loader.js";
 import { extractSessionMeta, listSessionsForWorkspace } from "./sessions/session-discovery.js";
 import { SessionRegistry } from "./sessions/session-registry.js";
@@ -125,7 +126,8 @@ export function initIpc(win: BrowserWindow): void {
     const piInfo = await locatePi(settings.piBinaryPath);
     if (!piInfo)
       throw new Error("pi binary not found. Please install pi or set the path in settings.");
-    registry?.activateSession(args.sessionId, piInfo.path);
+    const loginShellEnv = await getLoginShellEnv();
+    registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv);
   });
 
   ipcMain.handle("session.close", async (_evt, args: { sessionId: SessionId }) => {

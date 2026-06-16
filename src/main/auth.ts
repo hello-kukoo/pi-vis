@@ -7,10 +7,10 @@
  * own token refresh).
  */
 
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { lock, unlock } from "proper-lockfile";
 
@@ -83,7 +83,10 @@ export function readAuth(): Record<string, AuthCredential> {
       return parsed as Record<string, AuthCredential>;
     }
     return {};
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[auth] failed to read auth.json:", err);
+    }
     return {};
   }
 }
@@ -172,18 +175,18 @@ async function writeAuth(auth: Record<string, AuthCredential>): Promise<void> {
 
   // Acquire the same lock pi uses (default retry).
   const release = await lock(authPath, {
-    lockfilePath: authPath + ".lock",
+    lockfilePath: `${authPath}.lock`,
     retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
   });
 
   try {
-    const tmpPath = authPath + ".tmp." + process.pid;
+    const tmpPath = `${authPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmpPath, JSON.stringify(auth, null, 2), "utf8");
     fs.chmodSync(tmpPath, 0o600);
     fs.renameSync(tmpPath, authPath);
   } finally {
     await unlock(authPath, {
-      lockfilePath: authPath + ".lock",
+      lockfilePath: `${authPath}.lock`,
     }).catch(() => {
       // Best-effort release
     });
@@ -264,6 +267,10 @@ export function startAuthWatch(onChange: AuthChangeCallback): void {
 
     signal.addEventListener("abort", () => {
       watcher.close();
+    });
+
+    watcher.on("error", () => {
+      // fs.watch can emit transient FS errors; ignore rather than crash.
     });
   } catch {
     // fs.watch may fail; that's fine

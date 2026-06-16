@@ -25,7 +25,10 @@ export function loadSettings(): AppSettings {
     if (parsed.success) {
       current = parsed.data;
     }
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[settings] failed to read settings.json:", err);
+    }
     current = defaultSettings;
   }
   return current;
@@ -45,9 +48,18 @@ export function saveSettings(updates: Partial<AppSettings>): AppSettings {
   }
 
   // Atomic write: write to temp file, then rename
-  const tmpPath = `${filePath}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2), "utf8");
-  fs.renameSync(tmpPath, filePath);
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(current, null, 2), "utf8");
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      /* ignore */
+    }
+    throw err;
+  }
 
   return current;
 }

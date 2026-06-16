@@ -28,9 +28,9 @@ import {
 } from "@playwright/test";
 
 const APP_ENTRY = join(import.meta.dirname, "../../out/main/index.js");
-const SETTINGS_DIR = "/Users/romil/Library/Application Support/Pi-Vis";
+const SETTINGS_DIR = join(os.homedir(), "Library/Application Support/Pi-Vis");
 const SETTINGS_PATH = join(SETTINGS_DIR, "settings.json");
-const SESSIONS_DIR = "/Users/romil/.pi/agent/sessions/--Users-romil-src-pi-vis--";
+const SESSIONS_DIR = join(os.homedir(), ".pi/agent/sessions/--Users-romil-src-pi-vis--");
 
 function readSettings(): Record<string, unknown> {
   return JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"));
@@ -46,7 +46,7 @@ function resetSettings(): void {
           display: { family: "Inter", sizePx: 14 },
           code: { family: "IBM Plex Mono", sizePx: 14 },
         },
-        recentWorkspaces: ["/Users/romil/src/pi-vis"],
+        recentWorkspaces: [join(os.homedir(), "src/pi-vis")],
       },
       null,
       2,

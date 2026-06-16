@@ -12,10 +12,10 @@ export function UpdateProgress(): React.ReactElement | null {
 
   // Auto-scroll to bottom when new output arrives
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && activeRun) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [activeRun?.lines]);
+  }, [activeRun]);
 
   const handleDone = useCallback(() => {
     setActiveRun(null);

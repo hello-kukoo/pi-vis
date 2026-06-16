@@ -91,7 +91,10 @@ export interface IpcInvokeContract {
   };
 
   // ── PTY ─────────────────────────────────────────────────────────────
-  "pty.start": { req: { cwd?: string; autoLogin?: boolean; cols?: number; rows?: number }; res: { ptyId: string } };
+  "pty.start": {
+    req: { cwd?: string; autoLogin?: boolean; cols?: number; rows?: number };
+    res: { ptyId: string };
+  };
   "pty.write": { req: { ptyId: string; data: string }; res: undefined };
   "pty.resize": { req: { ptyId: string; cols: number; rows: number }; res: undefined };
   "pty.kill": { req: { ptyId: string }; res: undefined };

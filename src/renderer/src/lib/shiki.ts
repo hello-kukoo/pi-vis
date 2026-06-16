@@ -1,8 +1,8 @@
-import { type Highlighter, createHighlighter } from "shiki";
-import catppuccinLatte from "@shikijs/themes/catppuccin-latte";
 import catppuccinFrappe from "@shikijs/themes/catppuccin-frappe";
+import catppuccinLatte from "@shikijs/themes/catppuccin-latte";
 import catppuccinMacchiato from "@shikijs/themes/catppuccin-macchiato";
 import catppuccinMocha from "@shikijs/themes/catppuccin-mocha";
+import { type Highlighter, createHighlighter } from "shiki";
 
 let highlighter: Highlighter | null = null;
 let initPromise: Promise<Highlighter> | null = null;

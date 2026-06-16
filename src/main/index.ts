@@ -1,5 +1,5 @@
 import path from "node:path";
-import { BrowserWindow, app, session } from "electron";
+import { BrowserWindow, app, session, shell } from "electron";
 import { initIpc, stopAllSessions, triggerBackgroundUpdateCheck } from "./ipc.js";
 import { loadSettings, saveSettings } from "./settings-store.js";
 
@@ -45,6 +45,23 @@ function createWindow(): BrowserWindow {
 
   initIpc(win);
 
+  // External links open in the OS browser; never open new Electron windows.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+  // Prevent the app window from ever navigating away from the renderer.
+  win.webContents.on("will-navigate", (event, url) => {
+    if (url !== win.webContents.getURL()) {
+      event.preventDefault();
+      if (url.startsWith("http://") || url.startsWith("https://")) {
+        void shell.openExternal(url);
+      }
+    }
+  });
+
   win.once("ready-to-show", () => {
     win.show();
   });
@@ -64,6 +81,29 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  // Strict CSP for the packaged (file://) app. Skipped in dev: the Vite dev
+  // server needs inline/eval/websocket for HMR. 'wasm-unsafe-eval' is required
+  // by Shiki's WASM highlighter; 'unsafe-inline' style is required by Shiki and
+  // React inline styles.
+  if (!process.env["ELECTRON_RENDERER_URL"]) {
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [
+            "default-src 'self'; " +
+              "script-src 'self' 'wasm-unsafe-eval'; " +
+              "style-src 'self' 'unsafe-inline'; " +
+              "img-src 'self' data: file: https:; " +
+              "font-src 'self' data:; " +
+              "connect-src 'self'; " +
+              "object-src 'none'; base-uri 'none'; frame-src 'none'",
+          ],
+        },
+      });
+    });
+  }
+
   createWindow();
 
   // Background update check (3s delay, non-blocking)

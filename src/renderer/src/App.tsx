@@ -1,6 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { Composer } from "./components/composer/Composer.js";
 import { DiffViewerHost } from "./components/diff/DiffViewerHost.js";
 import { ExtensionDialogHost, ToastHost } from "./components/ext-ui/ExtensionDialogHost.js";
@@ -184,7 +185,7 @@ export function App(): React.ReactElement {
       if (store.activeRun?.runId === runId) {
         store.appendOutput(
           runId,
-          "\n\n" + (exitCode === 0 ? "✓ Update complete" : "✗ Update failed") + "\n",
+          `\n\n${exitCode === 0 ? "✓ Update complete" : "✗ Update failed"}\n`,
         );
       }
     });
@@ -254,27 +255,29 @@ export function App(): React.ReactElement {
       <main className="app__main">
         {activeSessionId ? (
           <div className="app__session" style={{ position: "relative" }}>
-            {/* SessionHeader is rendered inside the TitleBar at the top of
+            <ErrorBoundary key={activeSessionId}>
+              {/* SessionHeader is rendered inside the TitleBar at the top of
                 the window, not here. Keeping it out of the main column
                 reclaims the previously wasted vertical space below the
                 title bar. */}
-            <TranscriptView sessionId={activeSessionId} />
-            {/* Composer and the extension dialog share the same flex
+              <TranscriptView sessionId={activeSessionId} />
+              {/* Composer and the extension dialog share the same flex
                 slot: the dialog replaces the composer when a question is
                 pending, so they are never both visible. The dialog
                 intentionally does not block the rest of the UI — the
                 transcript above stays scrollable, the header (model +
                 thinking level) stays clickable, and the diff viewer
                 (Cmd+G) still works while the question is open. */}
-            {hasPendingDialog ? (
-              <ExtensionDialogHost sessionId={activeSessionId} />
-            ) : (
-              <Composer sessionId={activeSessionId} />
-            )}
-            {statusBarVisible && <StatusBar sessionId={activeSessionId} />}
-            <AppPickerHost sessionId={activeSessionId} />
-            <ToastHost sessionId={activeSessionId} />
-            <DiffViewerHost sessionId={activeSessionId} />
+              {hasPendingDialog ? (
+                <ExtensionDialogHost sessionId={activeSessionId} />
+              ) : (
+                <Composer sessionId={activeSessionId} />
+              )}
+              {statusBarVisible && <StatusBar sessionId={activeSessionId} />}
+              <AppPickerHost sessionId={activeSessionId} />
+              <ToastHost sessionId={activeSessionId} />
+              <DiffViewerHost sessionId={activeSessionId} />
+            </ErrorBoundary>
           </div>
         ) : (
           <div className="app__empty">

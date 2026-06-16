@@ -84,7 +84,7 @@ export class SessionRegistry {
    * Spawn the pi process for an existing cold record. Idempotent: a second
    * call while a process is alive is a no-op. Re-spawns after exit.
    */
-  activateSession(sessionId: SessionId, piPath: string): void {
+  activateSession(sessionId: SessionId, piPath: string, env?: Record<string, string>): void {
     const record = this.sessions.get(sessionId);
     if (!record) {
       throw new Error(`Unknown session: ${sessionId}`);
@@ -99,7 +99,7 @@ export class SessionRegistry {
     this.onStatusChanged(sessionId, "starting");
 
     try {
-      const proc = new PiProcess(piPath, record.workspacePath, record.sessionFile);
+      const proc = new PiProcess(piPath, record.workspacePath, record.sessionFile, env);
       record.proc = proc;
 
       const readyTimer = setTimeout(() => {
