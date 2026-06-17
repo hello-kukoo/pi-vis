@@ -17,3 +17,4 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      # TODO: add xvfb-run -a npm run test:e2e when e2e reliably passes headless

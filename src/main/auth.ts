@@ -165,44 +165,37 @@ export function listAuthStatus(
 
 // ── Write auth.json (atomic, locked) ────────────────────────────────────
 
-async function writeAuth(auth: Record<string, AuthCredential>): Promise<void> {
+// ── Public mutations ─────────────────────────────────────────────────────
+
+async function mutateAuth(mutator: (auth: Record<string, AuthCredential>) => void): Promise<void> {
   const authPath = getAuthPath();
   const authDir = getAuthDir();
-
-  if (!fs.existsSync(authDir)) {
-    fs.mkdirSync(authDir, { recursive: true, mode: 0o755 });
-  }
-
-  // Acquire the same lock pi uses (default retry).
-  const release = await lock(authPath, {
+  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true, mode: 0o755 });
+  await lock(authPath, {
     lockfilePath: `${authPath}.lock`,
+    realpath: false,
     retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
   });
-
   try {
+    const auth = readAuth(); // read INSIDE the lock
+    mutator(auth);
     const tmpPath = `${authPath}.tmp.${process.pid}`;
     fs.writeFileSync(tmpPath, JSON.stringify(auth, null, 2), "utf8");
     fs.chmodSync(tmpPath, 0o600);
     fs.renameSync(tmpPath, authPath);
   } finally {
-    await unlock(authPath, {
-      lockfilePath: `${authPath}.lock`,
-    }).catch(() => {
-      // Best-effort release
-    });
+    await unlock(authPath, { lockfilePath: `${authPath}.lock`, realpath: false }).catch(() => {});
   }
 }
-
-// ── Public mutations ─────────────────────────────────────────────────────
 
 export async function saveApiKey(
   provider: string,
   key: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const auth = readAuth();
-    auth[provider] = { type: "api_key", key };
-    await writeAuth(auth);
+    await mutateAuth((a) => {
+      a[provider] = { type: "api_key", key };
+    });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -213,9 +206,9 @@ export async function removeProvider(
   provider: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const auth = readAuth();
-    delete auth[provider];
-    await writeAuth(auth);
+    await mutateAuth((a) => {
+      delete a[provider];
+    });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

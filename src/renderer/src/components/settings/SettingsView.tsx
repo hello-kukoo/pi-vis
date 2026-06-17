@@ -7,7 +7,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
-import { UpdateProgress } from "../updates/UpdateProgress.js";
 import "./SettingsView.css";
 
 interface FontFamily {
@@ -39,7 +38,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   // ── Update state ───────────────────────────────────────────────────────
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateCheckMsg, setUpdateCheckMsg] = useState("");
-  const [showUpdateProgress, setShowUpdateProgress] = useState(false);
   const updatesStatus = useUpdatesStore((s) => s.status);
   const setStatus = useUpdatesStore((s) => s.setStatus);
   const setActiveRun = useUpdatesStore((s) => s.setActiveRun);
@@ -158,8 +156,13 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
     const sec = Math.round((Date.now() - ts) / 1000);
     if (sec < 60) return `${sec}s ago`;
     const min = Math.round(sec / 60);
-    if (min === 1) return "1m ago";
-    return `${min}m ago`;
+    if (min < 60) {
+      if (min === 1) return "1m ago";
+      return `${min}m ago`;
+    }
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    return `${Math.round(hr / 24)}d ago`;
   };
 
   const handleCheckUpdates = useCallback(async () => {
@@ -180,7 +183,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   const handleRunUpdate = useCallback(
     (target: "all" | "pi" | { extension: string }) => {
       void (async () => {
-        setShowUpdateProgress(true);
         const { runId } = await window.pivis.invoke("update.run", { target });
         setActiveRun({ runId, lines: [] });
       })();
@@ -188,21 +190,14 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
     [setActiveRun],
   );
 
-  // Subscribe to update progress
+  // Subscribe to update completion
   useEffect(() => {
-    const unsubProgress = window.pivis.on("update.progress", ({ runId, chunk }) => {
-      const store = useUpdatesStore.getState();
-      if (store.activeRun?.runId === runId) {
-        store.appendOutput(runId, chunk);
-      }
-    });
     const unsubDone = window.pivis.on("update.done", ({ runId, exitCode, status }) => {
       setUpdateStatus(status);
       setStatus(status);
       setUpdateCheckMsg(exitCode === 0 ? "Update successful" : "Update failed");
     });
     return () => {
-      unsubProgress();
       unsubDone();
     };
   }, [setStatus]);
@@ -687,8 +682,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
         />
       )}
 
-      {/* Update progress modal */}
-      {showUpdateProgress && <UpdateProgress />}
+      {/* Update progress modal — owned by App.tsx */}
     </>
   );
 }

@@ -41,6 +41,8 @@ export class JsonlStream {
   private onLine: (parsed: PiOutbound) => void;
   private onError: (err: Error) => void;
 
+  private static readonly MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
   constructor(onLine: (parsed: PiOutbound) => void, onError: (err: Error) => void) {
     this.onLine = onLine;
     this.onError = onError;
@@ -75,5 +77,14 @@ export class JsonlStream {
     }
 
     this.buffer = this.buffer.slice(start);
+
+    if (this.buffer.length > JsonlStream.MAX_BUFFER_BYTES) {
+      this.onError(
+        new Error(
+          `JSONL line exceeded ${JsonlStream.MAX_BUFFER_BYTES} bytes; dropping partial buffer`,
+        ),
+      );
+      this.buffer = Buffer.alloc(0);
+    }
   }
 }

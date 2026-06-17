@@ -3,10 +3,13 @@ import { create } from "zustand";
 
 interface UpdatesStore {
   status: UpdateStatus | null;
-  activeRun: { runId: string; lines: string[] } | null;
+  activeRun: { runId: string; lines: string[]; done?: boolean; exitCode?: number } | null;
   setStatus: (status: UpdateStatus) => void;
-  setActiveRun: (run: { runId: string; lines: string[] } | null) => void;
+  setActiveRun: (
+    run: { runId: string; lines: string[]; done?: boolean; exitCode?: number } | null,
+  ) => void;
   appendOutput: (runId: string, chunk: string) => void;
+  markDone: (runId: string, exitCode: number) => void;
   dismiss: () => void;
 }
 
@@ -29,6 +32,13 @@ export const useUpdatesStore = create<UpdatesStore>((set) => ({
       };
     });
   },
+
+  markDone: (runId, exitCode) =>
+    set((state) =>
+      state.activeRun?.runId === runId
+        ? { activeRun: { ...state.activeRun, done: true, exitCode } }
+        : {},
+    ),
 
   dismiss: () => set({ status: null }),
 }));

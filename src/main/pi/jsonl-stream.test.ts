@@ -96,6 +96,27 @@ describe("JsonlStream", () => {
     expect(lines).toHaveLength(1);
   });
 
+  it("drops the buffer and reports an error when a line exceeds the cap", () => {
+    const lines: unknown[] = [];
+    const errors: Error[] = [];
+    const stream = new JsonlStream(
+      (p) => lines.push(p),
+      (e) => errors.push(e),
+    );
+    // One chunk over the 64 MiB cap with no newline → the partial buffer
+    // must be dropped rather than grown unbounded.
+    const huge = Buffer.alloc(64 * 1024 * 1024 + 1, 0x41); // 'A' repeated, no '\n'
+    stream.feed(huge);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toMatch(/exceeded/);
+    expect(lines).toHaveLength(0);
+
+    // After the reset, a normal line still parses (no leftover garbage prefix).
+    stream.feed(Buffer.from('{"type":"agent_start"}\n'));
+    expect(lines).toHaveLength(1);
+    expect((lines[0] as { kind: string }).kind).toBe("event");
+  });
+
   it("handles chunk split mid-codepoint (UTF-8 multi-byte)", () => {
     const lines: unknown[] = [];
     const stream = new JsonlStream(

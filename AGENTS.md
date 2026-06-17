@@ -49,14 +49,14 @@ src/
 │   └── index.ts             # contextBridge exposing typed `window.pivis` API (invoke + on)
 │
 ├── renderer/src/            # React 19 SPA
-│   ├── App.tsx              # Root: wires IPC event listeners, layout (TitleBar + Sidebar + UpdateBanner + main area)
+│   ├── App.tsx              # Root: wires IPC event listeners, layout (TitleBar + Sidebar + main area)
 │   ├── main.tsx             # React entry; wraps <App> in a top-level ErrorBoundary; preview-stub only loads when import.meta.env.DEV
 │   ├── preview-stub.ts      # Stubs window.pivis for standalone browser dev (demo session + streaming)
 │   ├── components/
 │   │   ├── composer/        # Textarea input: prompts, !bash, /slash commands, image attach, autocomplete
 │   │   ├── transcript/      # TranscriptView, DiffBlock (renders user/assistant/tool_call/bash/compaction blocks)
 │   │   ├── shell/           # TitleBar, Sidebar (workspace switcher, session list, tabs, drag/drop), StatusBar,
-│   │   │                   #   UpdateBanner (dismissible update notification bar)
+│   │   │                   #   UpdateBanner (compact dismissible update card: above the composer in a session, floating bottom-right on the empty screen)
 │   │   ├── auth/            # LoginTerminal (embedded xterm.js terminal for pi's /login OAuth flow)
 │   │   ├── updates/         # UpdateProgress (modal with streaming `pi update` output via AnsiText)
 │   │   ├── diff/            # DiffViewerHost, DiffFileSection (Shiki-highlighted unified/split diffs)
@@ -229,7 +229,7 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `src/renderer/src/stores/updates-store.ts` | Update notification + progress state |
 | `src/renderer/src/lib/commands/` | Slash command definitions, parsing, and execution |
 | `src/renderer/src/components/auth/LoginTerminal.tsx` | Embedded xterm.js terminal for pi's /login OAuth flow |
-| `src/renderer/src/components/shell/UpdateBanner.tsx` | Dismissible update notification banner |
+| `src/renderer/src/components/shell/UpdateBanner.tsx` | Dismissible update card — sits above the composer (session) or floats bottom-right (empty screen) |
 | `src/renderer/src/components/updates/UpdateProgress.tsx` | Modal streaming `pi update` output |
 
 ## Maintaining This File

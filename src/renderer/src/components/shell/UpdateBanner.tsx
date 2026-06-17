@@ -4,7 +4,9 @@ import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
 import "./UpdateBanner.css";
 
-export function UpdateBanner(): React.ReactElement | null {
+export function UpdateBanner({
+  floating = false,
+}: { floating?: boolean }): React.ReactElement | null {
   const status = useUpdatesStore((s) => s.status);
   const dismiss = useUpdatesStore((s) => s.dismiss);
   const settings = useSettingsStore((s) => s.settings);
@@ -56,7 +58,7 @@ export function UpdateBanner(): React.ReactElement | null {
   }
 
   return (
-    <div className="update-banner">
+    <div className={`update-banner${floating ? " update-banner--floating" : ""}`}>
       <span className="update-banner__text">{parts.join(" — ")}</span>
       <div className="update-banner__actions">
         <button type="button" className="update-banner__btn" onClick={handleUpdateNow}>

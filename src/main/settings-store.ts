@@ -15,7 +15,7 @@ function getSettingsPath(): string {
   return path.join(getSettingsDir(), "settings.json");
 }
 
-let current: AppSettings = defaultSettings;
+let current: AppSettings = AppSettingsSchema.parse({});
 
 export function loadSettings(): AppSettings {
   const filePath = getSettingsPath();
@@ -29,7 +29,7 @@ export function loadSettings(): AppSettings {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       console.warn("[settings] failed to read settings.json:", err);
     }
-    current = defaultSettings;
+    current = AppSettingsSchema.parse({});
   }
   return current;
 }

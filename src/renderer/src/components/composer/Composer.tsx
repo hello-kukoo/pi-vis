@@ -121,19 +121,34 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     fileInputRef.current?.click();
   }, []);
 
-  const handleFilesSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    for (const file of Array.from(files)) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setAttachments((prev) => [...prev, { name: file.name, dataUrl }]);
-      };
-      reader.readAsDataURL(file);
-    }
-    e.target.value = "";
-  }, []);
+  const handleFilesSelected = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
+      const MAX_ATTACHMENTS = 8;
+      let slots = MAX_ATTACHMENTS - attachments.length;
+      for (const file of Array.from(files)) {
+        if (slots <= 0) {
+          addToast(sessionId, "Too many images (max 8)", "error");
+          break;
+        }
+        if (file.size > MAX_IMAGE_BYTES) {
+          addToast(sessionId, `${file.name} is too large (max 10 MB)`, "error");
+          continue;
+        }
+        slots--;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          setAttachments((prev) => [...prev, { name: file.name, dataUrl }]);
+        };
+        reader.readAsDataURL(file);
+      }
+      e.target.value = "";
+    },
+    [addToast, attachments, sessionId],
+  );
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));

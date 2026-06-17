@@ -1,22 +1,27 @@
-/* Update banner — slim dismissible bar below TitleBar */
+/* Update notification — compact, unobtrusive card pinned to the right,
+   sitting just above the composer. Dismissible. */
 
 .update-banner {
+  align-self: flex-end;
   display: flex;
   align-items: center;
-  gap: 0.857rem;
-  padding: 0.429rem 1rem;
+  gap: 0.714rem;
+  margin: 0.286rem 0.857rem;
+  padding: 0.286rem 0.286rem 0.286rem 0.857rem;
+  max-width: calc(100% - 1.714rem);
   background: var(--ctp-surface0);
-  border-bottom: 1px solid var(--ctp-surface1);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 0.571rem;
+  box-shadow: 0 0.143rem 0.571rem rgba(0, 0, 0, 0.28);
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-text);
-  grid-area: banner;
-  animation: update-banner-slide 0.2s ease-out;
+  animation: update-banner-rise 0.18s ease-out;
 }
 
-@keyframes update-banner-slide {
+@keyframes update-banner-rise {
   from {
-    transform: translateY(-100%);
+    transform: translateY(0.429rem);
     opacity: 0;
   }
   to {
@@ -25,16 +30,28 @@
   }
 }
 
+/* Floating variant — used on the empty (no-session) screen where there is
+   no composer to sit above. Anchored to the bottom-right of the main area. */
+.update-banner--floating {
+  position: absolute;
+  right: 0.857rem;
+  bottom: 0.857rem;
+  align-self: auto;
+  margin: 0;
+}
+
 .update-banner__text {
-  flex: 1;
   color: var(--ctp-green);
   font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .update-banner__actions {
   display: flex;
   align-items: center;
-  gap: 0.429rem;
+  gap: 0.286rem;
 }
 
 .update-banner__btn {
@@ -48,6 +65,7 @@
   font-weight: 500;
   line-height: var(--mcm-line-label);
   padding: 0.286rem 0.714rem;
+  white-space: nowrap;
 }
 
 .update-banner__btn:hover {
@@ -65,15 +83,22 @@
 }
 
 .update-banner__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.429rem;
+  height: 1.429rem;
   background: none;
   border: none;
+  border-radius: var(--mcm-radius-sm);
   color: var(--ctp-overlay0);
   cursor: pointer;
   font-size: 1.143em;
   line-height: 1;
-  padding: 0.143rem;
+  padding: 0;
 }
 
 .update-banner__close:hover {
+  background: var(--ctp-surface1);
   color: var(--ctp-text);
 }

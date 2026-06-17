@@ -12,6 +12,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSettingsStore } from "../../stores/settings-store.js";
+import { palettes } from "../../theme/catppuccin.js";
 import "@xterm/xterm/css/xterm.css";
 import "./LoginTerminal.css";
 
@@ -24,28 +26,31 @@ interface LoginTerminalProps {
 type Status = "connecting" | "connected" | "authenticated" | "error";
 
 /** Catppuccin Mocha palette for xterm (matches the app theme). */
-const XTERM_THEME = {
-  background: "#1e1e2e",
-  foreground: "#cdd6f4",
-  cursor: "#f5e0dc",
-  selectionBackground: "#585b70",
-  black: "#45475a",
-  red: "#f38ba8",
-  green: "#a6e3a1",
-  yellow: "#f9e2af",
-  blue: "#89b4fa",
-  magenta: "#f5c2e7",
-  cyan: "#94e2d5",
-  white: "#bac2de",
-  brightBlack: "#585b70",
-  brightRed: "#f38ba8",
-  brightGreen: "#a6e3a1",
-  brightYellow: "#f9e2af",
-  brightBlue: "#89b4fa",
-  brightMagenta: "#f5c2e7",
-  brightCyan: "#94e2d5",
-  brightWhite: "#a6adc8",
-} as const;
+function buildXtermTheme(colorScheme: string): Record<string, string> {
+  const p = palettes[colorScheme as keyof typeof palettes] ?? palettes.mocha;
+  return {
+    background: p.base,
+    foreground: p.text,
+    cursor: p.rosewater,
+    selectionBackground: p.surface2,
+    black: p.surface1,
+    red: p.red,
+    green: p.green,
+    yellow: p.yellow,
+    blue: p.blue,
+    magenta: p.pink,
+    cyan: p.teal,
+    white: p.subtext1,
+    brightBlack: p.surface2,
+    brightRed: p.red,
+    brightGreen: p.green,
+    brightYellow: p.yellow,
+    brightBlue: p.blue,
+    brightMagenta: p.pink,
+    brightCyan: p.teal,
+    brightWhite: p.subtext0,
+  };
+}
 
 function resolveMonoFont(): string {
   const fromVar = getComputedStyle(document.documentElement).getPropertyValue("--font-code").trim();
@@ -94,12 +99,13 @@ export function LoginTerminal({
     let localPtyId: string | null = null;
 
     const fontFamily = resolveMonoFont();
+    const colorScheme = useSettingsStore.getState().settings.colorScheme ?? "mocha";
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "block",
       fontSize: 14,
       fontFamily,
-      theme: XTERM_THEME,
+      theme: buildXtermTheme(colorScheme),
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);

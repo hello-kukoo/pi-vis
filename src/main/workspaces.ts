@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { dialog } from "electron";
 import { getSettings, saveSettings } from "./settings-store.js";
 
@@ -30,5 +31,14 @@ export function removeRecentWorkspace(path: string): string[] {
 }
 
 export function getRecentWorkspaces(): string[] {
-  return getSettings().recentWorkspaces;
+  const recents = getSettings().recentWorkspaces;
+  const existing = recents.filter((p) => {
+    try {
+      return fs.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (existing.length !== recents.length) saveSettings({ recentWorkspaces: existing });
+  return existing;
 }

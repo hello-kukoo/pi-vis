@@ -60,6 +60,7 @@
 
 .app__empty {
   /* MCM-style empty state: vast outer margins, body content centered. */
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;

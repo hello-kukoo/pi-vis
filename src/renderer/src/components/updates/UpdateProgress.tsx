@@ -23,9 +23,7 @@ export function UpdateProgress(): React.ReactElement | null {
 
   if (!activeRun) return null;
 
-  const isDone =
-    activeRun.lines.length > 0 &&
-    activeRun.lines[activeRun.lines.length - 1]?.includes("update.done");
+  const isDone = activeRun.done === true;
 
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard handled by App

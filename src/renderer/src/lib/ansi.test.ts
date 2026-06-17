@@ -21,7 +21,7 @@ describe("parseAnsi", () => {
   it("handles named colors, bold, and full reset", () => {
     const spans = parseAnsi("\x1b[1;32mok\x1b[0m done");
     expect(spans).toEqual([
-      { text: "ok", style: { fontWeight: "bold", color: "#a6e3a1" } },
+      { text: "ok", style: { fontWeight: "bold", color: "var(--ctp-green)" } },
       { text: " done", style: {} },
     ]);
   });
@@ -34,7 +34,7 @@ describe("parseAnsi", () => {
   it("treats bare ESC[m as a reset", () => {
     const spans = parseAnsi("\x1b[31ma\x1b[mb");
     expect(spans).toEqual([
-      { text: "a", style: { color: "#f38ba8" } },
+      { text: "a", style: { color: "var(--ctp-red)" } },
       { text: "b", style: {} },
     ]);
   });

@@ -19,6 +19,7 @@ async function runCommand(cmd: string): Promise<string | null> {
 export async function locatePi(
   overridePath?: string | null,
 ): Promise<{ path: string; version: string } | null> {
+  if (cached && !overridePath) return cached;
   const candidates: string[] = [];
 
   if (overridePath) {

@@ -113,6 +113,27 @@ describe("SessionRegistry", () => {
     expect(statusChanges.some((s) => s.sessionId === id && s.status === "ready")).toBe(true);
   }, 15_000);
 
+  it("marks the session busy during a turn, clears it on agent_end, and advances lastActiveAt", async () => {
+    const id = registry.openSession(workspaceDir);
+    const openedAt = registry.getSession(id)?.lastActiveAt ?? 0;
+    registry.activateSession(id, FAKE_PI);
+    const proc = registry.getSession(id)?.proc;
+    expect(proc).toBeDefined();
+    if (!proc) return;
+
+    // "hello" streams over ~200ms (50ms between deltas), giving a window
+    // to observe busy === true before agent_end lands.
+    void proc.sendCommand({ type: "prompt", message: "hello" });
+
+    await waitFor(() => registry.getSession(id)?.busy === true, 5000, "busy=true (agent_start)");
+    // Activity timestamp advances past the open time once events flow — the
+    // bug was that lastActiveAt was only ever set at openSession.
+    expect(registry.getSession(id)?.lastActiveAt ?? 0).toBeGreaterThan(openedAt);
+
+    await waitFor(() => registry.getSession(id)?.busy === false, 5000, "busy=false (agent_end)");
+    expect(registry.getSession(id)?.busy).toBe(false);
+  }, 15_000);
+
   it("activateSession is idempotent while a process is alive", () => {
     const id = registry.openSession(workspaceDir);
     registry.activateSession(id, FAKE_PI);

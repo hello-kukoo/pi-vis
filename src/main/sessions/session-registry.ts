@@ -113,6 +113,9 @@ export class SessionRegistry {
 
       proc.on("event", (event) => {
         if (record.proc !== proc) return;
+        record.lastActiveAt = Date.now();
+        if (event.type === "agent_start") record.busy = true;
+        else if (event.type === "agent_end") record.busy = false;
         if (record.status === "starting") {
           record.status = "ready";
           this.onStatusChanged(sessionId, "ready");
@@ -130,6 +133,7 @@ export class SessionRegistry {
         clearTimeout(readyTimer);
         if (record.proc !== proc) return;
         record.status = "exited";
+        record.busy = false;
         if (code !== 0 && code !== null) {
           const tail = proc.stderrLog.slice(-5).join("").trim();
           record.error = tail

@@ -109,6 +109,11 @@ async function checkPiUpdate(piVersion: string): Promise<PiUpdateStatus> {
 // ── Check extensions ────────────────────────────────────────────────────
 
 async function checkExtensions(loginShellEnv: Record<string, string>): Promise<ExtensionUpdate[]> {
+  // Respect offline/disable env vars (mirrors checkPiUpdate)
+  if (process.env["PI_OFFLINE"] === "1" || process.env["PI_SKIP_VERSION_CHECK"] === "1") {
+    return [];
+  }
+
   const packages = readPackagesConfig();
   if (packages.length === 0) return [];
 

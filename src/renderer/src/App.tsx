@@ -76,9 +76,22 @@ export function App(): React.ReactElement {
     };
     window.addEventListener("pivis:open-login", loginHandler);
 
+    // pivis:run-update — trigger update from the UpdateBanner
+    const runUpdateHandler = (e: Event) => {
+      const target =
+        (e as CustomEvent<{ target: "all" | "pi" | { extension: string } }>).detail?.target ??
+        "all";
+      void (async () => {
+        const { runId } = await window.pivis.invoke("update.run", { target });
+        useUpdatesStore.getState().setActiveRun({ runId, lines: [] });
+      })();
+    };
+    window.addEventListener("pivis:run-update", runUpdateHandler);
+
     return () => {
       window.removeEventListener("pivis:open-settings", handler);
       window.removeEventListener("pivis:open-login", loginHandler);
+      window.removeEventListener("pivis:run-update", runUpdateHandler);
     };
   }, []);
 
@@ -179,9 +192,9 @@ export function App(): React.ReactElement {
     });
 
     const unsubUpdateDone = window.pivis.on("update.done", ({ runId, exitCode, status }) => {
-      useUpdatesStore.getState().setStatus(status);
-      // Clear active run so the progress modal can show completion
       const store = useUpdatesStore.getState();
+      store.setStatus(status);
+      store.markDone(runId, exitCode);
       if (store.activeRun?.runId === runId) {
         store.appendOutput(
           runId,
@@ -246,7 +259,6 @@ export function App(): React.ReactElement {
       }
     >
       <TitleBar />
-      <UpdateBanner />
       <Sidebar
         onOpenSettings={() => setShowSettings(true)}
         width={sidebarWidth}
@@ -261,6 +273,10 @@ export function App(): React.ReactElement {
                 reclaims the previously wasted vertical space below the
                 title bar. */}
               <TranscriptView sessionId={activeSessionId} />
+              {/* Update notification: a compact, right-aligned, dismissible
+                  card that sits just above the composer (in-flow, so it never
+                  overlaps the input or relies on fragile fixed offsets). */}
+              <UpdateBanner />
               {/* Composer and the extension dialog share the same flex
                 slot: the dialog replaces the composer when a question is
                 pending, so they are never both visible. The dialog
@@ -282,6 +298,9 @@ export function App(): React.ReactElement {
         ) : (
           <div className="app__empty">
             <div className="app__empty-hint">Select a workspace and open or resume a session</div>
+            {/* No composer here to sit above, so the update notice floats in
+                the bottom-right corner of the empty area instead. */}
+            <UpdateBanner floating />
           </div>
         )}
       </main>
