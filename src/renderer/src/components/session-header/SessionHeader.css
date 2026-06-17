@@ -254,4 +254,10 @@
   white-space: nowrap;
   letter-spacing: 0;
   text-transform: none;
+  /* Reserve space so the meter doesn't shift when token/cost text loads
+     in (the block is now always mounted; see SessionHeader.tsx). The
+     cluster is right-aligned, so right-align the text within the reserve
+     to keep the window edge stable. */
+  min-width: 5.5rem;
+  text-align: right;
 }

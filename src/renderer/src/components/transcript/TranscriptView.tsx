@@ -24,31 +24,6 @@ const SCROLL_RESTICK_PX = 24;
 // Only show "You" / "Pi" when the *speaker* changes.  Tool/bash blocks are
 // not speakers and do not affect the label decision.
 
-type Speaker = "user" | "assistant";
-
-function speakerOf(block: TypedTranscriptBlock): Speaker | null {
-  if (block.type === "user") return "user";
-  if (block.type === "assistant") return "assistant";
-  return null;
-}
-
-function shouldShowLabel(blocks: TypedTranscriptBlock[], index: number): boolean {
-  const current = blocks[index];
-  if (!current) return false;
-  const curSpeaker = speakerOf(current);
-  // Non-speaker blocks never get a label
-  if (!curSpeaker) return false;
-
-  for (let i = index - 1; i >= 0; i--) {
-    const prev = blocks[i]!;
-    const prevSpeaker = speakerOf(prev);
-    if (prevSpeaker === null) continue; // skip tool/bash blocks
-    return prevSpeaker !== curSpeaker;
-  }
-  // First speaker block always gets a label
-  return true;
-}
-
 // ── Shared helpers ───────────────────────────────────────────────────────
 
 function splitOutputLines(text: string): string[] {
@@ -230,15 +205,12 @@ function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
 }
 
 function AssistantBlock({
-  showLabel,
   data,
 }: {
-  showLabel: boolean;
   data: AssistantBlockData;
 }): React.ReactElement {
   return (
     <div className="transcript-block transcript-block--assistant">
-      {showLabel && <div className="transcript-block__label">Pi</div>}
       {data.thinkingContent && (
         <div className="thinking-block">
           <Markdown>{data.thinkingContent}</Markdown>
@@ -530,9 +502,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
             Show {allBlocks.length - MAX_VISIBLE_BLOCKS} earlier messages
           </button>
         )}
-        {visibleBlocks.map((block, idx) => {
-          const showLabel = block.type === "assistant" && shouldShowLabel(visibleBlocks, idx);
-
+        {visibleBlocks.map((block) => {
           switch (block.type) {
             case "user":
               return <UserBlock key={block.id} data={block.data} />;
@@ -540,7 +510,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
               if (!block.data.textContent && !block.data.thinkingContent) {
                 return null;
               }
-              return <AssistantBlock key={block.id} showLabel={showLabel} data={block.data} />;
+              return <AssistantBlock key={block.id} data={block.data} />;
             case "tool_call":
               return (
                 <ToolCallBlock key={block.id} data={block.data} preserveScroll={preserveScroll} />

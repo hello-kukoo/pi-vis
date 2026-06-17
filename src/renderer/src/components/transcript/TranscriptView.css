@@ -54,14 +54,6 @@
   text-align: left;
 }
 
-.transcript-block__label {
-  font-family: var(--font-display);
-  font-size: 0.786em; /* ≈11px @ 14px root */
-  font-weight: 600;
-  line-height: var(--mcm-line-label);
-  color: var(--ctp-overlay1);
-}
-
 .transcript-block--user {
   align-items: flex-end;
 }
@@ -83,10 +75,6 @@
   word-break: break-word;
   font-family: var(--font-display);
   font-size: 1em;
-}
-
-.transcript-block--assistant .transcript-block__label {
-  color: var(--ctp-mauve);
 }
 
 /* Body content (assistant text) — flush-left, capped at 80% width.

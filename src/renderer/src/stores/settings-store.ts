@@ -35,8 +35,20 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
 
 function applyFonts(settings: AppSettings): void {
   const root = document.documentElement;
-  root.style.setProperty("--font-display", settings.fonts.display.family);
-  root.style.setProperty("--font-code", settings.fonts.code.family);
+  // Append generic fallback stacks (matching theme.css defaults) so that
+  // while the chosen webfont is still loading — or if it isn't available at
+  // all (e.g. a custom family name the user typed) — text degrades to the
+  // right *kind* of font. Without the `monospace` tail, a bare unavailable
+  // code-font name falls through to the browser's default *proportional*
+  // font, making code blocks render in a display-like font.
+  root.style.setProperty(
+    "--font-display",
+    `${settings.fonts.display.family}, system-ui, -apple-system, sans-serif`,
+  );
+  root.style.setProperty(
+    "--font-code",
+    `${settings.fonts.code.family}, "Menlo", "Monaco", "Courier New", monospace`,
+  );
   // The user-controlled base size is applied to the root <html> element so
   // that `1rem` equals the user's chosen base. This is the *only* place we
   // touch a px value: it's the user-set anchor, not a hardcoded layout

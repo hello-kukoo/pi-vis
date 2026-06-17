@@ -546,13 +546,23 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
           )}
         </div>
 
-        {/* Context meter */}
-        {contextPct !== null && (
+        {/* Context meter — always rendered while a session is active. It
+            used to be gated on `contextPct !== null`, so switching to a
+            session whose stats hadn't been fetched yet (new / resumed /
+            cold) unmounted the whole block. Because the controls are
+            right-aligned, that unmount reflowed the model + thinking
+            pickers — they'd visibly jump out and back as stats arrived.
+            Keeping the block mounted (meter at 0% until stats land, meta
+            width reserved in CSS) makes session switches reflow-free. */}
+        {session && (
           <div className="session-header__context">
-            <div className="context-meter" title={`${contextPct}% context used`}>
+            <div
+              className="context-meter"
+              title={contextPct !== null ? `${contextPct}% context used` : "Context usage"}
+            >
               <div
-                className={`context-meter__fill${contextPct >= 90 ? " context-meter__fill--danger" : contextPct >= 80 ? " context-meter__fill--warn" : ""}`}
-                style={{ width: `${contextPct}%` }}
+                className={`context-meter__fill${(contextPct ?? 0) >= 90 ? " context-meter__fill--danger" : (contextPct ?? 0) >= 80 ? " context-meter__fill--warn" : ""}`}
+                style={{ width: `${contextPct ?? 0}%` }}
               />
             </div>
             <span className="session-header__meta">
