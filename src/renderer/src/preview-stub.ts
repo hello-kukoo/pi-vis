@@ -455,6 +455,55 @@ const stub = {
       case "pty.kill":
         return undefined;
 
+      // ── Git stubs ───────────────────────────────────────────────
+      case "git.changes":
+        return {
+          kind: "ok",
+          repoRoot: "/Users/dev/pi-vis",
+          truncated: false,
+          files: [
+            {
+              path: "src/app/config-loader.ts",
+              status: "M",
+              untracked: false,
+              insertions: 12,
+              deletions: 3,
+              binary: false,
+            },
+            {
+              path: "src/app/new-module.ts",
+              status: "A",
+              untracked: true,
+              insertions: 8,
+              deletions: 0,
+              binary: false,
+            },
+          ],
+        };
+      case "git.fileDiff":
+        return {
+          kind: "ok",
+          oldText: "export const config = {\n  retries: 1,\n};\n",
+          newText: "export const config = {\n  retries: 3,\n  timeout: 5000,\n};\n",
+          binary: false,
+          tooLarge: false,
+          oldMissingNewline: false,
+          newMissingNewline: false,
+        };
+      case "git.branches":
+        return {
+          kind: "ok",
+          current: "main",
+          branches: [
+            { name: "main", remote: false, current: true },
+            { name: "feature/config-loader", remote: false, current: false },
+            { name: "feature/auth-redesign", remote: false, current: false },
+            { name: "chore/deps", remote: false, current: false },
+            { name: "origin/main", remote: true, current: false },
+            { name: "origin/develop", remote: true, current: false },
+          ],
+        };
+
       // ── Update stubs ────────────────────────────────────────────
       case "update.check":
         return {

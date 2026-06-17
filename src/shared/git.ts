@@ -43,3 +43,15 @@ export type GitFileDiffResult =
       newMissingNewline: boolean;
     }
   | { kind: "error"; message: string };
+
+export interface GitBranch {
+  name: string;
+  remote: boolean;
+  current: boolean;
+}
+
+export type GitBranchesResult =
+  | { kind: "ok"; current: string | null; branches: GitBranch[] }
+  | { kind: "not-a-repo" }
+  | { kind: "git-missing" }
+  | { kind: "error"; message: string };

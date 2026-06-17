@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getChanges, getFileDiff } from "./git.js";
+import { getBranches, getChanges, getFileDiff } from "./git.js";
 
 let tmpRoot = "";
 let workDir = "";
@@ -312,5 +312,98 @@ describe("getFileDiff", () => {
     expect(res.kind).toBe("ok");
     if (res.kind !== "ok") return;
     expect(res.newText).toBe("");
+  });
+});
+
+describe("getBranches", () => {
+  beforeEach(() => {
+    makeRepo();
+  });
+
+  it("lists local branches with a current flag", async () => {
+    const res = await getBranches(workDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.current).toBe("main");
+    expect(res.branches.find((b) => b.name === "main")).toBeDefined();
+    const main = res.branches.find((b) => b.name === "main")!;
+    expect(main.remote).toBe(false);
+    expect(main.current).toBe(true);
+  });
+
+  it("includes remote-tracking branches", async () => {
+    // Set up a fake remote tracking ref.
+    git(workDir, ["update-ref", "refs/remotes/origin/feature-x", "HEAD"]);
+    git(workDir, ["update-ref", "refs/remotes/origin/HEAD", "HEAD"]);
+    const res = await getBranches(workDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    const remote = res.branches.find((b) => b.name === "origin/feature-x");
+    expect(remote).toBeDefined();
+    expect(remote!.remote).toBe(true);
+    expect(remote!.current).toBe(false);
+    // origin/HEAD should be filtered out.
+    expect(res.branches.find((b) => b.name === "origin/HEAD")).toBeUndefined();
+  });
+
+  it("reports not-a-repo outside a git repository", async () => {
+    const res = await getBranches("/tmp");
+    expect(res.kind).toBe("not-a-repo");
+  });
+});
+
+describe("getChanges with base", () => {
+  beforeEach(() => {
+    makeRepo();
+  });
+
+  it("reports changes against merge-base when base is a branch name", async () => {
+    // Create a feature branch, add a commit, then check changes relative to main.
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(`${workDir}/feature-file.ts`, "// feature\n");
+    git(workDir, ["add", "feature-file.ts"]);
+    git(workDir, ["commit", "-m", "feature commit"]);
+
+    // Working tree: same as HEAD (no uncommitted changes yet).
+    let res = await getChanges(workDir, "main");
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.files).toHaveLength(1);
+    expect(res.files[0]?.path).toBe("feature-file.ts");
+
+    // Add an uncommitted edit — it should also show up.
+    write(`${workDir}/feature-file.ts`, "// feature updated\n");
+    res = await getChanges(workDir, "main");
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.files).toHaveLength(1);
+    expect(res.files[0]?.path).toBe("feature-file.ts");
+
+    // Switching back to HEAD (default) should show no changes (no uncommitted on main).
+    git(workDir, ["stash"]);
+    git(workDir, ["checkout", "main"]);
+    res = await getChanges(workDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.files).toHaveLength(0);
+  });
+
+  it("getFileDiff returns merge-base old side", async () => {
+    // Write a.ts on main first.
+    write(`${workDir}/a.ts`, "// content from main\n");
+    git(workDir, ["add", "a.ts"]);
+    git(workDir, ["commit", "-m", "initial"]);
+
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(`${workDir}/a.ts`, "// content from main\n// feature addition\n");
+    git(workDir, ["add", "a.ts"]);
+    git(workDir, ["commit", "-m", "feature commit"]);
+
+    const res = await getFileDiff(workDir, { path: "a.ts", status: "M", untracked: false }, "main");
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.oldText).toContain("content from main");
+    expect(res.oldText).not.toContain("feature addition");
+    expect(res.newText).toContain("feature addition");
   });
 });

@@ -18,6 +18,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type {
+  GitBranchesResult,
   GitChangedFile,
   GitChangesResult,
   GitFileDiffResult,
@@ -105,7 +106,26 @@ function execGitQuiet(args: string[], cwd: string, env?: Record<string, string>)
 
 // ── Public: getChanges ─────────────────────────────────────────────────
 
-export async function getChanges(root: string): Promise<GitChangesResult> {
+/** Resolve a base ref: returns "HEAD" for the default, or `git merge-base <base> HEAD` for a selected branch.
+ *  Falls back to `base` itself if merge-base fails (unrelated histories).
+ */
+async function resolveBaseRef(
+  base: string | undefined | null,
+  repoRoot: string,
+  env: Record<string, string>,
+): Promise<string> {
+  if (!base || base === "HEAD") return "HEAD";
+  try {
+    const r = await execGitText(["merge-base", base, "HEAD"], repoRoot, env);
+    const sha = r.stdout.trim();
+    if (sha) return sha;
+  } catch {
+    // fall through to fallback
+  }
+  return base;
+}
+
+export async function getChanges(root: string, base?: string): Promise<GitChangesResult> {
   // Step 1: confirm the binary is present and `root` is inside a repo.
   const env = await getSubprocessEnv();
   let repoRoot: string;
@@ -133,10 +153,12 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
   const tracked: GitChangedFile[] = [];
 
   if (hasHead) {
+    const baseRef = await resolveBaseRef(base, repoRoot, env);
+
     // Step 3a: statuses.
     let statusOut = "";
     try {
-      const r = await execGitText(["diff", "--name-status", "-z", "-M", "HEAD"], repoRoot, env);
+      const r = await execGitText(["diff", "--name-status", "-z", "-M", baseRef], repoRoot, env);
       statusOut = r.stdout;
     } catch (err) {
       return { kind: "error", message: errorMessage(err) };
@@ -149,7 +171,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
     // the SECOND is the new path.
     let numstatOut = "";
     try {
-      const r = await execGitText(["diff", "--numstat", "-z", "-M", "HEAD"], repoRoot, env);
+      const r = await execGitText(["diff", "--numstat", "-z", "-M", baseRef], repoRoot, env);
       numstatOut = r.stdout;
     } catch (err) {
       // numstat on binary files can throw; we still have the statuses.
@@ -273,6 +295,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
 export async function getFileDiff(
   root: string,
   file: { path: string; oldPath?: string; status: GitFileStatus; untracked: boolean },
+  base?: string,
 ): Promise<GitFileDiffResult> {
   const env = await getSubprocessEnv();
   // Re-resolve the repo root so callers (incl. stale tabs) can pass an
@@ -296,6 +319,9 @@ export async function getFileDiff(
     hasHead = false;
   }
 
+  // Resolve base ref for old-side reads.
+  const baseRef = await resolveBaseRef(base, repoRoot, env);
+
   // Old side.
   let oldText = "";
   let oldMissingNewline = false;
@@ -303,13 +329,13 @@ export async function getFileDiff(
   if (wantOld) {
     const showPath = file.oldPath ?? file.path;
     try {
-      const r = await execGitText(["show", `HEAD:${showPath}`], repoRoot, env);
+      const r = await execGitText(["show", `${baseRef}:${showPath}`], repoRoot, env);
       oldText = r.stdout;
       oldMissingNewline = oldText.length > 0 && !oldText.endsWith("\n");
     } catch (err) {
       // Race tolerance: file may have been renamed/removed. Drop the
       // old side, but still show a diff against an empty old.
-      console.warn(`git show HEAD:${showPath} failed:`, err);
+      console.warn(`git show ${baseRef}:${showPath} failed:`, err);
       oldText = "";
     }
   }
@@ -515,6 +541,76 @@ function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
   return String(err);
+}
+
+/**
+ * List branches for a repository.
+ */
+export async function getBranches(root: string): Promise<GitBranchesResult> {
+  try {
+    const env = await getSubprocessEnv();
+    const revParseRes = await execGitText(["rev-parse", "--show-toplevel"], root, env);
+    const repoRoot = revParseRes.stdout.trim();
+    if (!repoRoot) return { kind: "not-a-repo" };
+
+    // Current branch.
+    let current: string | null = null;
+    try {
+      const curRes = await execGitText(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot, env);
+      const cur = curRes.stdout.trim();
+      if (cur && cur !== "HEAD") current = cur;
+    } catch {
+      // detached HEAD — current stays null
+    }
+
+    // Local branches.
+    const localRes = await execGitText(
+      ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      repoRoot,
+      env,
+    );
+    const locals = localRes.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((name) => ({
+        name,
+        remote: false,
+        current: name === current,
+      }));
+
+    // Remote-tracking branches.
+    const remoteRes = await execGitText(
+      ["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+      repoRoot,
+      env,
+    );
+    const remotes = remoteRes.stdout
+      .trim()
+      .split("\n")
+      .filter((n) => n && n !== "origin/HEAD")
+      .map((name) => ({
+        name,
+        remote: true,
+        current: false,
+      }));
+
+    const branches = [...locals, ...remotes];
+    return { kind: "ok", current, branches };
+  } catch (err) {
+    return mapSpawnErrorBranches(err);
+  }
+}
+
+function mapSpawnErrorBranches(err: unknown): GitBranchesResult {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return { kind: "git-missing" };
+  const stderr = (err as { stderr?: string }).stderr ?? "";
+  const msg = errorMessage(err);
+  if (/not a git repository/i.test(stderr) || /not a git repository/i.test(msg)) {
+    return { kind: "not-a-repo" };
+  }
+  return { kind: "error", message: errorMessage(err) };
 }
 
 function mapSpawnError(err: unknown): GitChangesResult {

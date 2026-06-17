@@ -15,7 +15,7 @@ import {
   startAuthWatch,
   stopAuthWatch,
 } from "./auth.js";
-import { getChanges, getFileDiff } from "./git/git.js";
+import { getBranches, getChanges, getFileDiff } from "./git/git.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
 import { loadHistory } from "./sessions/history-loader.js";
@@ -234,9 +234,9 @@ export function initIpc(win: BrowserWindow): void {
   // never participate in the session-registry; the renderer derives the
   // root in exactly one helper. Wrapped in try/catch → `{ kind: "error" }`
   // so a misbehaving main never throws across IPC.
-  ipcMain.handle("git.changes", async (_evt, args: { root: string }) => {
+  ipcMain.handle("git.changes", async (_evt, args: { root: string; base?: string }) => {
     try {
-      return await getChanges(args.root);
+      return await getChanges(args.root, args.base);
     } catch (err) {
       return { kind: "error", message: err instanceof Error ? err.message : String(err) };
     }
@@ -248,6 +248,7 @@ export function initIpc(win: BrowserWindow): void {
       _evt,
       args: {
         root: string;
+        base?: string;
         path: string;
         oldPath?: string | undefined;
         status: import("@shared/git.js").GitFileStatus;
@@ -260,17 +261,26 @@ export function initIpc(win: BrowserWindow): void {
           args.oldPath !== undefined
             ? {
                 path: args.path,
+                base: args.base,
                 oldPath: args.oldPath,
                 status: args.status,
                 untracked: args.untracked,
               }
-            : { path: args.path, status: args.status, untracked: args.untracked };
-        return await getFileDiff(args.root, payload);
+            : { path: args.path, base: args.base, status: args.status, untracked: args.untracked };
+        return await getFileDiff(args.root, payload, args.base);
       } catch (err) {
         return { kind: "error", message: err instanceof Error ? err.message : String(err) };
       }
     },
   );
+
+  ipcMain.handle("git.branches", async (_evt, args: { root: string }) => {
+    try {
+      return await getBranches(args.root);
+    } catch (err) {
+      return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   // ── Auth IPC ──────────────────────────────────────────────────────────
 

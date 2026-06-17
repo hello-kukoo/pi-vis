@@ -8,7 +8,13 @@
 // passes it explicitly. This is the single point of change when
 // sessions become associated with a worktree.
 
-import type { GitChangedFile, GitChangesResult, GitFileDiffResult } from "@shared/git.js";
+import type {
+  GitBranchesResult,
+  GitChangedFile,
+  GitChangesResult,
+  GitFileDiffResult,
+} from "@shared/git.js";
+import type { GitBranch } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
 import type { ThemedToken } from "shiki";
 import { create } from "zustand";
@@ -57,6 +63,12 @@ export interface DiffStore {
   viewMode: "unified" | "split";
   fileState: Map<string, FileState>;
 
+  // base branch selection
+  branches: GitBranch[];
+  currentBranch: string | null;
+  selectedBase: string | null; // null = HEAD
+  includeRemoteBranches: boolean;
+
   // header badge (independent of the viewer being open)
   badge: DiffBadge | null;
   badgeKind: DiffPhase;
@@ -76,6 +88,9 @@ export interface DiffStore {
   setRailWidth: (w: number) => void;
   refreshBadge: (root: string) => Promise<void>;
   clearBadge: () => void;
+  loadBranches: () => Promise<void>;
+  setBase: (base: string | null) => void;
+  setIncludeRemoteBranches: (v: boolean) => void;
 }
 
 const EXPAND_STEP = 20;
@@ -134,10 +149,17 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     badge: null,
     badgeKind: "loading",
 
+    // branch selection
+    branches: [],
+    currentBranch: null,
+    selectedBase: null,
+    includeRemoteBranches: false,
+
     // ── mutators ────────────────────────────────────────────────────
 
     openViewer: (sessionId, root) => {
       const viewMode = useSettingsStore.getState().settings.diffViewMode;
+      const includeRemote = useSettingsStore.getState().settings.diffIncludeRemoteBranches;
       set({
         open: true,
         sessionId,
@@ -151,8 +173,12 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         filter: "",
         viewMode,
         fileState: new Map(),
+        // Reset branch selection on open.
+        selectedBase: null,
+        includeRemoteBranches: includeRemote,
       });
       void get().refresh();
+      void get().loadBranches();
     },
 
     closeViewer: () => {
@@ -185,7 +211,11 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       }
       let res: GitChangesResult;
       try {
-        res = await window.pivis.invoke("git.changes", { root });
+        const base = get().selectedBase ?? undefined;
+        res = await window.pivis.invoke("git.changes", {
+          root,
+          ...(base !== undefined ? { base } : {}),
+        });
       } catch (err) {
         if (isStale(generation, myGen)) return;
         set({
@@ -216,13 +246,23 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
       let res: GitFileDiffResult;
       try {
-        res = await window.pivis.invoke("git.fileDiff", {
+        const base = get().selectedBase ?? undefined;
+        const params: {
+          root: string;
+          base?: string;
+          path: string;
+          oldPath?: string;
+          status: import("@shared/git.js").GitFileStatus;
+          untracked: boolean;
+        } = {
           root: get().root ?? "",
           path: file.path,
-          ...(file.oldPath ? { oldPath: file.oldPath } : {}),
           status: file.status,
           untracked: file.untracked,
-        });
+        };
+        if (file.oldPath) params.oldPath = file.oldPath;
+        if (base !== undefined) params.base = base;
+        res = await window.pivis.invoke("git.fileDiff", params);
       } catch (err) {
         if (myGen !== fileGenerations.get(path)) return;
         const m2 = new Map(get().fileState);
@@ -347,6 +387,39 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         badgeDebounce = null;
       }
       set({ badge: null, badgeKind: "loading" });
+    },
+
+    // ── Base branch selection ──────────────────────────────────────
+
+    loadBranches: async () => {
+      const root = get().root;
+      if (!root) return;
+      try {
+        const res: GitBranchesResult = await window.pivis.invoke("git.branches", { root });
+        if (res.kind === "ok") {
+          set({
+            branches: res.branches,
+            currentBranch: res.current,
+          });
+        }
+      } catch {
+        // Silently ignore; branch dropdown just stays empty.
+      }
+    },
+
+    setBase: (base) => {
+      set({
+        selectedBase: base,
+        // Clear file state so diffs reload against the new base.
+        fileState: new Map(),
+      });
+      void get().refresh();
+    },
+
+    setIncludeRemoteBranches: (v) => {
+      set({ includeRemoteBranches: v });
+      // Persist to settings.
+      void useSettingsStore.getState().update({ diffIncludeRemoteBranches: v });
     },
   };
 

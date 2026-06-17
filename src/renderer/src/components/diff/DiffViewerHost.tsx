@@ -11,6 +11,7 @@ import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
+import { BaseBranchDropdown } from "./BaseBranchDropdown.js";
 import { DiffFileSection } from "./DiffFileSection.js";
 import "./DiffViewer.css";
 
@@ -27,7 +28,6 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const storeSessionId = useDiffStore((s) => s.sessionId);
   const closeViewer = useDiffStore((s) => s.closeViewer);
   const phase = useDiffStore((s) => s.phase);
-  const repoRoot = useDiffStore((s) => s.repoRoot);
   const files = useDiffStore((s) => s.files);
   const truncated = useDiffStore((s) => s.truncated);
   const errorMessage = useDiffStore((s) => s.errorMessage);
@@ -43,6 +43,9 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const selectedPath = useDiffStore((s) => s.selectedPath);
   const ensureFileLoaded = useDiffStore((s) => s.ensureFileLoaded);
   const refresh = useDiffStore((s) => s.refresh);
+
+  // Branch selection lives in BaseBranchDropdown, which subscribes to the
+  // store directly — the host only needs to mount it.
 
   // Only render when the viewer is open *for this session*. A session
   // switch while open closes the viewer.
@@ -274,8 +277,6 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       >
         <ViewerHeader
           phase={phase}
-          repoRoot={repoRoot}
-          root={root}
           files={files}
           viewMode={viewMode}
           narrow={narrow}
@@ -333,8 +334,6 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
 
 function ViewerHeader({
   phase,
-  repoRoot,
-  root,
   files,
   viewMode,
   narrow,
@@ -343,8 +342,6 @@ function ViewerHeader({
   onSetViewMode,
 }: {
   phase: import("../../stores/diff-store.js").DiffPhase;
-  repoRoot: string | null;
-  root: string | null;
   files: GitChangedFile[];
   viewMode: "unified" | "split";
   narrow: boolean;
@@ -352,8 +349,6 @@ function ViewerHeader({
   onRefresh: () => void;
   onSetViewMode: (m: "unified" | "split") => void;
 }): React.ReactElement {
-  // Use the real repoRoot if we have it; otherwise show the input root.
-  const chip = repoRoot ?? root ?? "";
   const totals = useMemo(() => {
     let ins = 0;
     let del = 0;
@@ -366,9 +361,7 @@ function ViewerHeader({
   return (
     <div className="diff-viewer__header">
       <span className="diff-viewer__title">Changes</span>
-      <span className="diff-viewer__root-chip" title={chip}>
-        {chip || "(no path)"}
-      </span>
+      <BaseBranchDropdown />
       <span className="diff-viewer__summary">
         <span>
           {totals.count.toLocaleString()} {totals.count === 1 ? "file" : "files"}

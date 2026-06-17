@@ -26,6 +26,7 @@ export const AppSettingsSchema = z.object({
   // toggle. Default is "unified" — split view is opt-in and only
   // used when the window is wide enough.
   diffViewMode: z.enum(["unified", "split"]).default("unified"),
+  diffIncludeRemoteBranches: z.boolean().default(false),
   statusBarVisible: z.boolean().default(true),
   archivedSessions: z.array(z.string()).default([]),
   lastDismissedPiVersion: z.string().nullable().default(null),

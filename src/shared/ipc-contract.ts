@@ -1,5 +1,11 @@
 import type { ProviderAuthStatus } from "./auth.js";
-import type { GitChangedFile, GitChangesResult, GitFileDiffResult, GitFileStatus } from "./git.js";
+import type {
+  GitBranchesResult,
+  GitChangedFile,
+  GitChangesResult,
+  GitFileDiffResult,
+  GitFileStatus,
+} from "./git.js";
 import type { SessionId } from "./ids.js";
 import type { PiRpcCommand } from "./pi-protocol/commands.js";
 import type { PiEvent } from "./pi-protocol/events.js";
@@ -67,10 +73,11 @@ export interface IpcInvokeContract {
   // `workspacePath` for a worktree path later without touching every
   // call site. The optional `oldPath` is set on renames; status is the
   // single-letter git code; `untracked` is true for new untracked files.
-  "git.changes": { req: { root: string }; res: GitChangesResult };
+  "git.changes": { req: { root: string; base?: string }; res: GitChangesResult };
   "git.fileDiff": {
     req: {
       root: string;
+      base?: string;
       path: string;
       oldPath?: string;
       status: GitFileStatus;
@@ -78,6 +85,7 @@ export interface IpcInvokeContract {
     };
     res: GitFileDiffResult;
   };
+  "git.branches": { req: { root: string }; res: GitBranchesResult };
 
   // ── Auth ────────────────────────────────────────────────────────────
   "auth.status": { req: undefined; res: ProviderAuthStatus[] };
