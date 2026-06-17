@@ -362,6 +362,8 @@ export function stopAllSessions(): void {
 export function triggerBackgroundUpdateCheck(): void {
   setTimeout(async () => {
     try {
+      const settings = getSettings();
+      if (!settings.updateCheckEnabled) return;
       const status = await checkForUpdates();
       if (status.pi.updateAvailable || status.extensions.some((e) => e.updateAvailable)) {
         safeSend("update.available", status);

@@ -28,9 +28,60 @@ import { createInterface } from "node:readline";
 
 // ── CLI args ──────────────────────────────────────────────────────────────
 
+/**
+ * A test-pinned version, or null when unpinned. Update tests need a binary
+ * whose version *changes* after `update` runs, so the version is read from a
+ * stamp file when FAKE_PI_VERSION_FILE points at one (falling back to
+ * FAKE_PI_VERSION). `update` rewrites that file, and the follow-up `--version`
+ * re-check sees the new value. When pinned, `--version` prints the *bare*
+ * version so it parses as semver (real `pi --version` does the same);
+ * unpinned, it prints the recognizable "fake-pi 1.0.0".
+ */
+function readPinnedVersion() {
+  const file = process.env.FAKE_PI_VERSION_FILE;
+  if (file) {
+    try {
+      const v = fs.readFileSync(file, "utf8").trim();
+      if (v) return v;
+    } catch {
+      // stamp not written yet — fall through
+    }
+  }
+  return process.env.FAKE_PI_VERSION ?? null;
+}
+
 if (process.argv.includes("--version")) {
-  process.stdout.write("fake-pi 1.0.0\n");
+  const pinned = readPinnedVersion();
+  process.stdout.write(pinned ? `${pinned}\n` : "fake-pi 1.0.0\n");
   process.exit(0);
+}
+
+// `pi update [pi | --extension <src>] [--no-approve]` — a one-shot CLI
+// command, not RPC. Simulate progress, then either fail, hang, or bump the
+// version stamp so the post-update version re-check observes the new value.
+//   FAKE_PI_UPDATE_HANG=1      → never exit (exercises the safety timeout)
+//   FAKE_PI_UPDATE_EXIT=<n>    → exit <n> without bumping the version
+//   FAKE_PI_UPDATE_TO=<ver>    → version to write on success (default "2.0.0")
+if (process.argv.includes("update")) {
+  process.stdout.write("Checking for updates...\n");
+  if (process.env.FAKE_PI_UPDATE_HANG === "1") {
+    // Hang forever; the parent's safety timeout should kill us.
+    setInterval(() => {}, 1 << 30);
+  } else {
+    const exitOverride = process.env.FAKE_PI_UPDATE_EXIT;
+    setTimeout(() => {
+      if (exitOverride !== undefined) {
+        process.stderr.write("Update failed.\n");
+        process.exit(Number.parseInt(exitOverride, 10) || 1);
+      }
+      const to = process.env.FAKE_PI_UPDATE_TO ?? "2.0.0";
+      if (process.env.FAKE_PI_VERSION_FILE) {
+        fs.writeFileSync(process.env.FAKE_PI_VERSION_FILE, `${to}\n`);
+      }
+      process.stdout.write(`Updated pi to ${to}\n`);
+      process.exit(0);
+    }, 20);
+  }
 }
 
 function argValue(flag) {

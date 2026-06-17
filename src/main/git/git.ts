@@ -23,6 +23,7 @@ import type {
   GitFileDiffResult,
   GitFileStatus,
 } from "@shared/git.js";
+import { getSubprocessEnv } from "../auth.js";
 
 // ── Tunables (kept in one place so they're easy to find) ──────────────
 
@@ -44,12 +45,22 @@ const MAX_BUFFER = 64 * 1024 * 1024;
 // ── exec helpers ───────────────────────────────────────────────────────
 
 /** Returns the text stdout of `git <args>` in `cwd`, or throws. */
-function execGitText(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+function execGitText(
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
       args,
-      { cwd, maxBuffer: MAX_BUFFER, timeout: GIT_TIMEOUT_MS, encoding: "utf8" },
+      {
+        cwd,
+        maxBuffer: MAX_BUFFER,
+        timeout: GIT_TIMEOUT_MS,
+        encoding: "utf8",
+        env: env ?? process.env,
+      },
       (err, stdout, stderr) => {
         if (err) {
           // execFile attaches a code for non-zero exits; pass it through.
@@ -68,12 +79,18 @@ function execGitText(args: string[], cwd: string): Promise<{ stdout: string; std
 }
 
 /** Like execGitText but only resolves with the exit code (no stdout). */
-function execGitQuiet(args: string[], cwd: string): Promise<number> {
+function execGitQuiet(args: string[], cwd: string, env?: Record<string, string>): Promise<number> {
   return new Promise((resolve) => {
     execFile(
       "git",
       args,
-      { cwd, maxBuffer: MAX_BUFFER, timeout: GIT_TIMEOUT_MS, encoding: "utf8" },
+      {
+        cwd,
+        maxBuffer: MAX_BUFFER,
+        timeout: GIT_TIMEOUT_MS,
+        encoding: "utf8",
+        env: env ?? process.env,
+      },
       (err) => {
         if (err) {
           const e = err as NodeJS.ErrnoException & { code?: number | string; status?: number };
@@ -90,9 +107,10 @@ function execGitQuiet(args: string[], cwd: string): Promise<number> {
 
 export async function getChanges(root: string): Promise<GitChangesResult> {
   // Step 1: confirm the binary is present and `root` is inside a repo.
+  const env = await getSubprocessEnv();
   let repoRoot: string;
   try {
-    const r = await execGitText(["rev-parse", "--show-toplevel"], root);
+    const r = await execGitText(["rev-parse", "--show-toplevel"], root, env);
     repoRoot = r.stdout.trim();
   } catch (err) {
     return mapSpawnError(err);
@@ -102,7 +120,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
   // Step 2: has HEAD? Fresh repos have no commits.
   let hasHead = false;
   try {
-    const code = await execGitQuiet(["rev-parse", "--verify", "--quiet", "HEAD"], repoRoot);
+    const code = await execGitQuiet(["rev-parse", "--verify", "--quiet", "HEAD"], repoRoot, env);
     hasHead = code === 0;
   } catch {
     hasHead = false;
@@ -118,7 +136,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
     // Step 3a: statuses.
     let statusOut = "";
     try {
-      const r = await execGitText(["diff", "--name-status", "-z", "-M", "HEAD"], repoRoot);
+      const r = await execGitText(["diff", "--name-status", "-z", "-M", "HEAD"], repoRoot, env);
       statusOut = r.stdout;
     } catch (err) {
       return { kind: "error", message: errorMessage(err) };
@@ -131,7 +149,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
     // the SECOND is the new path.
     let numstatOut = "";
     try {
-      const r = await execGitText(["diff", "--numstat", "-z", "-M", "HEAD"], repoRoot);
+      const r = await execGitText(["diff", "--numstat", "-z", "-M", "HEAD"], repoRoot, env);
       numstatOut = r.stdout;
     } catch (err) {
       // numstat on binary files can throw; we still have the statuses.
@@ -146,7 +164,7 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
     // tree. We treat `git ls-files --cached` as the added set.
     let lsOut = "";
     try {
-      const r = await execGitText(["ls-files", "--cached", "-z"], repoRoot);
+      const r = await execGitText(["ls-files", "--cached", "-z"], repoRoot, env);
       lsOut = r.stdout;
     } catch (err) {
       return { kind: "error", message: errorMessage(err) };
@@ -168,7 +186,11 @@ export async function getChanges(root: string): Promise<GitChangesResult> {
   const untracked: GitChangedFile[] = [];
   let untrackedOut = "";
   try {
-    const r = await execGitText(["ls-files", "--others", "--exclude-standard", "-z"], repoRoot);
+    const r = await execGitText(
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      repoRoot,
+      env,
+    );
     untrackedOut = r.stdout;
   } catch (err) {
     return { kind: "error", message: errorMessage(err) };
@@ -252,12 +274,13 @@ export async function getFileDiff(
   root: string,
   file: { path: string; oldPath?: string; status: GitFileStatus; untracked: boolean },
 ): Promise<GitFileDiffResult> {
+  const env = await getSubprocessEnv();
   // Re-resolve the repo root so callers (incl. stale tabs) can pass an
   // arbitrary path. We re-do this rather than caching because git
   // status can change in a heartbeat.
   let repoRoot: string;
   try {
-    const r = await execGitText(["rev-parse", "--show-toplevel"], root);
+    const r = await execGitText(["rev-parse", "--show-toplevel"], root, env);
     repoRoot = r.stdout.trim();
   } catch (err) {
     return { kind: "error", message: errorMessage(err) };
@@ -267,7 +290,7 @@ export async function getFileDiff(
   // hasHead?
   let hasHead = false;
   try {
-    const code = await execGitQuiet(["rev-parse", "--verify", "--quiet", "HEAD"], repoRoot);
+    const code = await execGitQuiet(["rev-parse", "--verify", "--quiet", "HEAD"], repoRoot, env);
     hasHead = code === 0;
   } catch {
     hasHead = false;
@@ -280,7 +303,7 @@ export async function getFileDiff(
   if (wantOld) {
     const showPath = file.oldPath ?? file.path;
     try {
-      const r = await execGitText(["show", `HEAD:${showPath}`], repoRoot);
+      const r = await execGitText(["show", `HEAD:${showPath}`], repoRoot, env);
       oldText = r.stdout;
       oldMissingNewline = oldText.length > 0 && !oldText.endsWith("\n");
     } catch (err) {

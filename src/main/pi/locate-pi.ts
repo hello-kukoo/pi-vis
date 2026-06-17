@@ -1,6 +1,6 @@
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { getLoginShellEnv } from "../auth.js";
+import { getSubprocessEnv } from "../auth.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -40,7 +40,7 @@ export async function locatePi(
   // `node` on PATH — use the login-shell env (the same env the rpc / pty /
   // update subprocesses run with). Without this, pi is wrongly reported
   // "not found" on every non-terminal launch.
-  const validateEnv = { ...process.env, ...(await getLoginShellEnv()) };
+  const validateEnv = await getSubprocessEnv();
 
   for (const candidate of candidates) {
     try {

@@ -9,12 +9,12 @@
  * Honors PI_OFFLINE and PI_SKIP_VERSION_CHECK env vars.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { getLoginShellEnv } from "./auth.js";
+import { getSubprocessEnv } from "./auth.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { getSettings } from "./settings-store.js";
 
@@ -159,7 +159,7 @@ function readPackagesConfig(): string[] {
 
 async function checkSingleExtension(
   source: string,
-  loginShellEnv: Record<string, string>,
+  env: Record<string, string>,
 ): Promise<ExtensionUpdate> {
   // Detect kind from source string
   const kind: "npm" | "git" | "local" = source.startsWith("git+")
@@ -189,7 +189,7 @@ async function checkSingleExtension(
     try {
       const { stdout } = await execFileAsync("npm", ["view", name, "version"], {
         timeout: 10000,
-        env: { ...loginShellEnv },
+        env,
       });
       const latest = stdout.trim();
       const updateAvailable = current ? isNewerPackageVersion(current, latest) : false;
@@ -212,7 +212,7 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
 
   const [piUpdate, loginShellEnv] = await Promise.all([
     checkPiUpdate(piVersion),
-    getLoginShellEnv(),
+    getSubprocessEnv(),
   ]);
 
   const extensions = await checkExtensions(loginShellEnv);
@@ -242,7 +242,6 @@ export async function runUpdate(
     return;
   }
 
-  const loginShellEnv = await getLoginShellEnv();
   const args: string[] = ["update"];
 
   if (target === "pi") {
@@ -255,25 +254,47 @@ export async function runUpdate(
   args.push("--no-approve");
 
   try {
-    const child = execFile(piInfo.path, args, {
-      env: { ...loginShellEnv, FORCE_COLOR: "1" },
-      timeout: 120000,
+    const env = await getSubprocessEnv();
+    const child = spawn(piInfo.path, args, {
+      env: { ...env, FORCE_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
-    child.stdout?.on("data", (chunk: string) => {
-      onProgress(runId, chunk);
+    // Safety timeout: 10 minutes, cleared on close
+    let safetyTimer: ReturnType<typeof setTimeout> | null = setTimeout(
+      () => {
+        console.warn("[updates] safety timeout reached, killing update");
+        child.kill();
+      },
+      10 * 60 * 1000,
+    );
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      onProgress(runId, typeof chunk === "string" ? chunk : chunk.toString());
     });
 
-    child.stderr?.on("data", (chunk: string) => {
-      onProgress(runId, chunk);
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      onProgress(runId, typeof chunk === "string" ? chunk : chunk.toString());
     });
 
-    child.stdout?.on("error", () => {});
-    child.stderr?.on("error", () => {});
+    child.stdout.on("error", () => {});
+    child.stderr.on("error", () => {});
 
     const exitCode = await new Promise<number>((resolve) => {
-      child.on("close", resolve);
-      child.on("error", () => resolve(1));
+      child.on("close", (code) => {
+        if (safetyTimer) {
+          clearTimeout(safetyTimer);
+          safetyTimer = null;
+        }
+        resolve(code ?? 1);
+      });
+      child.on("error", () => {
+        if (safetyTimer) {
+          clearTimeout(safetyTimer);
+          safetyTimer = null;
+        }
+        resolve(1);
+      });
     });
 
     // Clear cached pi location so version re-check picks up the new binary
@@ -294,7 +315,7 @@ export function startUpdate(
   onDone: UpdateDoneCallback,
 ): { runId: string } {
   const runId = `update-${++runCounter}`;
-  runUpdate(target, runId, onProgress, onDone).catch((err) => {
+  runUpdate(target, runId, onProgress, onDone).catch((_err) => {
     onDone(runId, 1, {
       pi: { current: "unknown", updateAvailable: false },
       extensions: [],

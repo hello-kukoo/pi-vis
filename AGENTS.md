@@ -191,16 +191,16 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 - **CSS**: Custom CSS with BEM naming (`composer__input-row--bash`). No CSS framework. CSS modules co-located with components. `global.css` defines an app-wide focus policy: pointer-driven focus has no outline (`:focus:not(:focus-visible)`), keyboard focus shows a lavender `:focus-visible` ring.
 - **Catppuccin theming**: Four variants (latte/frappé/macchiato/mocha). Default is mocha. Theme variables set via CSS custom properties.
 - **Browser preview**: `npm run dev:renderer` loads `preview-stub.ts` which stubs `window.pivis` with a demo session and canned responses including streamed agent output.
-- **Auth**: API keys stored in `~/.pi/agent/auth.json` using `proper-lockfile` for mutual exclusion with pi's token-refresh writes. Environment variables detected via `$SHELL -ilc env` (GUI apps don't inherit shell env). Atomic writes with tmp+rename, chmod 0600.
+- **Auth**: API keys stored in `~/.pi/agent/auth.json` using `proper-lockfile` for mutual exclusion with pi's token-refresh writes. Environment variables detected via `$SHELL -ilc env` (GUI apps don't inherit shell env). `getSubprocessEnv()` combines `process.env` + login-shell env for consistent subprocess PATH — used across git, updates, pty, and locate-pi. Atomic writes with tmp+rename, chmod 0600.
 - **Login**: Native API-key sign-in (writes auth.json) + embedded xterm.js terminal for OAuth (spawns real `pi` in `node-pty`, watches `auth.json` for success detection).
-- **Updates**: Background check at launch (3s delay, non-blocking). `update.run` spawns `pi update --no-approve`, streams output via IPC events. New sessions automatically use the updated binary.
+- **Updates**: Background check at launch (3s delay, non-blocking, respects `updateCheckEnabled` setting). `update.run` spawns `pi update --no-approve` via `spawn()` with 10-minute safety timeout, streams output via IPC events. New sessions automatically use the updated binary.
 - **Dependencies**: `@homebridge/node-pty-prebuilt-multiarch` (native, externalized from main bundle, asarUnpack in electron-builder), `@xterm/xterm` + `@xterm/addon-fit` (renderer), `proper-lockfile` + `@types/proper-lockfile` (main).
 
 ## Testing
 
 - **Vitest** for unit tests, colocated as `*.test.ts` next to source files
 - **Playwright** for E2E tests in `tests/e2e/` — tests app startup, commands, diff viewer, real pi integration
-- **Fake pi**: `tests/fixtures/fake-pi.mjs` is a scripted stand-in for the real pi binary (used in unit tests)
+- **Fake pi**: `tests/fixtures/fake-pi.mjs` is a scripted stand-in for the real pi binary (used in unit tests). Beyond RPC, it simulates `--version` (pinnable via `FAKE_PI_VERSION_FILE`/`FAKE_PI_VERSION`) and the `pi update` subcommand (bumps the version stamp, or fails/hangs via `FAKE_PI_UPDATE_EXIT`/`FAKE_PI_UPDATE_HANG`), so `updates.ts` can be tested end-to-end without touching the real install — see `src/main/updates.test.ts`
 - **Test overrides**: `tests/fixtures/captures/` contains captured pi protocol data for fixture-based testing
 
 ## Important Paths
@@ -209,6 +209,7 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 |---|---|
 | `~/.pi/agent/sessions/` | Session files (JSONL format) |
 | `~/.pi/agent/auth.json` | Auth credentials (api_key/oauth); read/written by `auth.ts` with proper-lockfile |
+| `build/notarize.cjs` | macOS notarization hook (env-gated, skips unless Apple creds present) |
 | `~/.pi/agent/settings.json` | Pi settings including `packages[]` for extension management |
 | `~/.pi/agent/npm/node_modules/` | Installed pi extension packages |
 | `~/Library/Application Support/pi-vis/settings.json` | App settings |
@@ -231,6 +232,14 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `src/renderer/src/components/auth/LoginTerminal.tsx` | Embedded xterm.js terminal for pi's /login OAuth flow |
 | `src/renderer/src/components/shell/UpdateBanner.tsx` | Dismissible update card — sits above the composer (session) or floats bottom-right (empty screen) |
 | `src/renderer/src/components/updates/UpdateProgress.tsx` | Modal streaming `pi update` output |
+| `RELEASING.md` | macOS signing, notarization, and release build docs |
+| `build/notarize.cjs` | `afterSign` hook for macOS notarization (env-gated) |
+
+## Releasing
+
+See [RELEASING.md](./RELEASING.md) for macOS signing, notarization, and build instructions.
+Required env vars (with no defaults): `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`.
+Optional: `CSC_LINK`, `CSC_KEY_PASSWORD`.
 
 ## Maintaining This File
 

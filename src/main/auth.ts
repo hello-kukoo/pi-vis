@@ -72,6 +72,19 @@ export function clearLoginShellEnvCache(): void {
   cachedLoginShellEnv = null;
 }
 
+/**
+ * Combine process.env with login-shell env for child processes.
+ * GUI apps on macOS (and Linux) inherit a stripped PATH; the
+ * login-shell env fills in paths/tools the user expects.
+ *
+ * Call this once per operation and pass the result to every
+ * spawn/execFile call, so env is consistent across all subprocesses
+ * (pi, git, npm, pty).
+ */
+export async function getSubprocessEnv(): Promise<Record<string, string>> {
+  return { ...(process.env as Record<string, string>), ...(await getLoginShellEnv()) };
+}
+
 // ── Read auth.json ───────────────────────────────────────────────────────
 
 export function readAuth(): Record<string, AuthCredential> {
@@ -188,13 +201,25 @@ async function mutateAuth(mutator: (auth: Record<string, AuthCredential>) => voi
   }
 }
 
+function isValidProviderName(provider: string): boolean {
+  const forbidden = new Set(["__proto__", "constructor", "prototype"]);
+  return provider.trim().length > 0 && !forbidden.has(provider.trim());
+}
+
 export async function saveApiKey(
   provider: string,
   key: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isValidProviderName(provider)) {
+    return { ok: false, error: "Invalid provider name" };
+  }
+  const trimmedKey = key.trim();
+  if (!trimmedKey) {
+    return { ok: false, error: "API key cannot be empty" };
+  }
   try {
     await mutateAuth((a) => {
-      a[provider] = { type: "api_key", key };
+      a[provider] = { type: "api_key", key: trimmedKey };
     });
     return { ok: true };
   } catch (err) {
@@ -205,6 +230,9 @@ export async function saveApiKey(
 export async function removeProvider(
   provider: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isValidProviderName(provider)) {
+    return { ok: false, error: "Invalid provider name" };
+  }
   try {
     await mutateAuth((a) => {
       delete a[provider];

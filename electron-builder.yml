@@ -29,7 +29,12 @@ mac:
   category: public.app-category.developer-tools
   target:
     - target: dmg
+      arch:
+        - arm64
     - target: zip
+      arch:
+        - arm64
+afterSign: build/notarize.cjs
 win:
   executableName: pi-vis
   target:

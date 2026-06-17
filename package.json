@@ -43,6 +43,7 @@
     "@biomejs/biome": "^1.9.0",
     "@electron-toolkit/preload": "^3.0.0",
     "@electron-toolkit/utils": "^3.0.0",
+    "@electron/notarize": "^3.1.1",
     "@playwright/test": "^1.45.0",
     "@types/node": "^20.14.0",
     "@types/proper-lockfile": "^4.1.4",

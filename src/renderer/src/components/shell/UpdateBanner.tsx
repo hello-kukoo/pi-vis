@@ -10,6 +10,7 @@ export function UpdateBanner({
   const status = useUpdatesStore((s) => s.status);
   const dismiss = useUpdatesStore((s) => s.dismiss);
   const settings = useSettingsStore((s) => s.settings);
+  const updateSettings = useSettingsStore((s) => s.update);
   const [, setShowDetails] = useState(false);
 
   // All hooks must run unconditionally and before any early return — the
@@ -18,8 +19,11 @@ export function UpdateBanner({
   // "Rendered more hooks than during the previous render" and white-screens
   // the whole app, since this banner is outside the session ErrorBoundary).
   const handleDismiss = useCallback(() => {
+    if (status?.pi.latest) {
+      void updateSettings({ lastDismissedPiVersion: status.pi.latest });
+    }
     dismiss();
-  }, [dismiss]);
+  }, [dismiss, status?.pi.latest, updateSettings]);
 
   const handleUpdateNow = useCallback(() => {
     // Open the update progress modal by triggering the update

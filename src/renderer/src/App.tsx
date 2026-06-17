@@ -37,7 +37,6 @@ export function App(): React.ReactElement {
   const [settingsInitialSection, setSettingsInitialSection] = useState<"account" | undefined>(
     undefined,
   );
-  const [showLoginTerminal, setShowLoginTerminal] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(220);
 
   // Whether the active session has an unanswered extension_ui_request.

@@ -10,7 +10,7 @@
  */
 
 import os from "node:os";
-import { getLoginShellEnv } from "./auth.js";
+import { getSubprocessEnv } from "./auth.js";
 import { locatePi } from "./pi/locate-pi.js";
 import { getSettings } from "./settings-store.js";
 
@@ -88,9 +88,8 @@ export async function startPty(opts: {
     throw new Error("pi binary not found. Please install pi or set the path in settings.");
   }
 
-  const loginShellEnv = await getLoginShellEnv();
   const env: Record<string, string> = {
-    ...loginShellEnv,
+    ...(await getSubprocessEnv()),
     TERM: "xterm-256color",
     FORCE_COLOR: "1",
   };
