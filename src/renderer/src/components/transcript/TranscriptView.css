@@ -14,6 +14,12 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* We manage bottom-pinning ourselves (see TranscriptView.tsx). Chromium's
+     scroll anchoring would otherwise silently re-adjust scrollTop when a tool
+     card is inserted or grows mid-stream, fighting our pin-to-bottom and
+     emitting scroll events the handler can misread as a user scrolling up —
+     which drifts the view off the bottom. Opt the scroller out entirely. */
+  overflow-anchor: none;
 }
 
 .transcript-blocks {
@@ -534,8 +540,15 @@ details[open] > .tool-card__args-summary::before {
   font-weight: 600;
 }
 
-/* Code block from shiki */
-.transcript-block__content .shiki {
+/* Code block from shiki.  Shiki sets an inline background from the
+   catppuccin theme that matches the transcript base, so the block would
+   otherwise blend into the surroundings.  Override it to mantle (one step
+   off base in all four schemes) and add a surface border so the block
+   reads as a distinct boxed surface — same treatment as the tool cards. */
+.transcript-block__content .shiki,
+.thinking-block .shiki {
+  background: var(--ctp-mantle) !important;
+  border: 1px solid var(--ctp-surface0);
   border-radius: var(--mcm-radius-sm);
   padding: 0.857rem;
   overflow-x: auto;
@@ -547,6 +560,7 @@ details[open] > .tool-card__args-summary::before {
 
 .code-block--plain {
   background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface0);
   border-radius: var(--mcm-radius-sm);
   padding: 0.857rem;
   font-family: var(--font-code);

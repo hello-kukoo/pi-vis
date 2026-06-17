@@ -100,10 +100,24 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     textareaRef.current?.focus();
   }, [editorInjectionNonce, editorInjectionText]);
 
-  // Focus the composer when the session becomes active (app open or tab
-  // switch) so the user can type right away. Guarded so we don't yank focus
-  // away from another field the user may already be interacting with.
+  // Focus the composer so the user can type right away on app open, session
+  // switch, and new-session — all of which mount a fresh Composer (the
+  // session subtree is keyed on the active session id).
+  //
+  // The catch: the textarea is `disabled` until the session is `live`
+  // (starting/ready), and `.focus()` is a no-op on a disabled element. A
+  // just-opened session mounts as "cold", so focusing on mount alone silently
+  // fails for every freshly opened/created session and only happened to work
+  // when switching to an already-ready one. So we wait for the enabled
+  // (`live`) transition instead of focusing once on mount.
+  //
+  // `didAutofocusRef` makes this fire at most once per mount, so we never yank
+  // focus back to the composer mid-session; the "typing elsewhere" guard
+  // avoids stealing focus from another field the user already moved to.
+  const didAutofocusRef = useRef(false);
   useEffect(() => {
+    if (didAutofocusRef.current) return;
+    if (!live) return; // textarea still disabled — focus() would be a no-op
     const el = textareaRef.current;
     if (!el) return;
     const active = document.activeElement;
@@ -111,9 +125,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       active instanceof HTMLElement &&
       active !== el &&
       (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+    didAutofocusRef.current = true;
     if (typingElsewhere) return;
     el.focus();
-  }, []);
+  }, [live]);
 
   // ── Attachment handling ─────────────────────────────────────────────
 

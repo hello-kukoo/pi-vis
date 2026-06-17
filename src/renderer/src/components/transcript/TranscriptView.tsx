@@ -454,14 +454,14 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       pinnedRef.current = false;
     }
     // else: ambiguous transient (grew below us, not yet re-pinned) —
-    // leave state as-is. The ResizeObserver follow-loop will pin us
-    // back into the distance-≤-margin branch on the next layout.
+    // leave state as-is. The commit-phase growth pin below (and the
+    // ResizeObserver backstop) will re-pin on the next layout.
   }, []);
 
-  // While pinned, follow content/viewport size changes. A ResizeObserver
-  // catches growth the block count misses: streaming text deltas, image
-  // loads, and async syntax highlighting — none of which fire scroll
-  // events on their own.
+  // Backstop for size changes that do NOT go through a React render — async
+  // syntax highlighting swapping in and images finishing load — neither of
+  // which re-renders the transcript or fires a scroll event, so the
+  // commit-phase pin below can't see them. While pinned, follow them here.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     const content = contentRef.current;
@@ -482,17 +482,48 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     pinToBottom();
   }, [sessionId, pinToBottom]);
 
-  // Sending your own message snaps the view back to the bottom
+  // Follow the bottom across content growth — the whole "tool call added and
+  // then expanding" sequence. New blocks (a tool call appearing) AND in-place
+  // growth (streaming text/thinking deltas, tool output) both re-render the
+  // transcript, so this commit-phase effect (no dep array → runs after every
+  // render) catches them synchronously, before paint, without depending on the
+  // ResizeObserver firing in time. The observer above stays as the backstop
+  // for growth that does NOT re-render React: async highlighting and images.
+  //
+  // Crucially, we follow only when the viewport was at the bottom BEFORE this
+  // commit grew the content — judged from the *live* scrollTop against the
+  // PREVIOUS height, not from `pinnedRef`. That measurement reflects a user's
+  // scroll-up immediately, even before their scroll event is delivered, so we
+  // never yank a reader who has scrolled up back down (the failure mode of an
+  // unconditional pin). `pinnedRef` is kept in sync so the ResizeObserver
+  // backstop agrees.
   const lastBlockType = allBlocks[allBlocks.length - 1]?.type;
   const blockCount = allBlocks.length;
   const prevBlockCountRef = useRef(blockCount);
+  const prevScrollHeightRef = useRef(0);
   useLayoutEffect(() => {
-    if (blockCount > prevBlockCountRef.current && lastBlockType === "user") {
+    const el = scrollRef.current;
+    if (!el) return;
+    const prevHeight = prevScrollHeightRef.current;
+    prevScrollHeightRef.current = el.scrollHeight;
+
+    // The user's own send re-pins unconditionally ("I'm caught up"), even if
+    // they'd scrolled up.
+    const newUserBlock = blockCount > prevBlockCountRef.current && lastBlockType === "user";
+    prevBlockCountRef.current = blockCount;
+    if (newUserBlock) {
       pinnedRef.current = true;
       pinToBottom();
+      return;
     }
-    prevBlockCountRef.current = blockCount;
-  }, [blockCount, lastBlockType, pinToBottom]);
+
+    // Only react to growth; a shrink (collapse, working-row removed) clamps to
+    // the bottom on its own and the ResizeObserver re-pins if needed.
+    if (el.scrollHeight <= prevHeight) return;
+    const wasAtBottom = prevHeight - el.scrollTop - el.clientHeight <= SCROLL_RESTICK_PX;
+    pinnedRef.current = wasAtBottom;
+    if (wasAtBottom) pinToBottom();
+  });
 
   return (
     <div className="transcript-view" ref={scrollRef} onScroll={handleScroll}>
