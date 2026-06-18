@@ -454,3 +454,104 @@ describe("transcript reducer — role-based message_start", () => {
     expect(state.pendingEchoes).toEqual([]);
   });
 });
+
+describe("transcript reducer — provider errors", () => {
+  const ERR_MSG = {
+    ...ASST_MSG,
+    stopReason: "error" as const,
+    errorMessage: "Provider returned error",
+  };
+
+  it("surfaces an empty failed turn as an error block (no blank bubble)", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ERR_MSG }));
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+
+    expect(state.activeAssistantId).toBeNull();
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("error");
+    if (state.blocks[0]?.type === "error") {
+      expect(state.blocks[0].data.message).toBe("Provider returned error");
+    }
+  });
+
+  it("falls back to a generic message when errorMessage is absent", () => {
+    const noMsg = { ...ASST_MSG, stopReason: "error" as const };
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: noMsg }));
+    state = applyPiEvent(state, e({ type: "message_end", message: noMsg }));
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("error");
+    if (state.blocks[0]?.type === "error") {
+      expect(state.blocks[0].data.message).toBe("The model response ended with an error.");
+    }
+  });
+
+  it("keeps partial output and appends an error block when a turn fails mid-stream", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "partial" },
+      }),
+    );
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks[0]?.type).toBe("assistant");
+    if (state.blocks[0]?.type === "assistant") {
+      expect(state.blocks[0].data.textContent).toBe("partial");
+      expect(state.blocks[0].data.isStreaming).toBe(false);
+    }
+    expect(state.blocks[1]?.type).toBe("error");
+  });
+
+  it("inserts the error block right after the assistant block, before later tool blocks", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "partial" },
+      }),
+    );
+    state = applyPiEvent(
+      state,
+      e({ type: "tool_execution_start", toolCallId: "t1", toolName: "read_file", args: {} }),
+    );
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+
+    // Order must match what history-loader reconstructs on reload:
+    // assistant → error → tool_call (not assistant → tool_call → error).
+    expect(state.blocks.map((b) => b.type)).toEqual(["assistant", "error", "tool_call"]);
+  });
+
+  it("surfaces an error even if message_start was missed (no active block)", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("error");
+  });
+
+  it("a normal stop does not produce an error block", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "ok" },
+      }),
+    );
+    state = applyPiEvent(state, e({ type: "message_end", message: ASST_MSG }));
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("assistant");
+  });
+});

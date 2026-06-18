@@ -158,7 +158,7 @@ Pi runs in `--mode rpc` with JSONL on stdin/stdout. Every command has a unique `
 All renderer state uses **Zustand** stores:
 
 - **`sessions-store`** — The primary store. Maps `SessionId → SessionViewState` (transcript, streaming status, pending dialogs, status segments, widgets, stats, model info, thinking level, commands). Handles all mutations via IPC calls + local state updates.
-- **`transcript.ts`** — Pure reducer (not a store). `applyPiEvent(state, event) → TranscriptState` transforms pi streaming events into `TypedTranscriptBlock[]` (user, assistant, tool_call, bash, compaction, custom_message). Uses pending-echo matching to deduplicate user messages that pi echoes back.
+- **`transcript.ts`** — Pure reducer (not a store). `applyPiEvent(state, event) → TranscriptState` transforms pi streaming events into `TypedTranscriptBlock[]` (user, assistant, tool_call, bash, compaction, custom_message, error). Uses pending-echo matching to deduplicate user messages that pi echoes back. The `error` block surfaces pi's `stopReason: "error"` / `errorMessage` turns (provider failures) so a dropped stream is visible instead of looking like a silent cut-off.
 - **`diff-store`** — Manages diff viewer: file list from `git.changes` (optionally branch-relative via `base`), lazy Shiki tokenization, expand/collapse gap state, unified/split view mode, base branch selection with `loadBranches`/`setBase`/`setIncludeRemoteBranches`
 - **`settings-store`** — Renderer mirror of app settings; applies fonts and color scheme.
 

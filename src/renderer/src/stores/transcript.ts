@@ -1,5 +1,6 @@
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
+import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { assertNever } from "@shared/result.js";
 
 // All TranscriptBlock data shapes
@@ -42,13 +43,26 @@ export interface CustomMessageBlockData {
   content: string;
 }
 
+/**
+ * A model/provider failure surfaced into the transcript. pi records a
+ * failed assistant turn as a `message_end` with `stopReason: "error"`
+ * (and usually an `errorMessage`). Without rendering this, a provider
+ * drop looks identical to "the stream mysteriously cut off". We surface
+ * it as a visible block so the cause is obvious and the user knows to
+ * retry / switch models.
+ */
+export interface ErrorBlockData {
+  message: string;
+}
+
 export type TypedTranscriptBlock =
   | { id: string; type: "user"; data: UserBlockData }
   | { id: string; type: "assistant"; data: AssistantBlockData }
   | { id: string; type: "tool_call"; data: ToolCallBlockData }
   | { id: string; type: "bash"; data: BashBlockData }
   | { id: string; type: "compaction"; data: CompactionBlockData }
-  | { id: string; type: "custom_message"; data: CustomMessageBlockData };
+  | { id: string; type: "custom_message"; data: CustomMessageBlockData }
+  | { id: string; type: "error"; data: ErrorBlockData };
 
 let blockCounter = 0;
 function newBlockId(): string {
@@ -146,6 +160,9 @@ export function seedFromHistory(
       }
       if (b.type === "custom_message") {
         return { id: b.id, type: "custom_message", data: { content: (d.content as string) ?? "" } };
+      }
+      if (b.type === "error") {
+        return { id: b.id, type: "error", data: { message: (d.message as string) ?? "" } };
       }
       // Unknown block type — drop it instead of synthesising an empty
       // user bubble, which would be confusing to the user.
@@ -365,15 +382,59 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       // Only assistant messages own the streaming state machine; closing a
       // non-assistant stream (user / custom) is a no-op.
       if (event.message?.role !== "assistant") return state;
-      if (!activeAssistantId) return state;
-      return {
-        ...state,
-        blocks: updateBlock(activeAssistantId, (b) => {
-          if (b.type !== "assistant") return b;
-          return { ...b, data: { ...b.data, isStreaming: false } };
-        }),
-        activeAssistantId: null,
+
+      const { isError, message: errorMessage } = detectTurnError(event.message);
+
+      // Normal close — just stop streaming on the active assistant block.
+      if (!isError) {
+        if (!activeAssistantId) return state;
+        return {
+          ...state,
+          blocks: updateBlock(activeAssistantId, (b) => {
+            if (b.type !== "assistant") return b;
+            return { ...b, data: { ...b.data, isStreaming: false } };
+          }),
+          activeAssistantId: null,
+        };
+      }
+
+      // Error close — surface a visible error block. If the active
+      // assistant block already accumulated partial text/thinking, keep it
+      // (the partial output is still useful context) and append the error
+      // block after it. If the block is empty, drop it so the user doesn't
+      // see a blank assistant bubble — the error block stands in for it.
+      const errorBlock: TypedTranscriptBlock = {
+        id: newBlockId(),
+        type: "error",
+        data: { message: errorMessage },
       };
+
+      if (!activeAssistantId) {
+        return { ...state, blocks: [...blocks, errorBlock], activeAssistantId: null };
+      }
+
+      const activeIndex = blocks.findIndex((b) => b.id === activeAssistantId);
+      const active = activeIndex >= 0 ? blocks[activeIndex] : undefined;
+      const hasContent =
+        active?.type === "assistant" &&
+        (active.data.textContent.length > 0 || active.data.thinkingContent.length > 0);
+
+      // Insert the error block immediately after the assistant block (rather
+      // than at the array end) so the in-session order matches what the
+      // history loader reconstructs on reload, even when later blocks (e.g.
+      // tool calls) were appended during the turn.
+      if (hasContent) {
+        const next = updateBlock(activeAssistantId, (b) =>
+          b.type === "assistant" ? { ...b, data: { ...b.data, isStreaming: false } } : b,
+        );
+        next.splice(activeIndex + 1, 0, errorBlock);
+        return { ...state, blocks: next, activeAssistantId: null };
+      }
+
+      // Drop the empty assistant block; the error block replaces it in place.
+      const next = blocks.filter((b) => b.id !== activeAssistantId);
+      next.splice(activeIndex, 0, errorBlock);
+      return { ...state, blocks: next, activeAssistantId: null };
     }
 
     case "tool_execution_start": {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
+import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { SessionEntrySchema, SessionHeaderSchema } from "@shared/session-file/entries.js";
 
 type EntryMap = Map<string, Record<string, unknown>>;
@@ -213,12 +214,34 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
             data: { role: "user", content: textContent },
           });
         } else {
-          // assistant: emit assistant block, then tool_call blocks for each tool call
-          blocks.push({
-            id: entry.id,
-            type: "assistant",
-            data: { role: "assistant", content: textContent, thinking: thinkingContent },
-          });
+          // assistant: emit assistant block, then tool_call blocks for each tool call.
+          // A failed provider turn is recorded by pi with `stopReason: "error"`
+          // (and usually an `errorMessage`) and empty content. Surface that as a
+          // visible error block instead of a blank assistant bubble so the cause
+          // of a "stream just stopped" is obvious on reload.
+          const { isError, message: errorMessage } = detectTurnError(msg);
+          if (isError && textContent.length === 0 && thinkingContent.length === 0) {
+            blocks.push({
+              id: entry.id,
+              type: "error",
+              data: { message: errorMessage },
+            });
+            break;
+          }
+          if (textContent.length > 0 || thinkingContent.length > 0) {
+            blocks.push({
+              id: entry.id,
+              type: "assistant",
+              data: { role: "assistant", content: textContent, thinking: thinkingContent },
+            });
+          }
+          if (isError) {
+            blocks.push({
+              id: `${entry.id}-error`,
+              type: "error",
+              data: { message: errorMessage },
+            });
+          }
           for (const tc of toolCalls) {
             blocks.push({
               id: `${entry.id}-tool-${tc.id}`,

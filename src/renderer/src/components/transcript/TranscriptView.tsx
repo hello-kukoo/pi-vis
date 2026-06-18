@@ -7,6 +7,7 @@ import { useSessionsStore } from "../../stores/sessions-store.js";
 import type {
   AssistantBlockData,
   BashBlockData,
+  ErrorBlockData,
   ToolCallBlockData,
   TypedTranscriptBlock,
   UserBlockData,
@@ -324,6 +325,20 @@ function ToolCallBlock({
   );
 }
 
+function ErrorBlock({ data }: { data: ErrorBlockData }): React.ReactElement {
+  return (
+    <div className="transcript-block transcript-block--error" role="alert">
+      <span className="transcript-block__error-icon" aria-hidden="true">
+        ⚠
+      </span>
+      <div className="transcript-block__error-body">
+        <span className="transcript-block__error-title">Model response failed</span>
+        <span className="transcript-block__error-message">{data.message}</span>
+      </div>
+    </div>
+  );
+}
+
 function BashBlock({
   data,
   preserveScroll,
@@ -588,6 +603,8 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
                   {block.data.content}
                 </div>
               );
+            case "error":
+              return <ErrorBlock key={block.id} data={block.data} />;
             default:
               return null;
           }
