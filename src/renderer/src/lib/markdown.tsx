@@ -10,13 +10,11 @@ import { getHighlighter, highlightCode } from "./shiki.js";
 void getHighlighter();
 
 interface CodeBlockProps {
-  className?: string | undefined;
-  children?: React.ReactNode | undefined;
+  lang: string;
+  code: string;
 }
 
-function CodeBlock({ className, children }: CodeBlockProps): React.ReactElement {
-  const lang = className?.replace("language-", "") ?? "text";
-  const code = String(children ?? "").replace(/\n$/, "");
+function CodeBlock({ lang, code }: CodeBlockProps): React.ReactElement {
   const [html, setHtml] = useState<string | null>(null);
   const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
 
@@ -62,17 +60,29 @@ function CodeBlock({ className, children }: CodeBlockProps): React.ReactElement 
 }
 
 const components: Components = {
-  code: ({ className, children, ...props }) => {
-    const isBlock = className?.startsWith("language-");
-    if (isBlock) {
-      return <CodeBlock className={className}>{children}</CodeBlock>;
+  // Block detection lives on <pre> — the only element a fenced or indented
+  // code block produces — so blocks without a language annotation (which
+  // react-markdown leaves without a `language-*` class on <code>) still
+  // render as proper Shiki boxes instead of falling through to inline code.
+  pre: ({ node, children }) => {
+    const codeEl = node?.children?.[0];
+    if (codeEl?.type === "element" && codeEl.tagName === "code") {
+      const classes = codeEl.properties?.className;
+      const langClass = Array.isArray(classes)
+        ? classes.find((c): c is string => typeof c === "string" && c.startsWith("language-"))
+        : undefined;
+      const lang = langClass ? langClass.replace("language-", "") : "text";
+      const textNode = codeEl.children[0];
+      const code = (textNode?.type === "text" ? textNode.value : "").replace(/\n$/, "");
+      return <CodeBlock lang={lang} code={code} />;
     }
-    return (
-      <code className="mcm-inline-code" {...props}>
-        {children}
-      </code>
-    );
+    return <pre>{children}</pre>;
   },
+  code: ({ node: _node, children, ...props }) => (
+    <code className="mcm-inline-code" {...props}>
+      {children}
+    </code>
+  ),
 };
 
 export function Markdown({ children }: { children: string }): React.ReactElement {
