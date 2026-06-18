@@ -578,7 +578,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             {text === "" && (
               <div className="composer__placeholder" aria-hidden="true">
                 {isStreaming
-                  ? "Streaming… (Enter to queue, Esc to abort)"
+                  ? "Streaming… (Enter to steer, Esc to abort)"
                   : "Message pi… (Enter to send, !cmd for bash, /cmd for commands)"}
               </div>
             )}
