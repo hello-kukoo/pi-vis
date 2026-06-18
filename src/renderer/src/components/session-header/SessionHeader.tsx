@@ -589,8 +589,11 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
   const badgeKind = useDiffStore((s) => s.badgeKind);
   const refreshBadge = useDiffStore((s) => s.refreshBadge);
 
-  // Refresh on session live, agent_end, and window focus. Mirrors
-  // the existing stats effect in this file.
+  // Refresh on session live, agent_end, every tool call, and window
+  // focus. Refreshing after each tool_execution_end keeps the changed-file
+  // count live as the agent edits files; refreshBadge is debounced so a
+  // burst of tool calls collapses into one git invocation. Mirrors the
+  // existing stats effect in this file.
   useEffect(() => {
     if (!live) return;
     const root = session?.workspacePath;
@@ -598,7 +601,8 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
     void refreshBadge(root);
 
     const unsubEvent = window.pivis.on("session.event", ({ sessionId: sid, event }) => {
-      if (sid === sessionId && event.type === "agent_end") {
+      if (sid !== sessionId) return;
+      if (event.type === "agent_end" || event.type === "tool_execution_end") {
         void refreshBadge(root);
       }
     });
