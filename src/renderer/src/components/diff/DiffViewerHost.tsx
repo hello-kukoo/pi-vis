@@ -81,10 +81,17 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   }, [visible]);
 
   // ── Auto-refresh on agent_end + window focus ──────────────────────
+  // A full refresh runs on agent_end (turn boundary) and window focus; each
+  // re-baselines the working-tree fingerprint and clears staleness. Mid-turn
+  // tool calls don't force a disruptive refresh — instead the header's
+  // per-tool-call badge refresh recomputes the fingerprint and lights the
+  // stale dot (see diff-store doBadgeRefresh).
+  const stale = useDiffStore((s) => s.stale);
   useEffect(() => {
     if (!visible) return;
     const unsubEvent = window.pivis.on("session.event", ({ sessionId: sid, event }) => {
-      if (sid === sessionId && event.type === "agent_end") {
+      if (sid !== sessionId) return;
+      if (event.type === "agent_end") {
         void refresh();
       }
     });
@@ -280,6 +287,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           files={files}
           viewMode={viewMode}
           narrow={narrow}
+          stale={stale}
           onClose={closeViewer}
           onRefresh={() => void refresh()}
           onSetViewMode={setViewMode}
@@ -337,6 +345,7 @@ function ViewerHeader({
   files,
   viewMode,
   narrow,
+  stale,
   onClose,
   onRefresh,
   onSetViewMode,
@@ -345,6 +354,7 @@ function ViewerHeader({
   files: GitChangedFile[];
   viewMode: "unified" | "split";
   narrow: boolean;
+  stale: boolean;
   onClose: () => void;
   onRefresh: () => void;
   onSetViewMode: (m: "unified" | "split") => void;
@@ -401,6 +411,14 @@ function ViewerHeader({
       >
         <RefreshIcon />
       </button>
+      {stale ? (
+        <span
+          className="diff-viewer__stale-dot"
+          role="img"
+          aria-label="Changes may be pending refresh"
+          title="Changes may be pending refresh"
+        />
+      ) : null}
       <button
         type="button"
         className="diff-viewer__icon-btn"

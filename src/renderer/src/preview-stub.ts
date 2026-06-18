@@ -480,6 +480,7 @@ const stub = {
           kind: "ok",
           repoRoot: "/Users/dev/pi-vis",
           truncated: false,
+          fingerprint: "stub-fingerprint",
           files: [
             {
               path: "src/app/config-loader.ts",

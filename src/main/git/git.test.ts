@@ -407,3 +407,84 @@ describe("getChanges with base", () => {
     expect(res.newText).toContain("feature addition");
   });
 });
+
+describe("getChanges fingerprint", () => {
+  /** Convenience: run getChanges and return the fingerprint, failing if not ok. */
+  async function fp(root: string, base?: string): Promise<string> {
+    const res = await getChanges(root, base);
+    if (res.kind !== "ok") throw new Error(`getChanges not ok: ${res.kind}`);
+    return res.fingerprint;
+  }
+
+  beforeEach(() => {
+    makeRepo();
+  });
+
+  it("is stable across calls when nothing changes", async () => {
+    const first = await fp(workDir);
+    const second = await fp(workDir);
+    expect(first).toBe(second);
+  });
+
+  it("changes when a tracked file's content changes", async () => {
+    const before = await fp(workDir);
+    write(path.join(workDir, "a.ts"), "export const a = 99;\n");
+    expect(await fp(workDir)).not.toBe(before);
+  });
+
+  it("detects a same-line-count edit (the numstat-collision case)", async () => {
+    // a.ts is one line: `export const a = 1;`. Replace it with a different
+    // one-line body — insertions=1, deletions=1 either way, so numstat alone
+    // (and the fileSig the viewer reconciles on) would be identical.
+    write(path.join(workDir, "a.ts"), "export const a = 1;\n");
+    const before = await fp(workDir); // clean tree baseline
+    write(path.join(workDir, "a.ts"), "export const a = 2;\n");
+    const after = await fp(workDir);
+    expect(after).not.toBe(before);
+
+    // Sanity: numstat really is identical for this edit.
+    const res = await getChanges(workDir);
+    if (res.kind !== "ok") throw new Error("not ok");
+    const a = res.files.find((f) => f.path === "a.ts");
+    expect(a?.insertions).toBe(1);
+    expect(a?.deletions).toBe(1);
+  });
+
+  it("returns to the baseline fingerprint when an edit is reverted", async () => {
+    const clean = await fp(workDir);
+    write(path.join(workDir, "a.ts"), "export const a = 2;\n");
+    expect(await fp(workDir)).not.toBe(clean);
+    write(path.join(workDir, "a.ts"), "export const a = 1;\n"); // revert
+    expect(await fp(workDir)).toBe(clean);
+  });
+
+  it("changes when an untracked file's content changes (same line count)", async () => {
+    write(path.join(workDir, "untracked.ts"), "const x = 1;\n");
+    const before = await fp(workDir);
+    write(path.join(workDir, "untracked.ts"), "const x = 2;\n"); // 1 line → 1 line
+    expect(await fp(workDir)).not.toBe(before);
+  });
+
+  it("changes when a new untracked file appears", async () => {
+    const before = await fp(workDir);
+    write(path.join(workDir, "brand-new.ts"), "// new\n");
+    expect(await fp(workDir)).not.toBe(before);
+  });
+
+  it("is base-independent: same working tree → same fingerprint with or without a base", async () => {
+    // Diverge a feature branch from main, then dirty the working tree.
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "feature-only.ts"), "// feature\n");
+    git(workDir, ["add", "feature-only.ts"]);
+    git(workDir, [...COMMIT_C, "commit", "-m", "feature commit"]);
+    write(path.join(workDir, "a.ts"), "export const a = 7;\n"); // uncommitted
+
+    // The display file list differs by base, but the working-tree
+    // fingerprint must not — it's always computed vs HEAD.
+    const noBase = await getChanges(workDir);
+    const withBase = await getChanges(workDir, "main");
+    if (noBase.kind !== "ok" || withBase.kind !== "ok") throw new Error("not ok");
+    expect(withBase.files.length).toBeGreaterThan(noBase.files.length);
+    expect(withBase.fingerprint).toBe(noBase.fingerprint);
+  });
+});

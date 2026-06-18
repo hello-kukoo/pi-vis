@@ -73,6 +73,15 @@ export interface DiffStore {
   badge: DiffBadge | null;
   badgeKind: DiffPhase;
 
+  // true when the working tree's content fingerprint has moved since the
+  // last full viewer refresh — i.e. a tool call actually changed files (as
+  // opposed to a read-only tool). Shown as a stale indicator by the refresh
+  // button. Recomputed on every badge refresh; cleared by refresh().
+  stale: boolean;
+  // Working-tree fingerprint as of the last full viewer refresh (the diff
+  // the user is currently looking at). null until the first refresh.
+  baselineFingerprint: string | null;
+
   // mutators
   openViewer: (sessionId: SessionId, root: string) => void;
   closeViewer: () => void;
@@ -148,6 +157,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     badge: null,
     badgeKind: "loading",
+    stale: false,
+    baselineFingerprint: null,
 
     // branch selection
     branches: [],
@@ -176,6 +187,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         // Reset branch selection on open.
         selectedBase: null,
         includeRemoteBranches: includeRemote,
+        stale: false,
+        baselineFingerprint: null,
       });
       void get().refresh();
       void get().loadBranches();
@@ -204,6 +217,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       const root = get().root;
       if (root === null) return;
       const myGen = ++generation;
+      // Note: `stale` is intentionally NOT cleared here. It is cleared (and
+      // the baseline fingerprint re-captured) only on success, in
+      // handleChangesResult — so a refresh that errors out leaves the dot up,
+      // since the displayed content is definitely out of date.
       // Show loading only on first load (when fileState is empty).
       const isFirst = get().fileState.size === 0;
       if (isFirst) {
@@ -477,6 +494,17 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       },
       badgeKind: "ready",
     });
+    // While the viewer is open, this per-tool-call refresh doubles as the
+    // staleness probe: the dot lights iff the working tree's fingerprint has
+    // moved off the baseline captured by the last full viewer refresh. The
+    // fingerprint is base-independent, so this holds even when the viewer is
+    // showing a branch-relative diff. It can also *clear* a false stale (an
+    // edit that was reverted returns to the baseline).
+    const s = get();
+    if (s.open) {
+      const stale = s.baselineFingerprint !== null && res.fingerprint !== s.baselineFingerprint;
+      if (s.stale !== stale) set({ stale });
+    }
   }
 });
 
@@ -534,6 +562,11 @@ function handleChangesResult(
     truncated: res.truncated,
     fileState,
     selectedPath: isFirst && res.files.length > 0 ? res.files[0]!.path : get().selectedPath,
+    // A full viewer refresh is the user seeing current state: re-baseline the
+    // fingerprint and clear staleness. Subsequent badge refreshes compare
+    // against this.
+    baselineFingerprint: res.fingerprint,
+    stale: false,
   });
 }
 

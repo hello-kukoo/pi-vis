@@ -27,6 +27,12 @@ export type GitChangesResult =
       files: GitChangedFile[];
       /** True when the file list was capped (see WP1b: 500-file limit). */
       truncated: boolean;
+      /** Content hash of the working tree vs HEAD (base-independent), plus
+       *  untracked file contents (the first 200 by name; beyond that, only
+       *  a file's presence is hashed, not its contents). Lets the diff viewer
+       *  tell a real edit from a read-only tool call without inspecting tool
+       *  names. */
+      fingerprint: string;
     }
   | { kind: "not-a-repo" }
   | { kind: "git-missing" }

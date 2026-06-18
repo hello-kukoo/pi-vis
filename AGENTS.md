@@ -129,7 +129,7 @@ src/
 - `session.sendCommand` — sends PiRpcCommand, returns PiRpcResponse
 - `session.respondToUiRequest` — sends ExtensionUiResponse back to pi
 - `settings.get` / `settings.set`
-- `git.changes` / `git.fileDiff` (both accept optional `base?: string` for branch-relative diffs)
+- `git.changes` / `git.fileDiff` (both accept optional `base?: string` for branch-relative diffs). `git.changes` also returns a `fingerprint` — a content hash of the working tree vs HEAD (always HEAD, regardless of `base`) plus untracked contents — that the diff viewer uses to detect whether tool calls actually changed files.
 - `git.branches` — list local + remote branches
 - `app.versions`
 - `auth.status` / `auth.saveApiKey` / `auth.remove`
@@ -159,7 +159,7 @@ All renderer state uses **Zustand** stores:
 
 - **`sessions-store`** — The primary store. Maps `SessionId → SessionViewState` (transcript, streaming status, pending dialogs, status segments, widgets, stats, model info, thinking level, commands). Handles all mutations via IPC calls + local state updates.
 - **`transcript.ts`** — Pure reducer (not a store). `applyPiEvent(state, event) → TranscriptState` transforms pi streaming events into `TypedTranscriptBlock[]` (user, assistant, tool_call, bash, compaction, custom_message, error). Uses pending-echo matching to deduplicate user messages that pi echoes back. The `error` block surfaces pi's `stopReason: "error"` / `errorMessage` turns (provider failures) so a dropped stream is visible instead of looking like a silent cut-off.
-- **`diff-store`** — Manages diff viewer: file list from `git.changes` (optionally branch-relative via `base`), lazy Shiki tokenization, expand/collapse gap state, unified/split view mode, base branch selection with `loadBranches`/`setBase`/`setIncludeRemoteBranches`
+- **`diff-store`** — Manages diff viewer: file list from `git.changes` (optionally branch-relative via `base`), lazy Shiki tokenization, expand/collapse gap state, unified/split view mode, base branch selection with `loadBranches`/`setBase`/`setIncludeRemoteBranches`. Tracks a `stale` flag for the refresh-button dot: each per-tool-call badge refresh compares `git.changes`'s `fingerprint` against the `baselineFingerprint` captured at the last full viewer refresh, so the dot lights only when files actually changed (and clears if an edit is reverted).
 - **`settings-store`** — Renderer mirror of app settings; applies fonts and color scheme.
 
 ### Session Lifecycle

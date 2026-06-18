@@ -15,6 +15,7 @@
 //     renderer can show a specific empty state.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type {
@@ -42,6 +43,9 @@ const BINARY_SNIFF_BYTES = 8192;
 const GIT_TIMEOUT_MS = 15_000;
 /** Buffer ceiling — list output is small; file contents are read via fs. */
 const MAX_BUFFER = 64 * 1024 * 1024;
+/** Git's well-known empty-tree object — used to diff a HEAD-less repo's
+ *  working tree against "nothing" for the content fingerprint. */
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 // ── exec helpers ───────────────────────────────────────────────────────
 
@@ -204,6 +208,28 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
     }
   }
 
+  // Working-tree content fingerprint. Always computed vs HEAD (never the
+  // display `base`), so a no-base badge refresh and a base-scoped viewer
+  // refresh produce identical, comparable fingerprints. Hashing the full
+  // patch text — not just numstat — closes the line-count-collision case
+  // (an edit that preserves insertions/deletions but changes content).
+  // Untracked files never appear in `git diff`, so they're folded in
+  // separately during the read loop below.
+  const fpHash = createHash("sha1");
+  {
+    const fpRef = hasHead ? "HEAD" : EMPTY_TREE_SHA;
+    try {
+      const r = await execGitText(["diff", "-M", "--no-color", fpRef], repoRoot, env);
+      fpHash.update(r.stdout);
+    } catch (err) {
+      // Non-fatal (e.g. a pathologically large diff exceeding maxBuffer):
+      // fold the error in so the fingerprint is stable for an unchanged
+      // failing state rather than silently masking real edits.
+      fpHash.update(`__diff_error__:${errorMessage(err)}`);
+    }
+  }
+  fpHash.update("\0untracked\0");
+
   // Step 5: untracked files.
   const untracked: GitChangedFile[] = [];
   let untrackedOut = "";
@@ -224,6 +250,14 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
     const counted = i < UNTRACKED_COUNT_LIMIT;
     let insertions = 0;
     let binary = false;
+    // Per-file fingerprint descriptor. The path is always hashed (so a
+    // new/removed untracked file moves the fingerprint); content is hashed
+    // for files we read anyway, falling back to size for binary/large ones.
+    // Files past UNTRACKED_COUNT_LIMIT contribute only their path (no stat,
+    // matching the line-counter's cap) — a content-only edit to one of those
+    // won't move the fingerprint, which the `fingerprint` doc notes.
+    // Reuses the read the line-counter already does — no extra I/O.
+    let fileFp = "uncounted";
     if (counted) {
       const filePath = path.join(repoRoot, p);
       try {
@@ -235,20 +269,31 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
             const { bytesRead } = await fd.read(buf, 0, BINARY_SNIFF_BYTES, 0);
             if (hasNulByte(buf.subarray(0, bytesRead))) {
               binary = true;
+              fileFp = `bin:${stat.size}`;
             } else {
               const full = await fs.readFile(filePath, "utf8");
               insertions = countLines(full);
+              fileFp = full;
             }
           } finally {
             await fd.close();
           }
+        } else {
+          // Directory, non-file, or over the read cap — size is the only
+          // cheap content proxy.
+          fileFp = `skip:${stat.size}`;
         }
       } catch (err) {
         // Skip-on-error: a file may have been deleted between ls-files
         // and our read. Drop counts rather than fail the whole call.
+        fileFp = "err";
         console.warn("untracked read failed:", p, err);
       }
     }
+    fpHash.update(p);
+    fpHash.update("\0");
+    fpHash.update(fileFp);
+    fpHash.update("\0");
     untracked.push({
       path: p,
       status: "A",
@@ -287,6 +332,7 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
     repoRoot,
     files: capped,
     truncated,
+    fingerprint: fpHash.digest("hex"),
   };
 }
 
