@@ -44,8 +44,16 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Grow to claim all slack between the traffic lights and the
+     right-anchored controls cluster, and shrink (truncating with
+     ellipsis) only when there genuinely isn't room. min-width: 0 lets
+     flexbox shrink the button below its content's intrinsic width so
+     the ellipsis can engage; flex: 1 makes it fill the .session-header__name
+     container (yielding to the WorktreeChip, which is flex-shrink: 0).
+     No fixed max-width — the cutoff is driven by viewport width, the
+     same pattern VS Code / Cursor / Linear use for title-bar titles. */
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 14.286rem;
   padding: 0.286rem 0.429rem;
   border-radius: var(--mcm-radius-sm);
   /* Interactive element inside the titlebar's drag region — must be
