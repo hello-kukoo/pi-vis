@@ -126,8 +126,18 @@ export function Sidebar({
       const ws = workspaces.get(wsPath);
       if (!ws) return [];
 
-      // Build mtime lookup: filePath → mtime for stored sessions
+      // Build lookups from stored-session summaries: filePath → mtime, and
+      // filePath → last user-activity (prompts / `!bash`). The activity
+      // timestamp is preferred for ordering because merely opening a session
+      // bumps its file mtime (pi appends a `session_info` entry) without any
+      // real user work, which previously let a session you only glanced at
+      // leapfrog one you actively worked in.
       const mtimeByFile = new Map((ws.sessions ?? []).map((s) => [s.filePath, s.mtime]));
+      const lastActiveByFile = new Map(
+        (ws.sessions ?? [])
+          .filter((s) => s.lastActiveAt !== undefined)
+          .map((s) => [s.filePath, s.lastActiveAt as number]),
+      );
 
       // Live sessions: those with content or the active one
       const liveSessions = activeSessionsForWs.filter((s) => {
@@ -173,7 +183,11 @@ export function Sidebar({
           sessionId: s.sessionId,
           name: s.sessionName ?? s.sessionTitle ?? "Untitled session",
           filePath: s.sessionFile ?? undefined,
-          sortKey: s.lastActivityAt ?? mtimeByFile.get(s.sessionFile ?? "") ?? 0,
+          sortKey:
+            s.lastActivityAt ??
+            (s.sessionFile ? lastActiveByFile.get(s.sessionFile) : undefined) ??
+            (s.sessionFile ? mtimeByFile.get(s.sessionFile) : undefined) ??
+            0,
         });
       }
       for (const s of storedSessions) {
@@ -184,7 +198,7 @@ export function Sidebar({
           preview: s.preview ?? "",
           mtime: s.mtime,
           messageCount: s.messageCount,
-          sortKey: s.mtime,
+          sortKey: s.lastActiveAt ?? s.mtime,
         });
       }
 

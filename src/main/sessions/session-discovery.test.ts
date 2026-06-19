@@ -184,6 +184,121 @@ describe("listSessionsForWorkspace", () => {
     expect(meta.messageCount).toBe(0);
     expect(meta.preview).toBe("");
   });
+
+  it("extractSessionMeta reports lastActiveAt as the newest user-message timestamp", () => {
+    const cwd = path.join(root, "workspace-A");
+    const filePath = writeSession("workspace-A", "session1.jsonl", [
+      { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
+      // older user message
+      {
+        id: "e1",
+        parentId: "abc",
+        timestamp: "2024-01-01T00:00:00Z",
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "first" }],
+          timestamp: 1_700_000_000_000,
+        },
+      },
+      // a later session_info entry — must NOT count as activity (passive open)
+      {
+        id: "e2",
+        parentId: "e1",
+        timestamp: "2024-06-01T00:00:00Z",
+        type: "session_info",
+        name: "Glanced",
+      },
+      // newest user message — this is the activity we want
+      {
+        id: "e3",
+        parentId: "e2",
+        timestamp: "2024-02-01T00:00:00Z",
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "second" }],
+          timestamp: 1_700_000_001_000,
+        },
+      },
+    ]);
+    const meta = extractSessionMeta(filePath);
+    // Newest user message is e3 at 2024-02-01 (1706745600000). The later
+    // session_info entry (e2, 2024-06-01) must NOT count as activity.
+    expect(meta.lastActiveAt).toBe(Date.parse("2024-02-01T00:00:00Z"));
+  });
+
+  it("extractSessionMeta returns null lastActiveAt when there are no user messages", () => {
+    const cwd = path.join(root, "workspace-A");
+    const filePath = writeSession("workspace-A", "session1.jsonl", [
+      { type: "session", version: 3, id: "abc", timestamp: "2024-01-01T00:00:00Z", cwd },
+      {
+        id: "e1",
+        parentId: "abc",
+        timestamp: "2024-01-01T00:00:00Z",
+        type: "session_info",
+        name: "Empty",
+      },
+    ]);
+    const meta = extractSessionMeta(filePath);
+    expect(meta.lastActiveAt).toBeNull();
+  });
+
+  it("orders sessions by last user activity, not file mtime (passive open must not promote)", async () => {
+    const cwd = path.join(root, "workspace-A");
+    // Session A: actively worked in recently (user message at 2024-02-01),
+    // but its file mtime is old.
+    const filePathA = writeSession("workspace-A", "active.jsonl", [
+      { type: "session", version: 3, id: "A", timestamp: "2024-01-01T00:00:00Z", cwd },
+      {
+        id: "a1",
+        parentId: "A",
+        timestamp: "2024-02-01T00:00:00Z",
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "real work" }],
+          timestamp: 1_700_000_001_000,
+        },
+      },
+    ]);
+    // Session B: only glanced at (a passive open appended a fresh
+    // session_info), so its file mtime is the newest of the two even though
+    // the last real user activity is older.
+    const filePathB = writeSession("workspace-A", "glanced.jsonl", [
+      { type: "session", version: 3, id: "B", timestamp: "2024-01-01T00:00:00Z", cwd },
+      {
+        id: "b1",
+        parentId: "B",
+        timestamp: "2024-01-15T00:00:00Z",
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "old work" }],
+          timestamp: 1_700_000_000_000,
+        },
+      },
+      {
+        id: "b2",
+        parentId: "b1",
+        timestamp: "2024-12-01T00:00:00Z",
+        type: "session_info",
+        name: "Glanced",
+      },
+    ]);
+    // Force B's file mtime to be newer than A's (simulating a passive open
+    // touch), even though A's last user activity is newer.
+    const oldMtime = new Date("2024-01-01T00:00:00Z");
+    const newMtime = new Date("2024-12-01T00:00:00Z");
+    fs.utimesSync(filePathA, oldMtime, oldMtime);
+    fs.utimesSync(filePathB, newMtime, newMtime);
+
+    const summaries = await listSessionsForWorkspace(cwd);
+    expect(summaries).toHaveLength(2);
+    // A (newer user activity) must rank above B (newer mtime only).
+    expect(summaries[0]?.id).toBe("A");
+    expect(summaries[1]?.id).toBe("B");
+  });
 });
 
 describe("worktree session discovery", () => {

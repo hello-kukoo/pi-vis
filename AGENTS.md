@@ -40,7 +40,7 @@ src/
 │   │   └── locate-pi.ts     # Finds pi binary via $SHELL/which/override; validates `--version` with login-shell env (pi's `env node` shebang needs node on PATH); caches result
 │   ├── sessions/            # Session lifecycle
 │   │   ├── session-registry.ts   # SessionId → PiProcess lifecycle; MAX_IDLE_PROCESSES=10
-│   │   ├── session-discovery.ts  # Scans ~/.pi/agent/sessions/ for workspace-linked session files
+│   │   ├── session-discovery.ts  # Scans ~/.pi/agent/sessions/ for workspace-linked session files; extracts per-session `lastActiveAt` (newest user-message timestamp) used as the persistent sidebar sort key (preferred over file mtime, which passive opens bump)
 │   │   └── history-loader.ts     # Reads session JSONL files into TranscriptBlock[]
 │   └── git/
 │       └── git.ts           # Git diff/changes via child_process; worktree-aware

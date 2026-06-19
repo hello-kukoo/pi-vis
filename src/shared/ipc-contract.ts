@@ -20,6 +20,11 @@ export interface SessionSummary {
   id: string;
   name?: string | undefined;
   mtime: number;
+  /** Epoch-ms of the most recent user-authored entry (prompt / `!bash`),
+   *  read from the session file. Absent for sessions with no user messages,
+   *  in which case callers fall back to `mtime`. Drives the persistent
+   *  sidebar ordering — see `extractSessionMeta`. */
+  lastActiveAt?: number | undefined;
   preview: string;
   messageCount: number;
   cwd: string;

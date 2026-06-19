@@ -35,14 +35,36 @@ function readFirstLine(filePath: string): string | null {
   }
 }
 
+/** Parse a session-file entry timestamp (ISO string or epoch-ms number)
+ *  into epoch milliseconds. Returns `undefined` for missing/unparseable
+ *  values so callers can skip them when computing a max. */
+function toEpochMs(ts: unknown): number | undefined {
+  if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+  if (typeof ts === "string") {
+    const ms = Date.parse(ts);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
+}
+
 export function extractSessionMeta(filePath: string): {
   preview: string;
   messageCount: number;
   name: string | null;
+  /** Epoch-ms of the most recent *user-authored* entry (prompt or `!bash`),
+   *  derived from the session file. Unlike `mtime`, this is unaffected by
+   *  passive operations (e.g. merely opening a session, which makes pi
+   *  append a `session_info` entry and bump the file mtime). Used as the
+   *  persistent sidebar sort key so a session you actively worked in
+   *  stays above ones you only glanced at. `null` when the file has no
+   *  user messages (e.g. brand-new/empty sessions) — callers fall back to
+   *  `mtime`. */
+  lastActiveAt: number | null;
 } {
   let preview = "";
   let messageCount = 0;
   let name: string | null = null;
+  let lastActiveAt: number | null = null;
   try {
     const content = fs.readFileSync(filePath, "utf8");
     const lines = content.split("\n");
@@ -55,6 +77,13 @@ export function extractSessionMeta(filePath: string): {
           const msg = entry["message"] as Record<string, unknown> | undefined;
           if (msg && msg["role"] === "user") {
             messageCount++;
+            // Track the most recent user-authored activity. Prefer the
+            // entry-level timestamp; fall back to the message-level one
+            // (pi v3 also stamps the nested message object).
+            const ms = toEpochMs(entry["timestamp"]) ?? toEpochMs(msg["timestamp"]);
+            if (ms !== undefined && (lastActiveAt === null || ms > lastActiveAt)) {
+              lastActiveAt = ms;
+            }
             if (!preview) {
               const body = msg["content"];
               if (typeof body === "string") {
@@ -82,7 +111,7 @@ export function extractSessionMeta(filePath: string): {
   } catch {
     /* ignore */
   }
-  return { preview, messageCount, name };
+  return { preview, messageCount, name, lastActiveAt };
 }
 
 /**
@@ -179,13 +208,14 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
 
       if (!header.success) continue;
 
-      const { preview, messageCount, name } = extractSessionMeta(filePath);
+      const { preview, messageCount, name, lastActiveAt } = extractSessionMeta(filePath);
 
       const summary: SessionSummary = {
         filePath,
         id: header.data.id,
         ...(name ? { name } : {}),
         mtime,
+        ...(lastActiveAt !== null ? { lastActiveAt } : {}),
         preview,
         messageCount,
         cwd: header.data.cwd,
@@ -200,8 +230,11 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
     }
   }
 
-  // Sort by most recent first
-  results.sort((a, b) => b.mtime - a.mtime);
+  // Sort by most recent *user activity* first (prompts / `!bash`), falling
+  // back to file mtime for sessions with no user messages (e.g. brand-new or
+  // externally-created sessions). This is the persistent ordering the sidebar
+  // relies on: unlike mtime it isn't bumped by merely opening a session.
+  results.sort((a, b) => (b.lastActiveAt ?? b.mtime) - (a.lastActiveAt ?? a.mtime));
 
   // Filter out archived sessions
   const archived = new Set(getSettings().archivedSessions);
