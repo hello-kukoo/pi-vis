@@ -161,25 +161,15 @@
 }
 
 /* Stale indicator — shown next to the refresh button when tool calls may
-   have changed the working tree since the last refresh. Mirrors the mauve
-   pulsing "streaming" dot used for sessions in the sidebar. */
+   have changed the working tree since the last refresh. A steady mauve dot
+   (no pulse): the session streaming dot pulses, but this staleness marker
+   just needs to be noticed, not animated. */
 .diff-viewer__stale-dot {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
   background: var(--ctp-mauve);
-  animation: diff-stale-pulse 1s ease-in-out infinite;
   flex-shrink: 0;
-}
-
-@keyframes diff-stale-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
 }
 
 @keyframes diff-spin {
@@ -190,10 +180,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .diff-viewer__icon-btn--spinning svg {
-    animation: none;
-  }
-
-  .diff-viewer__stale-dot {
     animation: none;
   }
 }

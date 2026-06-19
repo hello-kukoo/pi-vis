@@ -18,6 +18,21 @@ export const AppSettingsSchema = z.object({
   lastActiveWorkspace: z.string().nullable().default(null),
   lastUsedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().default(null),
   lastUsedThinkingLevel: ThinkingLevelSchema.nullable().default(null),
+  // Worktree associations: worktreePath → identity. Persisted so worktree
+  // sessions survive app relaunch (their session-file cwd is the worktree,
+  // not the parent workspace, so discovery needs this map to re-attach
+  // them to the right workspace and re-spawn pi in the worktree cwd).
+  worktrees: z
+    .record(
+      z.string(),
+      z.object({
+        workspacePath: z.string(),
+        branch: z.string(),
+        name: z.string(),
+        base: z.string(),
+      }),
+    )
+    .default({}),
   // Catppuccin flavor applied at runtime via CSS vars (and Shiki themes).
   // Enum literals must match the keys exported from catppuccin.ts.
   colorScheme: z.enum(["latte", "frappe", "macchiato", "mocha"]).default("mocha"),

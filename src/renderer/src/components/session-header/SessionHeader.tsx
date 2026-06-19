@@ -27,7 +27,8 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   const setSessionFile = useSessionsStore((s) => s.setSessionFile);
   const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
   const setThinkingLevel = useSessionsStore((s) => s.setThinkingLevel);
-  const { settings } = useSettingsStore();
+  const { settings, update: updateSettings } = useSettingsStore();
+  const resumed = session?.resumed ?? false;
 
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
@@ -63,8 +64,11 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
         if (modelAppliedRef.current) return;
         modelAppliedRef.current = true;
 
-        // Prefer last-used model from settings, fall back to pi's current
-        const lum = settings.lastUsedModel;
+        // "Remember last selected model" applies ONLY to brand-new sessions.
+        // Resumed sessions keep the model pi restored from the session file
+        // (currentModelId below) — they must not be clobbered by the global
+        // last-used preference.
+        const lum = resumed ? undefined : settings.lastUsedModel;
         const match = lum ? models.find((m) => m.id === lum.modelId) : undefined;
 
         if (match?.provider) {
@@ -83,7 +87,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
         }
       })
       .catch(() => {});
-  }, [sessionId, live, settings.lastUsedModel, setAvailableModels, setCurrentModel]);
+  }, [sessionId, live, resumed, settings.lastUsedModel, setAvailableModels, setCurrentModel]);
 
   // Authoritative state on mount / session switch: seed the store with pi's
   // current model and thinking level. This makes the dropdown match pi even
@@ -110,6 +114,18 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
             setThinkingLevel(sessionId, parsed.data);
           }
         }
+        // "Remember last selected thinking level" applies ONLY to new
+        // sessions; resumed sessions keep the level pi restored from the
+        // session file (seeded above).
+        if (!resumed && settings.lastUsedThinkingLevel) {
+          window.pivis
+            .invoke("session.sendCommand", {
+              sessionId,
+              command: { type: "set_thinking_level", level: settings.lastUsedThinkingLevel },
+            })
+            .then(() => setThinkingLevel(sessionId, settings.lastUsedThinkingLevel!))
+            .catch(() => {});
+        }
         if (raw.model && typeof raw.model.id === "string") {
           setCurrentModel(sessionId, raw.model.id);
         }
@@ -124,7 +140,16 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     return () => {
       cancelled = true;
     };
-  }, [sessionId, live, setThinkingLevel, setCurrentModel, setSessionName, setSessionFile]);
+  }, [
+    sessionId,
+    live,
+    resumed,
+    settings.lastUsedThinkingLevel,
+    setThinkingLevel,
+    setCurrentModel,
+    setSessionName,
+    setSessionFile,
+  ]);
 
   // Poll stats after each agent_end and periodically while streaming
   useEffect(() => {
@@ -276,6 +301,7 @@ export function SessionControls({
   const setCurrentModel = useSessionsStore((s) => s.setCurrentModel);
   const setThinkingLevel = useSessionsStore((s) => s.setThinkingLevel);
   const addToast = useSessionsStore((s) => s.addToast);
+  const updateSettings = useSettingsStore((s) => s.update);
 
   // ── Model picker state ────────────────────────────────────────────
   const [modelOpen, setModelOpen] = useState(false);
@@ -331,6 +357,15 @@ export function SessionControls({
     async (model: ModelInfo) => {
       setModelOpen(false);
       setCurrentModel(sessionId, model.id);
+      // Persist as the global "last selected" so the NEXT new session
+      // picks it up. (Doesn't affect resumed sessions — those keep their
+      // own persisted model.)
+      void updateSettings({
+        lastUsedModel: {
+          provider: model.provider ?? model.id.split("/")[0] ?? "",
+          modelId: model.id,
+        },
+      });
       try {
         await window.pivis.invoke("session.sendCommand", {
           sessionId,
@@ -345,7 +380,7 @@ export function SessionControls({
         addToast(sessionId, `Failed to set model: ${String(err)}`, "error");
       }
     },
-    [sessionId, addToast, setCurrentModel],
+    [sessionId, addToast, setCurrentModel, updateSettings],
   );
 
   // ── Thinking level picker state ───────────────────────────────────
@@ -372,6 +407,8 @@ export function SessionControls({
       lastRequestedThinkingLevelRef.current = level;
       const validated = ThinkingLevelSchema.parse(level);
       setThinkingLevel(sessionId, validated);
+      // Persist as the global "last selected" so the next new session uses it.
+      void updateSettings({ lastUsedThinkingLevel: validated });
       try {
         await window.pivis.invoke("session.sendCommand", {
           sessionId,
@@ -402,7 +439,7 @@ export function SessionControls({
         lastRequestedThinkingLevelRef.current = null;
       }
     },
-    [sessionId, setThinkingLevel, addToast],
+    [sessionId, setThinkingLevel, addToast, updateSettings],
   );
 
   useEffect(() => {
@@ -628,8 +665,10 @@ function WorktreeChip({
       title={path ? `${detail} · click to copy path` : detail}
       onClick={() => {
         if (!path) return;
-        void navigator.clipboard.writeText(path);
-        addToast(sessionId, "Worktree path copied", "info");
+        void window.pivis
+          .invoke("clipboard.writeText", { text: path })
+          .then(() => addToast(sessionId, "Worktree path copied", "info"))
+          .catch(() => addToast(sessionId, "Failed to copy worktree path", "error"));
       }}
     >
       ⑂ {name}

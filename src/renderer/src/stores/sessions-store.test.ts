@@ -141,6 +141,15 @@ describe("createSession(name) and tab lifecycle", () => {
     expect(useSessionsStore.getState().activeSessionId).toBeNull();
   });
 
+  it("createSession marks resumed sessions (with file) vs new sessions (no file)", () => {
+    // New session: no file → resumed=false (last-used model/thinking applies)
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.resumed).toBe(false);
+    // Resumed session: opened from a file → resumed=true (keeps its own model)
+    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE, "/f/b.jsonl");
+    expect(useSessionsStore.getState().sessions.get(SESSION_B)?.resumed).toBe(true);
+  });
+
   it("removeSession removes from sessions and workspace, clears activeSessionId only when pointing at it", () => {
     useSessionsStore.getState().addWorkspace(WORKSPACE);
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);

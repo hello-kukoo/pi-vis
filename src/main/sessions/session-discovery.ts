@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { SessionSummary } from "@shared/ipc-contract.js";
+import type { SessionSummary, WorktreeIdentity } from "@shared/ipc-contract.js";
 import { SessionHeaderSchema } from "@shared/session-file/entries.js";
 import { getSettings } from "../settings-store.js";
 
@@ -85,11 +85,51 @@ export function extractSessionMeta(filePath: string): {
   return { preview, messageCount, name };
 }
 
+/**
+ * Resolve a session file to its worktree identity, if it belongs to a
+ * known worktree of `workspacePath`. Reads the header `cwd` and looks it
+ * up in settings.worktrees (persisted at worktree-creation time). Returns
+ * undefined for normal workspace sessions, for sessions whose worktree
+ * was deleted from disk (so pi spawns in the workspace instead of a
+ * missing cwd), or when the worktree belongs to a different workspace.
+ */
+export function resolveWorktreeForFile(
+  filePath: string,
+  workspacePath: string,
+): WorktreeIdentity | undefined {
+  const first = readFirstLine(filePath);
+  if (!first) return undefined;
+  let header: { cwd?: unknown } | undefined;
+  try {
+    header = JSON.parse(first) as { cwd?: unknown };
+  } catch {
+    return undefined;
+  }
+  const cwd = typeof header?.cwd === "string" ? header.cwd : undefined;
+  if (!cwd || cwd === workspacePath) return undefined;
+  const wt = getSettings().worktrees?.[cwd];
+  if (!wt || wt.workspacePath !== workspacePath) return undefined;
+  // Don't claim a worktree whose directory no longer exists — the session
+  // would otherwise try to spawn pi in a missing cwd. Fall back to the
+  // workspace so the session is still openable.
+  if (!fs.existsSync(cwd)) return undefined;
+  return { path: cwd, branch: wt.branch, name: wt.name, base: wt.base };
+}
+
 export async function listSessionsForWorkspace(workspacePath: string): Promise<SessionSummary[]> {
   const results: SessionSummary[] = [];
   const SESSIONS_DIR = getSessionsDir();
 
   if (!fs.existsSync(SESSIONS_DIR)) return results;
+
+  // Worktrees belonging to this workspace. A session whose header `cwd` is
+  // one of these worktree paths is shown under the parent workspace even
+  // though its file lives elsewhere on disk (pi writes the worktree cwd
+  // into the header). Without this, worktree sessions vanish on relaunch.
+  const worktreeCwds = new Set<string>();
+  for (const [wtPath, wt] of Object.entries(getSettings().worktrees ?? {})) {
+    if (wt.workspacePath === workspacePath) worktreeCwds.add(wtPath);
+  }
 
   let subdirs: string[];
   try {
@@ -121,7 +161,7 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
       // Check cache
       const cached = cache.get(filePath);
       if (cached && cached.mtime === mtime) {
-        if (cached.summary.cwd === workspacePath) {
+        if (cached.summary.cwd === workspacePath || worktreeCwds.has(cached.summary.cwd)) {
           results.push(cached.summary);
         }
         continue;
@@ -155,7 +195,7 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
       // enumerating. Without this, switching workspaces re-parses every
       // file from disk on each call.
       cache.set(filePath, { mtime, summary });
-      if (header.data.cwd !== workspacePath) continue;
+      if (header.data.cwd !== workspacePath && !worktreeCwds.has(header.data.cwd)) continue;
       results.push(summary);
     }
   }

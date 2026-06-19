@@ -392,7 +392,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           window.dispatchEvent(new CustomEvent("pivis:open-login"));
         },
         copyToClipboard: async (t: string) => {
-          await navigator.clipboard.writeText(t);
+          await window.pivis.invoke("clipboard.writeText", { text: t });
         },
         getAvailableModels: (sid: SessionId): ModelInfo[] => {
           const s = useSessionsStore.getState().sessions.get(sid);

@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import type { SessionId } from "@shared/ids.js";
-import type { SessionStatus } from "@shared/ipc-contract.js";
+import type { SessionStatus, WorktreeIdentity } from "@shared/ipc-contract.js";
 import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
-import { app, ipcMain } from "electron";
+import { app, clipboard, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
 import {
   getAuthStatus,
@@ -19,7 +19,11 @@ import { createWorktree, getBranches, getChanges, getFileDiff } from "./git/git.
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
 import { loadHistory } from "./sessions/history-loader.js";
-import { extractSessionMeta, listSessionsForWorkspace } from "./sessions/session-discovery.js";
+import {
+  extractSessionMeta,
+  listSessionsForWorkspace,
+  resolveWorktreeForFile,
+} from "./sessions/session-discovery.js";
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { checkForUpdates, startUpdate } from "./updates.js";
@@ -90,6 +94,7 @@ export function initIpc(win: BrowserWindow): void {
       if (!registry) throw new Error("Registry not initialized");
       let name: string | null = null;
       let preview: string | null = null;
+      let worktree: WorktreeIdentity | undefined;
       if (args.sessionFile) {
         if (!fs.existsSync(args.sessionFile)) {
           return { outcome: "missing" as const };
@@ -97,6 +102,9 @@ export function initIpc(win: BrowserWindow): void {
         const meta = extractSessionMeta(args.sessionFile);
         name = meta.name;
         preview = meta.preview || null;
+        // Resolve worktree identity for resumed worktree sessions so the
+        // renderer can show the chip and pi spawns in the worktree cwd.
+        worktree = resolveWorktreeForFile(args.sessionFile, args.workspacePath);
         const existing = registry.getByFile(args.sessionFile);
         if (existing && existing.status !== "exited" && existing.status !== "failed") {
           return {
@@ -105,18 +113,20 @@ export function initIpc(win: BrowserWindow): void {
             name,
             preview,
             sessionStatus: existing.status,
+            ...(worktree ? { worktree } : {}),
           };
         }
         // exited/failed records fall through: openSession clears the stale
         // byFile mapping and creates a fresh cold record (existing behavior).
       }
-      const sessionId = registry.openSession(args.workspacePath, args.sessionFile);
+      const sessionId = registry.openSession(args.workspacePath, args.sessionFile, worktree?.path);
       return {
         outcome: "opened" as const,
         sessionId,
         name,
         preview,
         sessionStatus: "cold" as const,
+        ...(worktree ? { worktree } : {}),
       };
     },
   );
@@ -144,6 +154,18 @@ export function initIpc(win: BrowserWindow): void {
       try {
         const result = await createWorktree(rec.workspacePath, args.base);
         if (result.kind === "error") return { ok: false, error: result.message };
+        // Persist the worktree association so the session (and its chip)
+        // survive an app relaunch: discovery re-attaches worktree-cwd
+        // session files to this workspace, and session.open re-spawns
+        // pi in the worktree directory.
+        const worktrees = { ...getSettings().worktrees };
+        worktrees[result.worktreePath] = {
+          workspacePath: rec.workspacePath,
+          branch: result.branch,
+          name: result.name,
+          base: result.base,
+        };
+        saveSettings({ worktrees });
         registry?.setWorktreeAndRespawn(
           args.sessionId,
           result.worktreePath,
@@ -276,6 +298,15 @@ export function initIpc(win: BrowserWindow): void {
       electron: process.versions["electron"] ?? "",
       node: process.versions["node"] ?? "",
     };
+  });
+
+  // ── Clipboard ────────────────────────────────────────────────────────
+  // Electron's renderer `navigator.clipboard` API is unreliable (silently
+  // no-ops when the window isn't focused / under some security contexts),
+  // so clipboard writes go through the main process's clipboard module.
+  ipcMain.handle("clipboard.writeText", async (_evt, args: { text: string }) => {
+    clipboard.writeText(args.text);
+    return { ok: true as const };
   });
 
   // ── Git diff viewer (WP1) ───────────────────────────────────────────

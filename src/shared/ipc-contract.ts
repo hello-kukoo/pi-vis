@@ -26,6 +26,15 @@ export interface SessionSummary {
 
 export type SessionStatus = "cold" | "starting" | "ready" | "exited" | "failed";
 
+/** A worktree a session runs in. Persisted in settings.worktrees keyed
+ *  by `path` so worktree sessions survive app relaunch. */
+export interface WorktreeIdentity {
+  path: string;
+  branch: string;
+  name: string;
+  base: string;
+}
+
 export interface TranscriptBlock {
   id: string;
   type: string;
@@ -42,6 +51,10 @@ export interface IpcInvokeContract {
   "workspace.recents": { req: undefined; res: string[] };
   "workspace.remove": { req: { workspacePath: string }; res: string[] };
   "workspace.listSessions": { req: { workspacePath: string }; res: SessionSummary[] };
+  // Worktree identity attached to a session.open response when the
+  // resumed session file belongs to a known worktree of the workspace.
+  // Lets the renderer show the worktree chip and lets the main process
+  // spawn pi inside the worktree cwd (not the parent workspace).
   "session.open": {
     req: { workspacePath: string; sessionFile?: string | undefined };
     res:
@@ -51,6 +64,7 @@ export interface IpcInvokeContract {
           name: string | null;
           preview: string | null;
           sessionStatus: SessionStatus;
+          worktree?: WorktreeIdentity | undefined;
         }
       | { outcome: "missing" };
   };
@@ -78,6 +92,12 @@ export interface IpcInvokeContract {
   "settings.get": { req: undefined; res: AppSettings };
   "settings.set": { req: Partial<AppSettings>; res: AppSettings };
   "app.versions": { req: undefined; res: { app: string; electron: string; node: string } };
+  // Clipboard write. Routed through the main process because the
+  // renderer's `navigator.clipboard` API is unreliable in Electron
+  // (it silently no-ops when the window isn't focused / under certain
+  // security contexts), which left clicks that "copied" nothing.
+  "clipboard.writeText": { req: { text: string }; res: { ok: true } };
+
   // Git diff viewer (WP1). The requests take an explicit `root` (the
   // tree being diffed) — never a sessionId — so the renderer can swap
   // `workspacePath` for a worktree path later without touching every

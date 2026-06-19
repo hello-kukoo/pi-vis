@@ -52,7 +52,7 @@ export class SessionRegistry {
    * renderer learns the id from the invoke result, and activation happens
    * on focus (see activateSession).
    */
-  openSession(workspacePath: string, sessionFile?: string): SessionId {
+  openSession(workspacePath: string, sessionFile?: string, worktreePath?: string): SessionId {
     if (sessionFile) {
       const resolved = path.resolve(sessionFile);
       const existing = this.byFile.get(resolved);
@@ -70,6 +70,7 @@ export class SessionRegistry {
       sessionId,
       workspacePath,
       sessionFile,
+      worktreePath,
       status: "cold",
       lastActiveAt: Date.now(),
       busy: false,

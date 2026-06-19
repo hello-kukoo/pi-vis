@@ -90,6 +90,12 @@ export interface SessionViewState {
    * falls back to the session file's mtime, keeping them in place when clicked.
    */
   lastActivityAt?: number | undefined;
+  /** True for sessions resumed from a file on disk (had a `sessionFile` at
+   *  open time). False for brand-new sessions. Gates the "remember last
+   *  selected model/thinking level" preference: it applies only to new
+   *  sessions; resumed sessions keep the model/thinking level they had when
+   *  last active (restored by pi from the session file). */
+  resumed: boolean;
 }
 
 interface WorkspaceState {
@@ -263,6 +269,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // Fresh sessions (no file yet) sort to the top; resumed sessions
         // leave this undefined and fall back to their file mtime.
         lastActivityAt: sessionFile ? undefined : Date.now(),
+        // Resumed sessions had a file at open time; new sessions did not.
+        // Gates last-used model/thinking-level preference (new sessions only).
+        resumed: !!sessionFile,
       });
       const workspaces = new Map(state.workspaces);
       const ws = workspaces.get(workspacePath);
@@ -871,6 +880,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         preview ?? undefined,
         res.outcome === "existing" ? sessionStatus : "cold",
       );
+      // Re-attach worktree identity for a resumed worktree session so the
+      // chip renders and git operations target the worktree (not the parent
+      // workspace). New sessions have no worktree and skip this.
+      if (res.worktree) {
+        get().applyWorktree(sessionId, {
+          worktreePath: res.worktree.path,
+          branch: res.worktree.branch,
+          name: res.worktree.name,
+          base: res.worktree.base,
+        });
+      }
       // loadHistory + seedHistory exactly as before. For adopted sessions pi
       // persists entries as it goes, so the file IS the transcript.
       if (sessionFile) {
