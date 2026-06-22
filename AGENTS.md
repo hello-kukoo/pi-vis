@@ -181,8 +181,8 @@ It has a "Create worktree" checkbox and a branch dropdown (reusing the shared
 `BranchDropdown` presentational component). On first send with the box checked:
 
 1. `session.createWorktree` IPC creates a git worktree in a sibling
-   `<repoName>-worktrees/<friendlyName>` directory on a fresh `pivis/<friendlyName>`
-   branch (e.g. `pivis/swift-otter`), cutting from the selected base branch.
+   `<repoName>-worktrees/<friendlyName>` directory on a fresh `pi-vis-<friendlyName>`
+   branch (e.g. `pi-vis-swift-otter`), cutting from the selected base branch.
 2. `setWorktreeAndRespawn()` re-points the session's `cwd` to the worktree and
    re-spawns the pi process there.
 3. The WorktreeBar vanishes; the **WorktreeChip** (`⑂ swift-otter`) appears next to

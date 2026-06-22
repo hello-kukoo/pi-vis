@@ -795,7 +795,7 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
     const MAX_ATTEMPTS = 5;
 
     const collision = async (n: string): Promise<boolean> => {
-      const branchRef = `pivis/${n}`;
+      const branchRef = `pi-vis-${n}`;
       // Check branch existence
       try {
         await execGitText(["rev-parse", "--verify", "--quiet", branchRef], repoRoot, env);
@@ -824,7 +824,7 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
       }
     }
 
-    const branch = `pivis/${name}`;
+    const branch = `pi-vis-${name}`;
     const worktreePath = path.join(worktreesRoot, name);
 
     // `git worktree add -b <branch> <path> <base>`

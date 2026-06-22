@@ -74,7 +74,7 @@ export type GitBranchesResult =
 export interface GitWorktreeCreated {
   /** Absolute path to the worktree directory. */
   worktreePath: string;
-  /** Full branch name, e.g. "pivis/swift-otter". */
+  /** Full branch name, e.g. "pi-vis-swift-otter". */
   branch: string;
   /** The friendly name portion, e.g. "swift-otter". */
   name: string;

@@ -438,7 +438,7 @@ const stub = {
         return {
           ok: true,
           worktreePath: "/tmp/stub-worktree/swift-otter",
-          branch: "pivis/swift-otter",
+          branch: "pi-vis-swift-otter",
           name: "swift-otter",
           base: "main",
         };

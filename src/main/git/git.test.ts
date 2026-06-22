@@ -543,7 +543,7 @@ describe("createWorktree", () => {
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
     expect(result.worktreePath).toBeTruthy();
-    expect(result.branch).toMatch(/^pivis\/[a-z]+-[a-z]+$/);
+    expect(result.branch).toMatch(/^pi-vis-[a-z]+-[a-z]+$/);
     expect(result.name).toMatch(/^[a-z]+-[a-z]+$/);
     expect(result.base).toBe("feature");
 

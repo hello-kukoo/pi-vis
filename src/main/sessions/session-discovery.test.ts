@@ -327,7 +327,7 @@ describe("worktree session discovery", () => {
       worktrees: {
         [worktreePath]: {
           workspacePath: workspace,
-          branch: "pivis/swift-otter",
+          branch: "pi-vis-swift-otter",
           name: "swift-otter",
           base: "main",
         },
@@ -348,7 +348,7 @@ describe("worktree session discovery", () => {
     fs.mkdirSync(worktreePath, { recursive: true });
     saveSettings({
       worktrees: {
-        [worktreePath]: { workspacePath: workspaceA, branch: "pivis/x", name: "x", base: "main" },
+        [worktreePath]: { workspacePath: workspaceA, branch: "pi-vis-x", name: "x", base: "main" },
       },
     });
 
@@ -364,7 +364,7 @@ describe("worktree session discovery", () => {
     fs.mkdirSync(worktreePath, { recursive: true });
     saveSettings({
       worktrees: {
-        [worktreePath]: { workspacePath: workspace, branch: "pivis/c", name: "c", base: "main" },
+        [worktreePath]: { workspacePath: workspace, branch: "pi-vis-c", name: "c", base: "main" },
       },
     });
 
@@ -384,7 +384,7 @@ describe("worktree session discovery", () => {
       worktrees: {
         [worktreePath]: {
           workspacePath: workspace,
-          branch: "pivis/swift-otter",
+          branch: "pi-vis-swift-otter",
           name: "swift-otter",
           base: "main",
         },
@@ -395,7 +395,7 @@ describe("worktree session discovery", () => {
     const identity = resolveWorktreeForFile(filePath, workspace);
     expect(identity).toEqual({
       path: worktreePath,
-      branch: "pivis/swift-otter",
+      branch: "pi-vis-swift-otter",
       name: "swift-otter",
       base: "main",
     });
@@ -408,7 +408,7 @@ describe("worktree session discovery", () => {
       worktrees: {
         [worktreePath]: {
           workspacePath: workspace,
-          branch: "pivis/gone",
+          branch: "pi-vis-gone",
           name: "gone",
           base: "main",
         },

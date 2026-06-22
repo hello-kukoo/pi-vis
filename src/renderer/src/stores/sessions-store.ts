@@ -77,7 +77,7 @@ export interface SessionViewState {
    * created and the pi process is re-spawned into it.
    */
   worktreePath?: string | undefined;
-  /** Full branch name, e.g. "pivis/swift-otter". */
+  /** Full branch name, e.g. "pi-vis-swift-otter". */
   worktreeBranch?: string | undefined;
   /** The friendly name, e.g. "swift-otter". */
   worktreeName?: string | undefined;
