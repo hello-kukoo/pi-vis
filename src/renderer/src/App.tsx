@@ -34,13 +34,37 @@ export function App(): React.ReactElement {
   const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
   const loadSettings = useSettingsStore((s) => s.load);
   const statusBarVisible = useSettingsStore((s) => s.settings.statusBarVisible);
+  const persistedSidebarWidth = useSettingsStore((s) => s.settings.sidebarWidth);
+  const sidebarCollapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
+  const updateSettings = useSettingsStore((s) => s.update);
   const [piFound, setPiFound] = useState<boolean | null>(null);
   // onClose	SettingsView handler
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<"account" | undefined>(
     undefined,
   );
-  const [sidebarWidth, setSidebarWidth] = useState(220);
+  // Live sidebar width for smooth dragging; the persisted value (which arrives
+  // asynchronously once settings load, and updates again on each drag-end) is
+  // mirrored into local state so the drag stays jank-free without writing to
+  // disk on every mousemove. `?? 220` guards against a settings object that
+  // predates this field (so the grid never gets `undefinedpx`).
+  const [sidebarWidth, setSidebarWidth] = useState(persistedSidebarWidth ?? 220);
+  useEffect(() => {
+    setSidebarWidth(persistedSidebarWidth ?? 220);
+  }, [persistedSidebarWidth]);
+
+  const handleSidebarResizeEnd = useCallback(
+    (width: number) => {
+      void updateSettings({ sidebarWidth: width });
+    },
+    [updateSettings],
+  );
+
+  const toggleSidebar = useCallback(() => {
+    void updateSettings({
+      sidebarCollapsed: !useSettingsStore.getState().settings.sidebarCollapsed,
+    });
+  }, [updateSettings]);
 
   // Whether the active session has an unanswered extension_ui_request.
   // When true, the dialog replaces the Composer in the flex slot below.
@@ -135,6 +159,25 @@ export function App(): React.ReactElement {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [activeSessionId, showSettings]);
+
+  // Cmd/Ctrl+B toggles the sidebar (matches VS Code / common editors). This
+  // is also the way to bring the sidebar back when it's collapsed, alongside
+  // the title-bar toggle button.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "b") return;
+      // Don't hijack the shortcut while typing in a field.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)))
+        return;
+      e.preventDefault();
+      toggleSidebar();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [toggleSidebar]);
 
   // Subscribe to IPC events
   useEffect(() => {
@@ -253,18 +296,18 @@ export function App(): React.ReactElement {
 
   return (
     <div
-      className="app"
+      className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}`}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
         } as React.CSSProperties
       }
     >
-      <TitleBar />
+      <TitleBar sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
       <Sidebar
         onOpenSettings={() => setShowSettings(true)}
-        width={sidebarWidth}
         onResize={setSidebarWidth}
+        onResizeEnd={handleSidebarResizeEnd}
       />
       <main className="app__main">
         {activeSessionId ? (

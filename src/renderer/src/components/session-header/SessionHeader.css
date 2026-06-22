@@ -12,6 +12,13 @@
      the right edge of the window instead of the right edge of the
      session header's content. */
   flex: 1;
+  /* CRITICAL for compact mode: min-width:0 lets this flex child shrink to the
+     space the title bar actually has, instead of ballooning to its content's
+     intrinsic width. Without it, the un-shrinkable controls cluster pushes
+     the header past the viewport (e.g. 552px inside a 470px window), so the
+     ResizeObserver reads that overflow width and the `< 500` compact
+     breakpoint never fires — the controls just spill off the right edge. */
+  min-width: 0;
   height: 100%;
   background: var(--ctp-mantle);
   /* No border-bottom: the parent titlebar's border-bottom serves the
@@ -44,16 +51,17 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* Grow to claim all slack between the traffic lights and the
-     right-anchored controls cluster, and shrink (truncating with
-     ellipsis) only when there genuinely isn't room. min-width: 0 lets
-     flexbox shrink the button below its content's intrinsic width so
-     the ellipsis can engage; flex: 1 makes it fill the .session-header__name
-     container (yielding to the WorktreeChip, which is flex-shrink: 0).
-     No fixed max-width — the cutoff is driven by viewport width, the
-     same pattern VS Code / Cursor / Linear use for title-bar titles. */
-  flex: 1 1 auto;
+  /* Left-aligned and sized to its text (flex: 0 1 auto — don't grow, do
+     shrink). It used to be flex: 1, which stretched it across the whole left
+     half and — with a button's default centered text — produced a dated,
+     centered title that also covered the entire region as a no-drag element,
+     leaving almost nothing to grab the window by. Now the title sits flush
+     left near the toggle (modern editor convention) and the slack to its right
+     stays part of the title bar's drag region. It still shrinks + ellipsizes
+     when space is tight (min-width: 0). */
+  flex: 0 1 auto;
   min-width: 0;
+  text-align: left;
   padding: 0.286rem 0.429rem;
   border-radius: var(--mcm-radius-sm);
   /* Interactive element inside the titlebar's drag region — must be
@@ -148,6 +156,36 @@
 .session-header__picker-btn:hover {
   border-color: var(--ctp-overlay0);
   color: var(--ctp-text);
+}
+
+/* Model button — the only picker whose label can be arbitrarily long
+   (e.g. "z-ai/glm-5.2", "deepseek/deepseek-v4-flash"). Cap it and ellipsize
+   the name so one long model id can't blow out the controls cluster (which
+   is what kept the title bar from ever going compact). The caret stays
+   visible beside the truncated name. */
+.session-header__model-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.286rem;
+  min-width: 0;
+  /* Cap kept just under the point where the controls cluster would exceed
+     the compact threshold (≈500px) — so common model ids show in full on a
+     wide title bar, but no single long id can push the cluster wide enough
+     to either overflow the bar or defeat the compact reflow. */
+  max-width: 15rem;
+}
+
+.session-header__picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* In the compact sub-bar the row is even tighter — let the name give back
+   more space before everything wraps. */
+.session-sub-bar .session-header__model-btn {
+  max-width: 10rem;
 }
 
 /* These chrome buttons signal interaction via their hover border/color; the

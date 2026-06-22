@@ -10,7 +10,16 @@
 .transcript-view {
   flex: 1;
   overflow-y: auto;
-  padding: var(--mcm-base) var(--mcm-large);
+  /* The transcript is a vertical feed — it must never scroll horizontally.
+     Wide content (code blocks, tables) scrolls inside its own box, and text
+     wraps, so anything that would still overflow is a bug; clip it rather than
+     letting it spawn a phantom horizontal scrollbar (and its white corner). */
+  overflow-x: hidden;
+  /* Horizontal padding scales with the pane width (cqi → the `.app__main`
+     size container), so the MCM "negative space" only opens up once there's
+     room for it. On a narrow pane it collapses toward --mcm-base instead of
+     eating ~100px and crushing the text into a 2-words-per-line column. */
+  padding: var(--mcm-base) clamp(var(--mcm-base), 6cqi, var(--mcm-large));
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -57,6 +66,10 @@
   flex-direction: column;
   gap: 0.714rem; /* ≈10px */
   max-width: 100%;
+  /* As a flex item in the column, allow shrinking below the intrinsic width of
+     its content (e.g. a wide code block) so one wide child can't force the
+     whole block — and the transcript with it — to overflow horizontally. */
+  min-width: 0;
   text-align: left;
 }
 
@@ -65,9 +78,11 @@
 }
 
 .transcript-block--user .transcript-block__bubble {
-  /* User bubble — right-aligned, capped at two-thirds of the panel width
-     so the assistant column on the left keeps the dominant axis. */
-  max-width: 66.6667%;
+  /* User bubble — right-aligned. On a narrow pane it nearly fills the width
+     (a thin left gap still reads as "mine"); the two-thirds cap that keeps
+     the assistant column dominant is restored at wider panes (see the
+     @container rule below). */
+  max-width: 90%;
 }
 
 .transcript-block__bubble {
@@ -93,12 +108,37 @@
   font-size: 1em;
   line-height: var(--mcm-line-body);
   letter-spacing: var(--mcm-track-body);
-  max-width: 80%;
+  /* Full width on a narrow pane; the 80% reading-measure cap is restored at
+     wider panes via the @container rule at the bottom of this file. */
+  max-width: 100%;
+  min-width: 0;
+  /* Break long unbreakable runs (paths, identifiers) as a last resort so they
+     wrap within the column instead of overflowing. `anywhere` (not just
+     break-word) also lets the box's min-content shrink, which is what keeps it
+     from forcing width inside the flex column. */
+  overflow-wrap: anywhere;
 }
 
 .transcript-block--user .transcript-block__content {
   /* Fill the user bubble (the 2/3 cap is already on the bubble itself). */
   max-width: 100%;
+}
+
+/* ── Comfortable (wide pane) reading measures ─────────────────────────────
+   Once the content pane (the `.app__main` size container) is wide enough,
+   restore the MCM asymmetry: the assistant column is capped to a readable
+   measure and the user bubble to two-thirds, leaving deliberate negative
+   space. Below this width the caps above (100% / 90%) keep every word of
+   text on screen instead of wrapping into a sliver. */
+@container mainpane (min-width: 560px) {
+  .transcript-block__content,
+  .thinking-block {
+    max-width: 80%;
+  }
+
+  .transcript-block--user .transcript-block__bubble {
+    max-width: 66.6667%;
+  }
 }
 
 .transcript-block__images {
@@ -138,7 +178,8 @@
   color: var(--color-thinking);
   line-height: var(--mcm-line-body);
   word-break: break-word;
-  max-width: 80%;
+  /* Full width on a narrow pane; 80% cap restored at wider panes (below). */
+  max-width: 100%;
 }
 
 .thinking-block p {
@@ -564,6 +605,14 @@ details[open] > .tool-card__args-summary::before {
   font-size: 0.929em;
   margin: var(--mcm-tight) 0;
   font-family: var(--font-code);
+  /* A wide table scrolls inside its own box (capped at the column width)
+     rather than forcing the whole transcript to scroll horizontally. The
+     `display: block` + `width: max-content` pair is the standard responsive
+     markdown-table treatment. */
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .transcript-block__content th,

@@ -117,6 +117,12 @@ pre i,
   padding: 0.1em 0.3em;
   border-radius: 0.214em;
   color: var(--ctp-text);
+  /* Inline code is often a long unbreakable token — a file path
+     (src/renderer/src/...) or an identifier (MAX_PRE_COMPACTION_KEEP). Default
+     wrapping won't break at slashes/underscores, so such a token overflows its
+     column and forces a horizontal scrollbar on the whole transcript. Allow it
+     to break anywhere it has to, as a last resort, so it stays in its column. */
+  overflow-wrap: anywhere;
 }
 
 /* shiki: guarantee true italic for comment-colored tokens even if the

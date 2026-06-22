@@ -204,10 +204,14 @@
 }
 
 /* Rail */
-/* position/width of the rail are set via inline style + drag-resize. */
+/* position/width of the rail are set via inline style + drag-resize. The
+   max-width cap (relative to the viewer body) keeps the file tree from
+   swallowing the diff content on a narrow window even if the saved/dragged
+   rail width is wide. */
 .diff-rail {
   position: relative;
   flex-shrink: 0;
+  max-width: 55%;
   border-right: 1px solid var(--ctp-surface0);
   background: var(--ctp-mantle);
   display: flex;

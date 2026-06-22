@@ -24,7 +24,8 @@
 .statusbar__line--split {
   display: flex;
   justify-content: space-between;
-  gap: 1.143rem;
+  flex-wrap: wrap;
+  gap: 0 1.143rem;
 }
 
 .statusbar__model {

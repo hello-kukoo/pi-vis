@@ -25,11 +25,50 @@
   /* Left padding clears the macOS traffic-light buttons. macOS
      positions them natively at ~12px from the window's left edge and
      the three buttons + spacing span ~78px, so 80px of padding puts
-     the leftmost interactive element (the session name button) just
+     the leftmost interactive element (the sidebar toggle) just
      past them. */
   padding: 0 16px 0 80px;
   background: var(--color-sidebar);
   border-bottom: 1px solid var(--ctp-surface0);
   user-select: none;
   -webkit-app-region: drag;
+}
+
+/* Sidebar collapse toggle — leftmost interactive element, just past the
+   traffic lights. Always present (even on the empty screen) so the sidebar
+   can always be brought back. */
+.titlebar__sidebar-toggle {
+  align-self: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.857rem;
+  height: 1.857rem;
+  margin-right: 0.286rem;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-overlay1);
+  cursor: pointer;
+  /* Interactive element inside the drag region — must be clickable. */
+  -webkit-app-region: no-drag;
+}
+
+.titlebar__sidebar-toggle:hover {
+  background: var(--ctp-surface0);
+  color: var(--ctp-text);
+}
+
+.titlebar__sidebar-toggle:focus-visible {
+  outline: none;
+  background: var(--ctp-surface0);
+  color: var(--ctp-text);
+}
+
+.titlebar__sidebar-toggle svg {
+  width: 1rem;
+  height: 1rem;
+  display: block;
 }

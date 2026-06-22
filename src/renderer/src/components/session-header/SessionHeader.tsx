@@ -239,8 +239,14 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
+        // Reflow the secondary controls into the SessionSubBar once the header
+        // can't hold the name + the full controls cluster. The cluster maxes
+        // out around ~540px (capped model id + longest thinking label + token
+        // stats); 560 keeps a margin so nothing clips at the boundary. The
+        // header's own `min-width: 0` (SessionHeader.css) is what makes this
+        // measure the *available* width rather than the content-overflow width.
         const w = entry.contentRect.width;
-        setHeaderCompact(w < 500);
+        setHeaderCompact(w < 560);
       }
     });
     ro.observe(el);
@@ -486,10 +492,12 @@ export function SessionControls({
       <div className="session-header__model-picker">
         <button
           type="button"
-          className="session-header__picker-btn"
+          className="session-header__picker-btn session-header__model-btn"
           onClick={() => setModelOpen((v) => !v)}
+          title={session?.currentModel ?? "model"}
         >
-          {session?.currentModel ?? "model"} ▾
+          <span className="session-header__picker-label">{session?.currentModel ?? "model"}</span>
+          <span aria-hidden>▾</span>
         </button>
         {modelOpen && (
           <div className="session-header__dropdown" ref={dropdownRef}>

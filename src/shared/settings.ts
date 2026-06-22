@@ -43,6 +43,12 @@ export const AppSettingsSchema = z.object({
   diffViewMode: z.enum(["unified", "split"]).default("unified"),
   diffIncludeRemoteBranches: z.boolean().default(false),
   statusBarVisible: z.boolean().default(true),
+  // Sidebar chrome (user-controlled layout). Persisted so the width and
+  // collapsed state survive relaunch. Width is clamped to [160, 500] by the
+  // resize handle; the grid additionally caps it to a fraction of the window
+  // so it can never dominate a narrow window.
+  sidebarWidth: z.number().default(220),
+  sidebarCollapsed: z.boolean().default(false),
   archivedSessions: z.array(z.string()).default([]),
   lastDismissedPiVersion: z.string().nullable().default(null),
   updateCheckEnabled: z.boolean().default(true),

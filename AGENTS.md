@@ -95,7 +95,7 @@ src/
     │   ├── messages.ts      # Wire message types
     │   └── thinking.ts      # ThinkingLevel enum + schema
     ├── ids.ts               # Branded types: SessionId, RpcRequestId; ID generators (timestamp+counter)
-    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, recents, color scheme, diff mode, window bounds
+    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, recents, color scheme, diff mode, sidebar width/collapsed, window bounds
     ├── git.ts               # GitChangedFile, GitChangesResult, GitFileDiffResult types
     ├── result.ts            # Result<T,E> utility + assertNever
     └── session-file/        # Session file format schemas (header, message/model-change/snapshot entries)
@@ -188,10 +188,53 @@ It has a "Create worktree" checkbox and a branch dropdown (reusing the shared
 3. The WorktreeBar vanishes; the **WorktreeChip** (`⑂ swift-otter`) appears next to
    the session name in the header. Hover shows the full branch · base · path.
 
-**Responsive reflow**: At narrow widths (<500px), secondary controls (model picker,
+**Responsive reflow**: At narrow widths the secondary controls (model picker,
 thinking level, changes badge, context meter) drop into a **SessionSubBar** below the
 38px title bar. The name + WorktreeChip stay up top. The `SessionControls` component
-is the single source of truth rendered in either position.
+is the single source of truth rendered in either position. Mechanism: a
+`ResizeObserver` on `.session-header` flips `headerCompact` when the header's
+*available* width drops below 560px. Two things make this correct: (1) `.session-header`
+has `min-width: 0` so as a `flex: 1` child it clamps to the title bar's available width
+instead of ballooning to its content's intrinsic width — without it the un-shrinkable
+controls push the header past the viewport and the breakpoint never fires; (2) the model
+picker button is width-capped + ellipsized so one long model id can't blow out the
+cluster. The 560 threshold sits just above the cluster's realistic max (~540px) so
+controls reflow before they'd clip. See [Responsive layout system](#responsive-layout-system).
+
+### Responsive layout system
+
+The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 400` in
+`main/index.ts`) up to any size. Three independent mechanisms:
+
+- **Collapsible sidebar**: a toggle in the title bar (`TitleBar.tsx`) and `Cmd/Ctrl+B`
+  flip `settings.sidebarCollapsed` (persisted). Collapsed → the grid's sidebar column
+  becomes `0` and `.sidebar` is `display: none`. The grid track is
+  `min(var(--sidebar-width), 38%)` so even expanded the sidebar can never eat more than
+  ~⅓ of a narrow window (a no-op on normal windows). `sidebarWidth` is persisted too;
+  App keeps a live local copy for smooth dragging and writes to settings on drag-end.
+- **Compact title bar**: the SessionSubBar reflow described above.
+- **Title bar layout**: the session name is left-aligned and sized to its text
+  (`flex: 0 1 auto`, not `1`) — a modern editor convention, and it leaves the slack to
+  its right as part of the title bar's `-webkit-app-region: drag` region (only the
+  name button / chip / controls are `no-drag`). A full-width centered title would
+  otherwise cover the whole bar as a no-drag element, leaving nothing to grab the window
+  by.
+- **Fluid transcript**: `.app__main` is a size-query container (`container: mainpane /
+  inline-size`). The transcript's horizontal padding scales with the pane via
+  `clamp(--mcm-base, 6cqi, --mcm-large)`, and a `@container mainpane (min-width: 560px)`
+  rule restores the MCM reading-measure caps (assistant 80%, user bubble ⅔); below that
+  the caps yield to ~full width so text doesn't wrap into a sliver. The empty-state outer
+  padding is likewise `cqi`-scaled. Overlays (diff/picker/toast) live inside
+  `.app__session` (its own positioned ancestor), so the container's layout containment
+  doesn't affect them.
+- **Overflow containment**: the transcript feed and the sidebar list are vertical
+  scrollers, so both set `overflow-x: hidden` — a long unbreakable token (a file path or
+  identifier in inline code) or a wide row must never spawn a horizontal scrollbar on the
+  whole pane. Wide things instead either wrap (`.transcript-block__content` /
+  `.mcm-inline-code` use `overflow-wrap: anywhere`; blocks carry `min-width: 0`) or scroll
+  inside their own box (code blocks, and markdown tables via `display: block; width:
+  max-content; overflow-x: auto`). `::-webkit-scrollbar-corner` is transparent so the
+  corner where two scrollbars meet doesn't render as a light square.
 
 ### Reload
 

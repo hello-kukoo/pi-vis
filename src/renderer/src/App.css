@@ -16,11 +16,24 @@
      by the user's root font-size setting. */
   grid-template-rows: 38px 1fr;
   /* Sidebar width is set inline by the React component, in px — it's a
-     user-controlled chrome measurement, not typography. */
-  grid-template-columns: var(--sidebar-width, 15.714rem) 1fr;
+     user-controlled chrome measurement, not typography. The `min(…, 38%)`
+     cap means the sidebar can never eat more than ~⅓ of a narrow window:
+     it's a no-op on normal windows (38% ≫ the saved width) and only bites
+     once the window gets small, keeping the content column usable. */
+  grid-template-columns: min(var(--sidebar-width, 15.714rem), 38%) 1fr;
   grid-template-areas:
     "titlebar titlebar"
     "sidebar main";
+}
+
+/* Collapsed sidebar: the column vanishes and the main area spans the full
+   width below the title bar. The title bar's toggle button brings it back. */
+.app--sidebar-collapsed {
+  grid-template-columns: 0 1fr;
+}
+
+.app--sidebar-collapsed .sidebar {
+  display: none;
 }
 
 .app--setup {
@@ -48,6 +61,12 @@
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  /* Establish a size-query container so the transcript, empty state, and
+     other descendants can respond to the *content* width (window minus the
+     sidebar) instead of the viewport width. Abs/fixed overlays live inside
+     `.app__session` (its own positioned ancestor), so the layout containment
+     this implies does not affect them. */
+  container: mainpane / inline-size;
 }
 
 .app__session {
@@ -59,7 +78,9 @@
 }
 
 .app__empty {
-  /* MCM-style empty state: vast outer margins, body content centered. */
+  /* MCM-style empty state: vast outer margins, body content centered. The
+     horizontal padding scales with the pane width (cqi) so the "pools of
+     negative space" don't crush the centered hint on a narrow window. */
   position: relative;
   display: flex;
   flex-direction: column;
@@ -67,7 +88,7 @@
   justify-content: center;
   height: 100%;
   gap: var(--mcm-base);
-  padding: var(--mcm-large) var(--mcm-massive);
+  padding: var(--mcm-large) clamp(var(--mcm-base), 12cqi, var(--mcm-massive));
   text-align: center;
 }
 

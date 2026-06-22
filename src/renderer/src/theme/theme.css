@@ -131,3 +131,10 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--ctp-surface2);
 }
+
+/* The corner where a horizontal and vertical scrollbar meet. Unstyled, it
+   renders as an opaque light square (the "white box"); make it transparent so
+   it blends into whatever surface is behind it. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

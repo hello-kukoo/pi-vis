@@ -36,6 +36,12 @@ if (!app.requestSingleInstanceLock()) {
     const winOpts: Electron.BrowserWindowConstructorOptions = {
       width: bounds?.width ?? 1280,
       height: bounds?.height ?? 800,
+      // Floor on the window size. The renderer is fully responsive below this
+      // (collapsible sidebar, compact title bar, fluid transcript), but a
+      // window narrower/shorter than this is unusable, so the OS won't let it
+      // be dragged smaller.
+      minWidth: 480,
+      minHeight: 400,
       show: false,
     };
     // Only restore x/y if the saved position is visible on at least

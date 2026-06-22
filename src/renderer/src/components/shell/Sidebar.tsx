@@ -74,12 +74,12 @@ interface ArchiveConfirmState {
 
 export function Sidebar({
   onOpenSettings,
-  width,
   onResize,
+  onResizeEnd,
 }: {
   onOpenSettings: () => void;
-  width: number;
   onResize: (width: number) => void;
+  onResizeEnd: (width: number) => void;
 }): React.ReactElement {
   const workspaces = useSessionsStore((s) => s.workspaces);
   const sessions = useSessionsStore((s) => s.sessions);
@@ -217,9 +217,13 @@ export function Sidebar({
       isDragging.current = true;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
+      // Track the live width so the final value can be persisted on mouse-up
+      // (persisting on every move would write settings to disk per frame).
+      let latest = Math.max(160, Math.min(500, e.clientX));
       const onMove = (ev: MouseEvent) => {
         if (!isDragging.current) return;
-        onResize(Math.max(160, Math.min(500, ev.clientX)));
+        latest = Math.max(160, Math.min(500, ev.clientX));
+        onResize(latest);
       };
       const onUp = () => {
         isDragging.current = false;
@@ -227,11 +231,12 @@ export function Sidebar({
         document.body.style.userSelect = "";
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
+        onResizeEnd(latest);
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [onResize],
+    [onResize, onResizeEnd],
   );
 
   const handleAddWorkspace = useCallback(async () => {

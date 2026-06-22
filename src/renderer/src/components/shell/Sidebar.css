@@ -6,7 +6,10 @@
    ───────────────────────────────────────────────────────────────────── */
 
 .sidebar {
-  min-width: 11.429rem; /* ≈160px */
+  /* No min-width: the grid track (`min(--sidebar-width, 38%)` in App.css) and
+     the drag clamp (160–500px) govern the width. A hard min-width here would
+     instead overflow the track on a narrow window. */
+  min-width: 0;
   max-width: 35.714rem; /* ≈500px */
   background: var(--color-sidebar);
   display: flex;
@@ -29,6 +32,13 @@
 .sidebar__workspaces {
   flex: 1;
   overflow-y: auto;
+  /* A vertical list never scrolls horizontally. Without this, `overflow-y:
+     auto` resolves overflow-x to `auto` too, so any row whose content can't
+     shrink (a long path/session name) would clip into a scrollable region —
+     the text would be cut at the *content* edge instead of truncating with an
+     ellipsis at the *visible* edge. Clipping x keeps every row sized to the
+     visible width so the ellipsis engages. */
+  overflow-x: hidden;
   padding: 0 0 0.571rem 0; /* bottom only — top spacing handled by the divider above */
 }
 
@@ -112,6 +122,7 @@
 
 .sidebar__session-name {
   flex: 1;
+  min-width: 0; /* allow the flex item to shrink so the ellipsis engages */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

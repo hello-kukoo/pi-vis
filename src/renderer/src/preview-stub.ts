@@ -162,6 +162,10 @@ function seedDemoSession(): void {
         content: [
           "Fixed. The loader was using `path.join`, which keeps relative roots relative — `path.resolve` anchors them to the process cwd.",
           "",
+          "### 1. `src/renderer/src/components/transcript/TranscriptView.tsx` — long path",
+          "",
+          "The change lives in `src/renderer/src/components/transcript/TranscriptView.tsx` near `MAX_PRE_COMPACTION_KEEP`, an intentionally long unbreakable identifier used to test wrapping.",
+          "",
           "- `loadConfig` now resolves the config path before reading",
           "- all 10 tests pass",
           "",
@@ -388,6 +392,9 @@ const settingsState = {
   recentWorkspaces: [DEMO_WORKSPACE],
   lastUsedModel: null,
   colorScheme: "mocha" as const,
+  statusBarVisible: true,
+  sidebarWidth: 220,
+  sidebarCollapsed: false,
   window: undefined,
 };
 
