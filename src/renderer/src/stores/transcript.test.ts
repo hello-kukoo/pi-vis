@@ -555,3 +555,143 @@ describe("transcript reducer — provider errors", () => {
     expect(state.blocks[0]?.type).toBe("assistant");
   });
 });
+
+// ── Performance: streaming must reconcile in O(1) per token ──────────────
+// The reducer used to `.map` the whole `blocks` array on every text_delta /
+// thinking_delta / tool_execution_update — a per-element callback that made
+// streaming O(n²) over a long session (the freeze). It now copies only the
+// array spine and replaces the one streamed slot, so every *element* ref
+// except the streamed block stays stable — which is what lets the memo'd
+// block renderers skip. The array ref itself changes each delta (preserving
+// referential integrity for any ref-equality consumer); only the per-element
+// copy is avoided.
+describe("transcript reducer — streaming perf invariants", () => {
+  it("a text_delta preserves every untouched element reference", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    const refBefore = state.blocks;
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "x" },
+      }),
+    );
+    // Fresh array (ref-equality consumers see the change) but no per-element
+    // copy: the spine is cloned, the streamed slot replaced.
+    expect(state.blocks).not.toBe(refBefore);
+    expect(state.blocks).toHaveLength(refBefore.length);
+  });
+
+  it("a text_delta only changes the streamed block's `data` reference", () => {
+    let state = createTranscriptState();
+    // An earlier assistant block (unchanged by the next delta).
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "first" },
+      }),
+    );
+    state = applyPiEvent(state, e({ type: "message_end", message: ASST_MSG }));
+    const earlierData = state.blocks[0]?.data;
+
+    // A second assistant turn whose text streams in.
+    state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_update",
+        message: ASST_MSG,
+        assistantMessageEvent: { type: "text_delta", delta: "second" },
+      }),
+    );
+
+    // The earlier, untouched block keeps its exact `data` reference, so a
+    // React.memo'd renderer skips it. Only the streaming block changed.
+    expect(state.blocks[0]?.data).toBe(earlierData);
+    expect((state.blocks[1]?.data as { textContent: string }).textContent).toBe("second");
+  });
+
+  it("a tool_execution_update preserves untouched element references", () => {
+    let state = createTranscriptState();
+    // An earlier block the tool update must not touch.
+    state = addUserBlock(state, "earlier");
+    const earlierData = state.blocks[0]?.data;
+    state = applyPiEvent(
+      state,
+      e({ type: "tool_execution_start", toolCallId: "t1", toolName: "read_file", args: {} }),
+    );
+    const refBefore = state.blocks;
+    state = applyPiEvent(
+      state,
+      e({
+        type: "tool_execution_update",
+        toolCallId: "t1",
+        toolName: "read_file",
+        partialResult: "chunk",
+      }),
+    );
+    // Fresh array, but the earlier block keeps its exact `data` ref so a
+    // memo'd renderer skips it.
+    expect(state.blocks).not.toBe(refBefore);
+    expect(state.blocks[0]?.data).toBe(earlierData);
+  });
+});
+
+// ── Memory: compaction bounds the in-memory transcript ───────────────────
+// blocks used to grow without bound: compaction_end appended a marker but
+// never dropped the blocks it summarised. It now trims at the compaction
+// boundary, keeping only the most recent compaction marker onward (plus a
+// recent-context window on the first compaction). Reload from the session
+// file still restores the full history.
+describe("transcript reducer — compaction trims memory", () => {
+  // Helper: build a transcript with `n` user blocks so a compaction has
+  // something pre-existing to trim.
+  function withUserBlocks(n: number) {
+    let state = createTranscriptState();
+    for (let i = 0; i < n; i++) state = addUserBlock(state, `m${i}`);
+    return state;
+  }
+
+  it("first compaction keeps a recent-context window plus the new marker", () => {
+    // MAX_PRE_COMPACTION_KEEP is 200; with 250 pre-compaction blocks the
+    // oldest 50 are dropped and the most recent 200 are retained, then the
+    // compaction marker is appended.
+    let state = withUserBlocks(250);
+    state = applyPiEvent(state, e({ type: "compaction_end", result: { summary: "s1" } }));
+    expect(state.blocks).toHaveLength(201); // 200 retained + 1 marker
+    expect(state.blocks[200]?.type).toBe("compaction");
+  });
+
+  it("a later compaction drops everything before the previous marker", () => {
+    let state = withUserBlocks(250);
+    state = applyPiEvent(state, e({ type: "compaction_end", result: { summary: "s1" } }));
+    // Add 50 more blocks in the new epoch, then compact again.
+    for (let i = 0; i < 50; i++) state = addUserBlock(state, `post${i}`);
+    state = applyPiEvent(state, e({ type: "compaction_end", result: { summary: "s2" } }));
+
+    // After the second compaction, everything before the *first* compaction
+    // marker is dropped: kept = [first marker .. end] + new marker.
+    // Before the 2nd: [200 user, s1, 50 post] (251). slice(from s1) =
+    // [s1, 50 post] (51) + s2 marker = 52. The first marker is now at index 0.
+    expect(state.blocks[0]?.type).toBe("compaction");
+    if (state.blocks[0]?.type === "compaction") {
+      expect(state.blocks[0].data.summary).toBe("s1");
+    }
+    expect(state.blocks).toHaveLength(52);
+    expect(state.blocks[51]?.type).toBe("compaction");
+  });
+
+  it("compaction on an empty transcript still produces just the marker", () => {
+    const state = applyPiEvent(
+      createTranscriptState(),
+      e({ type: "compaction_end", result: { summary: "s" } }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("compaction");
+  });
+});

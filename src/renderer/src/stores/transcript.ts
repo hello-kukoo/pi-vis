@@ -69,6 +69,18 @@ function newBlockId(): string {
   return `blk-${++blockCounter}`;
 }
 
+/**
+ * Recent-context window retained in the live in-memory transcript across a
+ * compaction. pi compacts by summarising everything *before* the compaction
+ * point, so blocks prior to the most recent compaction marker are already
+ * represented by that marker's summary and are dropped to bound memory
+ * (reload from the session file restores the full history). On the *first*
+ * compaction there is no prior marker to anchor a trim, so we keep this many
+ * of the most recent pre-compaction blocks as a scroll-back window — large
+ * enough to cover the renderer's MAX_VISIBLE_BLOCKS (150) plus headroom.
+ */
+const MAX_PRE_COMPACTION_KEEP = 200;
+
 export interface TranscriptState {
   blocks: TypedTranscriptBlock[];
   // active ids for streaming
@@ -231,12 +243,54 @@ function extractResultDiff(result: unknown): string | undefined {
 export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): TranscriptState {
   const { blocks, activeAssistantId, activeToolCallIds, activeBashId, pendingEchoes } = state;
 
-  // Helper: immutably update a block by id
+  // Helper: immutably update a block by id. Pure O(n) copy — used for the
+  // *lifecycle* events (message_end, tool_execution_end, text_end, …) that
+  // fire once per block, not per token, so the aggregate cost over a session
+  // is O(n) total, never O(n²).
   function updateBlock(
     id: string,
     updater: (b: TypedTranscriptBlock) => TypedTranscriptBlock,
   ): TypedTranscriptBlock[] {
     return blocks.map((b) => (b.id === id ? updater(b) : b));
+  }
+
+  // Streaming update for the per-token path (text_delta, thinking_delta,
+  // tool_execution_update). Returns a *fresh* array (so the `blocks`
+  // reference changes — referential integrity for any ref-equality consumer)
+  // but copies only the array spine, leaving every element reference except
+  // the streamed one untouched. That keeps the React reconcile O(1): the
+  // block renderers are React.memo'd on their `data` prop, so only the one
+  // changed slot (new `data` ref) re-renders and every unchanged slot (same
+  // `data` ref) skips.
+  //
+  // Why not `updateBlock` (i.e. `.map`)? `.map` runs the callback once per
+  // element, which made streaming O(n²) over a long session (the freeze).
+  // `blocks.slice()` is a single bulk copy of the spine — far cheaper — and
+  // the array is bounded to a few hundred blocks by the compaction trim, so
+  // the per-token cost is negligible.
+  //
+  // We scan from the tail because the active assistant / tool-call block is
+  // always among the most recently appended, so the match is found in O(1)
+  // for the common case rather than scanning the whole array from the front.
+  function patchBlock(
+    id: string,
+    updater: (b: TypedTranscriptBlock) => TypedTranscriptBlock,
+  ): TypedTranscriptBlock[] {
+    let idx = -1;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i]?.id === id) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return blocks;
+    const cur = blocks[idx];
+    if (!cur) return blocks;
+    const nextBlock = updater(cur);
+    if (nextBlock === cur) return blocks;
+    const next = blocks.slice();
+    next[idx] = nextBlock;
+    return next;
   }
 
   switch (event.type) {
@@ -322,7 +376,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         case "text_delta":
           return {
             ...state,
-            blocks: updateBlock(activeAssistantId, (b) => {
+            blocks: patchBlock(activeAssistantId, (b) => {
               if (b.type !== "assistant") return b;
               return {
                 ...b,
@@ -336,7 +390,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         case "thinking_delta":
           return {
             ...state,
-            blocks: updateBlock(activeAssistantId, (b) => {
+            blocks: patchBlock(activeAssistantId, (b) => {
               if (b.type !== "assistant") return b;
               return {
                 ...b,
@@ -466,7 +520,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       const delta = typeof event.partialResult === "string" ? event.partialResult : "";
       return {
         ...state,
-        blocks: updateBlock(blockId, (b) => {
+        blocks: patchBlock(blockId, (b) => {
           if (b.type !== "tool_call") return b;
           return { ...b, data: { ...b.data, outputText: b.data.outputText + delta } };
         }),
@@ -504,13 +558,31 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
 
     case "compaction_end": {
       const blockId = newBlockId();
-      return {
-        ...state,
-        blocks: [
-          ...blocks,
-          { id: blockId, type: "compaction", data: { summary: event.result?.summary } },
-        ],
+      const newCompactionBlock: TypedTranscriptBlock = {
+        id: blockId,
+        type: "compaction",
+        data: { summary: event.result?.summary },
       };
+      // Bound the in-memory transcript at the compaction boundary. Find the
+      // most recent existing compaction marker; everything before it has
+      // already been summarised by that compaction and is dropped — the live
+      // session no longer needs it (pi has the summary, and reload from the
+      // session file restores the full history). On the first compaction
+      // (no prior marker) keep a recent window (MAX_PRE_COMPACTION_KEEP) so
+      // the user can still scroll back through the just-compacted context.
+      let lastCompactionIdx = -1;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (b?.type === "compaction") {
+          lastCompactionIdx = i;
+          break;
+        }
+      }
+      const kept =
+        lastCompactionIdx >= 0
+          ? blocks.slice(lastCompactionIdx)
+          : blocks.slice(Math.max(0, blocks.length - MAX_PRE_COMPACTION_KEEP));
+      return { ...state, blocks: [...kept, newCompactionBlock] };
     }
 
     case "thinking_level_changed":

@@ -1,6 +1,6 @@
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "../../lib/markdown.js";
 import { htmlToMarkdown } from "../../lib/turndown.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
@@ -216,7 +216,14 @@ function ToolCardShell({
 
 // ── Block renderers ──────────────────────────────────────────────────────
 
-function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
+// memo'd on the `data` prop: the transcript reducer (patchBlock) creates a
+// new `data` object only for the one block a streaming delta touches,
+// leaving every other block's `data` reference stable. So a per-token
+// re-render of the parent reconciles in O(1) — only the streamed block's
+// memo bails out (new `data` ref) and re-renders; the ~150 other visible
+// blocks keep a stable `data` ref and skip. Without this, the parent
+// re-renders all visible blocks on every token (O(150) reconcile per delta).
+const UserBlock = memo(function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
   return (
     <div className="transcript-block transcript-block--user">
       <div className="transcript-block__bubble user-content">
@@ -241,9 +248,9 @@ function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
       </div>
     </div>
   );
-}
+});
 
-function AssistantBlock({
+const AssistantBlock = memo(function AssistantBlock({
   data,
 }: {
   data: AssistantBlockData;
@@ -262,9 +269,9 @@ function AssistantBlock({
       )}
     </div>
   );
-}
+});
 
-function ToolCallBlock({
+const ToolCallBlock = memo(function ToolCallBlock({
   data,
   preserveScroll,
 }: {
@@ -360,9 +367,11 @@ function ToolCallBlock({
       {body}
     </ToolCardShell>
   );
-}
+});
 
-function ErrorBlock({ data }: { data: ErrorBlockData }): React.ReactElement {
+const ErrorBlock = memo(function ErrorBlock({
+  data,
+}: { data: ErrorBlockData }): React.ReactElement {
   return (
     <div className="transcript-block transcript-block--error" role="alert">
       <span className="transcript-block__error-icon" aria-hidden="true">
@@ -374,9 +383,9 @@ function ErrorBlock({ data }: { data: ErrorBlockData }): React.ReactElement {
       </div>
     </div>
   );
-}
+});
 
-function BashBlock({
+const BashBlock = memo(function BashBlock({
   data,
   preserveScroll,
 }: {
@@ -424,7 +433,7 @@ function BashBlock({
       )}
     </ToolCardShell>
   );
-}
+});
 
 // ── Main view ────────────────────────────────────────────────────────────
 
