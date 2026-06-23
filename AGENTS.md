@@ -333,14 +333,22 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `src/renderer/src/components/auth/LoginTerminal.tsx` | Embedded xterm.js terminal for pi's /login OAuth flow |
 | `src/renderer/src/components/shell/UpdateBanner.tsx` | Dismissible update card — in a session it lives in the in-flow `.session-dock` (App.tsx/App.css), stacked ABOVE the WorktreeBar and the composer (dock is rigid `flex: 0 0 auto` so only the transcript absorbs vertical pressure; banner is `position: relative; z-index: 1`); floats bottom-right on the empty screen |
 | `src/renderer/src/components/updates/UpdateProgress.tsx` | Modal streaming `pi update` output |
-| `RELEASING.md` | macOS signing, notarization, and release build docs |
+| `RELEASING.md` | macOS signing, notarization, and release build/publish docs |
 | `build/notarize.cjs` | `afterSign` hook for macOS notarization (env-gated) |
+| `scripts/install.sh` | End-user `curl \| bash` installer: fetches the latest release's `*-mac.zip`, installs to `/Applications`, strips quarantine (sidesteps Gatekeeper pre-notarization) |
 
 ## Releasing
 
 See [RELEASING.md](./RELEASING.md) for macOS signing, notarization, and build instructions.
 Required env vars (with no defaults): `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`.
 Optional: `CSC_LINK`, `CSC_KEY_PASSWORD`.
+
+End users install via `curl … | bash` → `scripts/install.sh` (README "Install"
+section), which downloads the latest release's `*-mac.zip` and unpacks it to
+`/Applications`. Cutting a release = `npm run dist` then `gh release create`
+with the zip+dmg attached (see RELEASING.md "Publishing a GitHub release"). The
+curl path avoids quarantine, so the ad-hoc-signed build launches without a
+Gatekeeper prompt even before notarization is set up.
 
 ## Maintaining This File
 

@@ -38,6 +38,36 @@ target) under `mac.target` in `electron-builder.yml` — note that `node-pty` sh
 no macOS prebuilts, so the x64 slice must be built from source on/for an x64
 toolchain (e.g. a per-arch CI job).
 
+### Publishing a GitHub release
+
+The README install command (`curl … | bash` → `scripts/install.sh`) pulls the
+latest GitHub release's `*-mac.zip` asset. To cut a release so that command
+works:
+
+```bash
+# 1. Build the artifacts (signed+notarized if Apple env vars are set, ad-hoc otherwise)
+npm run dist
+
+# 2. Publish a release tagged vX.Y.Z and upload the dmg + zip
+VERSION=$(node -p "require('./package.json').version")
+gh release create "v${VERSION}" \
+  "release/${VERSION}/Pi-Vis-${VERSION}-arm64-mac.zip" \
+  "release/${VERSION}/Pi-Vis-${VERSION}-arm64.dmg" \
+  --title "v${VERSION}" \
+  --notes "Pi-Vis v${VERSION}"
+```
+
+`install.sh` resolves the asset via the GitHub API (`releases/latest`), so it
+keeps working across versions with no edits — it just needs each release to
+carry a `*-mac.zip` asset. The `.zip` (not the `.dmg`) is what the installer
+unpacks into `/Applications`.
+
+**Quarantine note:** the installer downloads over `curl`, so macOS does not
+apply `com.apple.quarantine` and Gatekeeper does not block the ad-hoc-signed
+app. This is the temporary stand-in for notarization; once notarization works,
+the same release flow continues to apply (notarized builds also install
+cleanly).
+
 ### CI
 
 See `.github/workflows/ci.yml` for the current CI pipeline (typecheck → lint → test → build on push/PR). Notarization credentials should be stored as repository secrets and injected in a release workflow.
