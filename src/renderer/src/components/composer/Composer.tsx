@@ -248,8 +248,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   // ── Submit ─────────────────────────────────────────────────────────
 
-  const handleSubmit = useCallback(async () => {
-    const content = text;
+  const handleSubmit = useCallback(async (overrideContent?: string) => {
+    const content = overrideContent ?? text;
     if (!content.trim()) return;
     // Drop a second concurrent invocation: a held/auto-repeat Enter can
     // re-fire this before the `text` state below commits, which would
@@ -451,6 +451,17 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       .catch(console.error);
   }, [sessionId]);
 
+  // ── Suggestion completion ───────────────────────────────────────────
+  // Mirrors pi's TUI editor (pi-tui components/editor.js): Tab applies the
+  // highlighted completion and stays in the editor; Enter applies it *and*
+  // falls through to submit (slash commands only — suggestions are only
+  // shown for the bare command token, no args yet). Clicking a suggestion
+  // behaves like Tab (fill, don't submit) so the user can review/append args.
+  const completionFor = useCallback((entry: SuggestionEntry): string => {
+    const isArg = BUILTIN_COMMANDS.find((b) => b.name === entry.name)?.takesArgs;
+    return isArg ? `/${entry.name} ` : `/${entry.name}`;
+  }, []);
+
   // ── Keyboard ───────────────────────────────────────────────────────
 
   const handleKeyDown = useCallback(
@@ -472,9 +483,30 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           if (chosen) {
             // Built-ins that take args get a trailing space to invite the
             // user to type the argument. Arg-less ones don't.
-            const isArg = BUILTIN_COMMANDS.find((b) => b.name === chosen.name)?.takesArgs;
-            setText(isArg ? `/${chosen.name} ` : `/${chosen.name}`);
+            setText(completionFor(chosen));
             setSlashIndex(0);
+          }
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          // IME composition-Enter: confirm-Enter inside a CJK/IME candidate
+          // window fires `keydown` with `keyCode === 229` and
+          // `isComposing === true`. Submitting on that key would steal the
+          // composition end from the user.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          e.preventDefault();
+          // TUI parity: apply the highlighted completion, then submit. For
+          // arg-taking built-ins the completion is `/<name> ` which parses
+          // to the no-arg form (e.g. opens the model picker); the user
+          // uses Tab instead to keep typing args.
+          const chosen = suggestions[slashIndex];
+          if (chosen) {
+            const completed = completionFor(chosen);
+            setText(completed);
+            setSlashIndex(0);
+            void handleSubmit(completed);
+          } else {
+            void handleSubmit();
           }
           return;
         }
@@ -499,7 +531,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         handleAbort();
       }
     },
-    [suggestions, slashIndex, handleSubmit, isStreaming, handleAbort],
+    [suggestions, slashIndex, handleSubmit, isStreaming, handleAbort, completionFor],
   );
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -509,11 +541,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // ── Click to pick a suggestion ─────────────────────────────────────
 
   const handleSuggestionClick = useCallback((entry: SuggestionEntry) => {
-    const isArg = BUILTIN_COMMANDS.find((b) => b.name === entry.name)?.takesArgs;
-    setText(isArg ? `/${entry.name} ` : `/${entry.name}`);
+    setText(completionFor(entry));
     setSlashIndex(0);
     textareaRef.current?.focus();
-  }, []);
+  }, [completionFor]);
 
   const isBashMode = text.startsWith("!");
   const isSlashMode = text.startsWith("/");
