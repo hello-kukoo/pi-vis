@@ -156,6 +156,16 @@
   color: var(--ctp-text);
 }
 
+/* Toggled-on state for the header find button (find bar is open). */
+.diff-viewer__icon-btn--on {
+  background: color-mix(in srgb, var(--ctp-mauve) 22%, transparent);
+  color: var(--ctp-mauve);
+}
+.diff-viewer__icon-btn--on:hover {
+  background: color-mix(in srgb, var(--ctp-mauve) 30%, transparent);
+  color: var(--ctp-mauve);
+}
+
 .diff-viewer__icon-btn--spinning svg {
   animation: diff-spin 0.8s linear infinite;
 }
@@ -204,6 +214,126 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  /* Positioning context for the floating find bar. */
+  position: relative;
+}
+
+/* ── Find bar (floating, top-right of the diff content) ───────────── */
+
+.diff-search {
+  position: absolute;
+  top: 0.714rem;
+  right: 0.857rem;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.214rem;
+  padding: 0.214rem 0.286rem 0.214rem 0.5rem;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-md);
+  box-shadow: 0 0.286rem 1rem var(--ctp-shadow);
+  animation: diff-search-in 120ms ease-out;
+}
+
+@keyframes diff-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.286rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-search {
+    animation: none;
+  }
+}
+
+.diff-search__icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ctp-overlay0);
+  flex-shrink: 0;
+}
+
+.diff-search__input {
+  width: 13.5rem;
+  max-width: 40vw;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ctp-text);
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  padding: 0.286rem 0.143rem;
+  min-width: 0;
+}
+
+.diff-search__input::placeholder {
+  color: var(--ctp-overlay0);
+}
+
+.diff-search__count {
+  font-family: var(--font-code);
+  font-size: 0.786em;
+  color: var(--ctp-subtext0);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 3.5rem;
+  text-align: right;
+  padding-right: 0.143rem;
+}
+
+.diff-search__count--empty {
+  color: var(--ctp-red);
+}
+
+.diff-search__divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.214rem 0.143rem;
+  background: var(--ctp-surface1);
+  flex-shrink: 0;
+}
+
+.diff-search__btn {
+  width: 1.571rem;
+  height: 1.571rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-subtext0);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.diff-search__btn:hover:not(:disabled) {
+  background: var(--ctp-surface1);
+  color: var(--ctp-text);
+}
+
+.diff-search__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Case-sensitivity toggle: lit when active. */
+.diff-search__btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ctp-mauve) 22%, transparent);
+  color: var(--ctp-mauve);
+}
+.diff-search__btn[aria-pressed="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ctp-mauve) 30%, transparent);
+  color: var(--ctp-mauve);
 }
 
 /* Rail */

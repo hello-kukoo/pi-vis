@@ -9,6 +9,8 @@ import type { GitChangedFile } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { SearchMatch, SearchableFile } from "../../lib/diff/search.js";
+import { computeMatches } from "../../lib/diff/search.js";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { BaseBranchDropdown } from "./BaseBranchDropdown.js";
@@ -43,6 +45,52 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const selectedPath = useDiffStore((s) => s.selectedPath);
   const ensureFileLoaded = useDiffStore((s) => s.ensureFileLoaded);
   const refresh = useDiffStore((s) => s.refresh);
+  const toggleCollapsed = useDiffStore((s) => s.toggleCollapsed);
+
+  // ── In-diff find ─────────────────────────────────────────────────
+  const searchOpen = useDiffStore((s) => s.search.open);
+  const searchQuery = useDiffStore((s) => s.search.query);
+  const searchCaseSensitive = useDiffStore((s) => s.search.caseSensitive);
+  const activeMatch = useDiffStore((s) => s.search.activeMatch);
+  const openSearch = useDiffStore((s) => s.openSearch);
+  const closeSearch = useDiffStore((s) => s.closeSearch);
+  const setSearchQuery = useDiffStore((s) => s.setSearchQuery);
+  const toggleSearchCaseSensitive = useDiffStore((s) => s.toggleSearchCaseSensitive);
+  const setActiveMatch = useDiffStore((s) => s.setActiveMatch);
+
+  // The full ordered match list, derived from every loaded file's visible
+  // rows. Recomputed when the query, case-sensitivity, file list, or any
+  // file's diff model / gap state changes.
+  const matches = useMemo<SearchMatch[]>(() => {
+    if (!searchOpen || searchQuery === "") return [];
+    const loaded: SearchableFile[] = [];
+    for (const f of files) {
+      const st = fileState.get(f.path);
+      if (st?.status === "ready" && st.model && st.model.kind === "ok") {
+        loaded.push({
+          path: f.path,
+          model: st.model,
+          gapState: st.gapState ?? st.model.gaps.map(() => ({ top: 0, bottom: 0 })),
+        });
+      }
+    }
+    return computeMatches(loaded, searchQuery, searchCaseSensitive);
+  }, [searchOpen, searchQuery, searchCaseSensitive, files, fileState]);
+
+  const activeIndex = activeMatch ? matches.findIndex((m) => m.id === activeMatch.id) : -1;
+
+  const goToMatch = useCallback(
+    (delta: number) => {
+      if (matches.length === 0) return;
+      const cur = activeMatch ? matches.findIndex((m) => m.id === activeMatch.id) : -1;
+      let next = cur + delta;
+      if (next < 0) next = matches.length - 1;
+      if (next >= matches.length) next = 0;
+      const target = matches[next];
+      if (target) setActiveMatch(target);
+    },
+    [matches, activeMatch, setActiveMatch],
+  );
 
   // Branch selection lives in BaseBranchDropdown, which subscribes to the
   // store directly — the host only needs to mount it.
@@ -125,6 +173,55 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const sectionRefs = useRef<Map<string, HTMLElement | null>>(new Map());
   const suppressSpyUntilRef = useRef<number>(0);
 
+  // ── Find: load every file so matches are complete ────────────────
+  // The diff lazy-loads files (first N eager + on-scroll). A search must find
+  // every occurrence, so once a query is active we pull in any still-idle
+  // file. Collapsed files load too (their model feeds the count) without being
+  // expanded — expansion only happens for the file holding the active match.
+  useEffect(() => {
+    if (!visible || phase !== "ready") return;
+    if (!searchOpen || searchQuery === "") return;
+    for (const f of files) {
+      if (f.binary) continue;
+      const st = useDiffStore.getState().fileState.get(f.path);
+      if (!st || st.status === "idle") void ensureFileLoaded(f.path);
+    }
+  }, [visible, phase, searchOpen, searchQuery, files, ensureFileLoaded]);
+
+  // ── Find: seed the active match to the first hit ─────────────────
+  // setSearchQuery / case toggle clear activeMatch; once matches (re)compute
+  // we focus the first one. Only fires while there's no active match, so user
+  // navigation and late-loading files don't yank the selection around.
+  useEffect(() => {
+    if (!searchOpen || searchQuery === "") return;
+    if (activeMatch !== null) return;
+    const first = matches[0];
+    if (first) setActiveMatch(first);
+  }, [searchOpen, searchQuery, activeMatch, matches, setActiveMatch]);
+
+  // ── Find: reveal + scroll the active match into view ─────────────
+  // Re-runs on fileState changes so that after the target file loads/expands
+  // (and its "current" mark renders) we can find and scroll to it.
+  const scrolledIdRef = useRef<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `fileState` is a deliberate re-trigger — it isn't read directly (we use getState()), but its identity change after the target file loads/expands is what lets us find and scroll to the now-rendered mark.
+  useEffect(() => {
+    if (!visible) return;
+    if (!activeMatch) {
+      scrolledIdRef.current = null;
+      return;
+    }
+    const st = useDiffStore.getState().fileState.get(activeMatch.path);
+    if (st?.collapsed) toggleCollapsed(activeMatch.path);
+    void ensureFileLoaded(activeMatch.path);
+    if (scrolledIdRef.current === activeMatch.id) return;
+    suppressSpyUntilRef.current = performance.now() + SCROLL_SPY_SUPPRESS_MS;
+    const el = contentRef.current?.querySelector<HTMLElement>(".diff-search-mark--current");
+    if (el) {
+      el.scrollIntoView({ block: "center", behavior: "auto" });
+      scrolledIdRef.current = activeMatch.id;
+    }
+  }, [visible, activeMatch, fileState, toggleCollapsed, ensureFileLoaded]);
+
   const jumpTo = useCallback(
     (path: string) => {
       select(path);
@@ -168,6 +265,20 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       if (document.querySelector(".picker-overlay")) return;
       const target = e.target as HTMLElement | null;
       const isInFilter = target?.classList.contains("diff-rail__search-input") ?? false;
+      const isInSearch = target?.classList.contains("diff-search__input") ?? false;
+
+      // Cmd/Ctrl+F — open the find bar and focus it (overriding browser find).
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        openSearch();
+        requestAnimationFrame(() => {
+          const input = panelRef.current?.querySelector<HTMLInputElement>(".diff-search__input");
+          input?.focus();
+          input?.select();
+        });
+        return;
+      }
+
       if (e.key === "Escape") {
         if (isInFilter && filter) {
           // Clear filter and consume.
@@ -175,10 +286,38 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           e.stopPropagation();
           return;
         }
+        if (searchOpen) {
+          // First Escape closes the find bar, not the whole viewer.
+          e.preventDefault();
+          closeSearch();
+          panelRef.current?.focus();
+          return;
+        }
         e.preventDefault();
         closeViewer();
         return;
       }
+
+      // In the find bar: Enter / arrows step between matches.
+      if (isInSearch) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          goToMatch(e.shiftKey ? -1 : 1);
+          return;
+        }
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          goToMatch(1);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          goToMatch(-1);
+          return;
+        }
+        return;
+      }
+
       if (isInFilter) return;
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
@@ -193,7 +332,19 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [visible, closeViewer, files, selectedPath, filter, setFilter, jumpTo]);
+  }, [
+    visible,
+    closeViewer,
+    files,
+    selectedPath,
+    filter,
+    setFilter,
+    jumpTo,
+    searchOpen,
+    openSearch,
+    closeSearch,
+    goToMatch,
+  ]);
 
   // ── Lazy loading: IntersectionObserver + first N eager ───────────
   useEffect(() => {
@@ -288,12 +439,39 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           viewMode={viewMode}
           narrow={narrow}
           stale={stale}
+          searchOpen={searchOpen}
+          onToggleSearch={() => {
+            if (searchOpen) {
+              closeSearch();
+            } else {
+              openSearch();
+              requestAnimationFrame(() => {
+                panelRef.current?.querySelector<HTMLInputElement>(".diff-search__input")?.focus();
+              });
+            }
+          }}
           onClose={closeViewer}
           onRefresh={() => void refresh()}
           onSetViewMode={setViewMode}
         />
         {truncated && <div className="diff-viewer__truncated">Showing first 500 changed files</div>}
         <div className="diff-viewer__body">
+          {phase === "ready" && searchOpen && (
+            <DiffSearchBar
+              query={searchQuery}
+              caseSensitive={searchCaseSensitive}
+              count={matches.length}
+              activeIndex={activeIndex}
+              onQueryChange={setSearchQuery}
+              onToggleCase={toggleSearchCaseSensitive}
+              onPrev={() => goToMatch(-1)}
+              onNext={() => goToMatch(1)}
+              onClose={() => {
+                closeSearch();
+                panelRef.current?.focus();
+              }}
+            />
+          )}
           {phase === "ready" && (
             <Rail
               files={files}
@@ -346,6 +524,8 @@ function ViewerHeader({
   viewMode,
   narrow,
   stale,
+  searchOpen,
+  onToggleSearch,
   onClose,
   onRefresh,
   onSetViewMode,
@@ -355,6 +535,8 @@ function ViewerHeader({
   viewMode: "unified" | "split";
   narrow: boolean;
   stale: boolean;
+  searchOpen: boolean;
+  onToggleSearch: () => void;
   onClose: () => void;
   onRefresh: () => void;
   onSetViewMode: (m: "unified" | "split") => void;
@@ -384,6 +566,18 @@ function ViewerHeader({
         )}
       </span>
       <span className="diff-viewer__spacer" />
+      {phase === "ready" && files.length > 0 && (
+        <button
+          type="button"
+          className={`diff-viewer__icon-btn${searchOpen ? " diff-viewer__icon-btn--on" : ""}`}
+          onClick={onToggleSearch}
+          title="Find in diff (⌘F)"
+          aria-label="Find in diff"
+          aria-pressed={searchOpen}
+        >
+          <SearchIcon />
+        </button>
+      )}
       {stale ? (
         <span
           className="diff-viewer__stale-dot"
@@ -425,6 +619,113 @@ function ViewerHeader({
         onClick={onClose}
         title="Close (Esc)"
         aria-label="Close diff viewer"
+      >
+        <CloseIcon />
+      </button>
+    </div>
+  );
+}
+
+// ── Find bar ──────────────────────────────────────────────────────────
+
+// A floating find widget (top-right of the diff content), modeled on the
+// editor "find" affordance: live count, prev/next, case toggle. Highlighting
+// of the hits themselves is done by the row renderer (see DiffFileSection);
+// this only owns the controls and the query.
+function DiffSearchBar({
+  query,
+  caseSensitive,
+  count,
+  activeIndex,
+  onQueryChange,
+  onToggleCase,
+  onPrev,
+  onNext,
+  onClose,
+}: {
+  query: string;
+  caseSensitive: boolean;
+  count: number;
+  activeIndex: number;
+  onQueryChange: (q: string) => void;
+  onToggleCase: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}): React.ReactElement {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // Focus on mount (covers opening via the header button).
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const hasQuery = query.length > 0;
+  const noMatches = hasQuery && count === 0;
+  const hasMatches = count > 0;
+
+  return (
+    <div className="diff-search" role="search">
+      <span className="diff-search__icon" aria-hidden>
+        <SearchIcon />
+      </span>
+      <input
+        ref={inputRef}
+        className="diff-search__input"
+        type="text"
+        placeholder="Find in diff…"
+        value={query}
+        spellCheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        onChange={(e) => onQueryChange(e.target.value)}
+        aria-label="Find in diff"
+      />
+      <span
+        className={`diff-search__count${noMatches ? " diff-search__count--empty" : ""}`}
+        aria-live="polite"
+      >
+        {hasQuery ? (hasMatches ? `${activeIndex + 1} of ${count}` : "No results") : ""}
+      </span>
+      <div className="diff-search__divider" aria-hidden />
+      <button
+        type="button"
+        className="diff-search__btn"
+        onClick={onToggleCase}
+        title="Match case"
+        aria-label="Match case"
+        aria-pressed={caseSensitive}
+        data-on={caseSensitive ? "" : undefined}
+      >
+        <CaseIcon />
+      </button>
+      <button
+        type="button"
+        className="diff-search__btn"
+        onClick={onPrev}
+        disabled={!hasMatches}
+        title="Previous match (⇧⏎)"
+        aria-label="Previous match"
+      >
+        <ChevronUpIcon />
+      </button>
+      <button
+        type="button"
+        className="diff-search__btn"
+        onClick={onNext}
+        disabled={!hasMatches}
+        title="Next match (⏎)"
+        aria-label="Next match"
+      >
+        <ChevronDownIcon />
+      </button>
+      <button
+        type="button"
+        className="diff-search__btn diff-search__btn--close"
+        onClick={onClose}
+        title="Close (Esc)"
+        aria-label="Close find"
       >
         <CloseIcon />
       </button>
@@ -990,6 +1291,79 @@ function RefreshIcon(): React.ReactElement {
     >
       <path d="M14 8a6 6 0 1 1-6-6c1.7 0 3.3.7 4.5 1.8L14 6" />
       <path d="M14 2v4h-4" />
+    </svg>
+  );
+}
+
+function SearchIcon(): React.ReactElement {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <line x1="10.5" y1="10.5" x2="14" y2="14" />
+    </svg>
+  );
+}
+
+function CaseIcon(): React.ReactElement {
+  // A compact "Aa" glyph; the active state is conveyed by the button styling.
+  return (
+    <svg width="16" height="14" viewBox="0 0 18 14" fill="currentColor" aria-hidden="true">
+      <text
+        x="9"
+        y="11"
+        textAnchor="middle"
+        fontSize="11"
+        fontWeight="600"
+        fontFamily="var(--font-display)"
+      >
+        Aa
+      </text>
+    </svg>
+  );
+}
+
+function ChevronUpIcon(): React.ReactElement {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="3 7.5 6 4.5 9 7.5" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon(): React.ReactElement {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="3 4.5 6 7.5 9 4.5" />
     </svg>
   );
 }

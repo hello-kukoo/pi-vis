@@ -23,6 +23,7 @@ import type { AnyDiffModel, DiffModel, GapState } from "../lib/diff/diff-model.j
 import { buildDiffModel } from "../lib/diff/diff-model.js";
 import { tokenizeLines } from "../lib/diff/highlight.js";
 import { langForPath } from "../lib/diff/highlight.js";
+import type { SearchMatch } from "../lib/diff/search.js";
 import { gitRootForSession, useSessionsStore } from "./sessions-store.js";
 import { useSettingsStore } from "./settings-store.js";
 
@@ -64,6 +65,17 @@ export interface DiffStore {
   viewMode: "unified" | "split";
   fileState: Map<string, FileState>;
 
+  // in-diff find: highlight + jump between every visible occurrence of a
+  // string across all changed files. `activeMatch` is the currently-focused
+  // occurrence (drives the "current" highlight + scroll-into-view); the full
+  // ordered match list is derived in the host from files + fileState.
+  search: {
+    open: boolean;
+    query: string;
+    caseSensitive: boolean;
+    activeMatch: SearchMatch | null;
+  };
+
   // base branch selection
   branches: GitBranch[];
   currentBranch: string | null;
@@ -100,7 +112,21 @@ export interface DiffStore {
   loadBranches: () => Promise<void>;
   setBase: (base: string | null) => void;
   setIncludeRemoteBranches: (v: boolean) => void;
+
+  // in-diff find
+  openSearch: () => void;
+  closeSearch: () => void;
+  setSearchQuery: (q: string) => void;
+  toggleSearchCaseSensitive: () => void;
+  setActiveMatch: (m: SearchMatch | null) => void;
 }
+
+const EMPTY_SEARCH = {
+  open: false,
+  query: "",
+  caseSensitive: false,
+  activeMatch: null,
+} as const;
 
 const EXPAND_STEP = 20;
 
@@ -167,6 +193,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     stale: false,
     baselineFingerprint: null,
 
+    search: { ...EMPTY_SEARCH },
+
     // branch selection
     branches: [],
     currentBranch: null,
@@ -196,6 +224,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         includeRemoteBranches: includeRemote,
         stale: false,
         baselineFingerprint: null,
+        search: { ...EMPTY_SEARCH },
       });
       void get().refresh();
       void get().loadBranches();
@@ -215,6 +244,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         selectedPath: null,
         filter: "",
         fileState: new Map(),
+        search: { ...EMPTY_SEARCH },
       });
       // Refresh the badge after close so the header count reflects current state.
       if (root !== null) void get().refreshBadge(root);
@@ -436,6 +466,33 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       set({ includeRemoteBranches: v });
       // Persist to settings.
       void useSettingsStore.getState().update({ diffIncludeRemoteBranches: v });
+    },
+
+    // ── In-diff find ───────────────────────────────────────────────
+
+    openSearch: () => {
+      set({ search: { ...get().search, open: true } });
+    },
+
+    closeSearch: () => {
+      // Keep the query so reopening restores it; just hide the bar and drop
+      // the active occupation so no stray "current" highlight lingers.
+      set({ search: { ...get().search, open: false, activeMatch: null } });
+    },
+
+    setSearchQuery: (q) => {
+      // A new query invalidates the active match; the host re-seeds it to the
+      // first hit once matches recompute.
+      set({ search: { ...get().search, query: q, activeMatch: null } });
+    },
+
+    toggleSearchCaseSensitive: () => {
+      const s = get().search;
+      set({ search: { ...s, caseSensitive: !s.caseSensitive, activeMatch: null } });
+    },
+
+    setActiveMatch: (m) => {
+      set({ search: { ...get().search, activeMatch: m } });
     },
   };
 

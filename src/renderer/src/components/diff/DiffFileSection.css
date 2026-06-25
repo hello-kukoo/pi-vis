@@ -237,6 +237,33 @@
   background: color-mix(in srgb, var(--ctp-red) 12%, transparent);
 }
 
+/* ── Find highlights ─────────────────────────────────────────────── */
+/* Every visible occurrence of the search query gets a warm wash; the one
+   focused match (current) reverses to a solid chip so the eye lands on it
+   immediately. These come after .diff-row__em so they win the background on
+   a character that is both changed and matched. */
+.diff-search-mark {
+  background: color-mix(in srgb, var(--ctp-yellow) 30%, transparent);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ctp-yellow) 28%, transparent);
+}
+.diff-row--del .diff-search-mark,
+.diff-row--add .diff-search-mark {
+  /* Override the green/red em tint on changed lines too. */
+  background: color-mix(in srgb, var(--ctp-yellow) 30%, transparent);
+}
+
+.diff-search-mark--current {
+  background: var(--ctp-peach);
+  color: var(--ctp-crust) !important;
+  box-shadow: 0 0 0 1px var(--ctp-peach);
+  border-radius: 2px;
+}
+.diff-row--del .diff-search-mark--current,
+.diff-row--add .diff-search-mark--current {
+  background: var(--ctp-peach);
+}
+
 /* Row hover overlay (subtle — aids horizontal tracking in split view). */
 .diff-row:hover {
   background: color-mix(in srgb, var(--ctp-surface1) 30%, transparent);

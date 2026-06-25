@@ -18,9 +18,44 @@ import {
 } from "../../lib/diff/diff-model.js";
 import { segmentLine } from "../../lib/diff/highlight.js";
 import type { IntralineRanges } from "../../lib/diff/intraline.js";
+import { findOccurrences } from "../../lib/diff/search.js";
+import type { MatchSide } from "../../lib/diff/search.js";
 import type { FileState } from "../../stores/diff-store.js";
 import { useDiffStore } from "../../stores/diff-store.js";
 import "./DiffFileSection.css";
+
+/**
+ * In-diff find context for one file. `query` is "" when search is closed or
+ * empty (the no-op fast path). `active` is the currently-focused occurrence —
+ * present only when this file owns the active match — used to paint the one
+ * "current" highlight differently from the rest.
+ */
+export interface SearchHighlight {
+  query: string;
+  caseSensitive: boolean;
+  active: { lineIdx: number; side: MatchSide; occ: number } | null;
+}
+
+/** Per-code-cell search info handed to renderTokens. `null` = nothing to do. */
+interface CellSearch {
+  query: string;
+  caseSensitive: boolean;
+  /** Occurrence index to mark "current" on this cell, or null. */
+  currentOcc: number | null;
+}
+
+/** Build the per-cell search payload for a given (lineIdx, matchSide). */
+function cellSearch(
+  search: SearchHighlight | undefined,
+  lineIdx: number | null,
+  side: MatchSide,
+): CellSearch | null {
+  if (!search || search.query === "") return null;
+  const a = search.active;
+  const currentOcc =
+    a && lineIdx !== null && a.lineIdx === lineIdx && a.side === side ? a.occ : null;
+  return { query: search.query, caseSensitive: search.caseSensitive, currentOcc };
+}
 
 interface DiffFileSectionProps {
   file: GitChangedFile;
@@ -44,6 +79,24 @@ export function DiffFileSection({
   const toggleCollapsed = useDiffStore((s) => s.toggleCollapsed);
   const ensureFileLoaded = useDiffStore((s) => s.ensureFileLoaded);
   const expandGap = useDiffStore((s) => s.expandGap);
+
+  // In-diff find: rendered highlight for this file. Reads only the slices it
+  // needs (query/caseSensitive/active-for-this-file) so unrelated store
+  // updates don't re-render the body.
+  const searchOpen = useDiffStore((s) => s.search.open);
+  const searchQuery = useDiffStore((s) => s.search.query);
+  const searchCaseSensitive = useDiffStore((s) => s.search.caseSensitive);
+  const activeMatch = useDiffStore((s) => {
+    const m = s.search.activeMatch;
+    return m && m.path === file.path ? m : null;
+  });
+  const search: SearchHighlight = {
+    query: searchOpen ? searchQuery : "",
+    caseSensitive: searchCaseSensitive,
+    active: activeMatch
+      ? { lineIdx: activeMatch.lineIdx, side: activeMatch.side, occ: activeMatch.occ }
+      : null,
+  };
 
   // Auto-load: the host attaches IntersectionObserver to each section
   // and calls ensureFileLoaded(path) when the section is in view. We
@@ -84,6 +137,7 @@ export function DiffFileSection({
           state={state}
           viewMode={viewMode}
           narrowWindow={narrowWindow}
+          search={search}
           onExpandGap={(idx, dir) => expandGap(file.path, idx, dir)}
         />
       )}
@@ -98,12 +152,14 @@ function FileBody({
   state,
   viewMode,
   narrowWindow,
+  search,
   onExpandGap,
 }: {
   file: GitChangedFile;
   state: FileState;
   viewMode: "unified" | "split";
   narrowWindow: boolean;
+  search: SearchHighlight;
   onExpandGap: (idx: number, dir: "up" | "down" | "all") => void;
 }): React.ReactElement {
   // We render whatever status the model is in.
@@ -162,6 +218,7 @@ function FileBody({
       oldTokens={state.oldTokens}
       newTokens={state.newTokens}
       viewMode={useSplit ? "split" : "unified"}
+      search={search}
       onExpandGap={onExpandGap}
     />
   );
@@ -175,6 +232,7 @@ function RowsView({
   oldTokens,
   newTokens,
   viewMode,
+  search,
   onExpandGap,
 }: {
   model: DiffModel;
@@ -182,6 +240,7 @@ function RowsView({
   oldTokens: ThemedToken[][] | null | undefined;
   newTokens: ThemedToken[][] | null | undefined;
   viewMode: "unified" | "split";
+  search: SearchHighlight;
   onExpandGap: (idx: number, dir: "up" | "down" | "all") => void;
 }): React.ReactElement {
   // Compute the gutter width from the max line number so the gutters
@@ -244,7 +303,13 @@ function RowsView({
                   data-selecting="auto"
                   onMouseDown={(e) => onSelectSide(e, "old")}
                 >
-                  {renderTokens(row.text, oldTokenByLineNo?.(row.leftNo), null, "old")}
+                  {renderTokens(
+                    row.text,
+                    oldTokenByLineNo?.(row.leftNo),
+                    null,
+                    "old",
+                    cellSearch(search, row.lineIdx, "context"),
+                  )}
                 </div>
                 <div className="diff-row__num diff-row__num--right">{row.rightNo}</div>
                 <div
@@ -253,7 +318,13 @@ function RowsView({
                   data-selecting="auto"
                   onMouseDown={(e) => onSelectSide(e, "new")}
                 >
-                  {renderTokens(row.text, newTokenByLineNo?.(row.rightNo), null, "new")}
+                  {renderTokens(
+                    row.text,
+                    newTokenByLineNo?.(row.rightNo),
+                    null,
+                    "new",
+                    cellSearch(search, row.lineIdx, "context"),
+                  )}
                 </div>
               </div>
             );
@@ -278,6 +349,7 @@ function RowsView({
                   oldTokenByLineNo?.(row.leftNo),
                   row.leftEmphasis,
                   "old",
+                  cellSearch(search, row.leftIdx, "old"),
                 )}
               </div>
               <div
@@ -296,6 +368,7 @@ function RowsView({
                   newTokenByLineNo?.(row.rightNo),
                   row.rightEmphasis,
                   "new",
+                  cellSearch(search, row.rightIdx, "new"),
                 )}
               </div>
             </div>
@@ -335,7 +408,15 @@ function RowsView({
               <div className="diff-row__num">{row.line.oldNo}</div>
               <div className="diff-row__num">{row.line.newNo}</div>
               <div className="diff-row__marker" />
-              <div className="diff-row__code">{renderTokens(row.line.text, null, null, "old")}</div>
+              <div className="diff-row__code">
+                {renderTokens(
+                  row.line.text,
+                  null,
+                  null,
+                  "old",
+                  cellSearch(search, row.lineIdx, "context"),
+                )}
+              </div>
             </div>
           );
         }
@@ -355,6 +436,7 @@ function RowsView({
                   oldTokenByLineNo?.(row.line.oldNo),
                   row.line.emphasis,
                   "old",
+                  cellSearch(search, row.lineIdx, "old"),
                 )}
               </div>
             </div>
@@ -375,6 +457,7 @@ function RowsView({
                 newTokenByLineNo?.(row.line.newNo),
                 row.line.emphasis,
                 "new",
+                cellSearch(search, row.lineIdx, "new"),
               )}
             </div>
           </div>
@@ -541,52 +624,70 @@ function RetryButton({ path }: { path: string }): React.ReactElement {
 
 // ── Token rendering with intraline emphasis ──────────────────────────
 
+/** A rendered run of line text carrying its highlight layers. */
+interface RenderSeg {
+  text: string;
+  color?: string;
+  /** Intraline change emphasis. */
+  em: boolean;
+  /** A search-query hit. */
+  search?: boolean;
+  /** The single currently-focused search hit. */
+  current?: boolean;
+}
+
 function renderTokens(
   text: string,
   tokens: ThemedToken[] | null | undefined,
   emphasis: IntralineRanges | null | undefined,
   side: "old" | "new",
+  search: CellSearch | null,
 ): React.ReactNode {
-  const ranges =
+  const emRanges =
     emphasis === null || emphasis === undefined ? [] : side === "old" ? emphasis.old : emphasis.new;
-  if (tokens === null || tokens === undefined) {
-    return renderPlainWithEmphasis(text, ranges);
+  const searchRanges =
+    search === null ? [] : findOccurrences(text, search.query, search.caseSensitive);
+
+  // Fast path: plain text with no layers at all. Avoids a span wrapper for the
+  // overwhelmingly common context line.
+  if (
+    (tokens === null || tokens === undefined) &&
+    emRanges.length === 0 &&
+    searchRanges.length === 0
+  ) {
+    return text;
   }
-  // tokens is the per-line ThemedToken array. Build the input list
-  // with care for `exactOptionalPropertyTypes`: only include `color`
-  // when it's defined.
-  const segs = segmentLine(
-    tokens.map((t) =>
-      t.color !== undefined ? { text: t.content, color: t.color } : { text: t.content },
-    ),
-    ranges,
-  );
+
+  // Base segments carry color (shiki) + intraline emphasis. When shiki tokens
+  // are absent we feed segmentLine a single whole-line token so the same
+  // pipeline produces plain (uncolored) emphasis segments.
+  const rawTokens =
+    tokens === null || tokens === undefined
+      ? [{ text }]
+      : tokens.map((t) =>
+          t.color !== undefined ? { text: t.content, color: t.color } : { text: t.content },
+        );
+  let segs: RenderSeg[] = segmentLine(rawTokens, emRanges).map((s) => ({
+    text: s.text,
+    ...(s.color !== undefined ? { color: s.color } : {}),
+    em: s.em,
+  }));
+
+  // Overlay the search layer, splitting segments at hit boundaries.
+  if (searchRanges.length > 0) {
+    segs = overlaySearch(segs, searchRanges, search?.currentOcc ?? null);
+  }
+
   return segs.map((s, i) => {
     if (s.text === "") return null;
-    if (s.em) {
-      return (
-        <span
-          // biome-ignore lint/suspicious/noArrayIndexKey: segments are recreated per render; no per-segment state
-          key={i}
-          className="diff-row__em"
-          style={s.color ? { color: s.color } : undefined}
-        >
-          {s.text}
-        </span>
-      );
-    }
-    return s.color ? (
+    const cls =
+      `${s.em ? "diff-row__em " : ""}${s.search ? "diff-search-mark " : ""}${s.current ? "diff-search-mark--current" : ""}`.trim();
+    return (
       <span
         // biome-ignore lint/suspicious/noArrayIndexKey: segments are recreated per render; no per-segment state
         key={i}
-        style={{ color: s.color }}
-      >
-        {s.text}
-      </span>
-    ) : (
-      <span
-        // biome-ignore lint/suspicious/noArrayIndexKey: segments are recreated per render; no per-segment state
-        key={i}
+        className={cls === "" ? undefined : cls}
+        style={s.color !== undefined ? { color: s.color } : undefined}
       >
         {s.text}
       </span>
@@ -594,24 +695,49 @@ function renderTokens(
   });
 }
 
-function renderPlainWithEmphasis(
-  text: string,
-  ranges: ReadonlyArray<readonly [number, number]>,
-): React.ReactNode {
-  if (ranges.length === 0) return text;
-  const out: React.ReactNode[] = [];
-  let cursor = 0;
-  for (let i = 0; i < ranges.length; i++) {
-    const [a, b] = ranges[i]!;
-    if (a > cursor) out.push(text.slice(cursor, a));
-    out.push(
-      <span key={i} className="diff-row__em">
-        {text.slice(a, b)}
-      </span>,
-    );
-    cursor = b;
+/**
+ * Split base segments at search-hit boundaries, tagging the hit slices with
+ * `search` (and `current` for the focused occurrence). `ranges` are char
+ * offsets into the whole line text, sorted and non-overlapping; segments are
+ * contiguous and cover the line in order, so a single left-to-right walk
+ * suffices.
+ */
+function overlaySearch(
+  segs: RenderSeg[],
+  ranges: Array<[number, number]>,
+  currentOcc: number | null,
+): RenderSeg[] {
+  const out: RenderSeg[] = [];
+  let pos = 0;
+  const slice = (seg: RenderSeg, from: number, to: number): RenderSeg => ({
+    text: seg.text.slice(from, to),
+    ...(seg.color !== undefined ? { color: seg.color } : {}),
+    em: seg.em,
+  });
+  for (const seg of segs) {
+    const segStart = pos;
+    const segEnd = pos + seg.text.length;
+    pos = segEnd;
+    if (seg.text === "") continue;
+    let cursor = segStart;
+    for (let ri = 0; ri < ranges.length; ri++) {
+      const [a, b] = ranges[ri]!;
+      if (b <= cursor) continue;
+      if (a >= segEnd) break;
+      const lo = Math.max(a, cursor);
+      const hi = Math.min(b, segEnd);
+      if (lo > cursor) out.push(slice(seg, cursor - segStart, lo - segStart));
+      if (hi > lo) {
+        out.push({
+          ...slice(seg, lo - segStart, hi - segStart),
+          search: true,
+          ...(ri === currentOcc ? { current: true } : {}),
+        });
+        cursor = hi;
+      }
+    }
+    if (cursor < segEnd) out.push(slice(seg, cursor - segStart, segEnd - segStart));
   }
-  if (cursor < text.length) out.push(text.slice(cursor));
   return out;
 }
 

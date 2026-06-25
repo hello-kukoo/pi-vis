@@ -416,9 +416,13 @@ export type SplitRow =
       leftNo: number | null;
       leftText: string;
       leftEmphasis: IntralineRanges | undefined;
+      /** Index into model.lines for the left (del) line, or null when empty. */
+      leftIdx: number | null;
       rightNo: number | null;
       rightText: string;
       rightEmphasis: IntralineRanges | undefined;
+      /** Index into model.lines for the right (add) line, or null when empty. */
+      rightIdx: number | null;
     }
   | {
       type: "split-gap";
@@ -432,6 +436,8 @@ export type SplitRow =
       leftNo: number;
       rightNo: number;
       text: string;
+      /** Index into model.lines for this context line. */
+      lineIdx: number;
     };
 
 export function buildSplitRows(rows: Row[]): SplitRow[] {
@@ -455,6 +461,7 @@ export function buildSplitRows(rows: Row[]): SplitRow[] {
         leftNo: r.line.oldNo ?? 0,
         rightNo: r.line.newNo ?? 0,
         text: r.line.text,
+        lineIdx: r.lineIdx,
       });
       continue;
     }
@@ -481,9 +488,11 @@ export function buildSplitRows(rows: Row[]): SplitRow[] {
         leftNo: d?.line.oldNo ?? null,
         leftText: d?.line.text ?? "",
         leftEmphasis: d?.line.emphasis,
+        leftIdx: d?.lineIdx ?? null,
         rightNo: a?.line.newNo ?? null,
         rightText: a?.line.text ?? "",
         rightEmphasis: a?.line.emphasis,
+        rightIdx: a?.lineIdx ?? null,
       });
     }
   }
