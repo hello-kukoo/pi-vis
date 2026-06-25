@@ -1,7 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import { ExtensionUiRequestSchema } from "@shared/pi-protocol/extension-ui.js";
 import { beforeEach, describe, expect, it } from "vitest";
-import { useSessionsStore } from "./sessions-store.js";
+import { shouldShowWorkingIndicator, useSessionsStore } from "./sessions-store.js";
 
 const SESSION_A = "session-a" as SessionId;
 const SESSION_B = "session-b" as SessionId;
@@ -599,5 +599,182 @@ describe("sessions store - workspace expand / reorder model", () => {
     // Clearing the active session clears the active workspace too.
     store.setActiveSession(null);
     expect(useSessionsStore.getState().activeWorkspacePath).toBeNull();
+  });
+});
+
+// ── Custom-panel reducer (handlePanelEvent) ────────────────────────────────
+// The extension custom() panel state + its bounded replay buffer. None of this
+// was covered before; the 512KB trim loop in particular is fiddly.
+const PANEL_BUFFER_MAX_BYTES = 512 * 1024;
+
+describe("sessions store - custom panel reducer", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+  });
+
+  const panel = (id: SessionId = SESSION_A) => useSessionsStore.getState().sessions.get(id)?.panel;
+
+  it("panel_open creates the panel with an empty buffer", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: true,
+    });
+    expect(panel()).toEqual({ id: 1, overlay: true, buffer: [] });
+  });
+
+  it("panel_data appends to the matching panel's buffer", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 1, data: "a" });
+    s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 1, data: "b" });
+    expect(panel()?.buffer).toEqual(["a", "b"]);
+  });
+
+  it("panel_data for a non-matching panelId is ignored", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 99, data: "x" });
+    expect(panel()?.buffer).toEqual([]);
+  });
+
+  it("panel_data caps the buffer at PANEL_BUFFER_MAX_BYTES, dropping oldest first", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    const chunk = "x".repeat(100 * 1024); // 100KB each
+    // 7 × 100KB = 700KB > 512KB → oldest chunks dropped until under cap.
+    for (let i = 0; i < 7; i++) {
+      s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 1, data: chunk });
+    }
+    const buf = panel()?.buffer ?? [];
+    const total = buf.reduce((n, c) => n + c.length, 0);
+    expect(total).toBeLessThanOrEqual(PANEL_BUFFER_MAX_BYTES);
+    expect(buf.length).toBeGreaterThan(0); // never trims below one frame
+  });
+
+  it("never trims the buffer below a single chunk even if it exceeds the cap", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    const huge = "y".repeat(PANEL_BUFFER_MAX_BYTES + 10);
+    s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 1, data: huge });
+    // A lone over-cap chunk is retained (the trim loop guards buffer.length > 1).
+    expect(panel()?.buffer).toEqual([huge]);
+  });
+
+  it("panel_close clears the matching panel", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    s.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 1 });
+    expect(panel()).toBeUndefined();
+  });
+
+  it("panel_close for a non-matching panelId leaves the panel intact", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    s.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 2 });
+    expect(panel()?.id).toBe(1);
+  });
+
+  it("panel_clear_all clears the panel unconditionally", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    s.handlePanelEvent(SESSION_A, { type: "panel_clear_all" });
+    expect(panel()).toBeUndefined();
+  });
+
+  it("host_fallback surfaces a warning toast with the reason", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "host_fallback",
+      reason: "pi too old — update pi for panel support",
+    });
+    const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
+    expect(toasts.at(-1)).toMatchObject({
+      type: "warning",
+      message: "pi too old — update pi for panel support",
+    });
+  });
+
+  it("session_warning surfaces a warning toast", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "session_warning",
+      message: "Session file is open in another pi instance. Changes may conflict.",
+    });
+    const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
+    expect(toasts.at(-1)).toMatchObject({ type: "warning" });
+  });
+
+  it("is a no-op for an unknown session", () => {
+    useSessionsStore.getState().handlePanelEvent("nope" as SessionId, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: false,
+    });
+    expect(useSessionsStore.getState().sessions.has("nope" as SessionId)).toBe(false);
+  });
+});
+
+// ── Working-indicator gating (shouldShowWorkingIndicator) ──────────────────
+// An extension slash-command (e.g. /agents) runs via session.prompt, so pi
+// reports the turn "active" (isStreaming) while its handler is blocked on a
+// select dialog or custom panel. The indicator must NOT show during that wait.
+describe("sessions store - shouldShowWorkingIndicator", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+  });
+
+  const session = () => useSessionsStore.getState().sessions.get(SESSION_A);
+
+  it("is false when not streaming", () => {
+    expect(shouldShowWorkingIndicator(session())).toBe(false);
+  });
+
+  it("is true when streaming with no extension UI open", () => {
+    useSessionsStore.getState().setStreaming(SESSION_A, true);
+    expect(shouldShowWorkingIndicator(session())).toBe(true);
+  });
+
+  it("is false when streaming but a dialog is pending (e.g. /agents select)", () => {
+    useSessionsStore.getState().setStreaming(SESSION_A, true);
+    useSessionsStore.getState().addUiRequest(SESSION_A, {
+      type: "extension_ui_request",
+      id: "d1",
+      method: "select",
+      title: "Agents",
+      options: ["Settings"],
+    });
+    expect(shouldShowWorkingIndicator(session())).toBe(false);
+  });
+
+  it("is false when streaming but a custom panel is open (e.g. Settings)", () => {
+    useSessionsStore.getState().setStreaming(SESSION_A, true);
+    useSessionsStore
+      .getState()
+      .handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    expect(shouldShowWorkingIndicator(session())).toBe(false); // panel open → suppressed
+  });
+
+  it("returns to true once the extension UI closes (panel_close) while still streaming", () => {
+    const store = useSessionsStore.getState();
+    store.setStreaming(SESSION_A, true);
+    store.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    expect(shouldShowWorkingIndicator(session())).toBe(false);
+    store.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 1 });
+    expect(shouldShowWorkingIndicator(session())).toBe(true);
+  });
+
+  it("is false for an unknown/undefined session", () => {
+    expect(shouldShowWorkingIndicator(undefined)).toBe(false);
   });
 });

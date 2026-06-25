@@ -47,7 +47,8 @@
       "release",
       "coverage",
       "playwright-report",
-      "test-results"
+      "test-results",
+      ".pi"
     ]
   },
   "overrides": [

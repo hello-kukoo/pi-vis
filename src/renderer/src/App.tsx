@@ -5,6 +5,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { Composer } from "./components/composer/Composer.js";
 import { WorktreeBar } from "./components/composer/WorktreeBar.js";
 import { DiffViewerHost } from "./components/diff/DiffViewerHost.js";
+import { CustomPanelHost } from "./components/ext-ui/CustomPanelHost.js";
 import { ExtensionDialogHost, ToastHost } from "./components/ext-ui/ExtensionDialogHost.js";
 import { AppPickerHost } from "./components/pickers/AppPickerHost.js";
 import { SessionSubBar } from "./components/session-header/SessionSubBar.js";
@@ -28,6 +29,7 @@ export function App(): React.ReactElement {
   const applyEvent = useSessionsStore((s) => s.applyEvent);
   const addUiRequest = useSessionsStore((s) => s.addUiRequest);
   const compact = useSessionsStore((s) => s.headerCompact);
+  const handlePanelEvent = useSessionsStore((s) => s.handlePanelEvent);
   const adoptSessionFile = useSessionsStore((s) => s.adoptSessionFile);
   const refreshCommands = useSessionsStore((s) => s.refreshCommands);
   const seedHistory = useSessionsStore((s) => s.seedHistory);
@@ -74,6 +76,13 @@ export function App(): React.ReactElement {
     const id = s.activeSessionId;
     if (!id) return false;
     return (s.sessions.get(id)?.pendingDialogs.length ?? 0) > 0;
+  });
+
+  // Panel from ctx.ui.custom() -- replaces the composer while open
+  const hasOpenPanel = useSessionsStore((s) => {
+    const id = s.activeSessionId;
+    if (!id) return false;
+    return s.sessions.get(id)?.panel !== undefined;
   });
 
   // Boot: load settings and check for pi
@@ -189,17 +198,24 @@ export function App(): React.ReactElement {
       addUiRequest(sessionId as SessionId, request);
     });
 
-    const unsubStatus = window.pivis.on("session.statusChanged", ({ sessionId, status, error }) => {
-      const sid = sessionId as SessionId;
-      setSessionStatus(sid, status, error);
-      // Ready = pi has started and accepted commands. This is the right
-      // moment to ask for the discovered command list (extension / prompt
-      // template / skill) — pi exposes them via get_commands at any time,
-      // but a cold start is when the Composer's suggestions are empty
-      // and the user is about to type `/`.
-      if (status === "ready") {
-        void refreshCommands(sid);
-      }
+    const unsubStatus = window.pivis.on(
+      "session.statusChanged",
+      ({ sessionId, status, error, piVersion }) => {
+        const sid = sessionId as SessionId;
+        setSessionStatus(sid, status, error, piVersion);
+        // Ready = pi has started and accepted commands. This is the right
+        // moment to ask for the discovered command list (extension / prompt
+        // template / skill) — pi exposes them via get_commands at any time,
+        // but a cold start is when the Composer's suggestions are empty
+        // and the user is about to type `/`.
+        if (status === "ready") {
+          void refreshCommands(sid);
+        }
+      },
+    );
+
+    const unsubPanel = window.pivis.on("session.panelEvent", ({ sessionId, event }) => {
+      handlePanelEvent(sessionId as SessionId, event);
     });
 
     // session.fileChanged: emitted after /new, /fork, /clone, /switch_session
@@ -262,6 +278,7 @@ export function App(): React.ReactElement {
       unsubUpdateProgress();
       unsubUpdateDone();
       unsubAuthChanged();
+      unsubPanel();
     };
   }, [
     applyEvent,
@@ -271,6 +288,7 @@ export function App(): React.ReactElement {
     refreshCommands,
     seedHistory,
     refreshWorkspaceSessions,
+    handlePanelEvent,
   ]);
 
   const handlePiRecheck = useCallback(async () => {
@@ -344,6 +362,8 @@ export function App(): React.ReactElement {
                 (Cmd+G) still works while the question is open. */}
               {hasPendingDialog ? (
                 <ExtensionDialogHost sessionId={activeSessionId} />
+              ) : hasOpenPanel ? (
+                <CustomPanelHost sessionId={activeSessionId} />
               ) : (
                 <Composer sessionId={activeSessionId} />
               )}

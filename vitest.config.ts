@@ -4,7 +4,12 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // src/**/*.test.ts — the main/renderer/shared TypeScript suites.
+    // resources/**/*.test.mjs — the SDK-host subprocess (plain ESM, not under
+    //   src/, so the old glob silently excluded the entire host: trust resolver,
+    //   command bridge, version gate). Only .test.mjs is matched here so it
+    //   never collides with the Playwright e2e *.spec.mts under tests/e2e.
+    include: ["src/**/*.test.ts", "resources/**/*.test.mjs"],
     globals: false,
   },
   resolve: {

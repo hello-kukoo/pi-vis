@@ -364,3 +364,67 @@ describe("executeAction — picker host receives a well-typed PickerRequest", ()
     if (picker.kind === "resume") expect(picker.sessions.length).toBe(1);
   });
 });
+
+describe("executeAction — extension commands (fire-and-forget)", () => {
+  it("dispatches extension command without awaiting the invoke (composer decoupling)", async () => {
+    // The extension branch must NOT await the invoke — otherwise the composer
+    // blocks until the custom() panel closes (done callback).
+    let invokeResolved = false;
+    let invokeResolve: (() => void) | null = null;
+
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(() => {
+        return new Promise<unknown>((resolve) => {
+          invokeResolve = () => {
+            invokeResolved = true;
+            resolve({ success: true, data: {} });
+          };
+        });
+      }) as ExecuteDeps["invoke"],
+    });
+
+    const promise = executeAction(
+      SID,
+      {
+        kind: "send-prompt",
+        text: "/mcp",
+        commandSource: "extension",
+      },
+      deps,
+    );
+
+    // The executeAction should return immediately (fire-and-forget)
+    // WITHOUT waiting for the invoke to resolve.
+    await promise;
+
+    // At this point, executeAction has returned but invoke hasn't resolved.
+    // This proves the composer doesn't block on extension commands.
+    expect(invokeResolved).toBe(false);
+
+    // Now resolve the invoke to clean up
+    if (invokeResolve) (invokeResolve as () => void)();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invokeResolved).toBe(true);
+  });
+
+  it("surfaces a rejected invoke as an error toast (P2-a: no silent failure)", async () => {
+    // If the invoke rejects (session died, "No active process"), the
+    // fire-and-forget catch must toast the error — not just console.error it
+    // — so the user knows their extension invocation did nothing.
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(() => Promise.reject(new Error("No active process"))) as ExecuteDeps["invoke"],
+    });
+
+    await executeAction(
+      SID,
+      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
+      deps,
+    );
+    // The catch runs async; let it flush.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const addToastCalls = (calls["addToast"] ?? []) as unknown[];
+    expect(addToastCalls.length).toBe(1);
+    expect(addToastCalls[0]).toEqual([SID, expect.stringMatching(/No active process/), "error"]);
+  });
+});

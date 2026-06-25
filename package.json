@@ -13,7 +13,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "dev:renderer": "vite --config vite.renderer.config.ts",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && electron-vite build && npm run copy-host",
+    "copy-host": "mkdir -p out/resources/pi-session-host && cp resources/pi-session-host/*.mjs out/resources/pi-session-host/",
     "dist": "npm run build && electron-builder --mac",
     "typecheck": "tsc -b --noEmit",
     "lint": "biome check .",

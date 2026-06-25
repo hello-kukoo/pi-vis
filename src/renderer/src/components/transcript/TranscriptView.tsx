@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "../../lib/markdown.js";
 import { htmlToMarkdown } from "../../lib/turndown.js";
-import { useSessionsStore } from "../../stores/sessions-store.js";
+import { shouldShowWorkingIndicator, useSessionsStore } from "../../stores/sessions-store.js";
 import type {
   AssistantBlockData,
   BashBlockData,
@@ -484,7 +484,11 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   }, []);
 
   const allBlocks: TypedTranscriptBlock[] = session?.transcript.blocks ?? [];
-  const isStreaming = session?.isStreaming ?? false;
+  // Show the "Running for …" indicator only when the agent is genuinely
+  // computing — NOT while an extension command is blocked on its own UI (a
+  // dialog or custom panel), during which pi still reports the turn active.
+  // See shouldShowWorkingIndicator for the full rationale.
+  const showWorking = shouldShowWorkingIndicator(session);
 
   const visibleBlocks =
     showAll || allBlocks.length <= MAX_VISIBLE_BLOCKS
@@ -655,7 +659,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
               return null;
           }
         })}
-        {isStreaming && <WorkingRow sessionId={sessionId} />}
+        {showWorking && <WorkingRow sessionId={sessionId} />}
       </div>
     </div>
   );

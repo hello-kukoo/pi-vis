@@ -210,10 +210,29 @@ async function executeSendPrompt(
         mimeType: i.mimeType,
       }));
     }
-    await deps.invoke("session.sendCommand", {
-      sessionId,
-      command: extensionCommand,
-    });
+    // Fire-and-forget: do NOT await the invoke.
+    // The composer must not block on a command whose `prompt` response
+    // only resolves when its custom panel closes (ctx.ui.custom awaits done()).
+    // Events stream back through the session subscription independently.
+    // The .catch() is required: without awaiting, a rejected invoke (e.g. the
+    // session process died) would otherwise be an unhandled promise rejection.
+    deps
+      .invoke("session.sendCommand", {
+        sessionId,
+        command: extensionCommand,
+      })
+      .catch((err) => {
+        console.error("[execute] extension command failed:", err);
+        // P2-a: a dead session / failed send would otherwise vanish silently
+        // — the composer swallowed the input (fire-and-forget), so the user
+        // gets no feedback that their /mcp / extension invocation did nothing.
+        // Surface it as an error toast.
+        deps.addToast(
+          sessionId,
+          `Extension command failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
+      });
     return;
   }
 

@@ -44,6 +44,14 @@ src/
 │   │   └── history-loader.ts     # Reads session JSONL files into TranscriptBlock[]
 │   └── git/
 │       └── git.ts           # Git diff/changes via child_process; worktree-aware
+├── resources/
+│   └── pi-session-host/     # SDK-direct host subprocess (spawned via child_process.fork)
+│       ├── host.mjs          # Entry: imports pi SDK, creates AgentSessionRuntime,
+│       │                     #   binds extensions mode:"tui", bridges commands/events
+│       ├── bootstrap.mjs     # HTTP dispatcher, trust resolver, theme init
+│       ├── ui-context.mjs    # ~28-method ExtensionUIContext: dialogs, TUI no-ops,
+│       │                     #   custom() → HostTerminal + TUI overlay bridge
+│       └── bridge.mjs        # Command translation + event forwarding + setRebindSession
 │
 ├── preload/
 │   └── index.ts             # contextBridge exposing typed `window.pivis` API (invoke + on)
@@ -103,7 +111,38 @@ src/
 
 ## Architecture
 
-### Three-Process Electron Model
+### Four-Process Model (with SDK-host, progressive enhancement)
+
+```
+┌─────────────┐     IPC (typed)      ┌───────────┐   fork (child IPC)    ┌────────────────┐
+│  Main Proc   │ ◄──────────────────► │ Renderer  │ ─ ─ ─ ─ ─ ─ ─ ─ ─ ► │ pi-session-host│
+│ (Node.js)    │   contextBridge      │ (React)   │  panel.* events      │ (SDK host,     │
+│              │   window.pivis       │           │                      │  one per sess) │
+└─────────────┘                      └───────────┘                      └────────────────┘
+     ▲                                                                   │ imports user's │
+     │                                                                   │ installed pi   │
+     │                                                      ▲ FALLBACK: if host can't start │
+     │                                                     ┌─────────────┐                │
+     │                                                     │ pi --mode   │ ◄──────────────┘
+     │                                                     │   rpc       │
+     │                                                     │ (subprocess)│
+     │                                                     └─────────────┘
+```
+
+- **PiProcess** (`src/main/pi/pi-process.ts`): legacy wrapper, spawns `pi --mode rpc` (fallback)
+- **SessionHost** (`src/main/pi/session-host.ts`): SDK-direct wrapper, forks `resources/pi-session-host/host.mjs`
+  - Same EventEmitter shape as PiProcess (event, uiRequest, exit, error events; sendCommand/sendUiResponse methods)
+  - Additional panel events: panelOpen, panelData, panelClose, panelClearAll
+  - `activateSession` tries SessionHost first; on failure falls back to PiProcess (progressive enhancement)
+  - **Renderer contract unchanged**: PiRpcCommand/PiEvent/ExtensionUiRequest types preserved
+- **Panel channel**: `session.panelEvent` (IPC: main→renderer), `session.panelInput` + `session.panelResize` (IPC: renderer→main→host). Panel events: `panel_open`/`panel_data`/`panel_close`/`panel_clear_all` (custom() rendering), `host_fallback` (host couldn't start — fell back to `pi --mode rpc`, panels unavailable; surfaced as a toast), `session_warning` (non-fatal warning like session-file lock contention; surfaced as a toast).
+  - CustomPanelHost renders ANSI in xterm.js overlay (mirrors LoginTerminal)
+  - Composer decoupled: extension commands fire-and-forget (execute.ts)
+- **Project trust (security)**: the host wires `resolveProjectTrust` into `createAgentSessionServices` (deny-by-default, matching terminal pi). A folder with trust-requiring project-local resources prompts a React **select** dialog *during* host startup, offering pi's full choice set (trust folder / trust parent / trust this-session-only / deny / deny this-session-only — `buildProjectTrustOptions`); the chosen option's updates persist via the public `ProjectTrustStore.setMany` (`get()` walks ancestors, so a parent grant covers children). Because the prompt fires pre-`ready`, the registry attaches the `uiRequest`/panel listeners **before** `waitForReady`, and `SessionHost` pauses its startup watchdog while a pre-ready dialog is outstanding (a human, not a hang). Without this gate, pi loads project-local `.pi/` extensions ungated (`projectTrusted` defaults `true`). The host derives `agentDir` from `pi.getAgentDir()` so the trust store, services, and runtime agree and stay shared with terminal pi.
+- **Zero private pi imports**: the host uses only pi's public `dist/index.js` surface (+ public pi-tui + bundled undici). The active theme comes from public `initTheme()` + reading `globalThis[Symbol.for("…:theme")]`, not a deep import. Enforced by `src/main/pi/host-imports.test.ts`.
+
+### Three-Process Electron Model (legacy fallback)
+
 
 ```
 ┌─────────────┐     IPC (typed)      ┌───────────┐    JSONL/stdin/stdout    ┌────────────┐
@@ -128,6 +167,8 @@ src/
 - `session.activate` / `session.reload` / `session.close` / `session.loadHistory`
 - `session.sendCommand` — sends PiRpcCommand, returns PiRpcResponse
 - `session.respondToUiRequest` — sends ExtensionUiResponse back to pi
+- `session.panelInput` — keystrokes from the xterm.js panel overlay → host's custom() TUI
+- `session.panelResize` — new xterm.js cols/rows → host, so the TUI layout matches the panel
 - `settings.get` / `settings.set`
 - `git.changes` / `git.fileDiff` (both accept optional `base?: string` for branch-relative diffs). `git.changes` also returns a `fingerprint` — a content hash of the working tree vs HEAD (always HEAD, regardless of `base`) plus untracked contents — that the diff viewer uses to detect whether tool calls actually changed files. This is the heavyweight path (file list + line counts + the full-patch fingerprint), reserved for the **open** viewer and its staleness probe.
 - `git.changesCount` — lightweight changed-file **count** for the header badge while the viewer is **closed**. A single `git status --porcelain=v2 -z --untracked-files=all` scan (one working-tree walk), no line counts / fingerprint / file reads — so the every-tool-call badge refresh stays cheap on huge repos. Capped at the same `MAX_FILES` limit as `git.changes`.
@@ -168,10 +209,10 @@ All renderer state uses **Zustand** stores:
 ### Session Lifecycle
 
 1. **Open**: `session.open` IPC → `SessionRegistry.openSession()` creates a `SessionId`, returns it (no process yet)
-2. **Activate**: `session.activate` IPC → `SessionRegistry.activateSession()` spawns `PiProcess` (runs `pi --mode rpc`)
-3. **Ready**: Process emits first event or 2s timeout → status becomes `"ready"`
+2. **Activate**: `session.activate` IPC → `SessionRegistry.activateSession()` spawns the **SessionHost** (SDK-direct, forks `resources/pi-session-host/host.mjs`) as progressive enhancement. A min-pi-version gate (`MIN_PI_VERSION` in `host.mjs`, compared via `version.mjs`'s `compareVersions`) exits the host with code 42 if pi is too old; `SessionHost` detects this and the registry falls back to **PiProcess** (`pi --mode rpc`), emitting a `host_fallback` panel event so the renderer shows an "update pi for panel support" toast. The caller's request (`_hostRequested`) is sticky across fallbacks: `/reload` re-tries the host iff the caller originally wanted it (a pi upgrade mid-session re-promotes), while a worktree respawn preserves the ACTUAL running mode (`_useHost`) since the pi install is unchanged. The registry holds a proper-lockfile advisory lock on the session file (released on close/exit/error/failed-activation; `onCompromised` is overridden to log-and-clear instead of throw).
+3. **Ready**: Host sends `{type:"ready", piVersion}` (or RPC process emits first event / 2s timeout) → status becomes `"ready"` (with `piVersion` for the header)
 4. **Streaming**: User sends prompt → `session.sendCommand` → pi emits `agent_start`, `message_*`, `tool_execution_*`, `agent_end` events
-5. **Close**: `session.close` → process killed, session record retained for resume. Worktrees are left on disk (never removed).
+5. **Close**: `session.close` → process killed, advisory session-file lock released, session record retained for resume. Worktrees are left on disk (never removed).
 6. **Idle eviction**: MAX_IDLE_PROCESSES = 10; oldest inactive process stopped when exceeded
 
 ### Worktree-per-session
@@ -292,9 +333,12 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 
 ## Testing
 
-- **Vitest** for unit tests, colocated as `*.test.ts` next to source files
-- **Playwright** for E2E tests in `tests/e2e/` — tests app startup, commands, diff viewer, real pi integration
+- **Vitest** for unit tests. The glob is `["src/**/*.test.ts", "resources/**/*.test.mjs"]` — the second pattern is load-bearing: the SDK-host subprocess lives in `resources/pi-session-host/` as plain ESM and was previously excluded entirely. Host-subprocess units are colocated as `*.test.mjs` (matched there, never colliding with the Playwright `*.spec.mts` e2e). Everything else is colocated `*.test.ts`.
+- **Host-subprocess unit coverage** (`resources/pi-session-host/*.test.mjs`): the **trust resolver** (`trust.test.mjs` — the security-critical deny-by-default gate, fully faked pi SDK), the **command bridge** (`bridge.test.mjs` — pi-vis-command → SDK-method mapping + `assertHostCapabilities`), the **version gate** (`version.test.mjs` — `compareVersions`, incl. pre-release ordering), and the **uiContext dialog contract** (`ui-context.test.mjs` — select/confirm/input/editor must UNWRAP the wire response to pi's value contract: `string`/`boolean`/`undefined`, not the raw `{type,id,value}` object). These functions are exported precisely so they're testable without importing `host.mjs`'s fork entry-point (which needs a real pi).
+- **uiContext dialog contract (gotcha)**: `ctx.ui.select/input/editor` return the unwrapped **value** (`string`, `undefined` on cancel); `ctx.ui.confirm` returns a **boolean**. The host's `createDialog` resolves with the raw `ExtensionUiResponse` wire object, so `ui-context.mjs` MUST unwrap per-method. Returning the object breaks any extension that compares the result (`choice === "Settings"`, `choice.startsWith(...)`), e.g. `pi-subagents` `/agents → Settings`. The trust prompt (`host.mjs` `promptTrustChoice`) reads the raw response directly and is independent of this unwrapping.
+- **Playwright** for E2E tests in `tests/e2e/` — tests app startup, commands, diff viewer, real pi integration. The inline-panel E2E (`panels.spec.mts`) is gated behind `PI_E2E=1` (needs a real pi + extension); it is the load-bearing gate for the un-`tsc`-checkable host↔pi behavioral contract and is **not yet in CI**.
 - **Fake pi**: `tests/fixtures/fake-pi.mjs` is a scripted stand-in for the real pi binary (used in unit tests). Beyond RPC, it simulates `--version` (pinnable via `FAKE_PI_VERSION_FILE`/`FAKE_PI_VERSION`) and the `pi update` subcommand (bumps the version stamp, or fails/hangs via `FAKE_PI_UPDATE_EXIT`/`FAKE_PI_UPDATE_HANG`), so `updates.ts` can be tested end-to-end without touching the real install — see `src/main/updates.test.ts`
+- **SessionHost stub-fork harness**: `tests/fixtures/fake-host-process.mjs` (`FakeHostProcess`) is a ChildProcess-shaped EventEmitter that drives the host wire protocol deterministically without forking a real `host.mjs`. `SessionHost.__forkOverride` is the test seam (a mutable `{fn}` — set it to return a `FakeHostProcess` and `SessionHost` constructs it instead of calling `child_process.fork`). This makes the lifecycle seams executable: `waitForReady` resolve/reject/timeout, the pre-ready dialog watchdog (W1), `sendCommand` correlation + `rejectAllPending`, panel I/O round-trips, and pre-ready `uiRequest` ordering (`src/main/pi/session-host.test.ts`). The fake mirrors the real host's **failure** modes, not just the happy path — it bounces pre-`ready` commands with "Not initialized" (host.mjs:340) and fails `.send()` after exit (channel closed) — so a registry routing regression (e.g. P1-i) trips a test instead of silently buffering. The registry concurrency tests (`src/main/sessions/session-registry.test.ts`, "concurrency & lock lifecycle" describe) reuse it to exercise close-during-activate cancellation (P1-e), queued-command rejection on close (P1-h), the `onCompromised` no-throw override (P1-d), failed-activation lock release (P1-f), and `/reload` host re-try (P2-b).
 - **Test overrides**: `tests/fixtures/captures/` contains captured pi protocol data for fixture-based testing
 
 ## Important Paths

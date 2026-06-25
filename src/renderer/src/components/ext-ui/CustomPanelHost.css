@@ -1,0 +1,72 @@
+/* CustomPanelHost — inline xterm.js overlay for extension custom() panels */
+
+.custom-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--ctp-base);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-lg);
+  overflow: hidden;
+  min-height: 12rem;
+  max-height: 50vh;
+}
+
+.custom-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
+  padding: 0.571rem 0.857rem;
+  border-bottom: 1px solid var(--ctp-surface1);
+  background: var(--ctp-surface0);
+  flex-shrink: 0;
+}
+
+.custom-panel__title {
+  font-family: var(--font-display);
+  font-size: 0.929em;
+  font-weight: 600;
+  color: var(--ctp-text);
+}
+
+.custom-panel__hint {
+  font-family: var(--font-display);
+  font-size: 0.786em;
+  color: var(--ctp-overlay1);
+}
+
+.custom-panel__close {
+  margin-left: auto;
+  font-family: var(--font-display);
+  font-size: 0.786em;
+  color: var(--ctp-subtext0);
+  background: transparent;
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--mcm-radius-sm);
+  padding: 0.143rem 0.5rem;
+  cursor: pointer;
+}
+
+.custom-panel__close:hover {
+  color: var(--ctp-text);
+  background: var(--ctp-surface1);
+}
+
+.custom-panel__xterm {
+  flex: 1;
+  min-height: 10rem;
+  padding: 0.286rem;
+}
+
+/* Override xterm.js default colors to match Catppuccin theme */
+.custom-panel__xterm .xterm {
+  height: 100%;
+}
+
+.custom-panel__xterm .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ctp-surface1) transparent;
+}
+
+.custom-panel__xterm .xterm-screen {
+  /* Ensure the terminal text rendering uses the code font */
+}

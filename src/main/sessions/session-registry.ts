@@ -2,9 +2,14 @@ import path from "node:path";
 import { newSessionId } from "@shared/ids.js";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
+import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
+import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
+import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
+import lockfile from "proper-lockfile";
 import { PiProcess } from "../pi/pi-process.js";
+import { HostVersionTooLowError, SessionHost } from "../pi/session-host.js";
 
 export interface SessionRecord {
   sessionId: SessionId;
@@ -16,18 +21,69 @@ export interface SessionRecord {
   sessionFile?: string | undefined;
   status: SessionStatus;
   error?: string | undefined;
-  proc?: PiProcess | undefined;
+  proc?: PiProcess | SessionHost | undefined;
   /** Timestamp of last activity (open, command, or agent event). Used for LRU eviction. */
   lastActiveAt: number;
   /** True while the agent is actively processing a command (busy = ineligible for idle kill). */
   busy: boolean;
+  /** Whether we hold the proper-lockfile advisory lock on the session file. */
+  _hasLock?: boolean;
+  /** True while activateSession() is mid-flight — guards re-entrant double-spawn. */
+  _activating?: boolean;
+  /**
+   * Set by closeSession when it runs during activateSession's async window
+   * (the lock-acquire / waitForReady awaits). activateSession checks this
+   * after each await: if set, it tears down whatever it just spawned and
+   * returns WITHOUT reviving the deleted record or spawning a fallback —
+   * the close wins. See P1-e (close-during-activate) + P1-h (queue hang).
+   */
+  _dead?: boolean;
+  /**
+   * What the caller REQUESTED for host mode (the `useHost` arg to the first
+   * activateSession). Unlike `_useHost` (which is overwritten to false on
+   * fallback), this is sticky — it records intent, not outcome. /reload
+   * re-tries the host iff this is true, so a session that fell back to rpc
+   * can re-promote after a pi upgrade, while a session the caller never
+   * wanted in host mode stays rpc. See P2-b.
+   */
+  _hostRequested?: boolean;
+  /** Whether the session last ran in SDK-host mode (vs pi --mode rpc).
+   *  Remembered across reload/respawn so a re-activation preserves the mode
+   *  (without it, /reload and worktree-per-session silently reverted to
+   *  --mode rpc and lost panel support). */
+  _useHost?: boolean;
+  /**
+   * True once the proc is fully established and able to accept commands — i.e.
+   * AFTER the host handshake (waitForReady) for host mode, or immediately for
+   * the PiProcess/fallback branch. `proc` alone is NOT a readiness signal:
+   * host mode assigns `record.proc = hostProc` BEFORE waitForReady (so the
+   * init-time trust dialog can round-trip), and the host rejects every command
+   * with "Not initialized" until its session finishes initializing. sendCommand
+   * MUST gate on this flag, not on `proc` presence, or the renderer's init
+   * commands (fired on "starting") race the handshake and bounce. See P1-i.
+   */
+  _procReady?: boolean;
+  /** Commands queued while the proc was being established (activation in flight). */
+  _pendingSend?:
+    | Array<{
+        command: PiRpcCommand;
+        resolve: (res: PiRpcResponse) => void;
+        reject: (err: Error) => void;
+      }>
+    | undefined;
 }
 
 const MAX_IDLE_PROCESSES = 10;
 
 type SessionEventCallback = (sessionId: SessionId, event: PiEvent) => void;
 type UiRequestCallback = (sessionId: SessionId, req: ExtensionUiRequest) => void;
-type StatusChangedCallback = (sessionId: SessionId, status: SessionStatus, error?: string) => void;
+type StatusChangedCallback = (
+  sessionId: SessionId,
+  status: SessionStatus,
+  error?: string,
+  piVersion?: string,
+) => void;
+type PanelEventCallback = (sessionId: SessionId, event: PanelEvent) => void;
 
 export class SessionRegistry {
   private sessions = new Map<SessionId, SessionRecord>();
@@ -36,15 +92,18 @@ export class SessionRegistry {
   private onEvent: SessionEventCallback;
   private onUiRequest: UiRequestCallback;
   private onStatusChanged: StatusChangedCallback;
+  private onPanelEvent: PanelEventCallback;
 
   constructor(
     onEvent: SessionEventCallback,
     onUiRequest: UiRequestCallback,
     onStatusChanged: StatusChangedCallback,
+    onPanelEvent: PanelEventCallback,
   ) {
     this.onEvent = onEvent;
     this.onUiRequest = onUiRequest;
     this.onStatusChanged = onStatusChanged;
+    this.onPanelEvent = onPanelEvent;
   }
 
   /**
@@ -89,30 +148,208 @@ export class SessionRegistry {
    * Spawn the pi process for an existing cold record. Idempotent: a second
    * call while a process is alive is a no-op. Re-spawns after exit.
    */
-  activateSession(sessionId: SessionId, piPath: string, env?: Record<string, string>): void {
+  async activateSession(
+    sessionId: SessionId,
+    piPath: string,
+    env?: Record<string, string>,
+    useHost = false,
+  ): Promise<void> {
     const record = this.sessions.get(sessionId);
     if (!record) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
 
+    // Re-entrant guard. activateSession is async: it awaits the session-file
+    // lock and, in host mode, the host's startup handshake. A second call
+    // arriving mid-flight — e.g. the renderer re-firing session.activate
+    // before the "starting" status has landed — must NOT spawn a second
+    // process. The `record.proc &&` idempotency check below can't catch this,
+    // because proc is still undefined during the async window (the old sync
+    // activateSession set proc in the same tick as "starting", so this gap
+    // didn't exist). The _activating flag closes it; reload/respawn paths
+    // clear proc deliberately and call activateSession from a quiescent state,
+    // so they're unaffected.
+    if (record._activating) return;
     if (record.proc && (record.status === "starting" || record.status === "ready")) {
       return;
     }
 
+    record._activating = true;
+    // P2-b: remember what the caller REQUESTED (sticky across fallbacks) so
+    // /reload can re-try the host after a prior fallback (user may have
+    // upgraded pi). _useHost tracks the actual running mode; _hostRequested
+    // tracks intent. Both are passed through activateSession.
+    record._hostRequested = useHost;
     record.error = undefined;
+    // Not ready until the proc is fully established (post-handshake in host
+    // mode). Reset here so a re-activation (reload/respawn) re-queues until the
+    // fresh proc is up rather than firing at a half-spawned host. See P1-i.
+    record._procReady = false;
     record.status = "starting";
     this.onStatusChanged(sessionId, "starting");
 
     try {
+      // Advisory file lock — warns if the session file is open elsewhere
+      // (terminal pi). Non-blocking; if it fails we continue but emit a note.
+      // Skip if we already hold the lock (e.g. reload/respawn reuses the same
+      // session file) — otherwise proper-lockfile would see our own lockfile
+      // and emit a false "open elsewhere" warning.
+      if (record.sessionFile && !record._hasLock) {
+        try {
+          // proper-lockfile lock() is async and retries by default.
+          // We use a 0-retry policy so we fail immediately if locked.
+          // realpath:false must match the unlock() call in closeSession —
+          // otherwise lock() tracks the lock under the realpath'd key while
+          // unlock() looks up the raw path and throws ENOTACQUIRED, leaving
+          // proper-lockfile's recurring update timer running (and the
+          // lockfile on disk) forever.
+          // P1-d: proper-lockfile's default onCompromised throws, which fires
+          // from a recurring updateLock setTimeout when the lockfile mtime is
+          // compromised (e.g. terminal pi touches the same <file>.lock). That
+          // throw is an uncaught exception in the main process on a documented,
+          // expected scenario — the advisory lock exists BECAUSE of this
+          // contention. Override it to log + mark the lock lost (wrapped in
+          // try/catch so the override itself can never throw either).
+          await lockfile.lock(record.sessionFile, {
+            retries: 0,
+            realpath: false,
+            lockfilePath: `${record.sessionFile}.lock`,
+            onCompromised: (err: Error) => {
+              try {
+                console.warn(`[session-registry] Session lock compromised: ${err?.message ?? err}`);
+                record._hasLock = false; // we no longer hold it; skip unlock
+              } catch {
+                /* never let the override itself throw from the timer */
+              }
+            },
+          });
+          record._hasLock = true;
+        } catch {
+          // Lock is held elsewhere (e.g., terminal pi)
+          console.warn(`[session-registry] Session file is open elsewhere: ${record.sessionFile}`);
+          record._hasLock = false;
+          this.onPanelEvent(sessionId, {
+            type: "session_warning",
+            message: "Session file is open in another pi instance. Changes may conflict.",
+          });
+        }
+      }
+
+      // P1-e: if closeSession ran during the lock acquire above, bail out
+      // immediately. Don't spawn a proc onto a deleted record.
+      if (record._dead) {
+        record._activating = false;
+        return;
+      }
+
       const cwd = record.worktreePath ?? record.workspacePath;
-      const proc = new PiProcess(piPath, cwd, record.sessionFile, env);
+
+      let proc: PiProcess | SessionHost;
+      let hostPiVersion: string | undefined;
+
+      // Forward a proc's UI requests (dialogs) to the renderer. Attached
+      // per-proc — and, for the host, BEFORE waitForReady — because the
+      // project-trust confirm dialog fires DURING host startup (inside
+      // resourceLoader.reload). If we waited until after readiness to attach
+      // this, that prompt would be emitted with no listener and dropped,
+      // deadlocking init. The generation guard (`record.proc !== p`) makes a
+      // stale dead-host emission a no-op once we've swapped to the fallback.
+      const attachUiRequest = (p: PiProcess | SessionHost) => {
+        p.on("uiRequest", (req) => {
+          if (record.proc !== p) return;
+          this.onUiRequest(sessionId, req);
+        });
+      };
+
+      // Try SessionHost first (progressive enhancement).
+      // If the host fails to start, fall back to PiProcess (today's behavior).
+      if (useHost) {
+        record._useHost = true;
+        const hostProc = new SessionHost(piPath, cwd, record.sessionFile, env);
+        // Set record.proc + attach forwarders NOW (pre-readiness) so the
+        // init-time trust dialog round-trips. If the host fails below, the
+        // fallback path reassigns record.proc and these become inert.
+        record.proc = hostProc;
+        attachUiRequest(hostProc);
+        hostProc.on("panelOpen", (panelId, overlay) => {
+          if (record.proc !== hostProc) return;
+          this.onPanelEvent(sessionId, { type: "panel_open", panelId, overlay });
+        });
+        hostProc.on("panelData", (panelId, data) => {
+          if (record.proc !== hostProc) return;
+          this.onPanelEvent(sessionId, { type: "panel_data", panelId, data });
+        });
+        hostProc.on("panelClose", (panelId) => {
+          if (record.proc !== hostProc) return;
+          this.onPanelEvent(sessionId, { type: "panel_close", panelId });
+        });
+        hostProc.on("panelClearAll", () => {
+          if (record.proc !== hostProc) return;
+          this.onPanelEvent(sessionId, { type: "panel_clear_all" });
+        });
+
+        try {
+          await hostProc.waitForReady();
+          // P1-e: closeSession may have run during waitForReady. The host was
+          // killed (closeSession stopped it → exit → waitForReady reject) —
+          // but waitForReady can also RESOLVE if ready raced the kill. Either
+          // way, if the session is dead, don't proceed.
+          if (record._dead) {
+            hostProc.removeAllListeners();
+            hostProc.stop();
+            record._activating = false;
+            return;
+          }
+          proc = hostProc;
+          hostPiVersion = hostProc.piVersion;
+        } catch (hostErr) {
+          // P1-e: if closeSession ran during waitForReady, the host was killed
+          // by the close — that's not a host failure, it's a cancellation.
+          // Do NOT fall back to PiProcess onto the deleted record (that was
+          // the orphan bug). Just tear down and return.
+          if (record._dead) {
+            hostProc.removeAllListeners();
+            hostProc.stop();
+            record._activating = false;
+            return;
+          }
+          // Host failed — detach the dead host and fall back to pi --mode rpc.
+          record.proc = undefined;
+          hostProc.removeAllListeners();
+          hostProc.stop();
+          record._useHost = false;
+          const reason = hostErr instanceof Error ? hostErr.message : String(hostErr);
+          const isVersionTooLow = hostErr instanceof HostVersionTooLowError;
+          console.warn(
+            `[session-registry] SessionHost failed, falling back to pi --mode rpc: ${reason}`,
+          );
+          const fallbackProc = new PiProcess(piPath, cwd, record.sessionFile, env);
+          proc = fallbackProc;
+          attachUiRequest(fallbackProc);
+          this.onPanelEvent(sessionId, {
+            type: "host_fallback",
+            reason: isVersionTooLow ? `${reason} — update pi for panel support` : reason,
+          });
+        }
+      } else {
+        proc = new PiProcess(piPath, cwd, record.sessionFile, env);
+        attachUiRequest(proc);
+      }
+      // P1-e: final dead-check before assigning the proc and attaching
+      // listeners. Covers the PiProcess branch (no waitForReady) and the
+      // post-fallback window.
+      if (record._dead) {
+        proc.stop();
+        record._activating = false;
+        return;
+      }
       record.proc = proc;
 
       const readyTimer = setTimeout(() => {
         if (record.proc !== proc) return;
         if (record.status === "starting") {
           record.status = "ready";
-          this.onStatusChanged(sessionId, "ready");
+          this.onStatusChanged(sessionId, "ready", undefined, hostPiVersion);
         }
       }, 2000);
       readyTimer.unref?.();
@@ -129,10 +366,8 @@ export class SessionRegistry {
         this.onEvent(sessionId, event);
       });
 
-      proc.on("uiRequest", (req) => {
-        if (record.proc !== proc) return;
-        this.onUiRequest(sessionId, req);
-      });
+      // uiRequest is attached per-proc above (pre-readiness for the host) so
+      // the init-time trust dialog isn't dropped — not re-attached here.
 
       proc.on("exit", (code) => {
         // The timer must never leak. Clear before the generation guard.
@@ -148,6 +383,12 @@ export class SessionRegistry {
         } else {
           record.error = undefined;
         }
+        // P1-f: the proc is gone (exited) — release the advisory lock now if
+        // we hold it, so the lockfile + recurring update timer don't leak on
+        // a session whose process died (the sync catch can't see this; the
+        // failure is async). closeSession would also release it, but a
+        // dead-and-abandoned session otherwise leaks until then.
+        this._releaseLockIfHeld(sessionId);
         this.onStatusChanged(sessionId, "exited", record.error);
       });
 
@@ -155,17 +396,115 @@ export class SessionRegistry {
         if (record.proc !== proc) return;
         record.status = "failed";
         record.error = err.message;
+        // P1-f: same as exit — async failure must release the lock.
+        this._releaseLockIfHeld(sessionId);
         this.onStatusChanged(sessionId, "failed", err.message);
       });
+
+      // The proc is now fully established (host: post-handshake; PiProcess/
+      // fallback: constructed). Mark it ready BEFORE flushing so the queued
+      // commands — and any arriving during/after the flush — route to the live
+      // proc instead of re-queuing. Until this point sendCommand MUST queue,
+      // even though record.proc was set early in host mode. See P1-i.
+      record._procReady = true;
+      // Flush any commands that arrived while the proc was being established
+      // (during the session-file lock await and, in host mode, the startup
+      // handshake). They were queued by sendCommand(); now that proc is live
+      // they can go out for real.
+      this._flushPending(sessionId);
     } catch (err) {
       record.status = "failed";
       record.error = err instanceof Error ? err.message : String(err);
+      this._rejectPending(sessionId, record.error);
+      this._releaseLockIfHeld(sessionId); // P1-f: sync-failure path.
       this.onStatusChanged(sessionId, "failed", record.error);
       return;
+    } finally {
+      record._activating = false;
     }
 
     // After successful spawn, enforce the idle process limit
     this.enforceIdleLimit(sessionId);
+  }
+
+  /**
+   * Send a command to the session's pi process. If the process is live, send
+   * immediately. If activation is mid-flight (status "starting", proc not yet
+   * assigned — during the session-file lock await or the host startup
+   * handshake), queue the command and flush it once the proc is established.
+   * Otherwise (cold/exited/failed with no activation pending) fail fast with
+   * "No active process".
+   *
+   * The queue exists because activateSession is async: it emits "starting"
+   * *before* the proc exists, and the renderer reacts to "starting" by firing
+   * its init commands (get_state / get_available_models /
+   * get_session_stats). Without buffering those would race the proc
+   * assignment and fail with "No active process".
+   */
+  async sendCommand(sessionId: SessionId, command: PiRpcCommand): Promise<PiRpcResponse> {
+    const rec = this.sessions.get(sessionId);
+    if (!rec) throw new Error(`Unknown session: ${sessionId}`);
+    // Gate on readiness, NOT on proc presence: host mode assigns rec.proc
+    // pre-handshake (for the trust dialog), but the host bounces commands with
+    // "Not initialized" until init completes. _procReady flips true exactly
+    // when the proc can accept commands. See P1-i.
+    if (rec.proc && rec._procReady) {
+      return rec.proc.sendCommand(command);
+    }
+    if (rec.status === "starting") {
+      return new Promise<PiRpcResponse>((resolve, reject) => {
+        if (!rec._pendingSend) rec._pendingSend = [];
+        rec._pendingSend.push({ command, resolve, reject });
+      });
+    }
+    throw new Error(`No active process for session ${sessionId}`);
+  }
+
+  /** Flush queued commands now that the proc is live (activation succeeded). */
+  private _flushPending(sessionId: SessionId): void {
+    const rec = this.sessions.get(sessionId);
+    if (!rec?._pendingSend?.length) return;
+    const pending = rec._pendingSend;
+    rec._pendingSend = undefined;
+    const proc = rec.proc;
+    for (const item of pending) {
+      if (!proc) {
+        item.reject(new Error(`No active process for session ${sessionId}`));
+        continue;
+      }
+      proc.sendCommand(item.command).then(item.resolve, item.reject);
+    }
+  }
+
+  /**
+   * Release the advisory session-file lock if we hold it (P1-f). Called from
+   * the proc exit/error listeners (async failure), the sync catch, and
+   * closeSession. No-op if we don't hold it (e.g. onCompromised already
+   * cleared _hasLock). Swallows ENOTACQUIRED (lock already released by
+   * onCompromised/setLockAsCompromised). Keeps the success path's lock
+   * intact (only these terminal paths call it).
+   */
+  private _releaseLockIfHeld(sessionId: SessionId): void {
+    const rec = this.sessions.get(sessionId);
+    if (!rec?._hasLock || !rec.sessionFile) return;
+    lockfile
+      .unlock(rec.sessionFile, {
+        lockfilePath: `${rec.sessionFile}.lock`,
+        realpath: false,
+      })
+      .catch(() => {});
+    rec._hasLock = false;
+  }
+
+  /** Reject all queued commands (activation failed). */
+  private _rejectPending(sessionId: SessionId, reason: string): void {
+    const rec = this.sessions.get(sessionId);
+    if (!rec?._pendingSend?.length) return;
+    const pending = rec._pendingSend;
+    rec._pendingSend = undefined;
+    for (const { reject } of pending) {
+      reject(new Error(reason));
+    }
   }
 
   /**
@@ -205,6 +544,20 @@ export class SessionRegistry {
       if (this.byFile.get(oldResolved) === sessionId) {
         this.byFile.delete(oldResolved);
       }
+      // Release the advisory lock on the OLD file if we held it. The lock is
+      // per-file-path: after /new, /fork, or /clone the session moves to a NEW
+      // file, so keeping `_hasLock=true` would make the next activation skip
+      // locking the new file (it'd think it already holds it). Dropping it
+      // here lets the next activateSession acquire a fresh lock on the new path.
+      // P2-d (known limitation): the new file is NOT re-locked mid-session —
+      // only a /reload re-activates (and re-locks). So after /new//fork//clone,
+      // opening the new session file in terminal pi won't produce the "open
+      // elsewhere" warning until the next /reload. This is defensible: the new
+      // file may not exist on disk yet at swap time (so a lock acquire would
+      // create a lockfile for a not-yet-written file), and pi's own
+      // session-file writes don't need our advisory lock (we hold it only to
+      // warn about terminal-pi contention). Documented, not fixed.
+      this._releaseLockIfHeld(sessionId);
     }
     rec.sessionFile = sessionFile;
     if (sessionFile) {
@@ -219,9 +572,21 @@ export class SessionRegistry {
   closeSession(sessionId: SessionId): void {
     const rec = this.sessions.get(sessionId);
     if (!rec) return;
+    // P1-e: mark the record dead so an in-flight activateSession (awaiting
+    // the lock or waitForReady) tears down what it spawned instead of
+    // reviving the record / spawning a fallback onto it.
+    rec._dead = true;
+    // P1-h: reject any commands queued during activation BEFORE deleting the
+    // record. Without this, _pendingSend promises hang forever (the record is
+    // gone, so _flushPending/_rejectPending can't find them to settle).
+    this._rejectPending(sessionId, "Session closed");
     const proc = rec.proc;
     rec.proc = undefined;
     proc?.stop();
+
+    // Release the session file lock if we hold it (P1-f shared path).
+    this._releaseLockIfHeld(sessionId);
+
     this.sessions.delete(sessionId);
     if (rec.sessionFile) {
       const resolved = path.resolve(rec.sessionFile);
@@ -243,7 +608,11 @@ export class SessionRegistry {
    * session is mid-turn (mirrors pi's "Wait for the current response to
    * finish before reloading." guard).
    */
-  reloadSession(sessionId: SessionId, piPath: string, env?: Record<string, string>): void {
+  async reloadSession(
+    sessionId: SessionId,
+    piPath: string,
+    env?: Record<string, string>,
+  ): Promise<void> {
     const record = this.sessions.get(sessionId);
     if (!record) {
       throw new Error(`Unknown session: ${sessionId}`);
@@ -257,7 +626,14 @@ export class SessionRegistry {
     const proc = record.proc;
     record.proc = undefined;
     proc?.stop();
-    this.activateSession(sessionId, piPath, env);
+    // P2-b: re-try the host on /reload iff the caller originally requested
+    // host mode. /reload re-reads everything from disk, and the user may have
+    // just upgraded pi specifically to get panel support — a transient prior
+    // failure shouldn't permanently disable the feature. A session the caller
+    // never wanted in host mode (_hostRequested false) stays rpc.
+    // (setWorktreeAndRespawn preserves the ACTUAL _useHost, since the pi
+    // install hasn't changed across a worktree respawn.)
+    await this.activateSession(sessionId, piPath, env, record._hostRequested ?? false);
   }
 
   /**
@@ -267,12 +643,12 @@ export class SessionRegistry {
    * process in the worktree cwd). Safe for fresh sessions (empty
    * transcript, no session file — so no data loss on kill).
    */
-  setWorktreeAndRespawn(
+  async setWorktreeAndRespawn(
     sessionId: SessionId,
     worktreePath: string,
     piPath: string,
     env?: Record<string, string>,
-  ): void {
+  ): Promise<void> {
     const record = this.sessions.get(sessionId);
     if (!record) {
       throw new Error(`Unknown session: ${sessionId}`);
@@ -282,7 +658,12 @@ export class SessionRegistry {
     record.proc = undefined;
     proc?.stop();
     record.worktreePath = worktreePath;
-    this.activateSession(sessionId, piPath, env);
+    // Preserve the ACTUAL running mode across a worktree respawn: the pi
+    // install hasn't changed (same binary), so re-trying the host here would
+    // just re-fail the same way. Use _useHost (the outcome), not _hostRequested
+    // (the intent). Contrast with reloadSession, which re-tries the host via
+    // _hostRequested because /reload implies a pi upgrade is possible. See P2-b.
+    await this.activateSession(sessionId, piPath, env, record._useHost ?? false);
   }
 
   /**
@@ -295,6 +676,7 @@ export class SessionRegistry {
     if (!rec) return;
     const proc = rec.proc;
     rec.proc = undefined;
+    rec._procReady = false;
     proc?.stop();
     rec.status = "cold";
     rec.error = undefined;

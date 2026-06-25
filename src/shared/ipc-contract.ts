@@ -11,6 +11,7 @@ import type { SessionId } from "./ids.js";
 import type { PiRpcCommand } from "./pi-protocol/commands.js";
 import type { PiEvent } from "./pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "./pi-protocol/extension-ui.js";
+import type { PanelEvent } from "./pi-protocol/panel-events.js";
 import type { PiRpcResponse } from "./pi-protocol/responses.js";
 import type { AppSettings } from "./settings.js";
 import type { UpdateStatus } from "./updates.js";
@@ -95,6 +96,24 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; response: ExtensionUiResponse };
     res: undefined;
   };
+  /** Send keystroke input to an open custom panel (xterm.js overlay). */
+  "session.panelInput": {
+    req: { sessionId: SessionId; panelId: number; data: string };
+    res: undefined;
+  };
+  /** Notify the host of a new xterm.js panel size (cols/rows), so the TUI
+   *  layout matches the actual panel dimensions. */
+  "session.panelResize": {
+    req: { sessionId: SessionId; panelId: number; cols: number; rows: number };
+    res: undefined;
+  };
+  /** Force-close an open custom panel (escape hatch for a panel whose
+   *  extension never calls done()). Resolves the extension's custom() promise
+   *  with undefined and tears the panel down on both sides. */
+  "session.panelClose": {
+    req: { sessionId: SessionId; panelId: number };
+    res: undefined;
+  };
   "settings.get": { req: undefined; res: AppSettings };
   "settings.set": { req: Partial<AppSettings>; res: AppSettings };
   "app.versions": { req: undefined; res: { app: string; electron: string; node: string } };
@@ -162,6 +181,8 @@ export interface IpcEventContract {
     sessionId: SessionId;
     status: SessionStatus;
     error?: string | undefined;
+    /** pi version when using SDK-host; undefined for --mode rpc */
+    piVersion?: string | undefined;
   };
   // Emitted after new_session / switch_session / fork / clone when the
   // authoritative sessionFile + sessionName are known. The renderer adopts
@@ -184,6 +205,9 @@ export interface IpcEventContract {
   "update.available": UpdateStatus;
   "update.progress": { runId: string; chunk: string };
   "update.done": { runId: string; exitCode: number; status: UpdateStatus };
+
+  // ── Panels (custom() rendering) ────────────────────────────────────
+  "session.panelEvent": { sessionId: SessionId; event: PanelEvent };
 }
 
 export type IpcInvokeChannel = keyof IpcInvokeContract;

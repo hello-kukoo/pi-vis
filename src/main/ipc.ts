@@ -4,6 +4,7 @@ import type { SessionStatus, WorktreeIdentity } from "@shared/ipc-contract.js";
 import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
+import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
 import { app, clipboard, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
@@ -23,6 +24,7 @@ import {
   getFileDiff,
 } from "./git/git.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
+import { isSessionHost } from "./pi/session-host.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
 import { loadHistory } from "./sessions/history-loader.js";
 import {
@@ -59,8 +61,11 @@ export function initIpc(win: BrowserWindow): void {
     (sessionId: SessionId, req: ExtensionUiRequest) => {
       safeSend("session.uiRequest", { sessionId, request: req });
     },
-    (sessionId: SessionId, status: SessionStatus, error?: string) => {
-      safeSend("session.statusChanged", { sessionId, status, error });
+    (sessionId: SessionId, status: SessionStatus, error?: string, piVersion?: string) => {
+      safeSend("session.statusChanged", { sessionId, status, error, piVersion });
+    },
+    (sessionId: SessionId, event: PanelEvent) => {
+      safeSend("session.panelEvent", { sessionId, event });
     },
   );
 
@@ -143,7 +148,7 @@ export function initIpc(win: BrowserWindow): void {
     if (!piInfo)
       throw new Error("pi binary not found. Please install pi or set the path in settings.");
     const loginShellEnv = await getLoginShellEnv();
-    registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv);
+    await registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv, true);
   });
 
   // ── Worktree ───────────────────────────────────────────────────────
@@ -220,9 +225,12 @@ export function initIpc(win: BrowserWindow): void {
   ipcMain.handle(
     "session.sendCommand",
     async (_evt, args: { sessionId: SessionId; command: PiRpcCommand }): Promise<PiRpcResponse> => {
-      const rec = registry?.getSession(args.sessionId);
-      if (!rec?.proc) throw new Error(`No active process for session ${args.sessionId}`);
-      const res = await rec.proc.sendCommand(args.command);
+      const reg = registry;
+      if (!reg) throw new Error("Session registry not initialized");
+      // Route through the registry so a command that arrives mid-activation
+      // (status "starting", proc not yet assigned) is queued and flushed once
+      // the proc is live, instead of failing with "No active process".
+      const res = await reg.sendCommand(args.sessionId, args.command);
 
       // Harvest the session file from responses that carry it, so a brand-new
       // session's tab becomes durable the moment pi reports a path. This is
@@ -234,7 +242,7 @@ export function initIpc(win: BrowserWindow): void {
         typeof res.data === "object" &&
         typeof (res.data as Record<string, unknown>)["sessionFile"] === "string"
       ) {
-        registry?.noteSessionFile(
+        reg.noteSessionFile(
           args.sessionId,
           (res.data as Record<string, unknown>)["sessionFile"] as string,
         );
@@ -257,14 +265,14 @@ export function initIpc(win: BrowserWindow): void {
           args.command.type === "clone")
       ) {
         try {
-          const stateRes = await rec.proc.sendCommand({ type: "get_state" });
+          const stateRes = await reg.sendCommand(args.sessionId, { type: "get_state" });
           if (stateRes.success && stateRes.data && typeof stateRes.data === "object") {
             const data = stateRes.data as Record<string, unknown>;
             const sessionFile =
               typeof data["sessionFile"] === "string" ? (data["sessionFile"] as string) : undefined;
             const sessionName =
               typeof data["sessionName"] === "string" ? (data["sessionName"] as string) : undefined;
-            registry?.updateSessionFile(args.sessionId, sessionFile);
+            reg.updateSessionFile(args.sessionId, sessionFile);
             safeSend("session.fileChanged", {
               sessionId: args.sessionId,
               sessionFile,
@@ -287,6 +295,43 @@ export function initIpc(win: BrowserWindow): void {
       const rec = registry?.getSession(args.sessionId);
       if (!rec?.proc) return;
       rec.proc.sendUiResponse(JSON.stringify(args.response));
+    },
+  );
+
+  // ── Panel I/O (SDK-host only) ───────────────────────────────────────
+  // panelInput/panelResize are meaningful only for SessionHost (which has a
+  // live TUI/panel bridge). For the pi --mode rpc fallback there are no
+  // panels, so these are no-ops. `isSessionHost` (exported from session-host
+  // and unit-tested there) duck-types the proc and silently skips PiProcess,
+  // keeping the fallback a clean no-op.
+
+  ipcMain.handle(
+    "session.panelInput",
+    async (_evt, args: { sessionId: SessionId; panelId: number; data: string }) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (rec?.proc && isSessionHost(rec.proc)) {
+        rec.proc.sendPanelInput(args.panelId, args.data);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "session.panelResize",
+    async (_evt, args: { sessionId: SessionId; panelId: number; cols: number; rows: number }) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (rec?.proc && isSessionHost(rec.proc)) {
+        rec.proc.sendPanelResize(args.panelId, args.cols, args.rows);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "session.panelClose",
+    async (_evt, args: { sessionId: SessionId; panelId: number }) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (rec?.proc && isSessionHost(rec.proc)) {
+        rec.proc.sendPanelClose(args.panelId);
+      }
     },
   );
 

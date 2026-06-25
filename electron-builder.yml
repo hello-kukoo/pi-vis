@@ -16,6 +16,7 @@ files:
   - "!{.mocharc,.prettierrc}.{js,cjs,yml,yaml}"
 asarUnpack:
   - resources/**
+  - out/resources/pi-session-host/**
   - node_modules/@homebridge/node-pty-prebuilt-multiarch/**/*.node
   - node_modules/@homebridge/node-pty-prebuilt-multiarch/build/**
   - node_modules/proper-lockfile/**

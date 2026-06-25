@@ -4,6 +4,7 @@ import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
+import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
@@ -83,6 +84,12 @@ export interface SessionViewState {
   worktreeName?: string | undefined;
   /** The base branch the worktree was cut from (for the chip tooltip). */
   worktreeFromBase?: string | undefined;
+
+  /** Inline custom panel from extension ctx.ui.custom() — rendered via xterm.js overlay. */
+  panel?: { id: number; overlay: boolean; buffer: string[] } | undefined;
+  /** pi version reported by the SDK-host on ready (undefined for pi --mode rpc).
+   *  Surfaced in the SessionHeader tooltip. See P1-c. */
+  piVersion?: string | undefined;
   /**
    * Recency key for sidebar ordering. Set when a session is *created fresh*
    * (no file yet) and bumped only when the user submits a prompt — NOT on
@@ -102,6 +109,24 @@ interface WorkspaceState {
   path: string;
   sessions: SessionSummary[];
   activeSessions: SessionId[];
+}
+
+/**
+ * Whether the "Running for …" working indicator should be shown.
+ *
+ * `isStreaming` alone is not enough: an extension slash-command (e.g. /agents)
+ * runs through `session.prompt`, so pi emits `agent_start` and reports the turn
+ * active for the WHOLE time the command's handler is up — including while it's
+ * blocked on a select dialog or a custom panel awaiting the user. During that
+ * wait nothing is computing, so the indicator is misleading. Treat any open
+ * extension UI (a pending dialog or an open panel) as "waiting on the user, not
+ * working" and suppress it. This covers the whole category of interactive
+ * extension commands, not just /agents.
+ */
+export function shouldShowWorkingIndicator(session: SessionViewState | undefined): boolean {
+  if (!session?.isStreaming) return false;
+  const extensionUiActive = session.pendingDialogs.length > 0 || session.panel != null;
+  return !extensionUiActive;
 }
 
 interface SessionsStore {
@@ -152,7 +177,12 @@ interface SessionsStore {
     workspacePath: string,
   ) => Promise<void>;
   setSessionFile: (sessionId: SessionId, sessionFile: string) => void;
-  setSessionStatus: (sessionId: SessionId, status: SessionStatus, error?: string) => void;
+  setSessionStatus: (
+    sessionId: SessionId,
+    status: SessionStatus,
+    error?: string,
+    piVersion?: string,
+  ) => void;
   applyEvent: (sessionId: SessionId, event: PiEvent) => void;
   seedHistory: (sessionId: SessionId, history: TranscriptBlock[]) => void;
   addUserMessage: (sessionId: SessionId, content: string, images?: string[]) => void;
@@ -160,6 +190,7 @@ interface SessionsStore {
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
   addUiRequest: (sessionId: SessionId, request: ExtensionUiRequest) => void;
+  handlePanelEvent: (sessionId: SessionId, event: PanelEvent) => void;
   dismissUiRequest: (sessionId: SessionId, requestId: string) => void;
   addToast: (sessionId: SessionId, message: string, type?: string) => void;
   dismissToast: (sessionId: SessionId, toastId: string) => void;
@@ -211,6 +242,10 @@ interface SessionsStore {
 
 let toastCounter = 0;
 let editorInjectionNonce = 0;
+
+/** Upper bound on a session's retained custom-panel replay buffer (chars).
+ *  See the panel_data case in handlePanelEvent for the rationale. */
+const PANEL_BUFFER_MAX_BYTES = 512 * 1024;
 
 export const useSessionsStore = create<SessionsStore>((set, get) => ({
   workspaces: new Map(),
@@ -368,11 +403,21 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
-  setSessionStatus: (sessionId, status, error) => {
+  setSessionStatus: (sessionId, status, error, piVersion) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
-      if (s) sessions.set(sessionId, { ...s, status, error });
+      if (s) {
+        // Only store piVersion when explicitly provided (a non-host "ready"
+        // or a status change without version info mustn't clobber a prior
+        // value). See P1-c.
+        sessions.set(sessionId, {
+          ...s,
+          status,
+          error,
+          ...(piVersion !== undefined ? { piVersion } : {}),
+        });
+      }
       return { sessions };
     });
   },
@@ -616,6 +661,81 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         ...s,
         pendingDialogs: s.pendingDialogs.filter((d) => d.id !== requestId),
       });
+      return { sessions };
+    });
+  },
+
+  handlePanelEvent: (sessionId, event) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s) return {};
+      const sessions = new Map(state.sessions);
+
+      switch (event.type) {
+        case "panel_open":
+          sessions.set(sessionId, {
+            ...s,
+            panel: { id: event.panelId, overlay: event.overlay, buffer: [] },
+          });
+          break;
+        case "panel_data":
+          if (s.panel?.id === event.panelId) {
+            // The buffer is only a remount snapshot (CustomPanelHost replays it
+            // into a fresh xterm). A TUI panel redraws continuously, so an
+            // unbounded buffer is a steady leak. Keep a bounded tail: TUI
+            // frames are full repaints with cursor-home/clear sequences, so the
+            // most recent PANEL_BUFFER_MAX_BYTES reliably contains a complete
+            // frame to re-seed from. Oldest chunks are dropped first.
+            const buffer = [...s.panel.buffer, event.data];
+            let total = 0;
+            for (const chunk of buffer) total += chunk.length;
+            while (buffer.length > 1 && total > PANEL_BUFFER_MAX_BYTES) {
+              total -= (buffer.shift() as string).length;
+            }
+            sessions.set(sessionId, { ...s, panel: { ...s.panel, buffer } });
+          }
+          break;
+        case "panel_close":
+          if (s.panel?.id === event.panelId) {
+            sessions.set(sessionId, { ...s, panel: undefined });
+          }
+          break;
+        case "panel_clear_all":
+          sessions.set(sessionId, { ...s, panel: undefined });
+          break;
+        case "host_fallback":
+          // The host couldn't start (pi too old / SDK import failed) and we
+          // fell back to pi --mode rpc. Panels are unavailable — surface as a
+          // toast so the user knows to update pi, without blocking the session.
+          sessions.set(sessionId, {
+            ...s,
+            toasts: [
+              ...s.toasts,
+              {
+                id: `toast-${++toastCounter}`,
+                message: event.reason,
+                type: "warning",
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          break;
+        case "session_warning":
+          // Non-fatal warning (e.g. session file open elsewhere). Toast it.
+          sessions.set(sessionId, {
+            ...s,
+            toasts: [
+              ...s.toasts,
+              {
+                id: `toast-${++toastCounter}`,
+                message: event.message,
+                type: "warning",
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          break;
+      }
       return { sessions };
     });
   },

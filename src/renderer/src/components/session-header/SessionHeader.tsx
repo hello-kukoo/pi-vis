@@ -275,7 +275,16 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
               }}
             />
           ) : (
-            <button type="button" className="session-header__name-btn" onClick={handleRenameStart}>
+            <button
+              type="button"
+              className="session-header__name-btn"
+              onClick={handleRenameStart}
+              title={
+                session?.piVersion
+                  ? `${session?.sessionName ?? session?.sessionTitle ?? "Untitled session"} · pi ${session.piVersion}`
+                  : (session?.sessionName ?? session?.sessionTitle ?? "Untitled session")
+              }
+            >
               {session?.sessionName ?? session?.sessionTitle ?? "Untitled session"}
             </button>
           )}
