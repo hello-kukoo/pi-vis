@@ -41,8 +41,12 @@ const UNTRACKED_SKIP_SIZE = 1024 * 1024; // 1 MiB
 const FILE_TOO_LARGE = 1024 * 1024; // 1 MiB
 /** Number of leading bytes to sniff for a NUL when detecting binary. */
 const BINARY_SNIFF_BYTES = 8192;
-/** Process timeout for every git invocation. */
+/** Process timeout for every (fast) git invocation. */
 const GIT_TIMEOUT_MS = 15_000;
+/** Generous timeout for `git worktree add`, which performs a full
+ *  working-tree checkout — on large repos this can take minutes, far past
+ *  the 15s default that governs the cheap read-only commands. */
+const WORKTREE_ADD_TIMEOUT_MS = 10 * 60_000; // 10 minutes
 /** Buffer ceiling — list output is small; file contents are read via fs. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 /** Git's well-known empty-tree object — used to diff a HEAD-less repo's
@@ -105,6 +109,76 @@ function execGitQuiet(args: string[], cwd: string, env?: Record<string, string>)
           return;
         }
         resolve(0);
+      },
+    );
+  });
+}
+
+/** Outcome of {@link execGitCapture} — never throws, so callers can build a
+ *  rich error message from stderr / the kill signal instead of just a code. */
+interface GitExecResult {
+  /** Exit code (0 on success). 1 is the catch-all when no numeric code is set
+   *  (e.g. the process was killed by a signal). */
+  code: number;
+  stdout: string;
+  stderr: string;
+  /** The signal that killed the process, if any (e.g. "SIGTERM" on timeout). */
+  signal: NodeJS.Signals | null;
+  /** True when execFile aborted the process because it exceeded `timeoutMs`. */
+  timedOut: boolean;
+}
+
+/**
+ * Run `git <args>` capturing stdout, stderr, exit code, and kill signal
+ * without ever rejecting. Unlike {@link execGitQuiet} (which collapses every
+ * failure to a bare code and discards the reason), this preserves git's own
+ * stderr so the UI can show *why* a command failed.
+ *
+ * `timeoutMs` defaults to the standard short budget but is overridable —
+ * long-running plumbing like `git worktree add` (a full working-tree
+ * checkout) needs a far larger budget on big repos, where the 15s default
+ * would otherwise SIGTERM the checkout and surface as a meaningless "code 1".
+ */
+function execGitCapture(
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<GitExecResult> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        maxBuffer: MAX_BUFFER,
+        timeout: timeoutMs,
+        encoding: "utf8",
+        env: env ?? process.env,
+      },
+      (err, stdout, stderr) => {
+        const out = typeof stdout === "string" ? stdout : "";
+        const errOut = typeof stderr === "string" ? stderr : "";
+        if (err) {
+          const e = err as NodeJS.ErrnoException & {
+            code?: number | string;
+            signal?: NodeJS.Signals | null;
+            killed?: boolean;
+          };
+          const signal = e.signal ?? null;
+          // execFile sets `killed` when it terminates the process for exceeding
+          // the timeout; the signal is the configured killSignal (SIGTERM).
+          const timedOut = e.killed === true;
+          resolve({
+            code: typeof e.code === "number" ? e.code : 1,
+            stdout: out,
+            stderr: errOut,
+            signal,
+            timedOut,
+          });
+          return;
+        }
+        resolve({ code: 0, stdout: out, stderr: errOut, signal: null, timedOut: false });
       },
     );
   });
@@ -768,6 +842,27 @@ function mapSpawnErrorBranches(err: unknown): GitBranchesResult {
 // ── Public: createWorktree ────────────────────────────────────────────
 
 /**
+ * Build a human-readable failure message for a non-zero `git worktree add`,
+ * preferring git's own stderr and special-casing the timeout so a slow
+ * checkout on a huge repo reads as a timeout rather than a mystery "code 1".
+ */
+function describeWorktreeAddFailure(add: GitExecResult, worktreePath: string): string {
+  if (add.timedOut) {
+    const minutes = Math.round(WORKTREE_ADD_TIMEOUT_MS / 60_000);
+    return `Creating the worktree timed out after ${minutes} minutes. This can happen on very large repositories. The partial worktree at ${worktreePath} may need to be cleaned up before retrying.`;
+  }
+  const stderr = add.stderr.trim();
+  if (stderr) {
+    // git prefixes its messages with "fatal: " — keep it; it reads naturally.
+    return stderr;
+  }
+  if (add.signal) {
+    return `git worktree add was terminated by ${add.signal}.`;
+  }
+  return `git worktree add failed with code ${add.code}.`;
+}
+
+/**
  * Create a disconnected git worktree on a fresh branch.
  * Returns the worktree path, branch name, friendly name, and base.
  * Collision-safe: if the branch ref or dir already exists, re-rolls
@@ -781,10 +876,33 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
     const repoRoot = r.stdout.trim();
     if (!repoRoot) return { kind: "error", message: "Not a git repository" };
 
+    // Pre-flight: confirm the base ref actually resolves before we commit to
+    // creating directories and a branch. Without this, a stale/typo'd base
+    // surfaces only as git's verbose "invalid reference" deep inside the
+    // `worktree add` failure; this turns it into a crisp, actionable message.
+    const baseCheck = await execGitCapture(
+      ["rev-parse", "--verify", "--quiet", `${base}^{commit}`],
+      repoRoot,
+      env,
+    );
+    if (baseCheck.code !== 0) {
+      return {
+        kind: "error",
+        message: `Base branch "${base}" could not be resolved — it may have been deleted or renamed. Pick a different base branch and try again.`,
+      };
+    }
+
     const repoName = path.basename(repoRoot);
     const parentDir = path.dirname(repoRoot);
     const worktreesRoot = path.join(parentDir, `${repoName}-worktrees`);
-    await fs.mkdir(worktreesRoot, { recursive: true });
+    try {
+      await fs.mkdir(worktreesRoot, { recursive: true });
+    } catch (err) {
+      return {
+        kind: "error",
+        message: `Could not create the worktrees directory at ${worktreesRoot}: ${errorMessage(err)}`,
+      };
+    }
 
     // Import the name generator (lazy to avoid circular deps if any).
     const { generateWorktreeName } = await import("./worktree-names.js");
@@ -828,14 +946,18 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
     const worktreePath = path.join(worktreesRoot, name);
 
     // `git worktree add -b <branch> <path> <base>`
-    const exitCode = await execGitQuiet(
+    // Uses a generous timeout: this checks out the entire working tree, which
+    // on a large repo can take minutes. Capture stderr so a failure surfaces
+    // git's actual reason rather than a bare exit code.
+    const add = await execGitCapture(
       ["worktree", "add", "-b", branch, worktreePath, base],
       repoRoot,
       env,
+      WORKTREE_ADD_TIMEOUT_MS,
     );
 
-    if (exitCode !== 0) {
-      return { kind: "error", message: `git worktree add failed with code ${exitCode}` };
+    if (add.code !== 0) {
+      return { kind: "error", message: describeWorktreeAddFailure(add, worktreePath) };
     }
 
     return { kind: "ok", worktreePath, branch, name, base };

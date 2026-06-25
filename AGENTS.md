@@ -201,7 +201,7 @@ Pi runs in `--mode rpc` with JSONL on stdin/stdout. Every command has a unique `
 
 All renderer state uses **Zustand** stores:
 
-- **`sessions-store`** — The primary store. Maps `SessionId → SessionViewState` (transcript, streaming status, pending dialogs, status segments, widgets, stats, model info, thinking level, commands, worktreeCreate/worktreeBase/worktreePath/worktreeBranch/worktreeName/worktreeFromBase for worktree-per-session). Handles all mutations via IPC calls + local state updates. Export `gitRootForSession(session)` helper that returns the worktree path if set, else the workspace path — used by the diff viewer and changes badge.
+- **`sessions-store`** — The primary store. Maps `SessionId → SessionViewState` (transcript, streaming status, pending dialogs, status segments, widgets, stats, model info, thinking level, commands, worktreeCreate/worktreeBase/worktreeCreating/worktreeError/worktreePath/worktreeBranch/worktreeName/worktreeFromBase for worktree-per-session — `worktreeError` is the durable inline failure shown in the WorktreeBar). Handles all mutations via IPC calls + local state updates. Export `gitRootForSession(session)` helper that returns the worktree path if set, else the workspace path — used by the diff viewer and changes badge.
 - **`transcript.ts`** — Reducer (not a store). `applyPiEvent(state, event) → TranscriptState` transforms pi streaming events into `TypedTranscriptBlock[]` (user, assistant, tool_call, bash, compaction, custom_message, error). Uses pending-echo matching to deduplicate user messages that pi echoes back. The `error` block surfaces pi's `stopReason: "error"` / `errorMessage` turns (provider failures) so a dropped stream is visible instead of looking like a silent cut-off. **Streaming perf:** the per-token deltas (`text_delta`, `thinking_delta`, `tool_execution_update`) use `patchBlock`, which clones only the `blocks` array spine (a cheap bulk `slice()`, not the per-element `.map` that made streaming O(n²) — the freeze) and replaces the single streamed slot with a new `data` object, leaving every other element ref stable. It scans from the tail to find the active block (always recently appended) so the lookup is O(1) in the common case. The block renderers are `React.memo`'d on `data`, so only the streamed block re-renders (O(1) reconcile per token); the array ref still changes each delta, so ref-equality consumers stay correct. Lifecycle events (`message_end`, `tool_execution_end`, …) use the `.map`-based `updateBlock` since they fire once per block, not per token. **Memory:** `blocks` is bounded — `compaction_end` trims to the most recent compaction marker onward (plus a `MAX_PRE_COMPACTION_KEEP=200` recent-context window on the first compaction) instead of appending unboundedly; reload from the session file restores the full history.
 - **`diff-store`** — Manages diff viewer: file list from `git.changes` (optionally branch-relative via `base`), lazy Shiki tokenization, expand/collapse gap state, unified/split view mode, base branch selection with `loadBranches`/`setBase`/`setIncludeRemoteBranches`. Tracks a `stale` flag for the refresh-button dot: while the viewer is open, each per-tool-call badge refresh uses the full `git.changes` and compares its `fingerprint` against the `baselineFingerprint` captured at the last full viewer refresh, so the dot lights only when files actually changed (and clears if an edit is reverted). While the viewer is closed, the badge refresh uses the cheap `git.changesCount` instead (count only, no fingerprint).
 - **`settings-store`** — Renderer mirror of app settings; applies fonts and color scheme.
@@ -241,6 +241,23 @@ It has a "Create worktree" checkbox and a branch dropdown (reusing the shared
    re-spawns the pi process there.
 3. The WorktreeBar vanishes; the **WorktreeChip** (`⑂ swift-otter`) appears next to
    the session name in the header. Hover shows the full branch · base · path.
+
+**Reliability & error UX** (`createWorktree` in `git/git.ts`): `git worktree add`
+is a full working-tree checkout, so on a large repo it can take minutes —
+it runs with a generous `WORKTREE_ADD_TIMEOUT_MS` (10 min) instead of the 15s
+default that governs the cheap read-only commands (the short default was
+SIGTERM-ing the checkout on big repos and surfacing as a meaningless "code 1").
+Failures are captured via `execGitCapture` (a non-throwing exec helper that
+returns code + **stderr** + signal + `timedOut`) and turned into an actionable
+message by `describeWorktreeAddFailure` (git's own stderr, or an explicit
+timeout message). The base ref is pre-flight-validated (`rev-parse --verify
+<base>^{commit}`) so a deleted/renamed base reads as a crisp message, not a
+verbose git error. During creation the **composer is frozen** (`worktreeCreating`
+forces `live=false`, disabling the textarea) so the in-flight send reads as
+"sending", not stuck unsubmitted text. On failure the reason is shown **inline
+and durably** in the WorktreeBar (`session.worktreeError` → `.worktree-bar__error`,
+selectable, persists until the user retries or edits the inputs), and the
+prompt text is preserved for retry — not lost behind an ephemeral toast.
 
 **Responsive reflow**: At narrow widths the secondary controls (model picker,
 thinking level, changes badge, context meter) drop into a **SessionSubBar** below the

@@ -2,14 +2,20 @@
 
 .worktree-bar {
   display: flex;
-  align-items: center;
-  gap: 0.571rem;
+  flex-direction: column;
+  gap: 0.429rem;
   padding: 0.429rem 0.857rem;
   background: var(--ctp-mantle);
   border-bottom: 1px solid var(--ctp-surface0);
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-subtext0);
+}
+
+.worktree-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 0.571rem;
 }
 
 .worktree-bar__checkbox-label {
@@ -58,17 +64,51 @@
 }
 
 .worktree-bar__spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.357rem;
   font-size: 0.857em;
   color: var(--ctp-mauve);
-  animation: worktree-bar__pulse 1.2s ease-in-out infinite;
+  white-space: nowrap;
 }
 
-@keyframes worktree-bar__pulse {
-  0%,
-  100% {
-    opacity: 1;
+.worktree-bar__spinner-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border: 1.5px solid var(--ctp-mauve);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: worktree-bar__spin 0.7s linear infinite;
+}
+
+@keyframes worktree-bar__spin {
+  to {
+    transform: rotate(360deg);
   }
-  50% {
-    opacity: 0.5;
-  }
+}
+
+/* Inline, durable failure message — replaces the old ephemeral toast so the
+   user can actually read why creation failed. */
+.worktree-bar__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.429rem;
+  padding: 0.429rem 0.571rem;
+  background: color-mix(in srgb, var(--ctp-red) 12%, var(--ctp-mantle));
+  border: 1px solid color-mix(in srgb, var(--ctp-red) 45%, transparent);
+  border-radius: var(--mcm-radius-sm);
+  color: var(--ctp-red);
+  line-height: 1.4;
+}
+
+.worktree-bar__error-icon {
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.worktree-bar__error-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
 }

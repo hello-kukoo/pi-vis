@@ -86,12 +86,17 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const closeSessionTab = useSessionsStore((s) => s.closeSessionTab);
   const seedHistory = useSessionsStore((s) => s.seedHistory);
   const setWorktreeCreating = useSessionsStore((s) => s.setWorktreeCreating);
+  const setWorktreeError = useSessionsStore((s) => s.setWorktreeError);
   const applyWorktree = useSessionsStore((s) => s.applyWorktree);
   const clearWorktreeIntent = useSessionsStore((s) => s.clearWorktreeIntent);
   const updateSettings = useSettingsStore((s) => s.update);
 
   const isStreaming = session?.isStreaming ?? false;
-  const live = session?.status === "starting" || session?.status === "ready";
+  const worktreeCreating = session?.worktreeCreating ?? false;
+  // The composer is interactive only when the session is live AND we're not
+  // mid worktree-creation (the submit is already in flight — the input is
+  // frozen so it reads as "sending", not "still unsubmitted text").
+  const live = (session?.status === "starting" || session?.status === "ready") && !worktreeCreating;
 
   // Image-attach gating. Pi only forwards image content to models whose
   // registry record lists "image" as an input modality; for a text-only
@@ -248,197 +253,205 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   // ── Submit ─────────────────────────────────────────────────────────
 
-  const handleSubmit = useCallback(async (overrideContent?: string) => {
-    const content = overrideContent ?? text;
-    if (!content.trim()) return;
-    // Drop a second concurrent invocation: a held/auto-repeat Enter can
-    // re-fire this before the `text` state below commits, which would
-    // otherwise read the same `content` twice and dispatch two sends.
-    if (submittingRef.current) return;
-    submittingRef.current = true;
+  const handleSubmit = useCallback(
+    async (overrideContent?: string) => {
+      const content = overrideContent ?? text;
+      if (!content.trim()) return;
+      // Drop a second concurrent invocation: a held/auto-repeat Enter can
+      // re-fire this before the `text` state below commits, which would
+      // otherwise read the same `content` twice and dispatch two sends.
+      if (submittingRef.current) return;
+      submittingRef.current = true;
 
-    // ── Worktree creation on first send ──
-    // Only create one when this session has not already been placed in a
-    // worktree (worktreePath unset). After `/new` etc. the transcript resets
-    // to empty, so guarding on the transcript alone would re-create a worktree
-    // for a session that already has one.
-    const isNewSession = (session?.transcript.blocks.length ?? 0) === 0;
-    if (isNewSession && session?.worktreeCreate && !session.worktreePath) {
-      try {
-        setWorktreeCreating(sessionId, true);
-        // Fall back to HEAD (current commit) when no base branch is resolved —
-        // e.g. a detached HEAD where there is no current branch to default to.
-        // Never assume a literal "main"; it may not exist.
-        const base = session.worktreeBase ?? "HEAD";
-        const res = await window.pivis.invoke("session.createWorktree", {
-          sessionId,
-          base,
-        });
-        if (!res.ok) {
-          addToast(sessionId, `Failed to create worktree: ${res.error}`, "error");
+      // ── Worktree creation on first send ──
+      // Only create one when this session has not already been placed in a
+      // worktree (worktreePath unset). After `/new` etc. the transcript resets
+      // to empty, so guarding on the transcript alone would re-create a worktree
+      // for a session that already has one.
+      const isNewSession = (session?.transcript.blocks.length ?? 0) === 0;
+      if (isNewSession && session?.worktreeCreate && !session.worktreePath) {
+        try {
+          // setWorktreeCreating(true) also clears any prior worktreeError.
+          setWorktreeCreating(sessionId, true);
+          // Fall back to HEAD (current commit) when no base branch is resolved —
+          // e.g. a detached HEAD where there is no current branch to default to.
+          // Never assume a literal "main"; it may not exist.
+          const base = session.worktreeBase ?? "HEAD";
+          const res = await window.pivis.invoke("session.createWorktree", {
+            sessionId,
+            base,
+          });
+          if (!res.ok) {
+            // Surface the failure *inline* in the WorktreeBar (durable, unlike a
+            // toast) and keep the prompt text intact so the user can retry or
+            // uncheck "Create worktree" and send without one — nothing is lost.
+            setWorktreeError(sessionId, res.error ?? "Worktree creation failed");
+            submittingRef.current = false;
+            return;
+          }
+          applyWorktree(sessionId, {
+            worktreePath: res.worktreePath,
+            branch: res.branch,
+            name: res.name,
+            base: res.base,
+          });
+          // Drop the pre-send intent so the bar doesn't reappear (still checked)
+          // if the transcript later resets via /new, /fork, or /clone.
+          clearWorktreeIntent(sessionId);
+          addToast(sessionId, `Worktree ${res.name} created`, "success");
+        } catch (err) {
+          setWorktreeError(sessionId, String(err));
           submittingRef.current = false;
           return;
+        } finally {
+          setWorktreeCreating(sessionId, false);
         }
-        applyWorktree(sessionId, {
-          worktreePath: res.worktreePath,
-          branch: res.branch,
-          name: res.name,
-          base: res.base,
-        });
-        // Drop the pre-send intent so the bar doesn't reappear (still checked)
-        // if the transcript later resets via /new, /fork, or /clone.
-        clearWorktreeIntent(sessionId);
-        addToast(sessionId, `Worktree ${res.name} created`, "success");
-      } catch (err) {
-        addToast(sessionId, `Failed to create worktree: ${String(err)}`, "error");
-        submittingRef.current = false;
-        return;
+      }
+
+      try {
+        setText("");
+        setAttachments([]);
+        setSlashIndex(0);
+
+        const action = parseComposerInput(content, { discovered });
+        // Drop attachments the active model can't accept (e.g. the user
+        // attached an image, then switched to a text-only model). Pi would
+        // silently discard them before the provider call, so warn and submit
+        // the text alone rather than letting the user believe the image went.
+        let imgs = attachments;
+        if (imgs.length > 0 && !modelSupportsImages) {
+          addToast(
+            sessionId,
+            `${modelLabel} doesn't support image input — sending text only`,
+            "warning",
+          );
+          imgs = [];
+        }
+
+        const finalAction =
+          action.kind === "send-prompt" && imgs.length > 0
+            ? {
+                ...action,
+                images: imgs.map((a) => {
+                  const comma = a.dataUrl.indexOf(",");
+                  const header = a.dataUrl.slice(0, comma);
+                  const mimeType = /^data:([^;]+)/.exec(header)?.[1] ?? "image/png";
+                  return { data: a.dataUrl.slice(comma + 1), mimeType, dataUrl: a.dataUrl };
+                }),
+              }
+            : action;
+
+        // No-model guard: only for plain user prompts. /model (which fixes
+        // the guard!) and bash bypass it. Must run inside `try` so the
+        // `finally` below still resets `submittingRef`.
+        if (
+          finalAction.kind === "send-prompt" &&
+          !session?.currentModel &&
+          finalAction.commandSource === undefined
+        ) {
+          addToast(sessionId, "No model selected", "error");
+          return;
+        }
+
+        const deps = {
+          // The executeAction interface is intentionally generic-string for
+          // testability; the real invoke has a typed channel union, but the
+          // runtime call sites pass the right channel so the runtime contract
+          // is honored. We narrow at the boundary by giving the casted
+          // wrapper the right call signature.
+          invoke: <T = unknown>(channel: string, payload: unknown) =>
+            window.pivis.invoke(
+              channel as Parameters<typeof window.pivis.invoke>[0],
+              payload as Parameters<typeof window.pivis.invoke>[1],
+            ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+          setStreaming,
+          addToast,
+          addUserMessage,
+          addBashCommand,
+          finishBashCommand,
+          setCurrentModel,
+          updateLastUsedModel: async (provider: string, modelId: string) => {
+            await updateSettings({ lastUsedModel: { provider, modelId } });
+          },
+          addCustomMessage,
+          openPicker: (sid: SessionId, picker: PickerRequest) => openPicker(sid, picker),
+          adoptSessionFile: async (sid: SessionId, file?: string, name?: string) => {
+            await adoptSessionFile(sid, file, name);
+            if (file) {
+              const history = await window.pivis.invoke("session.loadHistory", { sessionId: sid });
+              seedHistory(sid, history ?? []);
+              if (session?.workspacePath) {
+                void refreshWorkspaceSessions(session.workspacePath);
+              }
+            }
+          },
+          closeSessionTab: async (sid: SessionId) => closeSessionTab(sid),
+          openAppSettings: () => {
+            // The settings panel is owned by App.tsx; we dispatch a custom
+            // event that the App subscribes to. Keeps Composer free of
+            // cross-tree prop drilling.
+            window.dispatchEvent(new CustomEvent("pivis:open-settings"));
+          },
+          openDiffViewer: (sid: SessionId) => {
+            // The diff viewer is mounted at the App level (overlay over
+            // the session area). The store owns its state; we just call
+            // the helper.
+            openDiffForSession(sid);
+          },
+          openLogin: () => {
+            window.dispatchEvent(new CustomEvent("pivis:open-login"));
+          },
+          copyToClipboard: async (t: string) => {
+            await window.pivis.invoke("clipboard.writeText", { text: t });
+          },
+          getAvailableModels: (sid: SessionId): ModelInfo[] => {
+            const s = useSessionsStore.getState().sessions.get(sid);
+            return s?.availableModels ?? [];
+          },
+          getSessionName: (sid: SessionId) =>
+            useSessionsStore.getState().sessions.get(sid)?.sessionName,
+          getCurrentModel: (sid: SessionId) =>
+            useSessionsStore.getState().sessions.get(sid)?.currentModel,
+          isStreaming: (sid: SessionId) =>
+            useSessionsStore.getState().sessions.get(sid)?.isStreaming ?? false,
+          getSessionWorkspacePath: (sid: SessionId) =>
+            useSessionsStore.getState().sessions.get(sid)?.workspacePath,
+          listSessions: (p: string) =>
+            window.pivis.invoke("workspace.listSessions", { workspacePath: p }),
+        };
+
+        await executeAction(sessionId, finalAction, deps);
       } finally {
-        setWorktreeCreating(sessionId, false);
+        submittingRef.current = false;
       }
-    }
-
-    try {
-      setText("");
-      setAttachments([]);
-      setSlashIndex(0);
-
-      const action = parseComposerInput(content, { discovered });
-      // Drop attachments the active model can't accept (e.g. the user
-      // attached an image, then switched to a text-only model). Pi would
-      // silently discard them before the provider call, so warn and submit
-      // the text alone rather than letting the user believe the image went.
-      let imgs = attachments;
-      if (imgs.length > 0 && !modelSupportsImages) {
-        addToast(
-          sessionId,
-          `${modelLabel} doesn't support image input — sending text only`,
-          "warning",
-        );
-        imgs = [];
-      }
-
-      const finalAction =
-        action.kind === "send-prompt" && imgs.length > 0
-          ? {
-              ...action,
-              images: imgs.map((a) => {
-                const comma = a.dataUrl.indexOf(",");
-                const header = a.dataUrl.slice(0, comma);
-                const mimeType = /^data:([^;]+)/.exec(header)?.[1] ?? "image/png";
-                return { data: a.dataUrl.slice(comma + 1), mimeType, dataUrl: a.dataUrl };
-              }),
-            }
-          : action;
-
-      // No-model guard: only for plain user prompts. /model (which fixes
-      // the guard!) and bash bypass it. Must run inside `try` so the
-      // `finally` below still resets `submittingRef`.
-      if (
-        finalAction.kind === "send-prompt" &&
-        !session?.currentModel &&
-        finalAction.commandSource === undefined
-      ) {
-        addToast(sessionId, "No model selected", "error");
-        return;
-      }
-
-      const deps = {
-        // The executeAction interface is intentionally generic-string for
-        // testability; the real invoke has a typed channel union, but the
-        // runtime call sites pass the right channel so the runtime contract
-        // is honored. We narrow at the boundary by giving the casted
-        // wrapper the right call signature.
-        invoke: <T = unknown>(channel: string, payload: unknown) =>
-          window.pivis.invoke(
-            channel as Parameters<typeof window.pivis.invoke>[0],
-            payload as Parameters<typeof window.pivis.invoke>[1],
-          ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
-        setStreaming,
-        addToast,
-        addUserMessage,
-        addBashCommand,
-        finishBashCommand,
-        setCurrentModel,
-        updateLastUsedModel: async (provider: string, modelId: string) => {
-          await updateSettings({ lastUsedModel: { provider, modelId } });
-        },
-        addCustomMessage,
-        openPicker: (sid: SessionId, picker: PickerRequest) => openPicker(sid, picker),
-        adoptSessionFile: async (sid: SessionId, file?: string, name?: string) => {
-          await adoptSessionFile(sid, file, name);
-          if (file) {
-            const history = await window.pivis.invoke("session.loadHistory", { sessionId: sid });
-            seedHistory(sid, history ?? []);
-            if (session?.workspacePath) {
-              void refreshWorkspaceSessions(session.workspacePath);
-            }
-          }
-        },
-        closeSessionTab: async (sid: SessionId) => closeSessionTab(sid),
-        openAppSettings: () => {
-          // The settings panel is owned by App.tsx; we dispatch a custom
-          // event that the App subscribes to. Keeps Composer free of
-          // cross-tree prop drilling.
-          window.dispatchEvent(new CustomEvent("pivis:open-settings"));
-        },
-        openDiffViewer: (sid: SessionId) => {
-          // The diff viewer is mounted at the App level (overlay over
-          // the session area). The store owns its state; we just call
-          // the helper.
-          openDiffForSession(sid);
-        },
-        openLogin: () => {
-          window.dispatchEvent(new CustomEvent("pivis:open-login"));
-        },
-        copyToClipboard: async (t: string) => {
-          await window.pivis.invoke("clipboard.writeText", { text: t });
-        },
-        getAvailableModels: (sid: SessionId): ModelInfo[] => {
-          const s = useSessionsStore.getState().sessions.get(sid);
-          return s?.availableModels ?? [];
-        },
-        getSessionName: (sid: SessionId) =>
-          useSessionsStore.getState().sessions.get(sid)?.sessionName,
-        getCurrentModel: (sid: SessionId) =>
-          useSessionsStore.getState().sessions.get(sid)?.currentModel,
-        isStreaming: (sid: SessionId) =>
-          useSessionsStore.getState().sessions.get(sid)?.isStreaming ?? false,
-        getSessionWorkspacePath: (sid: SessionId) =>
-          useSessionsStore.getState().sessions.get(sid)?.workspacePath,
-        listSessions: (p: string) =>
-          window.pivis.invoke("workspace.listSessions", { workspacePath: p }),
-      };
-
-      await executeAction(sessionId, finalAction, deps);
-    } finally {
-      submittingRef.current = false;
-    }
-  }, [
-    text,
-    discovered,
-    session,
-    sessionId,
-    addToast,
-    setStreaming,
-    addUserMessage,
-    addBashCommand,
-    finishBashCommand,
-    setCurrentModel,
-    updateSettings,
-    addCustomMessage,
-    openPicker,
-    adoptSessionFile,
-    closeSessionTab,
-    seedHistory,
-    refreshWorkspaceSessions,
-    setWorktreeCreating,
-    applyWorktree,
-    clearWorktreeIntent,
-    attachments,
-    modelSupportsImages,
-    modelLabel,
-  ]);
+    },
+    [
+      text,
+      discovered,
+      session,
+      sessionId,
+      addToast,
+      setStreaming,
+      addUserMessage,
+      addBashCommand,
+      finishBashCommand,
+      setCurrentModel,
+      updateSettings,
+      addCustomMessage,
+      openPicker,
+      adoptSessionFile,
+      closeSessionTab,
+      seedHistory,
+      refreshWorkspaceSessions,
+      setWorktreeCreating,
+      setWorktreeError,
+      applyWorktree,
+      clearWorktreeIntent,
+      attachments,
+      modelSupportsImages,
+      modelLabel,
+    ],
+  );
 
   // ── Abort ──────────────────────────────────────────────────────────
 
@@ -540,11 +553,14 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   // ── Click to pick a suggestion ─────────────────────────────────────
 
-  const handleSuggestionClick = useCallback((entry: SuggestionEntry) => {
-    setText(completionFor(entry));
-    setSlashIndex(0);
-    textareaRef.current?.focus();
-  }, [completionFor]);
+  const handleSuggestionClick = useCallback(
+    (entry: SuggestionEntry) => {
+      setText(completionFor(entry));
+      setSlashIndex(0);
+      textareaRef.current?.focus();
+    },
+    [completionFor],
+  );
 
   const isBashMode = text.startsWith("!");
   const isSlashMode = text.startsWith("/");

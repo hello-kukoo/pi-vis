@@ -13,7 +13,6 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
   const setWorktreeCreate = useSessionsStore((s) => s.setWorktreeCreate);
   const setWorktreeBase = useSessionsStore((s) => s.setWorktreeBase);
-  const addToast = useSessionsStore((s) => s.addToast);
   const gitRoot = gitRootForSession(session);
 
   // Load branches via IPC
@@ -94,6 +93,7 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
 
   const checked = session.worktreeCreate ?? false;
   const creating = session.worktreeCreating ?? false;
+  const worktreeError = session.worktreeError ?? null;
   const base = session.worktreeBase ?? currentBranch;
 
   const handleCheck = () => {
@@ -110,34 +110,50 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
 
   return (
     <div className="worktree-bar">
-      <label className="worktree-bar__checkbox-label">
-        <input
-          type="checkbox"
-          className="worktree-bar__checkbox"
-          checked={checked}
-          onChange={handleCheck}
-          disabled={creating}
+      <div className="worktree-bar__row">
+        <label className="worktree-bar__checkbox-label">
+          <input
+            type="checkbox"
+            className="worktree-bar__checkbox"
+            checked={checked}
+            onChange={handleCheck}
+            disabled={creating}
+          />
+          <span>Create worktree</span>
+        </label>
+
+        <BranchDropdown
+          branches={branches}
+          currentBranch={currentBranch}
+          value={checked ? base : currentBranch}
+          onChange={(b) => {
+            if (checked && b !== null) {
+              setWorktreeBase(sessionId, b);
+            }
+          }}
+          includeRemoteBranches={includeRemote}
+          onToggleRemote={handleToggleRemote}
+          disabled={!checked || creating}
+          triggerLabel={checked ? (base ?? "branch") : (currentBranch ?? "branch")}
+          placement="top"
         />
-        <span>Create worktree</span>
-      </label>
 
-      <BranchDropdown
-        branches={branches}
-        currentBranch={currentBranch}
-        value={checked ? base : currentBranch}
-        onChange={(b) => {
-          if (checked && b !== null) {
-            setWorktreeBase(sessionId, b);
-          }
-        }}
-        includeRemoteBranches={includeRemote}
-        onToggleRemote={handleToggleRemote}
-        disabled={!checked || creating}
-        triggerLabel={checked ? (base ?? "branch") : (currentBranch ?? "branch")}
-        placement="top"
-      />
+        {creating && (
+          <span className="worktree-bar__spinner">
+            <span className="worktree-bar__spinner-dot" aria-hidden="true" />
+            Creating worktree…
+          </span>
+        )}
+      </div>
 
-      {creating && <span className="worktree-bar__spinner">Creating worktree…</span>}
+      {worktreeError && !creating && (
+        <div className="worktree-bar__error" role="alert">
+          <span className="worktree-bar__error-icon" aria-hidden="true">
+            ⚠
+          </span>
+          <span className="worktree-bar__error-text">{worktreeError}</span>
+        </div>
+      )}
     </div>
   );
 }

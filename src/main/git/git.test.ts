@@ -585,6 +585,19 @@ describe("createWorktree", () => {
     git(workDir, ["branch", "-D", second.branch]);
   });
 
+  it("returns a descriptive error when the base ref can't be resolved", async () => {
+    makeRepo();
+
+    const { createWorktree } = await import("./git.js");
+    const result = await createWorktree(workDir, "no-such-branch");
+
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") return;
+    // The message names the bad base and is actionable — not a bare exit code.
+    expect(result.message).toContain("no-such-branch");
+    expect(result.message).not.toMatch(/code \d/);
+  });
+
   it("creates a worktree from a remote base", async () => {
     makeRepo();
     // Simulate a remote-tracking branch by creating a local branch that

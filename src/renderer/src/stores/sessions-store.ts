@@ -77,6 +77,12 @@ export interface SessionViewState {
   /** True while the worktree creation IPC is in flight. */
   worktreeCreating?: boolean | undefined;
   /**
+   * The reason the last worktree creation attempt failed, surfaced inline in
+   * the WorktreeBar so it persists (unlike a toast) until the user retries or
+   * changes the inputs. Cleared on a new attempt and on success.
+   */
+  worktreeError?: string | undefined;
+  /**
    * Post-creation identity — set after a worktree is successfully
    * created and the pi process is re-spawned into it.
    */
@@ -218,6 +224,8 @@ interface SessionsStore {
   setWorktreeCreate: (sessionId: SessionId, v: boolean) => void;
   setWorktreeBase: (sessionId: SessionId, base: string | null) => void;
   setWorktreeCreating: (sessionId: SessionId, v: boolean) => void;
+  /** Set (or clear, with null) the inline worktree-creation error. */
+  setWorktreeError: (sessionId: SessionId, message: string | null) => void;
   /** Apply post-creation identity after a successful worktree creation. */
   applyWorktree: (
     sessionId: SessionId,
@@ -398,6 +406,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         worktreeCreate: undefined,
         worktreeBase: undefined,
         worktreeCreating: undefined,
+        worktreeError: undefined,
         worktreePath: undefined,
         worktreeBranch: undefined,
         worktreeName: undefined,
@@ -827,7 +836,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      sessions.set(sessionId, { ...s, worktreeCreate: v });
+      // Toggling the checkbox is a fresh start — drop any stale failure.
+      sessions.set(sessionId, { ...s, worktreeCreate: v, worktreeError: undefined });
       return { sessions };
     });
   },
@@ -837,7 +847,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      sessions.set(sessionId, { ...s, worktreeBase: base });
+      // Changing the base is a fresh start — drop any stale failure.
+      sessions.set(sessionId, { ...s, worktreeBase: base, worktreeError: undefined });
       return { sessions };
     });
   },
@@ -847,7 +858,22 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      sessions.set(sessionId, { ...s, worktreeCreating: v });
+      // Starting a new attempt clears the previous error.
+      sessions.set(sessionId, {
+        ...s,
+        worktreeCreating: v,
+        ...(v ? { worktreeError: undefined } : {}),
+      });
+      return { sessions };
+    });
+  },
+
+  setWorktreeError: (sessionId, message) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, { ...s, worktreeError: message ?? undefined });
       return { sessions };
     });
   },
@@ -878,6 +904,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         worktreeCreate: undefined,
         worktreeBase: undefined,
         worktreeCreating: undefined,
+        worktreeError: undefined,
       });
       return { sessions };
     });
