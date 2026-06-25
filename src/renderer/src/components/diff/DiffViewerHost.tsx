@@ -135,6 +135,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   // per-tool-call badge refresh recomputes the fingerprint and lights the
   // stale dot (see diff-store doBadgeRefresh).
   const stale = useDiffStore((s) => s.stale);
+  const refreshing = useDiffStore((s) => s.refreshing);
   useEffect(() => {
     if (!visible) return;
     const unsubEvent = window.pivis.on("session.event", ({ sessionId: sid, event }) => {
@@ -439,6 +440,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           viewMode={viewMode}
           narrow={narrow}
           stale={stale}
+          refreshing={refreshing}
           searchOpen={searchOpen}
           onToggleSearch={() => {
             if (searchOpen) {
@@ -524,6 +526,7 @@ function ViewerHeader({
   viewMode,
   narrow,
   stale,
+  refreshing,
   searchOpen,
   onToggleSearch,
   onClose,
@@ -535,6 +538,7 @@ function ViewerHeader({
   viewMode: "unified" | "split";
   narrow: boolean;
   stale: boolean;
+  refreshing: boolean;
   searchOpen: boolean;
   onToggleSearch: () => void;
   onClose: () => void;
@@ -566,6 +570,23 @@ function ViewerHeader({
         )}
       </span>
       <span className="diff-viewer__spacer" />
+      {stale ? (
+        <span
+          className="diff-viewer__stale-dot"
+          role="img"
+          aria-label="Changes may be pending refresh"
+          title="Changes may be pending refresh"
+        />
+      ) : null}
+      <button
+        type="button"
+        className={`diff-viewer__icon-btn${phase === "loading" || refreshing ? " diff-viewer__icon-btn--spinning" : ""}`}
+        onClick={onRefresh}
+        title="Refresh"
+        aria-label="Refresh"
+      >
+        <RefreshIcon />
+      </button>
       {phase === "ready" && files.length > 0 && (
         <button
           type="button"
@@ -578,23 +599,6 @@ function ViewerHeader({
           <SearchIcon />
         </button>
       )}
-      {stale ? (
-        <span
-          className="diff-viewer__stale-dot"
-          role="img"
-          aria-label="Changes may be pending refresh"
-          title="Changes may be pending refresh"
-        />
-      ) : null}
-      <button
-        type="button"
-        className={`diff-viewer__icon-btn${phase === "loading" ? " diff-viewer__icon-btn--spinning" : ""}`}
-        onClick={onRefresh}
-        title="Refresh"
-        aria-label="Refresh"
-      >
-        <RefreshIcon />
-      </button>
       <div className="diff-viewer__seg" role="group" aria-label="Diff view mode">
         <button
           type="button"

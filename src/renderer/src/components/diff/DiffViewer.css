@@ -30,6 +30,15 @@
   animation: diff-pop-in 140ms ease-out;
 }
 
+/* The container is programmatically focused (tabIndex={-1}) to receive keyboard
+   shortcuts and to reclaim focus when the find bar closes. It is never a
+   meaningful keyboard target, so suppress the focus ring — it only surfaces as
+   a stray outline after Escape closes search. */
+.diff-viewer:focus,
+.diff-viewer:focus-visible {
+  outline: none;
+}
+
 @keyframes diff-pop-in {
   from {
     opacity: 0;

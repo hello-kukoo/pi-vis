@@ -95,6 +95,13 @@ export interface DiffStore {
   // the user is currently looking at). null until the first refresh.
   baselineFingerprint: string | null;
 
+  // True while a full `git.changes` refresh is in flight. Drives the
+  // refresh-button spinner independently of `phase` (which only flips to
+  // "loading" on the first load, to avoid wiping the already-displayed
+  // file list on every click). Enforced to stay true for at least one full
+  // icon rotation so an instant refresh still gives visible feedback.
+  refreshing: boolean;
+
   // mutators
   openViewer: (sessionId: SessionId, root: string) => void;
   closeViewer: () => void;
@@ -129,6 +136,11 @@ const EMPTY_SEARCH = {
 } as const;
 
 const EXPAND_STEP = 20;
+
+// Minimum time the refresh icon stays spinning, so even a sub-frame
+// refresh shows at least one full rotation (matches the 0.8s
+// `diff-spin` animation period).
+const MIN_REFRESH_SPIN_MS = 800;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -192,6 +204,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     badgeKind: "loading",
     stale: false,
     baselineFingerprint: null,
+    refreshing: false,
 
     search: { ...EMPTY_SEARCH },
 
@@ -224,6 +237,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         includeRemoteBranches: includeRemote,
         stale: false,
         baselineFingerprint: null,
+        refreshing: false,
         search: { ...EMPTY_SEARCH },
       });
       void get().refresh();
@@ -244,6 +258,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         selectedPath: null,
         filter: "",
         fileState: new Map(),
+        refreshing: false,
         search: { ...EMPTY_SEARCH },
       });
       // Refresh the badge after close so the header count reflects current state.
@@ -258,6 +273,13 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       // the baseline fingerprint re-captured) only on success, in
       // handleChangesResult — so a refresh that errors out leaves the dot up,
       // since the displayed content is definitely out of date.
+      // Spin the refresh icon for the duration of the fetch. Unlike `phase`,
+      // this does not wipe the already-displayed file list, so a refresh
+      // click keeps the current content visible while indicating activity.
+      // Held for at least one full icon rotation so an instant refresh still
+      // gives visible feedback.
+      set({ refreshing: true });
+      const minSpin = new Promise<void>((resolve) => setTimeout(resolve, MIN_REFRESH_SPIN_MS));
       // Show loading only on first load (when fileState is empty).
       const isFirst = get().fileState.size === 0;
       if (isFirst) {
@@ -275,11 +297,18 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         set({
           phase: "error",
           errorMessage: err instanceof Error ? err.message : String(err),
+          refreshing: false,
         });
         return;
       }
       if (isStale(generation, myGen)) return;
       handleChangesResult(set, get, res, isFirst);
+      // Keep the spinner going for at least one rotation even if the fetch
+      // was near-instant. If a newer refresh has superseded this one, leave
+      // `refreshing` alone — the newer call owns the flag.
+      await minSpin;
+      if (isStale(generation, myGen)) return;
+      set({ refreshing: false });
     },
 
     ensureFileLoaded: async (path) => {
