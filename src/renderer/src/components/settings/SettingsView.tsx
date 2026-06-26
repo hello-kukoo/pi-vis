@@ -4,6 +4,7 @@ import type { AppSettings } from "@shared/settings.js";
 import type { UpdateStatus } from "@shared/updates.js";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { formatMiB, parseSizeToMiB } from "../../lib/file-size.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
@@ -39,6 +40,86 @@ function buildFontOptions(localFonts: FontFamily[], current: string): string[] {
     }
   }
   return out;
+}
+
+// Min/max mirror the AppSettingsSchema clamp for diffMaxFileSizeMiB
+// ([1 KiB, 1 GiB]). Kept here so the input can report an out-of-range value
+// before it ever reaches the store.
+const DIFF_SIZE_MIN_MIB = 1 / 1024; // 1 KiB
+const DIFF_SIZE_MAX_MIB = 1024; // 1 GiB
+
+/**
+ * Freeform max-file-size input. Accepts sizes like "5 MiB", "500 KiB",
+ * "1 GiB", or a bare number (read as MiB), validating on blur / Enter. The
+ * stored value only updates on a valid, in-range commit; invalid input shows
+ * an inline error and is not persisted. The user's text is preserved verbatim
+ * once it round-trips to the stored value — we only normalize it when the
+ * value is changed from outside this input.
+ */
+function DiffMaxSizeInput({
+  valueMiB,
+  onCommit,
+}: {
+  valueMiB: number;
+  onCommit: (mib: number) => void;
+}): React.ReactElement {
+  const [text, setText] = useState(() => formatMiB(valueMiB));
+  const [error, setError] = useState("");
+
+  // Re-sync the box when the stored value changes. If it still matches what's
+  // typed (the change came from this input's own commit), leave the text
+  // exactly as entered — "1500 KiB" stays "1500 KiB" instead of snapping to
+  // "1.46 MiB". Only a change from elsewhere normalizes the display.
+  useEffect(() => {
+    setText((cur) => {
+      const parsed = parseSizeToMiB(cur);
+      if (parsed !== null && Math.abs(parsed - valueMiB) < 1e-9) return cur;
+      return formatMiB(valueMiB);
+    });
+    setError("");
+  }, [valueMiB]);
+
+  const commit = () => {
+    const mib = parseSizeToMiB(text);
+    if (mib === null) {
+      setError("Enter a size like “5 MiB”, “500 KiB”, or “1 GiB”.");
+      return;
+    }
+    if (mib < DIFF_SIZE_MIN_MIB || mib > DIFF_SIZE_MAX_MIB) {
+      setError("Must be between 1 KiB and 1 GiB.");
+      return;
+    }
+    setError("");
+    // Persist the parsed value but keep the text as typed (the effect above
+    // won't clobber it, since the new stored value round-trips from it).
+    onCommit(mib);
+  };
+
+  return (
+    <>
+      <input
+        className="settings-input"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+        placeholder="e.g. 5 MiB"
+        aria-label="Maximum diff file size"
+      />
+      {error ? (
+        <span className="settings-hint settings-hint--error">{error}</span>
+      ) : (
+        <span className="settings-hint">
+          Files larger than this show a “too large” notice instead of a diff.
+        </span>
+      )}
+    </>
+  );
 }
 
 interface SettingsViewProps {
@@ -462,6 +543,18 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                     +
                   </button>
                 </div>
+              </div>
+            </section>
+
+            {/* Diff viewer */}
+            <section className="settings-section">
+              <h3 className="settings-section__title">Diff viewer</h3>
+              <div className="settings-row">
+                <span className="settings-label">Max file size</span>
+                <DiffMaxSizeInput
+                  valueMiB={settings.diffMaxFileSizeMiB}
+                  onCommit={(mib) => update({ diffMaxFileSizeMiB: mib })}
+                />
               </div>
             </section>
 

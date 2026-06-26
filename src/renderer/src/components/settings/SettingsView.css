@@ -185,6 +185,10 @@
   line-height: var(--mcm-line-body);
 }
 
+.settings-hint--error {
+  color: var(--ctp-red);
+}
+
 .settings-hint code {
   font-family: var(--font-code);
   background: var(--ctp-surface1);

@@ -368,6 +368,32 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         set({ fileState: m2 });
         return;
       }
+      // Honor main's `tooLarge` / `binary` flags directly instead of diffing
+      // the text. Main caps the working-tree read at FILE_TOO_LARGE and
+      // returns `tooLarge` with an EMPTY newText (but a populated oldText for
+      // a modified file); feeding that empty new side into buildDiffModel
+      // would render a modified file as a wholesale deletion ("removed
+      // completely"), or — past the line cap — show a misleading "File too
+      // large to diff". A `binary` file's text is replacement-char soup that's
+      // pointless to diff. Both get a dedicated notice; skip tokenization too.
+      if (res.tooLarge || res.binary) {
+        const m2 = new Map(get().fileState);
+        m2.set(path, {
+          ...(state ?? { collapsed: false }),
+          status: "ready",
+          // Binary takes precedence: a binary diff has nothing legible to
+          // render, and main never sets both flags at once (a too-large file
+          // is returned with binary:false before the sniff runs).
+          model: res.binary ? { kind: "binary" } : { kind: "too-large", oldSize: 0, newSize: 0 },
+          gapState: [],
+          oldTokens: null,
+          newTokens: null,
+          oldText: res.oldText,
+          newText: res.newText,
+        });
+        set({ fileState: m2 });
+        return;
+      }
       const model = buildDiffModel(res.oldText, res.newText);
       const gapState: GapState[] =
         model.kind === "ok" ? model.gaps.map(() => ({ top: 0, bottom: 0 })) : [];

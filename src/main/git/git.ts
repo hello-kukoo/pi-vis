@@ -37,8 +37,12 @@ const MAX_FILES = 500;
 const UNTRACKED_COUNT_LIMIT = 200;
 /** Above this many bytes, skip line counting and just mark the file. */
 const UNTRACKED_SKIP_SIZE = 1024 * 1024; // 1 MiB
-/** Above this many bytes, refuse to read the contents. */
-const FILE_TOO_LARGE = 1024 * 1024; // 1 MiB
+/** Default cap on the working-tree file bytes the diff viewer will read.
+ *  Overridable per-call (from the `diffMaxFileSizeMiB` setting); above the
+ *  effective cap, getFileDiff returns a `tooLarge` marker. The renderer's
+ *  per-side line cap (TOO_LARGE_LINE_TOTAL in diff-model.ts) is the other
+ *  guard; keep the two roughly in step. */
+const FILE_TOO_LARGE_DEFAULT = 5 * 1024 * 1024; // 5 MiB
 /** Number of leading bytes to sniff for a NUL when detecting binary. */
 const BINARY_SNIFF_BYTES = 8192;
 /** Process timeout for every (fast) git invocation. */
@@ -502,6 +506,7 @@ export async function getFileDiff(
   root: string,
   file: { path: string; oldPath?: string; status: GitFileStatus; untracked: boolean },
   base?: string,
+  maxFileSizeBytes: number = FILE_TOO_LARGE_DEFAULT,
 ): Promise<GitFileDiffResult> {
   // GIT_OPTIONAL_LOCKS=0: these are read-only commands; don't take
   // index.lock (avoids contention with concurrent git reads and a stray
@@ -558,7 +563,7 @@ export async function getFileDiff(
           const filePath = path.join(repoRoot, file.path);
           try {
             const stat = await fs.stat(filePath);
-            if (stat.size > FILE_TOO_LARGE) {
+            if (stat.size > maxFileSizeBytes) {
               return { text: "", missingNewline: false, tooLarge: true };
             }
             const text = await fs.readFile(filePath, "utf8");

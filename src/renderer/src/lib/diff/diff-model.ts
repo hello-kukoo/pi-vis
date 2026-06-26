@@ -91,7 +91,11 @@ export interface TooLargeModel {
   newSize: number;
 }
 
-export type AnyDiffModel = DiffModel | TooLargeModel;
+export interface BinaryModel {
+  kind: "binary";
+}
+
+export type AnyDiffModel = DiffModel | TooLargeModel | BinaryModel;
 
 /** Per-gap state owned by the store: how many lines are revealed on each end. */
 export interface GapState {
@@ -103,8 +107,11 @@ export interface GapState {
 
 const CONTEXT_LINES = 3;
 const EXPAND_STEP = 20;
-/** Cap that triggers a too-large model. Either side is the upper bound. */
-const TOO_LARGE_LINE_TOTAL = 30_000;
+/** Cap that triggers a too-large model. Either side is the upper bound.
+ *  Paired with FILE_TOO_LARGE (5 MiB) in main's git.ts — this is the
+ *  line-count guard that bounds jsdiff's work on a file that's under the
+ *  byte cap but pathologically long. */
+const TOO_LARGE_LINE_TOTAL = 50_000;
 
 // ── buildDiffModel ─────────────────────────────────────────────────────
 
@@ -333,7 +340,7 @@ export type Row =
  * For gap rows it's the gap's index.
  */
 export function visibleRows(model: AnyDiffModel, gapState: GapState[]): Row[] {
-  if (model.kind === "too-large") return [];
+  if (model.kind !== "ok") return [];
   const out: Row[] = [];
   const lines = model.lines;
   const gaps = model.gaps;

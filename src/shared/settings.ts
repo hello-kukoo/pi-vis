@@ -52,6 +52,18 @@ export const AppSettingsSchema = z.object({
   // used when the window is wide enough.
   diffViewMode: z.enum(["unified", "split"]).default("unified"),
   diffIncludeRemoteBranches: z.boolean().default(false),
+  // Largest working-tree file the diff viewer will read and render, in MiB
+  // (fractional allowed — the settings UI parses freeform sizes like "5 MiB"
+  // or "500 KiB" into this). Above it, getFileDiff returns a `tooLarge` marker
+  // and the viewer shows a "File too large to diff" notice instead of diffing
+  // the contents (jsdiff cost grows with file size). Clamped to [1 KiB, 1 GiB]
+  // — a low floor lets someone keep the viewer snappy on a slow machine;
+  // default 5 MiB.
+  diffMaxFileSizeMiB: z
+    .number()
+    .min(1 / 1024)
+    .max(1024)
+    .default(5),
   statusBarVisible: z.boolean().default(true),
   // Sidebar chrome (user-controlled layout). Persisted so the width and
   // collapsed state survive relaunch. Width is clamped to [160, 500] by the

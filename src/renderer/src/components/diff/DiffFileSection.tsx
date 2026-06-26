@@ -195,6 +195,13 @@ function FileBody({
       </div>
     );
   }
+  if (model.kind === "binary") {
+    return (
+      <div className="diff-file__body diff-file__body--open">
+        <div className="diff-file__notice">Binary file not shown</div>
+      </div>
+    );
+  }
   if (model.kind === "ok" && model.changedCount === 0) {
     return (
       <div className="diff-file__body diff-file__body--open">

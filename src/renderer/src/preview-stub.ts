@@ -393,6 +393,7 @@ const settingsState = {
   expandedWorkspaces: [DEMO_WORKSPACE],
   lastUsedModel: null,
   colorScheme: "mocha" as const,
+  diffMaxFileSizeMiB: 5,
   statusBarVisible: true,
   sidebarWidth: 220,
   sidebarCollapsed: false,

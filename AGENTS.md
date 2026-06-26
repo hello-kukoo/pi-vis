@@ -72,7 +72,7 @@ src/
 │   │   ├── ErrorBoundary.tsx # React error boundary (reloadable card) — used at TWO levels: top-level in main.tsx (whole shell) + per-session in App; prevents render crashes from white-screening
 │   │   ├── pickers/         # AppPickerHost (model picker, thinking level picker)
 │   │   ├── session-header/  # SessionHeader (model dropdown, thinking level, token stats, session name)
-│   │   ├── settings/        # SettingsView (fonts, pi path, color scheme, diff view mode, Account, Updates)
+│   │   ├── settings/        # SettingsView (fonts, pi path, color scheme, diff viewer max file size, Account, Updates)
 │   │   └── setup/           # PiNotFound (shown when pi binary can't be located)
 │   ├── stores/              # Zustand stores
 │   │   ├── sessions-store.ts   # Primary store: SessionViewState per session, transcript, streaming, pickers, workspace order + multi-expand (workspaceOrder/expandedWorkspaces decoupled from activeWorkspacePath)
@@ -103,7 +103,7 @@ src/
     │   ├── messages.ts      # Wire message types
     │   └── thinking.ts      # ThinkingLevel enum + schema
     ├── ids.ts               # Branded types: SessionId, RpcRequestId; ID generators (timestamp+counter)
-    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, workspaceOrder + expandedWorkspaces, lastActiveWorkspace, color scheme, diff mode, sidebar width/collapsed, window bounds
+    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, workspaceOrder + expandedWorkspaces, lastActiveWorkspace, color scheme, diff mode, diffMaxFileSizeMiB (diff viewer file-size cap, default 5), sidebar width/collapsed, window bounds
     ├── git.ts               # GitChangedFile, GitChangesResult, GitFileDiffResult types
     ├── result.ts            # Result<T,E> utility + assertNever
     └── session-file/        # Session file format schemas (header, message/model-change/snapshot entries)

@@ -406,7 +406,8 @@ export function initIpc(win: BrowserWindow): void {
                 untracked: args.untracked,
               }
             : { path: args.path, base: args.base, status: args.status, untracked: args.untracked };
-        return await getFileDiff(args.root, payload, args.base);
+        const maxBytes = getSettings().diffMaxFileSizeMiB * 1024 * 1024;
+        return await getFileDiff(args.root, payload, args.base, maxBytes);
       } catch (err) {
         return { kind: "error", message: err instanceof Error ? err.message : String(err) };
       }

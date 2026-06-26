@@ -272,9 +272,9 @@ describe("getFileDiff", () => {
 
   it("flags a too-large file", async () => {
     makeRepo();
-    // Write a 1.5 MiB file (> 1 MiB limit) directly on disk.
+    // Write a 6 MiB file (> 5 MiB limit) directly on disk.
     const filePath = path.join(workDir, "big.ts");
-    const big = Buffer.alloc(1.5 * 1024 * 1024, 0x61);
+    const big = Buffer.alloc(6 * 1024 * 1024, 0x61);
     fs.writeFileSync(filePath, big);
     const res = await getFileDiff(workDir, {
       path: "big.ts",
@@ -285,6 +285,32 @@ describe("getFileDiff", () => {
     if (res.kind !== "ok") return;
     expect(res.tooLarge).toBe(true);
     expect(res.newText).toBe("");
+  });
+
+  it("honors a custom maxFileSizeBytes cap", async () => {
+    makeRepo();
+    // 1.5 MiB: under the 5 MiB default, but over a 1 MiB custom cap.
+    const filePath = path.join(workDir, "mid.ts");
+    fs.writeFileSync(filePath, Buffer.alloc(1.5 * 1024 * 1024, 0x61));
+
+    const underDefault = await getFileDiff(workDir, {
+      path: "mid.ts",
+      status: "A",
+      untracked: false,
+    });
+    expect(underDefault.kind).toBe("ok");
+    if (underDefault.kind !== "ok") return;
+    expect(underDefault.tooLarge).toBe(false);
+
+    const overCustom = await getFileDiff(
+      workDir,
+      { path: "mid.ts", status: "A", untracked: false },
+      undefined,
+      1 * 1024 * 1024,
+    );
+    expect(overCustom.kind).toBe("ok");
+    if (overCustom.kind !== "ok") return;
+    expect(overCustom.tooLarge).toBe(true);
   });
 
   it("reports newMissingNewline when the file lacks a trailing newline", async () => {
