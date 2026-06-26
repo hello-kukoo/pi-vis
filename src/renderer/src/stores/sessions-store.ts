@@ -67,11 +67,21 @@ export interface SessionViewState {
   editorInjection?: { text: string; nonce: number } | undefined;
   pendingPicker?: PickerRequest | undefined;
   /**
-   * Pre-send worktree creation intent (drives the WorktreeBar).
-   * These are only set for a brand-new session (no transcript yet)
-   * and are cleared after the first send.
+   * Pre-send worktree intent mode (drives the WorktreeBar segmented
+   * control). These are only set for a brand-new session (no transcript
+   * yet) and are cleared after the first send.
+   *
+   * - `"none"` (default ≙ the bar's "In Workspace" segment): run the
+   *   session in the workspace cwd, no worktree.
+   * - `"create"` ("New Worktree" segment): create a fresh worktree on
+   *   submit (mirrors the original `worktreeCreate: true` flow).
+   * - `"attach"` ("Existing Worktree" segment): attach to an existing worktree on
+   *   disk at `worktreeAttachPath`; the authoritative validation happens
+   *   server-side in the `session.attachWorktree` IPC.
    */
-  worktreeCreate?: boolean | undefined;
+  worktreeMode?: "none" | "create" | "attach" | undefined;
+  /** The user-supplied path for the "Existing" (attach) mode. */
+  worktreeAttachPath?: string | undefined;
   /** The base branch the user selected in the WorktreeBar. */
   worktreeBase?: string | null | undefined;
   /** True while the worktree creation IPC is in flight. */
@@ -221,7 +231,12 @@ interface SessionsStore {
   setHeaderCompact: (v: boolean) => void;
 
   // Worktree bar state (pre-send)
-  setWorktreeCreate: (sessionId: SessionId, v: boolean) => void;
+  /** Set the WorktreeBar segmented-control mode. Clears any prior
+   *  `worktreeError` so a fresh mode starts with a clean status line. */
+  setWorktreeMode: (sessionId: SessionId, mode: "none" | "create" | "attach") => void;
+  /** Set the path input value for the "Existing" (attach) mode. Clears
+   *  any prior `worktreeError`. */
+  setWorktreeAttachPath: (sessionId: SessionId, path: string) => void;
   setWorktreeBase: (sessionId: SessionId, base: string | null) => void;
   setWorktreeCreating: (sessionId: SessionId, v: boolean) => void;
   /** Set (or clear, with null) the inline worktree-creation error. */
@@ -403,7 +418,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         toasts: [],
         availableModels: [],
         // Worktree fields start unset
-        worktreeCreate: undefined,
+        worktreeMode: undefined,
+        worktreeAttachPath: undefined,
         worktreeBase: undefined,
         worktreeCreating: undefined,
         worktreeError: undefined,
@@ -831,13 +847,38 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   // ── Worktree actions ────────────────────────────────────────────
 
-  setWorktreeCreate: (sessionId, v) => {
+  setWorktreeMode: (sessionId, mode) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      // Toggling the checkbox is a fresh start — drop any stale failure.
-      sessions.set(sessionId, { ...s, worktreeCreate: v, worktreeError: undefined });
+      // Switching segments is a fresh start — drop any stale failure.
+      // Also drop `worktreeAttachPath` when switching away from attach
+      // so a stale path from a prior selection can't leak into a new
+      // attempt (the input clears its own value too, but the store is
+      // the source of truth for the submit-time path).
+      sessions.set(sessionId, {
+        ...s,
+        worktreeMode: mode,
+        ...(mode !== "attach" ? { worktreeAttachPath: undefined } : {}),
+        worktreeError: undefined,
+      });
+      return { sessions };
+    });
+  },
+
+  setWorktreeAttachPath: (sessionId, path) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      // Each keystroke (or pick) is a fresh start — drop any stale
+      // failure so the status line updates without an old error.
+      sessions.set(sessionId, {
+        ...s,
+        worktreeAttachPath: path,
+        worktreeError: undefined,
+      });
       return { sessions };
     });
   },
@@ -901,7 +942,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       if (!s) return {};
       sessions.set(sessionId, {
         ...s,
-        worktreeCreate: undefined,
+        worktreeMode: undefined,
+        worktreeAttachPath: undefined,
         worktreeBase: undefined,
         worktreeCreating: undefined,
         worktreeError: undefined,

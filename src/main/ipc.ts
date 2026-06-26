@@ -22,6 +22,7 @@ import {
   getChanges,
   getChangesCount,
   getFileDiff,
+  inspectWorktree,
 } from "./git/git.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { isSessionHost } from "./pi/session-host.js";
@@ -35,7 +36,12 @@ import {
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { checkForUpdates, startUpdate } from "./updates.js";
-import { getOrderedWorkspaces, pickWorkspace, removeWorkspace } from "./workspaces.js";
+import {
+  getOrderedWorkspaces,
+  pickWorkspace,
+  pickWorktreeDirectory,
+  removeWorkspace,
+} from "./workspaces.js";
 
 let registry: SessionRegistry | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -198,6 +204,82 @@ export function initIpc(win: BrowserWindow): void {
       }
     },
   );
+
+  // Attach an existing worktree on disk to a brand-new session. Mirrors
+  // `session.createWorktree`: re-runs `inspectWorktree` server-side as the
+  // authoritative gate (so a stale/edited live-validate result can never
+  // persist a bad path), persists the worktree association, and respawns
+  // pi into the worktree cwd. The renderer uses the same
+  // `applyWorktree` plumbing on success.
+  //
+  // `base` for an attached worktree equals `branch` (no "cut from"
+  // relationship). `resolveWorktreeForFile` matches by `cwd` byte-for-byte
+  // against the persisted key, so we MUST key `settings.worktrees` by the
+  // canonical toplevel `inspectWorktree` returned — never the user's raw
+  // input.
+  ipcMain.handle(
+    "session.attachWorktree",
+    async (_evt, args: { sessionId: SessionId; path: string }) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (!rec) return { ok: false, error: "Session not found" };
+      const settings = getSettings();
+      const piInfo = await locatePi(settings.piBinaryPath);
+      if (!piInfo) return { ok: false, error: "pi binary not found" };
+      const loginShellEnv = await getLoginShellEnv();
+      try {
+        const result = await inspectWorktree(rec.workspacePath, args.path);
+        if (result.kind === "error") return { ok: false, error: result.message };
+        // Key by the canonical toplevel, not the raw input — see the
+        // `GitWorktreeInspect` doc and the `inspectWorktree` doc.
+        const worktrees = { ...getSettings().worktrees };
+        worktrees[result.path] = {
+          workspacePath: rec.workspacePath,
+          branch: result.branch,
+          name: result.name,
+          base: result.branch, // attached: no "cut from" relationship
+        };
+        saveSettings({ worktrees });
+        registry?.setWorktreeAndRespawn(args.sessionId, result.path, piInfo.path, loginShellEnv);
+        return {
+          ok: true,
+          worktreePath: result.path,
+          branch: result.branch,
+          name: result.name,
+          base: result.branch,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  // Live-validate a candidate worktree path for the WorktreeBar's
+  // "Existing" mode. The result drives the status line; it is advisory
+  // only — the authoritative gate is `session.attachWorktree` above
+  // re-running `inspectWorktree`.
+  ipcMain.handle(
+    "worktree.validate",
+    async (_evt, args: { workspacePath: string; path: string }) => {
+      try {
+        const result = await inspectWorktree(args.workspacePath, args.path);
+        if (result.kind === "error") return { ok: false, error: result.message };
+        return { ok: true, branch: result.branch, name: result.name };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  // Open the OS directory picker for attaching to an existing worktree.
+  ipcMain.handle("worktree.pickDirectory", async (_evt, args: { workspacePath: string }) => {
+    return pickWorktreeDirectory(args.workspacePath);
+  });
 
   ipcMain.handle("session.reload", async (_evt, args: { sessionId: SessionId }) => {
     const settings = getSettings();

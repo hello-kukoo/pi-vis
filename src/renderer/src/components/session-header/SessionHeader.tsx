@@ -519,7 +519,12 @@ function WorktreeChip({
   path?: string | undefined;
 }): React.ReactElement {
   const addToast = useSessionsStore((s) => s.addToast);
-  const detail = `${branch}${base ? ` · from ${base}` : ""}${path ? ` · ${path}` : ""}`;
+  // For an attached worktree there is no "cut from" relationship — the
+  // attach IPC stores `base = branch` as a sentinel meaning "attached,
+  // not cut from anything". Skip the `· from <base>` segment in that
+  // case so the tooltip stays honest about the worktree's provenance.
+  const showFromBase = base && base !== branch;
+  const detail = `${branch}${showFromBase ? ` · from ${base}` : ""}${path ? ` · ${path}` : ""}`;
   // A real <button> so it's keyboard-operable (Enter/Space) and screen-reader
   // friendly without hand-rolling key handlers.
   return (

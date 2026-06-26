@@ -86,6 +86,35 @@ export interface IpcInvokeContract {
       | { ok: true; worktreePath: string; branch: string; name: string; base: string }
       | { ok: false; error: string };
   };
+  // Attach an existing worktree on disk to a fresh session. Mirrors the
+  // shape of `session.createWorktree` — the main process re-runs
+  // `inspectWorktree` server-side so a stale/edited live-validate result
+  // can never persist a bad path. `path` is the canonical toplevel the
+  // main process resolved; the renderer uses it to seed
+  // `applyWorktree` and the same plumbing (`setWorktreeAndRespawn`,
+  // `settings.worktrees` persistence, `resolveWorktreeForFile`
+  // re-attach) as the create flow. `base` equals `branch` here — there
+  // is no "cut from" relationship for an attached worktree; the chip
+  // tooltip uses `base === branch` as the "attached, not cut from
+  // anything" sentinel.
+  "session.attachWorktree": {
+    req: { sessionId: SessionId; path: string };
+    res:
+      | { ok: true; worktreePath: string; branch: string; name: string; base: string }
+      | { ok: false; error: string };
+  };
+  // Live-validate a pasted-or-picked path for the WorktreeBar's
+  // "Existing" mode. The renderer calls this from a debounced text
+  // input + the "Browse…" button; the result drives the status line.
+  // The result is advisory only — the authoritative gate is the
+  // `session.attachWorktree` IPC re-running `inspectWorktree`.
+  "worktree.validate": {
+    req: { workspacePath: string; path: string };
+    res: { ok: true; branch: string; name: string } | { ok: false; error: string };
+  };
+  // Open the OS directory picker for attaching to an existing worktree.
+  // Returns the chosen path or `null` if the user cancelled.
+  "worktree.pickDirectory": { req: { workspacePath: string }; res: string | null };
   "session.close": { req: { sessionId: SessionId }; res: undefined };
   "session.loadHistory": { req: { sessionId: SessionId }; res: TranscriptBlock[] };
   "session.sendCommand": {

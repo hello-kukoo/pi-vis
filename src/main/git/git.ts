@@ -16,7 +16,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import path from "node:path";
 import type {
   GitBranchesResult,
@@ -25,6 +25,7 @@ import type {
   GitChangesResult,
   GitFileDiffResult,
   GitFileStatus,
+  GitWorktreeInspect,
   GitWorktreeResult,
 } from "@shared/git.js";
 import { getSubprocessEnv } from "../auth.js";
@@ -969,6 +970,201 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
   } catch (err) {
     return { kind: "error", message: errorMessage(err) };
   }
+}
+
+/**
+ * Validate a user-supplied candidate directory for the attach-to-worktree
+ * flow and return the canonical worktree identity (canonical toplevel +
+ * branch + name).
+ *
+ * Validation strategy (the "same main repo" check):
+ *
+ *  1. Canonicalize the candidate to its worktree root first. Run
+ *     `git rev-parse --show-toplevel` (cwd = the user's input) → collapses
+ *     a pasted *subdirectory* of a worktree down to the worktree root, and
+ *     the output is already absolute. Then `fs.realpath` it (macOS
+ *     `/var`↔`/private/var`). **Every downstream use — the same-repo
+ *     compare, the persisted `settings.worktrees` key, the respawn cwd, and
+ *     the chip name — uses this canonical toplevel, never the raw input.**
+ *     This is what makes `resolveWorktreeForFile` re-attach correctly on
+ *     relaunch: pi writes the canonical cwd into the session header, and
+ *     our persisted key must equal it byte-for-byte.
+ *
+ *  2. Same-repo proof via common dir. For any worktree, `git rev-parse
+ *     --git-common-dir` resolves to the *shared* `.git` of the main repo;
+ *     all linked worktrees of one repo share it. Compare
+ *     `realpath(commonDir(candidate)) === realpath(commonDir(workspaceRoot))`.
+ *     (`--git-common-dir` can return a relative path, so resolve it
+ *     against the candidate's toplevel before realpath. No
+ *     `--path-format=absolute` — it needs git ≥2.31 and is unnecessary
+ *     here.)
+ *
+ * Order of checks (crisp messages, cheapest first):
+ *
+ *  - `fs.stat(input)` → missing/not-a-dir → "Directory not found." (Do
+ *    **not** rely on git for this: `mapSpawnError` at the bottom of this
+ *    file maps `ENOENT` to `git-missing`, which means *git binary*
+ *    missing — wrong message.)
+ *  - `--show-toplevel` fails → "Not a git repository."
+ *  - common-dir mismatch → "That directory belongs to a different repository."
+ *  - canonical toplevel === realpath'd workspace toplevel → "That's the
+ *    current workspace — choose a different worktree directory."
+ *    (Compare two *realpath'd* toplevels, not raw `workspaceRoot` vs
+ *    realpath'd candidate.)
+ *
+ * Branch resolution (best effort, never fails the validation):
+ *
+ *  - `git rev-parse --abbrev-ref HEAD`; `HEAD` (detached) → `--short HEAD`;
+ *    if that also fails (unborn HEAD, no commits) → fall back to the branch
+ *    from `git symbolic-ref --short HEAD` or the literal `"(no commits)"`.
+ *
+ * Single source of truth: called by both the live-validate IPC
+ * (`worktree.validate`) and the attach IPC (`session.attachWorktree`).
+ * The attach IPC is the authoritative gate — it re-runs `inspectWorktree`
+ * server-side and uses the returned canonical `path`, so a stale/edited
+ * live result can never persist a bad path.
+ */
+export async function inspectWorktree(
+  workspaceRoot: string,
+  candidatePath: string,
+): Promise<GitWorktreeInspect> {
+  // Precheck: must exist AND be a directory. Do this BEFORE shelling out to
+  // git — `mapSpawnError` below maps ENOENT to `git-missing`, which means
+  // "git binary missing", not "directory missing". Doing the stat here keeps
+  // the user-facing error message correct.
+  let stat: Stats;
+  try {
+    stat = await fs.stat(candidatePath);
+  } catch {
+    return { kind: "error", message: "Directory not found." };
+  }
+  if (!stat.isDirectory()) {
+    return { kind: "error", message: "Directory not found." };
+  }
+
+  const env = await getSubprocessEnv();
+
+  // 1. Canonicalize the candidate down to its worktree root + same-repo check
+  //    via `--git-common-dir`. Both happen in one git invocation per command
+  //    so we don't pay four spawn costs on a large repo.
+  let canonicalTop: string;
+  let commonDirRel: string;
+  try {
+    const topRes = await execGitText(["rev-parse", "--show-toplevel"], candidatePath, env);
+    canonicalTop = topRes.stdout.trim();
+    if (!canonicalTop) return { kind: "error", message: "Not a git repository." };
+  } catch {
+    return { kind: "error", message: "Not a git repository." };
+  }
+  // `--git-common-dir` can return a relative path; resolve it against the
+  // canonical toplevel, then realpath both sides for the byte-for-byte
+  // compare that survives `/var`↔`/private/var` (macOS) and any symlinks
+  // the user or `git worktree add` created in the candidate path.
+  try {
+    const commonRes = await execGitText(["rev-parse", "--git-common-dir"], candidatePath, env);
+    const rel = commonRes.stdout.trim();
+    if (!rel) return { kind: "error", message: "Not a git repository." };
+    commonDirRel = path.isAbsolute(rel) ? rel : path.resolve(canonicalTop, rel);
+  } catch {
+    return { kind: "error", message: "Not a git repository." };
+  }
+
+  // Resolve the workspace side the same way (canonical + common-dir). Doing
+  // it here (rather than caching the workspace's common-dir in a setting)
+  // makes the check robust against the workspace itself having been moved
+  // or moved-aside on disk — the user sees a real failure, not a stale hit.
+  let workspaceTop: string;
+  let workspaceCommon: string;
+  try {
+    const topRes = await execGitText(["rev-parse", "--show-toplevel"], workspaceRoot, env);
+    workspaceTop = topRes.stdout.trim();
+    if (!workspaceTop) return { kind: "error", message: "Not a git repository." };
+  } catch {
+    return { kind: "error", message: "Not a git repository." };
+  }
+  try {
+    const commonRes = await execGitText(["rev-parse", "--git-common-dir"], workspaceRoot, env);
+    const rel = commonRes.stdout.trim();
+    if (!rel) return { kind: "error", message: "Not a git repository." };
+    workspaceCommon = path.isAbsolute(rel) ? rel : path.resolve(workspaceTop, rel);
+  } catch {
+    return { kind: "error", message: "Not a git repository." };
+  }
+
+  let realCandidateCommon: string;
+  let realWorkspaceCommon: string;
+  let realCandidateTop: string;
+  let realWorkspaceTop: string;
+  try {
+    realCandidateCommon = await fs.realpath(commonDirRel);
+    realWorkspaceCommon = await fs.realpath(workspaceCommon);
+    realCandidateTop = await fs.realpath(canonicalTop);
+    realWorkspaceTop = await fs.realpath(workspaceTop);
+  } catch {
+    // The path resolved to something that doesn't exist on disk anymore
+    // (e.g. user pasted a phantom worktree, or a parent was unmounted).
+    // Treat as "not a git repository" — the same-repo check below is
+    // meaningless without both sides.
+    return { kind: "error", message: "Not a git repository." };
+  }
+
+  if (realCandidateCommon !== realWorkspaceCommon) {
+    return {
+      kind: "error",
+      message: "That directory belongs to a different repository.",
+    };
+  }
+  if (realCandidateTop === realWorkspaceTop) {
+    return {
+      kind: "error",
+      message: "That's the current workspace — choose a different worktree directory.",
+    };
+  }
+
+  // From here down, use the realpath'd toplevel (`realCandidateTop`) — the
+  // exact string the self-compare above trusted — for the branch cwd, the
+  // chip name, and the returned `path`. This is the value we persist as the
+  // `settings.worktrees` key and respawn pi into, so it must match the cwd pi
+  // records in its session header byte-for-byte for `resolveWorktreeForFile`
+  // to re-attach on relaunch. (Git's `--show-toplevel` already resolves
+  // symlinks, so `realCandidateTop === canonicalTop` in practice; this keeps
+  // the one source of truth explicit rather than relying on that.)
+
+  // 2. Branch label. Best-effort: a detached HEAD falls through to `--short
+  //    HEAD` (a SHA prefix), and an unborn HEAD (no commits yet) ends at the
+  //    `"(no commits)"` sentinel. None of these branches fail validation —
+  //    attaching to an unborn-HEAD worktree is still a valid attach target.
+  let branch = "(no commits)";
+  try {
+    const r = await execGitText(["rev-parse", "--abbrev-ref", "HEAD"], realCandidateTop, env);
+    const trimmed = r.stdout.trim();
+    if (trimmed && trimmed !== "HEAD") {
+      branch = trimmed;
+    } else {
+      // Detached HEAD → short SHA.
+      try {
+        const sha = await execGitText(["rev-parse", "--short", "HEAD"], realCandidateTop, env);
+        branch = sha.stdout.trim() || "(no commits)";
+      } catch {
+        // Fall back to symbolic-ref (e.g. unborn HEAD: HEAD points at refs/.../main but no commit yet).
+        try {
+          const sym = await execGitText(["symbolic-ref", "--short", "HEAD"], realCandidateTop, env);
+          branch = sym.stdout.trim() || "(no commits)";
+        } catch {
+          branch = "(no commits)";
+        }
+      }
+    }
+  } catch {
+    branch = "(no commits)";
+  }
+
+  // The friendly chip name = directory name. We use the canonical toplevel
+  // (the worktree root) so a subdir-paste collapses to the same name a
+  // freshly-created worktree would have, not the subdir's basename.
+  const name = path.basename(realCandidateTop);
+
+  return { kind: "ok", path: realCandidateTop, branch, name };
 }
 
 /** The error variants shared by getChanges / getChangesCount — a subset of

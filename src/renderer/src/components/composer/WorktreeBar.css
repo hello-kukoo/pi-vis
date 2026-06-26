@@ -14,54 +14,166 @@
 
 .worktree-bar__row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.571rem;
 }
 
-.worktree-bar__checkbox-label {
+/* ── Segmented control (In Workspace | New Worktree | Existing Worktree)
+ *
+ * Flexes cleanly at narrow widths:
+ *   - `.worktree-bar__row` wraps the mode-specific control
+ *     (BranchDropdown / AttachMode) to a second line when the segmented
+ *     control + the input don't fit on one.
+ *   - The control is `flex` (not `inline-flex`) with
+ *     `width: fit-content; max-width: 100%`: intrinsic width when
+ *     there's room, capped at the row's width when narrow.
+ *   - `flex-wrap: wrap` lets the three segments stack onto multiple
+ *     lines inside the control when the row can't fit all three side
+ *     by side (e.g. a 480px window with the sidebar expanded leaves
+ *     the bar ~298px wide, less than the intrinsic ~310px).
+ *   - `min-width: 0` on segments lets them shrink below their text
+ *     width so they don't overflow the control at extreme narrowness.
+ *     `text-align: center` keeps the wrapped label centered in the
+ *     button. `white-space: nowrap` is intentionally *not* set here so
+ *     segments can shrink; at wide widths the text is short enough to
+ *     stay on one line anyway.
+ */
+.worktree-bar__segmented {
   display: flex;
-  align-items: center;
-  gap: 0.429rem;
-  cursor: pointer;
-  white-space: nowrap;
-  -webkit-app-region: no-drag;
-}
-
-.worktree-bar__checkbox {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 0.929rem;
-  height: 0.929rem;
-  margin: 0;
+  flex-wrap: wrap;
+  align-items: stretch;
   border: 1px solid var(--ctp-surface2);
   border-radius: var(--mcm-radius-sm);
-  background: var(--ctp-base);
+  background: var(--ctp-surface0);
+  padding: 2px;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.worktree-bar__segment {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ctp-subtext0);
+  padding: 0.214rem 0.643rem;
+  font: inherit;
+  font-size: 0.857em;
+  border-radius: calc(var(--mcm-radius-sm) - 2px);
   cursor: pointer;
-  position: relative;
-  flex-shrink: 0;
+  text-align: center;
+  -webkit-app-region: no-drag;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  min-width: 0;
 }
 
-.worktree-bar__checkbox:checked {
+.worktree-bar__segment:hover:not(:disabled):not(.worktree-bar__segment--active) {
+  color: var(--ctp-text);
+}
+
+.worktree-bar__segment--active {
   background: var(--ctp-mauve);
-  border-color: var(--ctp-mauve);
+  color: var(--ctp-base);
+  cursor: default;
 }
 
-.worktree-bar__checkbox:checked::after {
-  content: "";
-  position: absolute;
-  left: 0.286rem;
-  top: 0.107rem;
-  width: 0.214rem;
-  height: 0.45rem;
-  border: solid var(--ctp-base);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
-
-.worktree-bar__checkbox:disabled {
+.worktree-bar__segment:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ── Attach mode (Existing): path input + Browse button ─────────── */
+
+.worktree-bar__attach {
+  display: flex;
+  align-items: center;
+  gap: 0.357rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  -webkit-app-region: no-drag;
+}
+
+.worktree-bar__attach-input {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1 1 auto;
+  min-width: 8rem;
+  padding: 0.286rem 0.5rem;
+  background: var(--ctp-base);
+  color: var(--ctp-text);
+  border: 1px solid var(--ctp-surface2);
+  border-radius: var(--mcm-radius-sm);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.857em;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.worktree-bar__attach-input:focus {
+  border-color: var(--ctp-mauve);
+  box-shadow: 0 0 0 1px var(--ctp-mauve);
+}
+
+.worktree-bar__attach-input::placeholder {
+  color: var(--ctp-overlay0);
+}
+
+.worktree-bar__attach-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.worktree-bar__attach-browse {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--ctp-surface2);
+  background: var(--ctp-surface1);
+  color: var(--ctp-text);
+  padding: 0.286rem 0.643rem;
+  font: inherit;
+  font-size: 0.857em;
+  border-radius: var(--mcm-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.worktree-bar__attach-browse:hover:not(:disabled) {
+  background: var(--ctp-surface2);
+  border-color: var(--ctp-overlay0);
+}
+
+.worktree-bar__attach-browse:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Attach validation status line (advisory) ──────────────────── */
+
+.worktree-bar__status {
+  display: flex;
+  align-items: center;
+  gap: 0.357rem;
+  font-size: 0.857em;
+  line-height: 1.4;
+  padding: 0.143rem 0;
+}
+
+.worktree-bar__status--validating {
+  color: var(--ctp-subtext0);
+}
+
+.worktree-bar__status--ok {
+  color: var(--ctp-mauve);
+}
+
+/* ── Spinner (shared by create + attach busy states) ────────────── */
 
 .worktree-bar__spinner {
   display: inline-flex;

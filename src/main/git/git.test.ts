@@ -644,3 +644,225 @@ describe("createWorktree", () => {
     git(workDir, ["branch", "-D", result.branch]);
   });
 });
+
+describe("inspectWorktree", () => {
+  // Helper: make a fresh tmp repo with an initial commit, return its path.
+  // Distinct from the outer `workDir` so worktree tests below can use it
+  // without colliding with sibling describes' state.
+  function makeTmpRepo(): string {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, "inspect-repo-"));
+    git(dir, [...INIT_C, "init"]);
+    try {
+      git(dir, ["config", "core.hooksPath", "/dev/null"]);
+    } catch {
+      /* best effort */
+    }
+    write(path.join(dir, "a.ts"), "export const a = 1;\n");
+    git(dir, ["add", "a.ts"]);
+    git(dir, [...COMMIT_C, "commit", "-m", "init"]);
+    return dir;
+  }
+
+  // Helper: make a *second* fresh tmp repo (no shared `.git` with the first).
+  // Used to verify the same-repo common-dir check rejects unrelated dirs.
+  function makeUnrelatedRepo(): string {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, "inspect-other-"));
+    git(dir, [...INIT_C, "init"]);
+    try {
+      git(dir, ["config", "core.hooksPath", "/dev/null"]);
+    } catch {
+      /* best effort */
+    }
+    write(path.join(dir, "b.ts"), "export const b = 2;\n");
+    git(dir, ["add", "b.ts"]);
+    git(dir, [...COMMIT_C, "commit", "-m", "init"]);
+    return dir;
+  }
+
+  it("returns 'Directory not found' for a missing path (not 'git missing')", async () => {
+    const repo = makeTmpRepo();
+    const { inspectWorktree } = await import("./git.js");
+    const missing = path.join(tmpRoot, "does-not-exist-xyz");
+    const res = await inspectWorktree(repo, missing);
+    expect(res.kind).toBe("error");
+    if (res.kind !== "error") return;
+    // The bug this guards against: if we let git handle the missing path,
+    // `mapSpawnError` rewrites ENOENT to `git-missing` ("git binary
+    // missing") which is the wrong message. The pre-stat in inspectWorktree
+    // catches it before shelling out.
+    expect(res.message).toBe("Directory not found.");
+    expect(res.message).not.toMatch(/git/i);
+  });
+
+  it("returns 'Not a git repository' for a plain directory", async () => {
+    const repo = makeTmpRepo();
+    const plain = fs.mkdtempSync(path.join(tmpRoot, "inspect-plain-"));
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, plain);
+    expect(res.kind).toBe("error");
+    if (res.kind !== "error") return;
+    expect(res.message).toBe("Not a git repository.");
+  });
+
+  it("returns the canonical worktree root for a same-repo worktree", async () => {
+    const repo = makeTmpRepo();
+    // Create a sibling worktree of the same repo via `git worktree add`.
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-wt-"));
+    git(repo, ["worktree", "add", "-b", "feature", wtDir]);
+
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, wtDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    // The canonical path is the toplevel, which IS the worktree root here
+    // (the candidate was already a worktree root, not a subdirectory).
+    expect(res.path).toBe(fs.realpathSync(wtDir));
+    expect(res.branch).toBe("feature");
+    expect(res.name).toBe(path.basename(wtDir));
+
+    // Cleanup
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+    git(repo, ["branch", "-D", "feature"]);
+  });
+
+  it("collapses a subdirectory of a worktree to the worktree root (P0 regression guard)", async () => {
+    const repo = makeTmpRepo();
+    // Create a sibling worktree, then make a subdirectory inside it.
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-wt-sub-"));
+    git(repo, ["worktree", "add", "-b", "feature", wtDir]);
+    const sub = path.join(wtDir, "src", "deep");
+    fs.mkdirSync(sub, { recursive: true });
+
+    const { inspectWorktree } = await import("./git.js");
+    // Pass the *subdirectory*, not the worktree root. The whole point of
+    // canonicalization via `--show-toplevel` + realpath is that this
+    // collapses to the worktree root and matches the workspace-side
+    // common-dir (same repo), rather than being treated as "not a repo".
+    const res = await inspectWorktree(repo, sub);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.path).toBe(fs.realpathSync(wtDir));
+    expect(res.branch).toBe("feature");
+    // `name` uses `path.basename(canonicalTop)` so it's the worktree
+    // root's basename, not the subdirectory's basename.
+    expect(res.name).toBe(path.basename(wtDir));
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+    git(repo, ["branch", "-D", "feature"]);
+  });
+
+  it("returns 'different repository' for a worktree of an unrelated repo", async () => {
+    const repo = makeTmpRepo();
+    const otherRepo = makeUnrelatedRepo();
+    // Create a worktree of `otherRepo` (same `.git` as otherRepo, NOT repo).
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-other-wt-"));
+    git(otherRepo, ["worktree", "add", "-b", "branch", wtDir]);
+
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, wtDir);
+    expect(res.kind).toBe("error");
+    if (res.kind !== "error") return;
+    expect(res.message).toBe("That directory belongs to a different repository.");
+
+    git(otherRepo, ["worktree", "remove", "--force", wtDir]);
+    git(otherRepo, ["branch", "-D", "branch"]);
+  });
+
+  it("returns 'current workspace' guard when the candidate IS the workspace itself", async () => {
+    const repo = makeTmpRepo();
+    const { inspectWorktree } = await import("./git.js");
+    // Pass the workspace root as the candidate. The realpath'd toplevels
+    // match, so the same-repo check passes but the workspace-self guard
+    // trips.
+    const res = await inspectWorktree(repo, repo);
+    expect(res.kind).toBe("error");
+    if (res.kind !== "error") return;
+    expect(res.message).toBe(
+      "That's the current workspace — choose a different worktree directory.",
+    );
+  });
+
+  it("returns a short SHA for a detached HEAD", async () => {
+    const repo = makeTmpRepo();
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-detached-"));
+    git(repo, ["worktree", "add", "--detach", wtDir]);
+
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, wtDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.path).toBe(fs.realpathSync(wtDir));
+    // Detached HEAD → short SHA (hex, ~7-12 chars). Not the literal "HEAD".
+    expect(res.branch).not.toBe("HEAD");
+    expect(res.branch).toMatch(/^[0-9a-f]{7,12}$/);
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+  });
+
+  it("returns '(no commits)' for an unborn HEAD repo", async () => {
+    const repo = makeTmpRepo();
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-unborn-"));
+    // `git worktree add` of an unborn-HEAD repo still creates a worktree
+    // pointing at the unborn ref; if that fails, fall back to a fresh
+    // empty repo whose HEAD is unborn (no commits).
+    git(repo, ["worktree", "add", "--detach", wtDir]);
+
+    // Make the worktree's HEAD unborn by checking out a non-existent
+    // branch reference (this is what `git worktree add` does internally
+    // for unborn HEADs).
+    let unborn = false;
+    try {
+      git(wtDir, ["checkout", "--orphan", "orphan-branch"]);
+      unborn = true;
+    } catch {
+      // Orphan branches can fail on some git versions for worktrees;
+      // fall back to a separate empty tmp repo with no commits.
+    }
+
+    if (!unborn) {
+      // Make a tmp dir that has `git init` but no commits at all.
+      const empty = fs.mkdtempSync(path.join(tmpRoot, "inspect-empty-"));
+      git(empty, [...INIT_C, "init"]);
+      try {
+        git(empty, ["config", "core.hooksPath", "/dev/null"]);
+      } catch {
+        /* best effort */
+      }
+      const { inspectWorktree } = await import("./git.js");
+      const res = await inspectWorktree(repo, empty);
+      expect(res.kind).toBe("ok");
+      if (res.kind !== "ok") return;
+      expect(res.branch).toBe("(no commits)");
+      return;
+    }
+
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, wtDir);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.branch).toBe("(no commits)");
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+  });
+
+  it("canonicalizes the path via realpath (no trailing slash / symlink drift)", async () => {
+    const repo = makeTmpRepo();
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-realpath-"));
+    git(repo, ["worktree", "add", "-b", "feature", wtDir]);
+
+    // Pass a trailing-slash variant — `git rev-parse --show-toplevel` already
+    // normalizes that, and the subsequent `fs.realpath` flattens any symlinks.
+    const withSlash = wtDir.endsWith("/") ? wtDir : `${wtDir}/`;
+
+    const { inspectWorktree } = await import("./git.js");
+    const res = await inspectWorktree(repo, withSlash);
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.path).toBe(fs.realpathSync(wtDir));
+    // No trailing slash in the canonical output.
+    expect(res.path.endsWith("/")).toBe(false);
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+    git(repo, ["branch", "-D", "feature"]);
+  });
+});

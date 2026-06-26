@@ -263,42 +263,94 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       if (submittingRef.current) return;
       submittingRef.current = true;
 
-      // ── Worktree creation on first send ──
-      // Only create one when this session has not already been placed in a
-      // worktree (worktreePath unset). After `/new` etc. the transcript resets
-      // to empty, so guarding on the transcript alone would re-create a worktree
-      // for a session that already has one.
+      // ── Worktree creation / attachment on first send ──
+      // Only run when this session has not already been placed in a
+      // worktree (worktreePath unset). After `/new` etc. the transcript
+      // resets to empty, so guarding on the transcript alone would
+      // re-create a worktree for a session that already has one.
+      //
+      // `worktreeMode` is the segmented-control selection in the
+      // WorktreeBar:
+      //   - "none"   → no pre-send action (run in the workspace).
+      //   - "create" → cut a fresh worktree (the original checkbox flow).
+      //   - "attach" → re-point this session into an existing worktree
+      //                on disk. The IPC is the authoritative validation
+      //                gate — no client-side path check; an invalid path
+      //                just comes back `{ok:false}` and the inline error
+      //                shows up in the bar.
       const isNewSession = (session?.transcript.blocks.length ?? 0) === 0;
-      if (isNewSession && session?.worktreeCreate && !session.worktreePath) {
+      // Truthy-check on `session?.worktreeMode` narrows `session` to
+      // defined inside this block (TS flow analysis), so the `session.*`
+      // accesses below don't need optional chaining.
+      const worktreeMode = session?.worktreeMode;
+      if (
+        session &&
+        isNewSession &&
+        !session.worktreePath &&
+        (worktreeMode === "create" || worktreeMode === "attach")
+      ) {
+        // Empty path in "attach" mode is a client-side gate (the input
+        // is just a text field — easy to send with nothing in it). Show
+        // the inline error and reset `submittingRef` so the composer
+        // doesn't wedge behind the re-entrancy guard at the top of this
+        // callback.
+        if (worktreeMode === "attach" && !session.worktreeAttachPath?.trim()) {
+          setWorktreeError(sessionId, "Choose a worktree directory first.");
+          submittingRef.current = false;
+          return;
+        }
         try {
           // setWorktreeCreating(true) also clears any prior worktreeError.
           setWorktreeCreating(sessionId, true);
-          // Fall back to HEAD (current commit) when no base branch is resolved —
-          // e.g. a detached HEAD where there is no current branch to default to.
-          // Never assume a literal "main"; it may not exist.
-          const base = session.worktreeBase ?? "HEAD";
-          const res = await window.pivis.invoke("session.createWorktree", {
-            sessionId,
-            base,
-          });
+          let res:
+            | { ok: true; worktreePath: string; branch: string; name: string; base: string }
+            | { ok: false; error: string };
+          if (worktreeMode === "create") {
+            // Fall back to HEAD (current commit) when no base branch is
+            // resolved — e.g. a detached HEAD where there is no current
+            // branch to default to. Never assume a literal "main"; it
+            // may not exist.
+            const base = session.worktreeBase ?? "HEAD";
+            res = await window.pivis.invoke("session.createWorktree", {
+              sessionId,
+              base,
+            });
+          } else {
+            // "attach" — the IPC re-runs `inspectWorktree` server-side
+            // and returns the canonical toplevel path, so a stale or
+            // edited live-validate result can never persist a bad path.
+            res = await window.pivis.invoke("session.attachWorktree", {
+              sessionId,
+              path: session.worktreeAttachPath ?? "",
+            });
+          }
           if (!res.ok) {
-            // Surface the failure *inline* in the WorktreeBar (durable, unlike a
-            // toast) and keep the prompt text intact so the user can retry or
-            // uncheck "Create worktree" and send without one — nothing is lost.
-            setWorktreeError(sessionId, res.error ?? "Worktree creation failed");
+            // Surface the failure *inline* in the WorktreeBar (durable,
+            // unlike a toast) and keep the prompt text intact so the
+            // user can retry or switch modes and send without a
+            // worktree — nothing is lost.
+            setWorktreeError(sessionId, res.error ?? "Worktree operation failed");
             submittingRef.current = false;
             return;
           }
+          // Past the narrowing: `res` is `{ok:true, ...}` here. Compose
+          // the success toast after the narrowing check so `res.name` is
+          // accessible without a union cast.
+          const successToast =
+            worktreeMode === "create"
+              ? `Worktree ${res.name} created`
+              : `Attached worktree ${res.name}`;
           applyWorktree(sessionId, {
             worktreePath: res.worktreePath,
             branch: res.branch,
             name: res.name,
             base: res.base,
           });
-          // Drop the pre-send intent so the bar doesn't reappear (still checked)
-          // if the transcript later resets via /new, /fork, or /clone.
+          // Drop the pre-send intent so the bar doesn't reappear
+          // (still in the same mode) if the transcript later resets
+          // via /new, /fork, or /clone.
           clearWorktreeIntent(sessionId);
-          addToast(sessionId, `Worktree ${res.name} created`, "success");
+          addToast(sessionId, successToast, "success");
         } catch (err) {
           setWorktreeError(sessionId, String(err));
           submittingRef.current = false;

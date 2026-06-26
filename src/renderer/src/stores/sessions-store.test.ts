@@ -1093,3 +1093,97 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
     expect(updateSpy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Tests for the WorktreeBar's three-state segmented control. The bar's
+ * `worktreeMode` ("none" | "create" | "attach") replaced the old
+ * boolean `worktreeCreate`; `worktreeAttachPath` is the path input for
+ * "attach" mode. Both setters clear `worktreeError` so a stale failure
+ * from a prior mode doesn't linger after the user switches segments
+ * (mirrors how the old `setWorktreeCreate` did).
+ *
+ * `clearWorktreeIntent` resets the whole pre-send state — it's called
+ * on a successful attach/create so the bar doesn't reappear later
+ * (e.g. after `/new`, `/fork`, `/clone`).
+ */
+describe("sessions store - worktree mode / attach path", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+  });
+
+  it("createSession resets the worktree fields to undefined", () => {
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.worktreeMode).toBeUndefined();
+    expect(session?.worktreeAttachPath).toBeUndefined();
+    expect(session?.worktreeBase).toBeUndefined();
+    expect(session?.worktreeCreating).toBeUndefined();
+    expect(session?.worktreeError).toBeUndefined();
+  });
+
+  it("setWorktreeMode updates the mode and clears any prior error", () => {
+    // Seed a stale error (e.g. from a previous failed attach) so we can
+    // assert it gets cleared on mode change.
+    useSessionsStore.getState().setWorktreeError(SESSION_A, "stale failure");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreeError).toBe(
+      "stale failure",
+    );
+
+    useSessionsStore.getState().setWorktreeMode(SESSION_A, "attach");
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.worktreeMode).toBe("attach");
+    expect(session?.worktreeError).toBeUndefined();
+  });
+
+  it("setWorktreeAttachPath updates the path and clears any prior error", () => {
+    useSessionsStore.getState().setWorktreeMode(SESSION_A, "attach");
+    useSessionsStore.getState().setWorktreeError(SESSION_A, "stale failure");
+
+    useSessionsStore.getState().setWorktreeAttachPath(SESSION_A, "/path/to/wt");
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.worktreeAttachPath).toBe("/path/to/wt");
+    expect(session?.worktreeError).toBeUndefined();
+  });
+
+  it("setWorktreeMode drops worktreeAttachPath when switching away from attach", () => {
+    // Set up an attach path so the next assertion has something to drop.
+    useSessionsStore.getState().setWorktreeMode(SESSION_A, "attach");
+    useSessionsStore.getState().setWorktreeAttachPath(SESSION_A, "/path/to/wt");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreeAttachPath).toBe(
+      "/path/to/wt",
+    );
+
+    // Switching to "create" must drop the attach path so it can't leak
+    // into a future attempt where the user picked a different path.
+    useSessionsStore.getState().setWorktreeMode(SESSION_A, "create");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreeMode).toBe("create");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreeAttachPath).toBeUndefined();
+  });
+
+  it("setWorktreeAttachPath is a no-op for unknown sessions", () => {
+    useSessionsStore.getState().setWorktreeAttachPath("unknown" as SessionId, "/path");
+    expect(useSessionsStore.getState().sessions.has("unknown" as SessionId)).toBe(false);
+  });
+
+  it("clearWorktreeIntent resets worktreeMode + worktreeAttachPath (and the other worktree fields)", () => {
+    // Set every worktree field so we can confirm the clear is exhaustive.
+    useSessionsStore.getState().setWorktreeMode(SESSION_A, "attach");
+    useSessionsStore.getState().setWorktreeAttachPath(SESSION_A, "/path/to/wt");
+    useSessionsStore.getState().setWorktreeBase(SESSION_A, "main");
+    useSessionsStore.getState().setWorktreeCreating(SESSION_A, true);
+    useSessionsStore.getState().setWorktreeError(SESSION_A, "stale");
+
+    useSessionsStore.getState().clearWorktreeIntent(SESSION_A);
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.worktreeMode).toBeUndefined();
+    expect(session?.worktreeAttachPath).toBeUndefined();
+    expect(session?.worktreeBase).toBeUndefined();
+    expect(session?.worktreeCreating).toBeUndefined();
+    expect(session?.worktreeError).toBeUndefined();
+  });
+});

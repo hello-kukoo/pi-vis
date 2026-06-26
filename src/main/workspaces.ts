@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { dialog } from "electron";
 import { getSettings, saveSettings } from "./settings-store.js";
 
@@ -31,6 +32,47 @@ export async function pickWorkspace(): Promise<string | null> {
     lastActiveWorkspace: chosen,
   });
   return chosen;
+}
+
+/**
+ * Open the OS directory picker for attaching a session to an existing
+ * worktree on disk. Mirrors `pickWorkspace` but does NOT mutate the
+ * workspace list — attaching is a per-session concern, not a workspace
+ * discovery action.
+ *
+ * `defaultPath` nicety: opens the picker at the sibling
+ * `<repoName>-worktrees` directory (where Pi-Vis creates worktrees via
+ * `createWorktree`) when it exists, otherwise the repo's parent — so
+ * the picker lands where worktrees actually live instead of at the
+ * user's home. The repo name and parent are computed the same way
+ * `createWorktree` computes its worktree directory, so the two flows
+ * agree on the layout.
+ *
+ * Returns the chosen absolute path, or `null` if the user cancelled.
+ */
+export async function pickWorktreeDirectory(workspacePath: string): Promise<string | null> {
+  // Compute the same sibling path `createWorktree` uses. We `statSync`
+  // (not `realpath`) because the directory may not exist yet — the
+  // picker should still open at the parent in that case, not fail.
+  let defaultPath: string | undefined;
+  try {
+    const repoName = path.basename(workspacePath);
+    const parentDir = path.dirname(workspacePath);
+    const worktreesRoot = path.join(parentDir, `${repoName}-worktrees`);
+    defaultPath = fs.existsSync(worktreesRoot) ? worktreesRoot : parentDir;
+  } catch {
+    // workspacePath could not be parsed (defensive — `dialog` will
+    // just default to the user's home). Swallow the error.
+    defaultPath = undefined;
+  }
+
+  const result = await dialog.showOpenDialog({
+    properties: ["openDirectory"],
+    title: "Attach Existing Worktree",
+    ...(defaultPath ? { defaultPath } : {}),
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0] ?? null;
 }
 
 /**

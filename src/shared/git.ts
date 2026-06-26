@@ -85,3 +85,29 @@ export interface GitWorktreeCreated {
 export type GitWorktreeResult =
   | ({ kind: "ok" } & GitWorktreeCreated)
   | { kind: "error"; message: string };
+
+/**
+ * Result of inspecting a candidate directory for attach-to-worktree.
+ *
+ * `path` is the **canonical worktree toplevel** (not the raw input):
+ * `git rev-parse --show-toplevel` collapses a pasted subdirectory down
+ * to the worktree root, then `fs.realpath` resolves symlinks (macOS
+ * `/var`↔`/private/var`). Every downstream use — the same-repo compare,
+ * the persisted `settings.worktrees` key, the respawn cwd, and the
+ * chip name — uses this canonical path, never the raw input. Skipping
+ * the canonicalization breaks subdir inputs, the relaunch re-attach
+ * (`resolveWorktreeForFile` matches `cwd` from the session file
+ * header byte-for-byte against the persisted key), and the
+ * workspace-self guard.
+ */
+export type GitWorktreeInspect =
+  | {
+      kind: "ok";
+      path: string;
+      /** Best-effort branch label. Falls back to a short SHA on detached
+       *  HEAD, or `"(no commits)"` for an unborn HEAD. */
+      branch: string;
+      /** `path.basename(path)` — the directory name, used for the chip. */
+      name: string;
+    }
+  | { kind: "error"; message: string };

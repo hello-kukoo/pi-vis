@@ -175,6 +175,9 @@ src/
 - Perf notes: `getChanges`/`getFileDiff` run their independent git reads concurrently and pass `GIT_OPTIONAL_LOCKS=0` (read-only, no index.lock churn). The renderer's badge refresh is **single-flight** (`diff-store`): at most one scan runs at a time, and requests arriving mid-scan coalesce into one trailing scan — so overlapping multi-second scans can't pile up.
 - `git.branches` — list local + remote branches
 - `session.createWorktree` — creates a git worktree from a base branch and re-spawns the pi process into it
+- `session.attachWorktree` — attaches an existing on-disk worktree to a fresh session (server-side re-runs `inspectWorktree` for the canonical toplevel); mirrors `session.createWorktree`'s success shape. `base === branch` is the "attached, not cut from anything" sentinel.
+- `worktree.validate` — live-validate a candidate worktree path (`inspectWorktree` wrapped as `{ok}`); advisory only — the authoritative gate is `session.attachWorktree` re-running `inspectWorktree` server-side
+- `worktree.pickDirectory` — native directory picker for the WorktreeBar's "Existing Worktree" segment; defaults to the repo's sibling `<repoName>-worktrees` dir when it exists, else the repo's parent
 - `app.versions`
 - `auth.status` / `auth.saveApiKey` / `auth.remove`
 - `pty.start` (with optional `cols`/`rows` for viewport matching) / `pty.write` / `pty.resize` / `pty.kill`
@@ -231,16 +234,74 @@ These are enforced structurally by making the dropdowns a pure function of the p
 ### Worktree-per-session
 
 A **WorktreeBar** above the composer appears in brand-new sessions (empty transcript).
-It has a "Create worktree" checkbox and a branch dropdown (reusing the shared
-`BranchDropdown` presentational component). On first send with the box checked:
+It is a 3-way **segmented control**: `[In Workspace] [New Worktree] [Existing Worktree]`. The segment
+selection drives which controls appear below it:
 
-1. `session.createWorktree` IPC creates a git worktree in a sibling
-   `<repoName>-worktrees/<friendlyName>` directory on a fresh `pi-vis-<friendlyName>`
-   branch (e.g. `pi-vis-swift-otter`), cutting from the selected base branch.
-2. `setWorktreeAndRespawn()` re-points the session's `cwd` to the worktree and
+- **Workspace** (`worktreeMode = "none"`, default): run the session in the
+  workspace cwd, no worktree.
+- **New** (`worktreeMode = "create"`): show the shared `BranchDropdown` for the
+  base branch. On first send, `session.createWorktree` IPC creates a git
+  worktree in a sibling `<repoName>-worktrees/<friendlyName>` directory on a
+  fresh `pi-vis-<friendlyName>` branch (e.g. `pi-vis-swift-otter`), cutting
+  from the selected base branch.
+- **Existing** (`worktreeMode = "attach"`): show a path **text input** plus a
+  **"Browse…"** button (native directory picker via `worktree.pickDirectory`,
+  defaulting to the repo's sibling `<repoName>-worktrees` dir when it exists).
+  A debounced (~300ms) live validation line (`worktree.validate` → advisory
+  `✓ On branch …` or `⚠ <error>`) gives fast feedback while the authoritative
+  validation gate is the `session.attachWorktree` IPC re-running
+  `inspectWorktree` server-side (so a stale/edited live result can never
+  persist a bad path). On first send, `session.attachWorktree` IPC attaches
+  the chosen worktree; the renderer uses the **same** success/failure
+  handling as the create flow (`applyWorktree`, `clearWorktreeIntent`,
+  toast `Attached worktree <name>`).
+
+Both New and Existing converge on the same plumbing:
+
+1. `setWorktreeAndRespawn()` re-points the session's `cwd` to the worktree and
    re-spawns the pi process there.
-3. The WorktreeBar vanishes; the **WorktreeChip** (`⑂ swift-otter`) appears next to
-   the session name in the header. Hover shows the full branch · base · path.
+2. The WorktreeBar vanishes; the **WorktreeChip** (`⑂ swift-otter`) appears next to
+   the session name in the header. Hover shows `branch · path` for attached
+   worktrees (where `base === branch` is the "attached, not cut from anything"
+   sentinel) and `branch · from <base> · path` for created worktrees.
+3. `settings.worktrees` is persisted **keyed by the canonical worktree toplevel**
+   (`git rev-parse --show-toplevel` + `fs.realpath`), not the raw user input.
+   This is load-bearing for `resolveWorktreeForFile` on relaunch: pi writes the
+   canonical cwd into the session header, and the persisted key must equal it
+   byte-for-byte to re-attach the session to its workspace.
+
+**Validation strategy** (`inspectWorktree` in `git/git.ts`): a two-part
+check that guards against attaching to an unrelated repo. **Canonicalization
+is the load-bearing part** — a fresh-context review found that skipping it
+breaks subdir inputs, relaunch re-attach, and the workspace-self guard, all
+at once. Order of checks (cheapest first, with crisp messages):
+
+1. `fs.stat(input)` → missing/not-a-dir → "Directory not found." (Done
+   *before* shelling out to git: `mapSpawnError` maps ENOENT to
+   `git-missing` — wrong message.)
+2. `git rev-parse --show-toplevel` fails → "Not a git repository."
+3. Canonicalize the candidate to its worktree root + `fs.realpath`
+   (collapses a pasted subdirectory of a worktree down to the worktree
+   root, and resolves macOS `/var`↔`/private/var` symlinks). Every
+   downstream use — the same-repo compare, the persisted
+   `settings.worktrees` key, the respawn cwd, and the chip name — uses
+   this canonical toplevel, never the raw input.
+4. Same-repo proof via `git rev-parse --git-common-dir`: resolve both
+   sides' common dirs (relative paths resolved against the canonical
+   toplevel, then `realpath`'d), and compare for byte equality. Mismatch
+   → "That directory belongs to a different repository."
+5. Workspace-self guard: realpath'd toplevels match → "That's the current
+   workspace — choose a different worktree directory." (Compare two
+   *realpath'd* toplevels, not raw `rec.workspacePath` vs realpath'd
+   candidate.)
+6. Branch label: `git rev-parse --abbrev-ref HEAD`; `HEAD` (detached) →
+   `--short HEAD`; falls through to `"(no commits)"` for an unborn HEAD.
+   Never fails validation — attaching to an unborn-HEAD worktree is still
+   valid.
+
+The attach IPC is the **authoritative** gate: it re-runs `inspectWorktree`
+server-side and uses the returned canonical `path`, so a stale/edited live
+result can never persist a bad path.
 
 **Reliability & error UX** (`createWorktree` in `git/git.ts`): `git worktree add`
 is a full working-tree checkout, so on a large repo it can take minutes —
@@ -388,10 +449,12 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `src/shared/ipc-contract.ts` | The typed IPC boundary — start here when adding new main↔renderer communication |
 | `src/shared/pi-protocol/` | Source of truth for all pi RPC types |
 | `src/main/git/worktree-names.ts` | Curated word lists + `generateWorktreeName()` for worktree branches |
+| `src/main/git/git.ts` (`inspectWorktree`) | Validation helper for the attach flow — canonicalizes the candidate to its worktree toplevel + verifies same-repo via `--git-common-dir`. Called by both `worktree.validate` (live, advisory) and `session.attachWorktree` (authoritative). |
+| `src/main/workspaces.ts` (`pickWorktreeDirectory`) | Native directory picker for the WorktreeBar's "Existing Worktree" segment — opens at the repo's sibling `<repoName>-worktrees` dir when it exists. |
 | `src/renderer/src/components/common/BranchDropdown.tsx` | Presentational branch dropdown (search, keyboard nav, remote toggle) |
 | `src/renderer/src/components/common/BranchDropdown.css` | Branch dropdown styles (extracted from DiffViewer.css) |
-| `src/renderer/src/components/composer/WorktreeBar.tsx` | Pre-send worktree creation bar (checkbox + branch picker) |
-| `src/renderer/src/components/composer/WorktreeBar.css` | WorktreeBar styles |
+| `src/renderer/src/components/composer/WorktreeBar.tsx` | Pre-send worktree bar — 3-way segmented control (`In Workspace | New Worktree | Existing Worktree`) + mode-specific controls (branch dropdown for New, path input + Browse + live validation line for Existing) |
+| `src/renderer/src/components/composer/WorktreeBar.css` | WorktreeBar styles (segmented control, attach input, status line) |
 | `src/renderer/src/components/session-header/SessionSubBar.tsx` | Compact-mode secondary controls strip |
 | `src/renderer/src/components/session-header/SessionSubBar.css` | SessionSubBar styles |
 | `src/shared/auth.ts` | Provider definitions (transcribed from pi's docs/providers.md) |

@@ -443,6 +443,28 @@ const stub = {
           name: "swift-otter",
           base: "main",
         };
+      case "session.attachWorktree": {
+        // Stub: pretend any non-empty pasted path is a valid existing
+        // worktree on the same repo, mirroring the real handler's success
+        // shape (`base === branch` is the "attached, not cut from anything"
+        // sentinel — see the IPC contract doc). The preview renderer's
+        // segmented control + path input only need a success path to
+        // exercise the UI; the IPC contract is the load-bearing thing.
+        const args = req as { path?: string };
+        const last = (args.path ?? "").replace(/^.*\//, "") || "swift-otter";
+        return {
+          ok: true,
+          worktreePath: args.path ?? "/tmp/stub-attached/swift-otter",
+          branch: last,
+          name: last,
+          base: last,
+        };
+      }
+      case "worktree.validate":
+        return { ok: true, branch: "main", name: "swift-otter" };
+      case "worktree.pickDirectory":
+        // Stub: pretend the user picked a sibling worktree.
+        return "/Users/me/code/my-repo-worktrees/swift-otter";
       case "session.sendCommand":
         return handleSendCommand(req);
       case "app.versions":
