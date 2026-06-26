@@ -10,11 +10,36 @@ export interface UserBlockData {
   images?: string[] | undefined;
 }
 
+/**
+ * One ordered piece of an assistant message. A single model message may
+ * interleave several thinking and text content blocks (e.g. thinking, then
+ * text, then *more* thinking). Modeling the message as an ordered list of
+ * segments — instead of two flat `thinkingContent`/`textContent` fields —
+ * preserves the model's real output order, matching pi's TUI. (The flat
+ * fields demuxed every thinking delta into one bucket and every text delta
+ * into another, so later thinking was visually lifted *above* text that
+ * chronologically preceded it.)
+ *
+ * `contentIndex` is the wire content-block index (from `*_start`/`*_delta`/
+ * `*_end` events). It keys a segment so a resumed content block (thinking
+ * reopened after some text) routes its deltas to the right segment instead
+ * of appending to a new one. Absent on segments reconstructed from history
+ * (the session file is already ordered, so no routing is needed) and on
+ * events that omit it (defensive fallbacks then apply).
+ */
+export type AssistantSegment =
+  | { kind: "thinking"; content: string; contentIndex?: number | undefined }
+  | { kind: "text"; content: string; contentIndex?: number | undefined };
+
 export interface AssistantBlockData {
   role: "assistant";
-  textContent: string;
-  thinkingContent: string;
+  segments: AssistantSegment[];
   isStreaming: boolean;
+}
+
+/** True if the block has any visible (non-empty) content. */
+export function hasAssistantContent(data: AssistantBlockData): boolean {
+  return data.segments.some((s) => s.content.length > 0);
 }
 
 export interface ToolCallBlockData {
@@ -128,13 +153,39 @@ export function seedFromHistory(
         };
       }
       if (b.type === "assistant") {
+        // Reconstruct the ordered segment list. The history loader already
+        // preserves content-block order from the session file; `contentIndex`
+        // is irrelevant here (no streaming routing) so segments are built
+        // without it. A legacy `content`/`thinking` pair (older history-loader
+        // output, or any stale shape) is folded back into order
+        // thinking-then-text so reload never regresses.
+        const segs = d.segments;
+        let segments: AssistantSegment[];
+        if (Array.isArray(segs)) {
+          segments = (segs as Array<Record<string, unknown>>)
+            .map((s): AssistantSegment | null => {
+              if (s["kind"] === "thinking") {
+                return { kind: "thinking", content: (s["content"] as string) ?? "" };
+              }
+              if (s["kind"] === "text") {
+                return { kind: "text", content: (s["content"] as string) ?? "" };
+              }
+              return null;
+            })
+            .filter((s): s is AssistantSegment => s !== null);
+        } else {
+          segments = [];
+          const thinking = (d.thinking as string) ?? "";
+          const text = (d.content as string) ?? "";
+          if (thinking) segments.push({ kind: "thinking", content: thinking });
+          if (text) segments.push({ kind: "text", content: text });
+        }
         return {
           id: b.id,
           type: "assistant",
           data: {
             role: "assistant",
-            textContent: (d.content as string) ?? "",
-            thinkingContent: (d.thinking as string) ?? "",
+            segments,
             isStreaming: false,
           },
         };
@@ -240,6 +291,98 @@ function extractResultDiff(result: unknown): string | undefined {
   return undefined;
 }
 
+// ── Assistant segment helpers ───────────────────────────────────────────
+// Pure transforms over a message's ordered `AssistantSegment[]`. They route
+// streaming deltas to the correct content block so a resumed block (e.g.
+// thinking reopened after some text) appends to its existing segment instead
+// of spawning a new one — preserving the model's true output order.
+//
+// contentIndex (from the wire) is the canonical key when present. When it's
+// absent (some providers/older paths omit it) the helpers fall back to
+// positional rules that match historical flat-field behavior.
+
+function findSegmentByIndex(
+  segments: AssistantSegment[],
+  contentIndex: number | undefined,
+  kind: AssistantSegment["kind"],
+): number {
+  if (contentIndex !== undefined) {
+    // Match on both contentIndex and kind. The wire contract makes
+    // contentIndex unique per content block, but requiring kind to agree
+    // too keeps us robust to a provider that reuses an index across types
+    // (a text_delta would otherwise silently append to a thinking segment).
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const s = segments[i];
+      if (s?.contentIndex === contentIndex && s.kind === kind) return i;
+    }
+    return -1;
+  }
+  // No contentIndex: the most recently appended segment of this kind.
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (segments[i]?.kind === kind) return i;
+  }
+  return -1;
+}
+
+/** `*_start`: open a new (empty) segment for a content block. Idempotent on
+ *  contentIndex so a duplicate start never creates a phantom segment. */
+function startSegment(
+  segments: AssistantSegment[],
+  kind: AssistantSegment["kind"],
+  contentIndex: number | undefined,
+): AssistantSegment[] {
+  if (contentIndex !== undefined && findSegmentByIndex(segments, contentIndex, kind) >= 0) {
+    return segments;
+  }
+  return [...segments, { kind, content: "", contentIndex }];
+}
+
+/** `*_delta`: append to the matching segment. Without a contentIndex the rule
+ *  is "the last segment overall, if it's the same kind" — appending a new
+ *  segment otherwise — so a thinking→text→thinking stream (no starts, no
+ *  contentIndex) interleaves correctly rather than merging into one bucket. */
+function appendSegmentDelta(
+  segments: AssistantSegment[],
+  kind: AssistantSegment["kind"],
+  contentIndex: number | undefined,
+  delta: string,
+): AssistantSegment[] {
+  let idx: number;
+  if (contentIndex !== undefined) {
+    idx = findSegmentByIndex(segments, contentIndex, kind);
+  } else {
+    const last = segments[segments.length - 1];
+    idx = last && last.kind === kind ? segments.length - 1 : -1;
+  }
+  if (idx < 0) {
+    return [...segments, { kind, content: delta, contentIndex }];
+  }
+  const cur = segments[idx]!;
+  const next = segments.slice();
+  next[idx] = { ...cur, content: cur.content + delta };
+  return next;
+}
+
+/** `*_end`: backfill the segment from the snapshot if streaming missed it.
+ *  Never overwrites content already received via deltas. */
+function endSegment(
+  segments: AssistantSegment[],
+  kind: AssistantSegment["kind"],
+  contentIndex: number | undefined,
+  snapshot: string,
+): AssistantSegment[] {
+  if (!snapshot) return segments;
+  const idx = findSegmentByIndex(segments, contentIndex, kind);
+  if (idx < 0) {
+    return [...segments, { kind, content: snapshot, contentIndex }];
+  }
+  const cur = segments[idx]!;
+  if (cur.content.length > 0) return segments; // keep streamed content
+  const next = segments.slice();
+  next[idx] = { ...cur, content: snapshot };
+  return next;
+}
+
 export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): TranscriptState {
   const { blocks, activeAssistantId, activeToolCallIds, activeBashId, pendingEchoes } = state;
 
@@ -311,7 +454,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         const newBlock: TypedTranscriptBlock = {
           id: blockId,
           type: "assistant",
-          data: { role: "assistant", textContent: "", thinkingContent: "", isStreaming: true },
+          data: { role: "assistant", segments: [], isStreaming: true },
         };
         return {
           ...state,
@@ -385,64 +528,95 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
     case "message_update": {
       if (!activeAssistantId || !event.assistantMessageEvent) return state;
       const msgEvent = event.assistantMessageEvent;
+      const ci = (msgEvent as { contentIndex?: number | undefined }).contentIndex;
 
       switch (msgEvent.type) {
         case "text_start":
-          // text_start carries no text content — actual text arrives via text_delta
-          return state;
+          // Open a new text segment. contentIndex keys it so later
+          // text_delta/text_end for the same content block route here —
+          // preserving order when the model interleaves thinking/text.
+          return {
+            ...state,
+            blocks: patchBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? { ...b, data: { ...b.data, segments: startSegment(b.data.segments, "text", ci) } }
+                : b,
+            ),
+          };
         case "text_delta":
           return {
             ...state,
-            blocks: patchBlock(activeAssistantId, (b) => {
-              if (b.type !== "assistant") return b;
-              return {
-                ...b,
-                data: { ...b.data, textContent: b.data.textContent + msgEvent.delta },
-              };
-            }),
+            blocks: patchBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? {
+                    ...b,
+                    data: {
+                      ...b.data,
+                      segments: appendSegmentDelta(b.data.segments, "text", ci, msgEvent.delta),
+                    },
+                  }
+                : b,
+            ),
           };
         case "thinking_start":
-          // thinking_start carries no thinking content — actual thinking arrives via thinking_delta
-          return state;
+          return {
+            ...state,
+            blocks: patchBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? {
+                    ...b,
+                    data: { ...b.data, segments: startSegment(b.data.segments, "thinking", ci) },
+                  }
+                : b,
+            ),
+          };
         case "thinking_delta":
           return {
             ...state,
-            blocks: patchBlock(activeAssistantId, (b) => {
-              if (b.type !== "assistant") return b;
-              return {
-                ...b,
-                data: { ...b.data, thinkingContent: b.data.thinkingContent + msgEvent.delta },
-              };
-            }),
+            blocks: patchBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? {
+                    ...b,
+                    data: {
+                      ...b.data,
+                      segments: appendSegmentDelta(b.data.segments, "thinking", ci, msgEvent.delta),
+                    },
+                  }
+                : b,
+            ),
           };
         case "text_end": {
           const content = (msgEvent as { content?: string }).content;
-          if (content) {
-            return {
-              ...state,
-              blocks: updateBlock(activeAssistantId, (b) => {
-                if (b.type !== "assistant") return b;
-                // Only use snapshot content if we didn't already get text via deltas
-                if (b.data.textContent.length > 0) return b;
-                return { ...b, data: { ...b.data, textContent: content } };
-              }),
-            };
-          }
-          return state;
+          if (!content) return state;
+          return {
+            ...state,
+            blocks: updateBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? {
+                    ...b,
+                    data: { ...b.data, segments: endSegment(b.data.segments, "text", ci, content) },
+                  }
+                : b,
+            ),
+          };
         }
         case "thinking_end": {
           const content = (msgEvent as { content?: string }).content;
-          if (content) {
-            return {
-              ...state,
-              blocks: updateBlock(activeAssistantId, (b) => {
-                if (b.type !== "assistant") return b;
-                if (b.data.thinkingContent.length > 0) return b;
-                return { ...b, data: { ...b.data, thinkingContent: content } };
-              }),
-            };
-          }
-          return state;
+          if (!content) return state;
+          return {
+            ...state,
+            blocks: updateBlock(activeAssistantId, (b) =>
+              b.type === "assistant"
+                ? {
+                    ...b,
+                    data: {
+                      ...b.data,
+                      segments: endSegment(b.data.segments, "thinking", ci, content),
+                    },
+                  }
+                : b,
+            ),
+          };
         }
         default:
           return state;
@@ -486,9 +660,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
 
       const activeIndex = blocks.findIndex((b) => b.id === activeAssistantId);
       const active = activeIndex >= 0 ? blocks[activeIndex] : undefined;
-      const hasContent =
-        active?.type === "assistant" &&
-        (active.data.textContent.length > 0 || active.data.thinkingContent.length > 0);
+      const hasContent = active?.type === "assistant" && hasAssistantContent(active.data);
 
       // Insert the error block immediately after the assistant block (rather
       // than at the array end) so the in-session order matches what the

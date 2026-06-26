@@ -56,7 +56,7 @@ describe("transcript reducer", () => {
     const block = state.blocks[0];
     expect(block?.type).toBe("assistant");
     if (block?.type === "assistant") {
-      expect(block.data.textContent).toBe("Hello world");
+      expect(block.data.segments.map((s) => s.content).join("")).toBe("Hello world");
       expect(block.data.isStreaming).toBe(false);
     }
   });
@@ -84,8 +84,10 @@ describe("transcript reducer", () => {
 
     const block = state.blocks[0];
     if (block?.type === "assistant") {
-      expect(block.data.thinkingContent).toBe("Hmm");
-      expect(block.data.textContent).toBe("Answer");
+      expect(block.data.segments).toEqual([
+        { kind: "thinking", content: "Hmm", contentIndex: undefined },
+        { kind: "text", content: "Answer", contentIndex: undefined },
+      ]);
     }
   });
 
@@ -537,7 +539,7 @@ describe("transcript reducer — provider errors", () => {
     expect(state.blocks).toHaveLength(2);
     expect(state.blocks[0]?.type).toBe("assistant");
     if (state.blocks[0]?.type === "assistant") {
-      expect(state.blocks[0].data.textContent).toBe("partial");
+      expect(state.blocks[0].data.segments.map((s) => s.content).join("")).toBe("partial");
       expect(state.blocks[0].data.isStreaming).toBe(false);
     }
     expect(state.blocks[1]?.type).toBe("error");
@@ -646,7 +648,11 @@ describe("transcript reducer — streaming perf invariants", () => {
     // The earlier, untouched block keeps its exact `data` reference, so a
     // React.memo'd renderer skips it. Only the streaming block changed.
     expect(state.blocks[0]?.data).toBe(earlierData);
-    expect((state.blocks[1]?.data as { textContent: string }).textContent).toBe("second");
+    expect(
+      (state.blocks[1]?.data as { segments: Array<{ content: string }> }).segments
+        .map((s) => s.content)
+        .join(""),
+    ).toBe("second");
   });
 
   it("a tool_execution_update preserves untouched element references", () => {
@@ -672,6 +678,207 @@ describe("transcript reducer — streaming perf invariants", () => {
     // memo'd renderer skips it.
     expect(state.blocks).not.toBe(refBefore);
     expect(state.blocks[0]?.data).toBe(earlierData);
+  });
+});
+
+// ── Interleaved content blocks: order is preserved ─────────────────────
+// A single model message can interleave thinking and text content blocks.
+// The reducer must preserve the model's true output order so that later
+// thinking renders *below* earlier text, matching pi's TUI.
+describe("transcript reducer — interleaved thinking/text", () => {
+  function startAssistant() {
+    return applyPiEvent(createTranscriptState(), {
+      type: "message_start",
+      message: { role: "assistant" },
+    });
+  }
+
+  it("preserves thinking→text→thinking order with contentIndex", () => {
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Hmm", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "Hmm" },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_start", contentIndex: 1 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "Answer", contentIndex: 1 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_end", contentIndex: 1, content: "Answer" },
+    });
+    // resumed thinking block (new contentIndex) — the regression case
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_start", contentIndex: 2 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "more", contentIndex: 2 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_end", contentIndex: 2, content: "more" },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([
+      { kind: "thinking", content: "Hmm", contentIndex: 0 },
+      { kind: "text", content: "Answer", contentIndex: 1 },
+      { kind: "thinking", content: "more", contentIndex: 2 },
+    ]);
+  });
+
+  it("preserves order without contentIndex (positional fallback)", () => {
+    // Providers/events that omit contentIndex still interleave correctly via
+    // the positional fallback: deltas append to the last same-kind segment,
+    // and a kind change opens a new segment.
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Hmm" },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "Answer" },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "more" },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([
+      { kind: "thinking", content: "Hmm", contentIndex: undefined },
+      { kind: "text", content: "Answer", contentIndex: undefined },
+      { kind: "thinking", content: "more", contentIndex: undefined },
+    ]);
+  });
+
+  it("*_end backfills snapshot only when streaming missed content", () => {
+    // No deltas — the end snapshot provides the content.
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "from-snapshot" },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_end", contentIndex: 1, content: "answer" },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([
+      { kind: "thinking", content: "from-snapshot", contentIndex: 0 },
+      { kind: "text", content: "answer", contentIndex: 1 },
+    ]);
+  });
+
+  it("*_end does not overwrite content already received via deltas", () => {
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "streamed", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "DIFFERENT" },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([{ kind: "text", content: "streamed", contentIndex: 0 }]);
+  });
+
+  it("duplicate *_start with same contentIndex does not create a phantom segment", () => {
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "x", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([{ kind: "text", content: "x", contentIndex: 0 }]);
+  });
+
+  it("a reused contentIndex across kinds does not cross-wire deltas", () => {
+    // If a provider reuses a contentIndex across a thinking and a text block
+    // (a quirk, not the wire contract), a text_delta must NOT land in the
+    // thinking segment. The old flat-field design was immune; the segment
+    // router must be too.
+    let state = startAssistant();
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", delta: "Hmm", contentIndex: 0 },
+    });
+    // text block reuses index 0
+    state = applyPiEvent(state, {
+      type: "message_update",
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "text_delta", delta: "hi", contentIndex: 0 },
+    });
+    state = applyPiEvent(state, { type: "message_end", message: { role: "assistant" } });
+
+    const block = state.blocks[0];
+    if (block?.type !== "assistant") throw new Error("expected assistant block");
+    expect(block.data.segments).toEqual([
+      { kind: "thinking", content: "Hmm", contentIndex: 0 },
+      { kind: "text", content: "hi", contentIndex: 0 },
+    ]);
   });
 });
 

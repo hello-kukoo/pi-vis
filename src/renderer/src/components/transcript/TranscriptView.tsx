@@ -4,13 +4,15 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { Markdown } from "../../lib/markdown.js";
 import { htmlToMarkdown } from "../../lib/turndown.js";
 import { shouldShowWorkingIndicator, useSessionsStore } from "../../stores/sessions-store.js";
-import type {
-  AssistantBlockData,
-  BashBlockData,
-  ErrorBlockData,
-  ToolCallBlockData,
-  TypedTranscriptBlock,
-  UserBlockData,
+import {
+  type AssistantBlockData,
+  type AssistantSegment,
+  type BashBlockData,
+  type ErrorBlockData,
+  type ToolCallBlockData,
+  type TypedTranscriptBlock,
+  type UserBlockData,
+  hasAssistantContent,
 } from "../../stores/transcript.js";
 import { DiffBlock } from "./DiffBlock.js";
 import "./TranscriptView.css";
@@ -250,6 +252,43 @@ const UserBlock = memo(function UserBlock({ data }: { data: UserBlockData }): Re
   );
 });
 
+const ThinkingSegment = memo(function ThinkingSegment({
+  content,
+}: {
+  content: string;
+}): React.ReactElement {
+  return (
+    <div className="thinking-block">
+      <Markdown>{content}</Markdown>
+    </div>
+  );
+});
+
+const TextSegment = memo(function TextSegment({
+  content,
+}: {
+  content: string;
+}): React.ReactElement {
+  return (
+    <div className="transcript-block__content">
+      <Markdown>{content}</Markdown>
+    </div>
+  );
+});
+
+const AssistantSegmentView = memo(function AssistantSegmentView({
+  segment,
+}: {
+  segment: AssistantSegment;
+}): React.ReactElement | null {
+  if (!segment.content) return null;
+  return segment.kind === "thinking" ? (
+    <ThinkingSegment content={segment.content} />
+  ) : (
+    <TextSegment content={segment.content} />
+  );
+});
+
 const AssistantBlock = memo(function AssistantBlock({
   data,
 }: {
@@ -257,16 +296,9 @@ const AssistantBlock = memo(function AssistantBlock({
 }): React.ReactElement {
   return (
     <div className="transcript-block transcript-block--assistant">
-      {data.thinkingContent && (
-        <div className="thinking-block">
-          <Markdown>{data.thinkingContent}</Markdown>
-        </div>
-      )}
-      {data.textContent && (
-        <div className="transcript-block__content">
-          <Markdown>{data.textContent}</Markdown>
-        </div>
-      )}
+      {data.segments.map((seg, i) => (
+        <AssistantSegmentView key={`${seg.kind}-${i}`} segment={seg} />
+      ))}
     </div>
   );
 });
@@ -626,7 +658,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
             case "user":
               return <UserBlock key={block.id} data={block.data} />;
             case "assistant":
-              if (!block.data.textContent && !block.data.thinkingContent) {
+              if (!hasAssistantContent(block.data)) {
                 return null;
               }
               return <AssistantBlock key={block.id} data={block.data} />;

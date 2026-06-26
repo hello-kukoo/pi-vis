@@ -183,20 +183,27 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
         }
 
         // user or assistant message
-        let textContent = "";
-        let thinkingContent = "";
+        // Build the ordered content-block list. The session file stores
+        // content as an ordered array of parts (text/thinking/toolCall), so
+        // we map it directly to segments — preserving the model's true output
+        // order (e.g. thinking → text → more thinking) rather than demuxing
+        // into two flat buckets. toolCall parts are collected separately and
+        // emitted as follow-on tool_call blocks.
+        const segments: Array<
+          { kind: "thinking"; content: string } | { kind: "text"; content: string }
+        > = [];
         const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
 
         if (typeof content === "string") {
-          textContent = content;
+          segments.push({ kind: "text", content });
         } else if (Array.isArray(content)) {
           for (const part of content) {
             if (typeof part !== "object" || part === null) continue;
             const p = part as Record<string, unknown>;
             if (p["type"] === "text") {
-              textContent += (p["text"] as string) ?? "";
+              segments.push({ kind: "text", content: (p["text"] as string) ?? "" });
             } else if (p["type"] === "thinking") {
-              thinkingContent += (p["thinking"] as string) ?? "";
+              segments.push({ kind: "thinking", content: (p["thinking"] as string) ?? "" });
             } else if (p["type"] === "toolCall") {
               toolCalls.push({
                 id: p["id"] as string,
@@ -207,11 +214,20 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
           }
         }
 
+        const hasAssistantText = segments.some((s) => s.content.length > 0);
+
         if (role === "user") {
           blocks.push({
             id: entry.id,
             type: "user",
-            data: { role: "user", content: textContent },
+            data: {
+              role: "user",
+              content:
+                segments
+                  .filter((s) => s.kind === "text")
+                  .map((s) => s.content)
+                  .join("") || "",
+            },
           });
         } else {
           // assistant: emit assistant block, then tool_call blocks for each tool call.
@@ -220,7 +236,7 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
           // visible error block instead of a blank assistant bubble so the cause
           // of a "stream just stopped" is obvious on reload.
           const { isError, message: errorMessage } = detectTurnError(msg);
-          if (isError && textContent.length === 0 && thinkingContent.length === 0) {
+          if (isError && !hasAssistantText) {
             blocks.push({
               id: entry.id,
               type: "error",
@@ -228,11 +244,11 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
             });
             break;
           }
-          if (textContent.length > 0 || thinkingContent.length > 0) {
+          if (hasAssistantText) {
             blocks.push({
               id: entry.id,
               type: "assistant",
-              data: { role: "assistant", content: textContent, thinking: thinkingContent },
+              data: { role: "assistant", segments },
             });
           }
           if (isError) {

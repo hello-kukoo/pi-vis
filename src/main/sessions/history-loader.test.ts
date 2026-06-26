@@ -91,7 +91,9 @@ describe("loadHistory (real pi v3 nested message format)", () => {
 
     // assistant text block
     expect(blocks[1]?.type).toBe("assistant");
-    expect((blocks[1]?.data as Record<string, unknown>)["content"]).toBe("Looking now.");
+    const aData = blocks[1]?.data as Record<string, unknown>;
+    const aSegments = aData["segments"] as Array<{ content: string }>;
+    expect(aSegments.map((s) => s.content).join("")).toBe("Looking now.");
 
     // tool_call block, paired with the subsequent toolResult
     expect(blocks[2]?.type).toBe("tool_call");
@@ -105,7 +107,9 @@ describe("loadHistory (real pi v3 nested message format)", () => {
 
     // final assistant text
     expect(blocks[3]?.type).toBe("assistant");
-    expect((blocks[3]?.data as Record<string, unknown>)["content"]).toBe("Done.");
+    const fData = blocks[3]?.data as Record<string, unknown>;
+    const fSegments = fData["segments"] as Array<{ content: string }>;
+    expect(fSegments.map((s) => s.content).join("")).toBe("Done.");
   });
 
   it("picks the leaf with the later ISO timestamp (pins the entryTime fix)", () => {
@@ -153,9 +157,57 @@ describe("loadHistory (real pi v3 nested message format)", () => {
     ]);
 
     const blocks = loadHistory(file);
-    const text = (b: TranscriptBlock) => (b.data as Record<string, unknown>)["content"];
+    const text = (b: TranscriptBlock) =>
+      ((b.data as Record<string, unknown>)["segments"] as Array<{ content: string }>)
+        .map((s) => s.content)
+        .join("");
     const assistantTexts = blocks.filter((b) => b.type === "assistant").map(text);
     expect(assistantTexts).toContain("NEW-FORK");
     expect(assistantTexts).not.toContain("OLD-FORK");
+  });
+
+  it("preserves interleaved thinking→text→thinking order from the session file", () => {
+    const cwd = "/test/ws";
+    writeEntries([
+      { type: "session", version: 3, id: "00000000", timestamp: "2024-01-01T00:00:00.000Z", cwd },
+      {
+        id: "00000001",
+        parentId: "00000000",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "hi" }],
+          timestamp: 1_700_000_001_000,
+        },
+      },
+      {
+        id: "00000002",
+        parentId: "00000001",
+        timestamp: "2024-01-01T00:00:02.000Z",
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Hmm" },
+            { type: "text", text: "Answer" },
+            { type: "thinking", thinking: "more" },
+          ],
+          timestamp: 1_700_000_002_000,
+        },
+      },
+    ]);
+
+    const blocks = loadHistory(file);
+    expect(blocks[1]?.type).toBe("assistant");
+    const segs = (blocks[1]?.data as Record<string, unknown>)["segments"] as Array<{
+      kind: string;
+      content: string;
+    }>;
+    expect(segs).toEqual([
+      { kind: "thinking", content: "Hmm" },
+      { kind: "text", content: "Answer" },
+      { kind: "thinking", content: "more" },
+    ]);
   });
 });
