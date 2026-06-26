@@ -1206,13 +1206,16 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         if (parsed.success) get().setThinkingLevel(sessionId, parsed.data);
       }
       if (ltl) {
-        await window.pivis
-          .invoke("session.sendCommand", {
-            sessionId,
-            command: { type: "set_thinking_level", level: ltl },
-          })
-          .then(() => get().setThinkingLevel(sessionId, ltl))
-          .catch(() => {});
+        // Apply the preferred level through the SAME path the user takes when
+        // choosing a level in the header (`applyThinkingLevel`), which sends
+        // set_thinking_level and then RECONCILES with the level pi actually
+        // applied — a model may clamp it (e.g. a model that doesn't support
+        // "xhigh"). The model was already set in step 1, so pi clamps relative
+        // to the right model. The old inline path blindly wrote `ltl` into the
+        // store, so a new session that inherited (say) "xhigh" from one session
+        // and a non-xhigh model from another would show "xhigh" even though pi
+        // had clamped it.
+        await get().applyThinkingLevel(sessionId, ltl);
       }
       if (raw.model && typeof raw.model.id === "string") {
         get().setCurrentModel(sessionId, raw.model.id);

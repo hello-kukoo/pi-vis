@@ -808,9 +808,19 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
   // Per-session pi-side current model so get_state / get_available_models
   // reflect earlier set_model calls (mirrors real pi switching the model).
   let piModel: Map<string, string>;
+  // Per-session pi-side thinking level so get_state reflects an earlier
+  // set_thinking_level — including pi clamping the level down to what the
+  // active model supports (real pi does this server-side).
+  let piThinking: Map<string, string>;
 
   type Cmd = { type: string; modelId?: string; level?: string };
   type Payload = { sessionId: string; command: Cmd };
+
+  // model-y stands in for a model that does NOT support "xhigh": pi clamps a
+  // requested "xhigh" down to "high" for it. model-x supports every level.
+  function clampLevel(modelId: string, level: string): string {
+    return modelId === "openrouter/model-y" && level === "xhigh" ? "high" : level;
+  }
 
   function makeInvoke() {
     return vi.fn(async (_channel: string, payload: Payload) => {
@@ -836,13 +846,19 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
             success: true,
             data: {
               model: { id: piModel.get(sessionId) ?? "openrouter/model-x" },
-              thinkingLevel: "off",
+              thinkingLevel: piThinking.get(sessionId) ?? "off",
               sessionId,
             },
           };
-        case "set_thinking_level":
+        case "set_thinking_level": {
           setThinkingCalls.push({ sessionId, level: command.level as string });
+          // Mirror real pi: the applied level may be clamped to what the
+          // active model supports. A later get_state reads back the clamped
+          // value, which is what applyThinkingLevel reconciles against.
+          const active = piModel.get(sessionId) ?? "openrouter/model-x";
+          piThinking.set(sessionId, clampLevel(active, command.level as string));
           return { success: true };
+        }
         default:
           return { success: true, data: {} };
       }
@@ -853,6 +869,7 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
     setModelCalls = [];
     setThinkingCalls = [];
     piModel = new Map();
+    piThinking = new Map();
     vi.stubGlobal("window", { pivis: { invoke: makeInvoke() } });
     useSettingsStore.setState({
       settings: {
@@ -860,6 +877,9 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
         lastUsedModel: null,
         lastUsedThinkingLevel: null,
       },
+      // applyThinkingLevel persists last-used on success; the real `update`
+      // touches `document` (unavailable in the node test env), so stub it.
+      update: vi.fn(async () => {}) as unknown as () => Promise<void>,
     });
     useSessionsStore.setState({
       sessions: new Map(),
@@ -976,6 +996,33 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
     await useSessionsStore.getState().bootstrapModelState(SESSION_A);
     expect(setThinkingCalls).toEqual([]);
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.thinkingLevel).toBe("off");
+  });
+
+  // The bug: the global preference can pair a model from one session with a
+  // thinking level from another (e.g. last-used model = model-y, which doesn't
+  // support "xhigh", while last-used level = "xhigh"). On a new session the
+  // bootstrap applies the preferred model first, then the preferred level — and
+  // must reconcile the level with what pi actually applied (its clamp) rather
+  // than blindly showing the requested level. This is the same reconciliation
+  // the header does when you pick a level directly.
+  it("clamps the preferred thinking level to what the chosen model supports", async () => {
+    setLastUsedModel("openrouter/model-y");
+    useSettingsStore.setState({
+      settings: {
+        ...useSettingsStore.getState().settings,
+        lastUsedThinkingLevel: "xhigh",
+      },
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    await useSessionsStore.getState().bootstrapModelState(SESSION_A);
+
+    // We asked pi for xhigh…
+    expect(setThinkingCalls).toEqual([{ sessionId: SESSION_A, level: "xhigh" }]);
+    // …but model-y clamps it to high, and the store reflects the clamped value.
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.currentModel).toBe(
+      "openrouter/model-y",
+    );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.thinkingLevel).toBe("high");
   });
 });
 
