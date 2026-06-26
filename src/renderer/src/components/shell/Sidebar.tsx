@@ -3,6 +3,7 @@ import type { SessionStatus } from "@shared/ipc-contract.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { isNewSessionPending, isPendingNewSessionActiveFor } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
@@ -146,8 +147,12 @@ export function Sidebar({
           .map((s) => [s.filePath, s.lastActiveAt as number]),
       );
 
-      // Live sessions: those with content or the active one
+      // Live sessions: those with content or the active one — but a
+      // brand-new pending session is never shown as a row (the "+ New
+      // session" button is shown as selected instead, and its unsent
+      // text lives in `newSessionDrafts`).
       const liveSessions = activeSessionsForWs.filter((s) => {
+        if (isNewSessionPending(s)) return false;
         if (s.sessionId === activeSessionId) return true;
         return s.transcript.blocks.length > 0;
       });
@@ -265,6 +270,13 @@ export function Sidebar({
 
   const handleNewSession = useCallback(
     (workspacePath: string) => {
+      // "+ New session" is a no-op when it is already the selected
+      // (active) element for this workspace — the pending new session
+      // is already showing its composer and draft. Avoids spawning a
+      // fresh pi process on a redundant click.
+      if (isPendingNewSessionActiveFor(useSessionsStore.getState(), workspacePath)) {
+        return;
+      }
       void openSessionTab(workspacePath);
     },
     [openSessionTab],
@@ -520,112 +532,122 @@ export function Sidebar({
 
               {isExpanded && (
                 <div className="sidebar__sessions">
-                  <button
-                    type="button"
-                    className="sidebar__new-session"
-                    onClick={() => handleNewSession(ws.path)}
-                  >
-                    <svg className="sidebar__add-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M12 5v14" />
-                      <path d="M5 12h14" />
-                    </svg>
-                    <span>New session</span>
-                  </button>
-
-                  {/* Unified session list (live + stored, paginated) */}
-                  {visibleSessions.map((entry) => {
-                    if (entry.kind === "live") {
-                      const liveSession = sessions.get(entry.sessionId);
-                      return (
-                        <div
-                          key={entry.sessionId}
-                          role="button"
-                          tabIndex={0}
-                          className={`sidebar__session ${activeSessionId === entry.sessionId ? "sidebar__session--active" : ""}`}
-                          onClick={() => setActiveSession(entry.sessionId)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              setActiveSession(entry.sessionId);
-                            }
-                          }}
-                        >
-                          {liveSession?.isStreaming ? (
-                            <StreamingIndicator isStreaming />
-                          ) : (
-                            <StatusDot
-                              status={liveSession?.status ?? "cold"}
-                              hasPendingDialog={(liveSession?.pendingDialogs.length ?? 0) > 0}
-                              unreadStatus={liveSession?.unreadStatus}
-                            />
-                          )}
-                          <span className="sidebar__session-name">{entry.name}</span>
-                          <button
-                            type="button"
-                            className="sidebar__session-archive"
-                            title="Archive session"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setArchiveTarget({
-                                sessionId: entry.sessionId,
-                                filePath: entry.filePath ?? "",
-                                workspacePath: ws.path,
-                                sessionName: entry.name,
-                              });
-                            }}
-                          >
-                            <ArchiveIcon />
-                          </button>
-                        </div>
-                      );
-                    }
-
-                    // Stored session row
+                  {(() => {
+                    const isNewButtonSelected = isPendingNewSessionActiveFor(
+                      { sessions, activeSessionId },
+                      ws.path,
+                    );
                     return (
-                      <div
-                        key={entry.filePath}
-                        role="button"
-                        tabIndex={0}
-                        className="sidebar__session"
-                        onClick={() => handleResumeSession(ws.path, entry.filePath)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            handleResumeSession(ws.path, entry.filePath);
-                          }
-                        }}
-                      >
-                        <span className="status-dot status-dot--cold" title="Not running" />
-                        <span className="sidebar__session-name">{entry.name}</span>
+                      <>
                         <button
                           type="button"
-                          className="sidebar__session-archive"
-                          title="Archive session"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setArchiveTarget({
-                              sessionId: undefined,
-                              filePath: entry.filePath,
-                              workspacePath: ws.path,
-                              sessionName: entry.name,
-                            });
-                          }}
+                          className={`sidebar__new-session ${isNewButtonSelected ? "sidebar__new-session--selected" : ""}`}
+                          onClick={() => handleNewSession(ws.path)}
                         >
-                          <ArchiveIcon />
+                          <svg className="sidebar__add-icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 5v14" />
+                            <path d="M5 12h14" />
+                          </svg>
+                          <span>New session</span>
                         </button>
-                      </div>
-                    );
-                  })}
 
-                  {hasMore && (
-                    <button
-                      type="button"
-                      className="sidebar__show-more"
-                      onClick={() => handleShowMore(ws.path)}
-                    >
-                      + Show more ({unifiedSessions.length - visibleCount} remaining)
-                    </button>
-                  )}
+                        {/* Unified session list (live + stored, paginated) */}
+                        {visibleSessions.map((entry) => {
+                          if (entry.kind === "live") {
+                            const liveSession = sessions.get(entry.sessionId);
+                            return (
+                              <div
+                                key={entry.sessionId}
+                                role="button"
+                                tabIndex={0}
+                                className={`sidebar__session ${activeSessionId === entry.sessionId ? "sidebar__session--active" : ""}`}
+                                onClick={() => setActiveSession(entry.sessionId)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    setActiveSession(entry.sessionId);
+                                  }
+                                }}
+                              >
+                                {liveSession?.isStreaming ? (
+                                  <StreamingIndicator isStreaming />
+                                ) : (
+                                  <StatusDot
+                                    status={liveSession?.status ?? "cold"}
+                                    hasPendingDialog={(liveSession?.pendingDialogs.length ?? 0) > 0}
+                                    unreadStatus={liveSession?.unreadStatus}
+                                  />
+                                )}
+                                <span className="sidebar__session-name">{entry.name}</span>
+                                <button
+                                  type="button"
+                                  className="sidebar__session-archive"
+                                  title="Archive session"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setArchiveTarget({
+                                      sessionId: entry.sessionId,
+                                      filePath: entry.filePath ?? "",
+                                      workspacePath: ws.path,
+                                      sessionName: entry.name,
+                                    });
+                                  }}
+                                >
+                                  <ArchiveIcon />
+                                </button>
+                              </div>
+                            );
+                          }
+
+                          // Stored session row
+                          return (
+                            <div
+                              key={entry.filePath}
+                              role="button"
+                              tabIndex={0}
+                              className="sidebar__session"
+                              onClick={() => handleResumeSession(ws.path, entry.filePath)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  handleResumeSession(ws.path, entry.filePath);
+                                }
+                              }}
+                            >
+                              <span className="status-dot status-dot--cold" title="Not running" />
+                              <span className="sidebar__session-name">{entry.name}</span>
+                              <button
+                                type="button"
+                                className="sidebar__session-archive"
+                                title="Archive session"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setArchiveTarget({
+                                    sessionId: undefined,
+                                    filePath: entry.filePath,
+                                    workspacePath: ws.path,
+                                    sessionName: entry.name,
+                                  });
+                                }}
+                              >
+                                <ArchiveIcon />
+                              </button>
+                            </div>
+                          );
+                        })}
+
+                        {hasMore && (
+                          <button
+                            type="button"
+                            className="sidebar__show-more"
+                            onClick={() => handleShowMore(ws.path)}
+                          >
+                            + Show more ({unifiedSessions.length - visibleCount} remaining)
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>

@@ -280,6 +280,16 @@
   color: var(--ctp-mauve);
 }
 
+.sidebar__new-session--selected {
+  color: var(--ctp-mauve);
+  background: var(--ctp-surface0);
+}
+
+.sidebar__new-session--selected:hover {
+  color: var(--ctp-mauve);
+  background: var(--ctp-surface0);
+}
+
 /* Show more button */
 .sidebar__show-more {
   width: calc(100% - 1.714rem);

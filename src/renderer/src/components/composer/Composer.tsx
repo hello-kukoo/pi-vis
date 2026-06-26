@@ -12,6 +12,7 @@ import {
 } from "../../lib/commands/index.js";
 import { openDiffForSession } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { isNewSessionPending } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import "./Composer.css";
 
@@ -50,11 +51,11 @@ interface SuggestionEntry {
  * LLM for anything.
  */
 export function Composer({ sessionId }: ComposerProps): React.ReactElement {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   // Re-entrancy guard for `handleSubmit`. Without this, a rapid/auto-repeat
   // keydown can read the stale `text` closure before `setText("")` commits
   // and dispatch two submissions (two optimistic bubbles + two prompts).
@@ -71,6 +72,46 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // it changes (even if the text is identical) so the user can re-inject
   // the same prefix on demand.
   const editorInjectionNonce = session?.editorInjection?.nonce;
+
+  // Whether the active session is a brand-new (still-empty) one. For such
+  // sessions the unsent composer text is mirrored into a per-workspace store
+  // slot (`newSessionDrafts`) so it survives switching away and back — the
+  // "+ New session" button is shown as selected instead of a session row.
+  // For normal sessions we keep the text in local state as before.
+  const workspacePath = session?.workspacePath;
+  const pending = useMemo(() => isNewSessionPending(session), [session]);
+  // Track which workspace's draft is currently mirrored into `text`, so a
+  // switch to a different pending session re-seeds from that workspace's
+  // draft rather than showing the previous session's leftover text.
+  const seededWorkspaceRef = useRef<string | null>(null);
+  // Ref mirrors of `pending`/`workspacePath` so the editorInjection effect
+  // can read the current values without re-running on the pending→real
+  // transition (which would spuriously re-inject stale text).
+  const pendingRef = useRef(pending);
+  const workspacePathRef = useRef(workspacePath);
+  pendingRef.current = pending;
+  workspacePathRef.current = workspacePath;
+
+  // Seed / re-seed local text from the store draft when the pending session
+  // or its workspace changes (e.g. user switches away and clicks "+ New
+  // session" again — the typed text comes back). Non-pending sessions start
+  // empty as before. We read the draft via getState() (not a reactive
+  // subscription) so per-keystroke draft writes don't trigger an extra
+  // render here — the setText in handleChange already re-renders.
+  useEffect(() => {
+    if (pending && workspacePath) {
+      if (seededWorkspaceRef.current !== workspacePath) {
+        seededWorkspaceRef.current = workspacePath;
+        const draft = useSessionsStore.getState().newSessionDrafts.get(workspacePath);
+        setText(draft ?? "");
+        setSlashIndex(0);
+        setAttachments([]);
+      }
+    } else {
+      seededWorkspaceRef.current = null;
+      setText("");
+    }
+  }, [pending, workspacePath]);
   const editorInjectionText = session?.editorInjection?.text;
 
   const addUserMessage = useSessionsStore((s) => s.addUserMessage);
@@ -89,6 +130,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const setWorktreeError = useSessionsStore((s) => s.setWorktreeError);
   const applyWorktree = useSessionsStore((s) => s.applyWorktree);
   const clearWorktreeIntent = useSessionsStore((s) => s.clearWorktreeIntent);
+  const setNewSessionDraft = useSessionsStore((s) => s.setNewSessionDraft);
   const updateSettings = useSettingsStore((s) => s.update);
 
   const isStreaming = session?.isStreaming ?? false;
@@ -118,10 +160,17 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   useEffect(() => {
     if (editorInjectionNonce === undefined || editorInjectionText === undefined) return;
     setText(editorInjectionText);
+    // Mirror the injected text into the per-workspace draft when the session
+    // is still pending. Read `pending` from a ref so this effect only fires
+    // on nonce/text changes — not on the pending→real transition after the
+    // first send (which would spuriously re-inject stale text).
+    if (pendingRef.current && workspacePathRef.current) {
+      setNewSessionDraft(workspacePathRef.current, editorInjectionText);
+    }
     setSlashIndex(0);
     setAttachments([]);
     textareaRef.current?.focus();
-  }, [editorInjectionNonce, editorInjectionText]);
+  }, [editorInjectionNonce, editorInjectionText, setNewSessionDraft]);
 
   // Focus the composer so the user can type right away on app open, session
   // switch, and new-session — all of which mount a fresh Composer (the
@@ -361,10 +410,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
 
       try {
-        setText("");
-        setAttachments([]);
-        setSlashIndex(0);
-
         const action = parseComposerInput(content, { discovered });
         // Drop attachments the active model can't accept (e.g. the user
         // attached an image, then switched to a text-only model). Pi would
@@ -404,6 +449,17 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           addToast(sessionId, "No model selected", "error");
           return;
         }
+
+        // Clear the composer only after the send is past every early-return
+        // guard above. Clearing earlier (before the no-model guard) wiped the
+        // visible text on a bail while the per-workspace draft silently held
+        // it — leaving the user staring at an empty composer with no obvious
+        // way to recover their prompt. The draft itself is cleared in the
+        // store actions (addUserMessage / addBashCommand / addCustomMessage)
+        // the moment content lands, so an aborted send still preserves it.
+        setText("");
+        setAttachments([]);
+        setSlashIndex(0);
 
         const deps = {
           // The executeAction interface is intentionally generic-string for
@@ -473,6 +529,19 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         };
 
         await executeAction(sessionId, finalAction, deps);
+
+        // The store actions for content-bearing sends
+        // (addUserMessage/addBashCommand/addCustomMessage) and applyEvent's
+        // user-echo backstop already clear the per-workspace draft for
+        // prompts/bash/template/skill sends. But non-promoting slash
+        // commands (/model, /name, /settings, /diff, /login, …) add no
+        // transcript block, so they'd leave their command text lingering in
+        // the draft — and it would resurface on the next "+ New session".
+        // Clear here too, once the action has dispatched successfully past
+        // all guards. This is idempotent with the store-side clears.
+        if (pendingRef.current && workspacePathRef.current) {
+          useSessionsStore.getState().clearNewSessionDraft(workspacePathRef.current);
+        }
       } finally {
         submittingRef.current = false;
       }
@@ -548,7 +617,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           if (chosen) {
             // Built-ins that take args get a trailing space to invite the
             // user to type the argument. Arg-less ones don't.
-            setText(completionFor(chosen));
+            const v = completionFor(chosen);
+            setText(v);
+            if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
             setSlashIndex(0);
           }
           return;
@@ -568,6 +639,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           if (chosen) {
             const completed = completionFor(chosen);
             setText(completed);
+            if (pending && workspacePath) setNewSessionDraft(workspacePath, completed);
             setSlashIndex(0);
             void handleSubmit(completed);
           } else {
@@ -596,22 +668,39 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         handleAbort();
       }
     },
-    [suggestions, slashIndex, handleSubmit, isStreaming, handleAbort, completionFor],
+    [
+      suggestions,
+      slashIndex,
+      handleSubmit,
+      isStreaming,
+      handleAbort,
+      completionFor,
+      pending,
+      workspacePath,
+      setNewSessionDraft,
+    ],
   );
 
-  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value);
-  }, []);
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const v = e.target.value;
+      setText(v);
+      if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
+    },
+    [pending, workspacePath, setNewSessionDraft],
+  );
 
   // ── Click to pick a suggestion ─────────────────────────────────────
 
   const handleSuggestionClick = useCallback(
     (entry: SuggestionEntry) => {
-      setText(completionFor(entry));
+      const v = completionFor(entry);
+      setText(v);
+      if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
       setSlashIndex(0);
       textareaRef.current?.focus();
     },
-    [completionFor],
+    [completionFor, pending, workspacePath, setNewSessionDraft],
   );
 
   const isBashMode = text.startsWith("!");

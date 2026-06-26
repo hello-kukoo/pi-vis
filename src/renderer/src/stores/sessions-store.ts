@@ -109,6 +109,15 @@ export interface SessionViewState {
   /** pi version reported by the SDK-host on ready (undefined for pi --mode rpc).
    *  Surfaced in the SessionHeader tooltip. See P1-c. */
   piVersion?: string | undefined;
+  /** True for a brand-new session (created without a session file) that
+   *  has not yet sent its first message. Such sessions are hidden from
+   *  the sidebar (the "+ New session" button shows as selected instead)
+   *  and their unsent composer text is kept as a per-workspace draft so
+   *  it survives switching away and back. Cleared on the first
+   *  user/bash/custom message so the session becomes a normal, visible
+   *  tab — and so a later `/new` (which resets the transcript) does NOT
+   *  re-hide it. See `isNewSessionPending`. */
+  isNewPending?: boolean | undefined;
   /**
    * Recency key for sidebar ordering. Set when a session is *created fresh*
    * (no file yet) and bumped only when the user submits a prompt — NOT on
@@ -146,6 +155,54 @@ interface WorkspaceState {
 }
 
 /**
+ * A brand-new session that the user has not yet sent a message in. It is
+ * hidden from the sidebar (the "+ New session" button is shown as selected
+ * instead) and its unsent composer text is backed by a per-workspace draft
+ * (see `newSessionDrafts`). Once the first message lands the session becomes
+ * a normal, visible tab.
+ *
+ * Defined as `isNewPending && empty transcript` so it self-clears the moment
+ * content arrives — but `isNewPending` is also flipped to false on the first
+ * content block so a subsequent `/new` (which resets the transcript) does not
+ * re-hide a session that was once real.
+ */
+export function isNewSessionPending(s: SessionViewState | undefined | null): boolean {
+  return !!s?.isNewPending && s.transcript.blocks.length === 0;
+}
+
+/**
+ * Whether the active session is a still-pending new session for
+ * `workspacePath` — i.e. the workspace's "+ New session" button should render
+ * as selected and a repeat click should be a no-op. Pure over the two store
+ * fields it reads, so it works against both a live render snapshot and
+ * `getState()`.
+ */
+export function isPendingNewSessionActiveFor(
+  state: Pick<SessionsStore, "sessions" | "activeSessionId">,
+  workspacePath: string,
+): boolean {
+  const active = state.activeSessionId ? state.sessions.get(state.activeSessionId) : undefined;
+  return isNewSessionPending(active) && active?.workspacePath === workspacePath;
+}
+
+/**
+ * Returns a `newSessionDrafts` map with the given workspace's draft removed
+ * when `shouldClear` is set and a draft exists — otherwise the same reference
+ * (so callers can detect a no-op and skip a redundant state-field write).
+ * Centralizes the clear performed when a pending new session becomes real.
+ */
+function clearNewSessionDraftFor(
+  drafts: Map<string, string>,
+  workspacePath: string,
+  shouldClear: boolean,
+): Map<string, string> {
+  if (!shouldClear || !drafts.has(workspacePath)) return drafts;
+  const next = new Map(drafts);
+  next.delete(workspacePath);
+  return next;
+}
+
+/**
  * Whether the "Running for …" working indicator should be shown.
  *
  * `isStreaming` alone is not enough: an extension slash-command (e.g. /agents)
@@ -173,6 +230,19 @@ interface SessionsStore {
   expandedWorkspaces: string[];
   /** Whether the session header is in compact mode (controls in sub-bar). */
   headerCompact: boolean;
+
+  /** Per-workspace unsent composer text for the current pending new session.
+   *  Lets the user switch away from a brand-new (still-empty) session and
+   *  come back via "+ New session" without losing what they typed. Lives only
+   *  in memory — never persisted to settings — so closing & reopening the
+   *  app starts a clean slate. The Composer writes on every keystroke while
+   *  the active session is pending (`isNewSessionPending`) and the slot is
+   *  cleared the moment a message is actually sent. */
+  newSessionDrafts: Map<string, string>;
+  /** Update (replace) the per-workspace draft for a pending new session. */
+  setNewSessionDraft: (workspacePath: string, text: string) => void;
+  /** Clear the per-workspace draft (called when the pending session sends). */
+  clearNewSessionDraft: (workspacePath: string) => void;
 
   addWorkspace: (path: string) => void;
   removeWorkspace: (path: string) => void;
@@ -328,6 +398,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   activeWorkspacePath: null,
   expandedWorkspaces: [],
   headerCompact: false,
+  newSessionDrafts: new Map(),
 
   addWorkspace: (path) => {
     set((state) => {
@@ -343,10 +414,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     set((state) => {
       const workspaces = new Map(state.workspaces);
       workspaces.delete(path);
+      const drafts = new Map(state.newSessionDrafts);
+      drafts.delete(path);
       return {
         workspaces,
         activeWorkspacePath: state.activeWorkspacePath === path ? null : state.activeWorkspacePath,
         expandedWorkspaces: state.expandedWorkspaces.filter((p) => p !== path),
+        newSessionDrafts: drafts,
       };
     });
   },
@@ -430,6 +504,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // Fresh sessions (no file yet) sort to the top; resumed sessions
         // leave this undefined and fall back to their file mtime.
         lastActivityAt: sessionFile ? undefined : Date.now(),
+        // Brand-new sessions are hidden from the sidebar until their first
+        // message lands; the "+ New session" button shows as selected
+        // instead. Resumed sessions always show normally.
+        isNewPending: !sessionFile,
         // Resumed sessions had a file at open time; new sessions did not.
         // Gates last-used model/thinking-level preference (new sessions only).
         resumed: !!sessionFile,
@@ -462,10 +540,20 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           activeSessions: ws.activeSessions.filter((id) => id !== sessionId),
         });
       }
+      // Dropping a still-pending new session also clears its per-workspace
+      // draft: the draft belongs to the pending new-session slot, and once
+      // that slot is gone (closed) the text shouldn't resurface on the next
+      // "+ New session".
+      const drafts = clearNewSessionDraftFor(
+        state.newSessionDrafts,
+        s.workspacePath,
+        isNewSessionPending(s),
+      );
       return {
         sessions,
         workspaces,
         activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
+        newSessionDrafts: drafts,
       };
     });
   },
@@ -561,6 +649,25 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
       const thinkingLevel = event.type === "thinking_level_changed" ? event.level : s.thinkingLevel;
       const transcript = applyPiEvent(s.transcript, event);
+      // When pi echoes the first user message — which is the authoritative
+      // path for prompt-template / skill / unknown `/foo` sends that bypass
+      // `addUserMessage` (they don't optimistically seed a bubble) — promote
+      // the pending new session to a real tab and clear its draft. This is
+      // idempotent: once `isNewPending` is false (set by addUserMessage for
+      // plain prompts) this branch is a no-op, so it only acts as a backstop.
+      //
+      // Gate on a *user* echo that actually added a block — NOT raw block
+      // growth. A spontaneous server-/extension-originated block (e.g. a
+      // `custom` message with `display:true`, or an assistant block) must not
+      // prematurely un-hide a still-empty pending session and drop its draft
+      // (which would also wipe the in-progress composer text on the resulting
+      // pending→real transition).
+      const userEchoed =
+        event.type === "message_start" &&
+        event.message?.role === "user" &&
+        transcript.blocks.length > s.transcript.blocks.length;
+      const promoted = !!s.isNewPending && userEchoed;
+      const drafts = clearNewSessionDraftFor(state.newSessionDrafts, s.workspacePath, promoted);
       sessions.set(sessionId, {
         ...s,
         transcript,
@@ -570,8 +677,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         runningSince,
         sessionName,
         thinkingLevel,
+        isNewPending: promoted ? false : s.isNewPending,
       });
-      return { sessions };
+      return promoted ? { sessions, newSessionDrafts: drafts } : { sessions };
     });
   },
 
@@ -605,8 +713,23 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       }
       // Submitting a prompt is the only thing that promotes a session in the
       // sidebar order — opening/activating it does not (see lastActivityAt).
-      sessions.set(sessionId, { ...s, transcript, sessionTitle, lastActivityAt: Date.now() });
-      return { sessions };
+      sessions.set(sessionId, {
+        ...s,
+        transcript,
+        sessionTitle,
+        lastActivityAt: Date.now(),
+        isNewPending: false,
+      });
+      // Clear the per-workspace draft exactly when the pending session
+      // becomes real (content landed). Doing it here — not in the Composer's
+      // submit handler — means a send that bails early (no-model guard,
+      // abort, worktree-creation failure) preserves the draft for retry.
+      const drafts = clearNewSessionDraftFor(
+        state.newSessionDrafts,
+        s.workspacePath,
+        !!s.isNewPending,
+      );
+      return { sessions, newSessionDrafts: drafts };
     });
   },
 
@@ -616,8 +739,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const s = sessions.get(sessionId);
       if (!s) return {};
       const transcript = addBashBlock(s.transcript, command);
-      sessions.set(sessionId, { ...s, transcript });
-      return { sessions };
+      sessions.set(sessionId, { ...s, transcript, isNewPending: false });
+      // Clear the per-workspace draft when the pending session becomes real
+      // (see addUserMessage for rationale).
+      const drafts = clearNewSessionDraftFor(
+        state.newSessionDrafts,
+        s.workspacePath,
+        !!s.isNewPending,
+      );
+      return { sessions, newSessionDrafts: drafts };
     });
   },
 
@@ -1318,9 +1448,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const next: SessionViewState = {
         ...s,
         transcript: addCustomMessageBlock(s.transcript, content),
+        isNewPending: false,
       };
       sessions.set(sessionId, next);
-      return { sessions };
+      // Clear the per-workspace draft when the pending session becomes real
+      // (see addUserMessage for rationale).
+      const drafts = clearNewSessionDraftFor(
+        state.newSessionDrafts,
+        s.workspacePath,
+        !!s.isNewPending,
+      );
+      return { sessions, newSessionDrafts: drafts };
     });
   },
 
@@ -1471,6 +1609,23 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   },
   setHeaderCompact: (v) => {
     set({ headerCompact: v });
+  },
+
+  setNewSessionDraft: (workspacePath, text) => {
+    set((state) => {
+      const drafts = new Map(state.newSessionDrafts);
+      drafts.set(workspacePath, text);
+      return { newSessionDrafts: drafts };
+    });
+  },
+
+  clearNewSessionDraft: (workspacePath) => {
+    set((state) => {
+      if (!state.newSessionDrafts.has(workspacePath)) return {};
+      const drafts = new Map(state.newSessionDrafts);
+      drafts.delete(workspacePath);
+      return { newSessionDrafts: drafts };
+    });
   },
 }));
 

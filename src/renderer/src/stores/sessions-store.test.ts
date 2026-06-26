@@ -2,7 +2,12 @@ import type { SessionId } from "@shared/ids.js";
 import { ExtensionUiRequestSchema } from "@shared/pi-protocol/extension-ui.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { shouldShowWorkingIndicator, useSessionsStore } from "./sessions-store.js";
+import {
+  isNewSessionPending,
+  isPendingNewSessionActiveFor,
+  shouldShowWorkingIndicator,
+  useSessionsStore,
+} from "./sessions-store.js";
 import { useSettingsStore } from "./settings-store.js";
 
 const SESSION_A = "session-a" as SessionId;
@@ -1185,5 +1190,132 @@ describe("sessions store - worktree mode / attach path", () => {
     expect(session?.worktreeBase).toBeUndefined();
     expect(session?.worktreeCreating).toBeUndefined();
     expect(session?.worktreeError).toBeUndefined();
+  });
+});
+
+describe("sessions store - pending new session + per-workspace drafts", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      newSessionDrafts: new Map(),
+    });
+  });
+
+  it("createSession marks a fileless session pending and a resumed one not", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE); // no file → brand new
+    store.createSession(SESSION_B, WORKSPACE, "/f/b.jsonl"); // resumed
+    const a = useSessionsStore.getState().sessions.get(SESSION_A);
+    const b = useSessionsStore.getState().sessions.get(SESSION_B);
+    expect(a?.isNewPending).toBe(true);
+    expect(isNewSessionPending(a)).toBe(true);
+    expect(b?.isNewPending).toBe(false);
+    expect(isNewSessionPending(b)).toBe(false);
+  });
+
+  it("addUserMessage clears isNewPending and the workspace draft", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "half-typed");
+    expect(useSessionsStore.getState().newSessionDrafts.get(WORKSPACE)).toBe("half-typed");
+    store.addUserMessage(SESSION_A, "hello");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isNewPending).toBe(false);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("addBashCommand clears isNewPending and the workspace draft", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "!ls");
+    store.addBashCommand(SESSION_A, "ls");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isNewPending).toBe(false);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("addCustomMessage clears isNewPending and the workspace draft", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "/skill");
+    store.addCustomMessage(SESSION_A, "custom content");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isNewPending).toBe(false);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("applyEvent promotes the pending session when pi echoes a user message (skill/template path)", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "/some-skill");
+    // Skill/template sends bypass the optimistic addUserMessage — pi echoes the
+    // user message directly. With no pending echo this adds a user block, which
+    // is the authoritative "first message landed" signal.
+    store.applyEvent(SESSION_A, {
+      type: "message_start",
+      message: { role: "user", content: "expanded skill prompt" },
+    });
+    const a = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(a?.isNewPending).toBe(false);
+    expect(a?.transcript.blocks.length).toBeGreaterThan(0);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("applyEvent does NOT promote (or drop the draft) on a spontaneous custom message", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "draft in progress");
+    // An extension emits a custom banner before the user sends anything. It
+    // renders a transcript block but is NOT a user echo — the session must stay
+    // pending and keep its draft (otherwise the in-progress composer text would
+    // be wiped on the premature pending→real transition).
+    store.applyEvent(SESSION_A, {
+      type: "message_start",
+      message: { role: "custom", customType: "banner", content: "Welcome", display: true },
+    });
+    const a = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(a?.transcript.blocks.length).toBeGreaterThan(0); // the banner rendered
+    expect(a?.isNewPending).toBe(true); // but the session is still pending
+    expect(useSessionsStore.getState().newSessionDrafts.get(WORKSPACE)).toBe("draft in progress");
+  });
+
+  it("removeSession clears the draft of a still-pending session", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "lost on close");
+    store.removeSession(SESSION_A);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("removeWorkspace clears its draft", () => {
+    const store = useSessionsStore.getState();
+    store.addWorkspace(WORKSPACE);
+    store.setNewSessionDraft(WORKSPACE, "gone with the workspace");
+    store.removeWorkspace(WORKSPACE);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("setNewSessionDraft / clearNewSessionDraft round-trip", () => {
+    const store = useSessionsStore.getState();
+    store.setNewSessionDraft(WORKSPACE, "typed");
+    expect(useSessionsStore.getState().newSessionDrafts.get(WORKSPACE)).toBe("typed");
+    store.clearNewSessionDraft(WORKSPACE);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("isPendingNewSessionActiveFor tracks the active pending session per workspace", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE); // pending
+    store.createSession(SESSION_B, "/other-ws"); // pending, different ws
+    // No active session yet.
+    expect(isPendingNewSessionActiveFor(useSessionsStore.getState(), WORKSPACE)).toBe(false);
+    // Activate A.
+    useSessionsStore.setState({ activeSessionId: SESSION_A });
+    expect(isPendingNewSessionActiveFor(useSessionsStore.getState(), WORKSPACE)).toBe(true);
+    // Right session, wrong workspace.
+    expect(isPendingNewSessionActiveFor(useSessionsStore.getState(), "/other-ws")).toBe(false);
+    // Once A has content it is no longer a pending new session.
+    store.addUserMessage(SESSION_A, "hi");
+    expect(isPendingNewSessionActiveFor(useSessionsStore.getState(), WORKSPACE)).toBe(false);
   });
 });
