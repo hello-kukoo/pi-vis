@@ -391,7 +391,9 @@ describe("transcript reducer — role-based message_start", () => {
     expect(state.pendingEchoes).toEqual([]);
   });
 
-  it("custom message_start appends a custom_message block", () => {
+  it("custom message_start with display:true renders content (not display)", () => {
+    // `display` is a boolean visibility gate; `content` is the rendered text.
+    // (Mirrors pi's TUI: CustomMessageComponent renders message.content.)
     let state = createTranscriptState();
     state = applyPiEvent(
       state,
@@ -400,19 +402,42 @@ describe("transcript reducer — role-based message_start", () => {
         message: {
           role: "custom",
           customType: "skill",
-          display: "[skill] brave-search",
-          content: { query: "abc" },
+          display: true,
+          content: "ran skill brave-search",
         },
       }),
     );
     expect(state.blocks).toHaveLength(1);
     expect(state.blocks[0]?.type).toBe("custom_message");
     if (state.blocks[0]?.type === "custom_message") {
-      expect(state.blocks[0].data.content).toBe("[skill] brave-search");
+      expect(state.blocks[0].data.content).toBe("ran skill brave-search");
+    }
+
+    // content as an array of text blocks is joined (pi's CustomMessageComponent
+    // does the same).
+    state = createTranscriptState();
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "skill",
+          display: true,
+          content: [
+            { type: "text", text: "line one" },
+            { type: "text", text: "line two" },
+          ],
+        },
+      }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    if (state.blocks[0]?.type === "custom_message") {
+      expect(state.blocks[0].data.content).toBe("line one\nline two");
     }
   });
 
-  it("custom message_start without display falls back to JSON of content", () => {
+  it("custom message_start without display renders nothing (matches pi's TUI)", () => {
     let state = createTranscriptState();
     state = applyPiEvent(
       state,
@@ -421,9 +446,17 @@ describe("transcript reducer — role-based message_start", () => {
         message: { role: "custom", customType: "x", content: { foo: 1 } },
       }),
     );
-    if (state.blocks[0]?.type === "custom_message") {
-      expect(state.blocks[0].data.content).toBe('{"foo":1}');
-    }
+    expect(state.blocks).toHaveLength(0);
+
+    // A boolean `content: true` must not be JSON-stringified into "true".
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_start",
+        message: { role: "custom", customType: "x", content: true },
+      }),
+    );
+    expect(state.blocks).toHaveLength(0);
   });
 
   it("message_end with role: 'user' is a no-op (does not close assistant)", () => {

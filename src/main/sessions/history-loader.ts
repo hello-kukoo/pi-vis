@@ -260,7 +260,13 @@ export function loadHistory(filePath: string): TranscriptBlock[] {
         break;
       }
       case "custom_message": {
-        if (entry.display !== false && entry.content) {
+        // Match the live reducer (transcript.ts) and pi's TUI: render only
+        // when `display` is truthy. `display` is a boolean visibility gate;
+        // `content` is the text. The old `display !== false` gate rendered
+        // entries pi's own TUI hides (display absent). Truthy (not
+        // `=== true`) so a truthy non-boolean `display` from an extension is
+        // handled the same as in the live path.
+        if (entry.display && entry.content) {
           blocks.push({
             id: entry.id,
             type: "custom_message",

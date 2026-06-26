@@ -339,25 +339,42 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         return echoed !== null ? addUserBlock(state, echoed, undefined, false) : state;
       }
       if (role === "custom") {
-        // Extension-originated message (skill, plugin, etc.). Real pi emits
-        // these with `message: { customType, content, display, details }`
-        // where `content` and `display` are the raw payload. We render
-        // `display` if it's a string, else the JSON of `content`.
-        const msg = event.message as
-          | { display?: unknown; content?: unknown; customType?: string }
-          | undefined;
-        const display =
-          typeof msg?.display === "string"
-            ? msg.display
-            : msg?.display != null
-              ? JSON.stringify(msg.display)
-              : msg?.content != null
-                ? JSON.stringify(msg.content)
-                : (msg?.customType ?? "(custom message)");
+        // Match pi's TUI (interactive-mode.js `addMessageToChat` →
+        // `case "custom"`): a custom message is rendered ONLY when `display`
+        // is truthy — `display` is a boolean visibility gate, NOT the text.
+        // The rendered text comes from `content` (pi's CustomMessageComponent
+        // renders `message.content`, using `display` only to decide whether
+        // to show the block at all). Rendering `display` would print "true"
+        // for every legitimate `display: true` custom message — which is
+        // exactly the bug that surfaced when an extension sent a custom
+        // message with `content: true` and no `display` (the old fallback
+        // JSON-stringified `content` → "true").
+        const msg = event.message as { display?: unknown; content?: unknown } | undefined;
+        if (!msg?.display) return state;
+        const content = msg.content;
+        let text: string | undefined;
+        if (typeof content === "string") {
+          text = content;
+        } else if (Array.isArray(content)) {
+          // Mirror pi's CustomMessageComponent: join text blocks.
+          text = content
+            .filter(
+              (c): c is { type: "text"; text: string } =>
+                !!c &&
+                typeof c === "object" &&
+                (c as { type?: unknown }).type === "text" &&
+                typeof (c as { text?: unknown }).text === "string",
+            )
+            .map((c) => c.text)
+            .join("\n");
+        }
+        // Non-string/non-array content (e.g. a boolean) has no renderable
+        // text — skip, matching pi which would likewise produce nothing.
+        if (!text) return state;
         const blockId = newBlockId();
         return {
           ...state,
-          blocks: [...blocks, { id: blockId, type: "custom_message", data: { content: display } }],
+          blocks: [...blocks, { id: blockId, type: "custom_message", data: { content: text } }],
         };
       }
       // Unknown role (toolResult, bashExecution, etc.) — ignore for now;
