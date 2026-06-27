@@ -177,6 +177,40 @@
   grid-area: sidebar;
 }
 
+.app__sidebar-draghandle {
+  /* Resize grab strip straddling the content card's left edge. The layout
+     reads as "adjusting the card's width" (the sidebar is just the slack the
+     card absorbs/gives up), so the affordance sits *on* the card's left edge —
+     half over the card, half over the canvas gap to the sidebar — not centered
+     in the gap.
+
+     It must live in `.app` (not inside `.sidebar`) because `.sidebar` has
+     `overflow: hidden` plus a fade mask, which clips any child positioned out
+     into the gap to reach the card edge — the handle would vanish, the resize
+     regression the redesign introduced.
+
+     The card (`.app__main`) is inset from its grid area by `--space-2` on
+     every side, so the card's left edge is at `grid main start + --space-2`,
+     i.e. `min(--sidebar-width, 38%) + --space-2` from `.app`'s left. The strip
+     is centered on that edge: its width is the grab target, its right edge
+     extends half a target past the card edge into the card, and its left edge
+     sits half a target back into the gap toward the sidebar. */
+  position: absolute;
+  top: 0;
+  left: calc(min(var(--sidebar-width, 15.714rem), 38%) + var(--space-2) - var(--sidebar-draghalf));
+  width: calc(var(--sidebar-draghalf) * 2);
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+/* The handle is only meaningful in sidebar-visible mode (the JSX gates it on
+   `!sidebarCollapsed`). In collapsed mode the sidebar floats as an overlay
+   pill and resizing is a different interaction — keep it hidden regardless. */
+.app--sidebar-collapsed .app__sidebar-draghandle {
+  display: none;
+}
+
 .app__main {
   grid-area: main;
   display: flex;

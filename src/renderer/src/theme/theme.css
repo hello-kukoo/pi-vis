@@ -99,6 +99,11 @@
   --space-8: 2.75rem;
   --space-10: 4.25rem;
 
+  /* Half the sidebar resize grab target. The handle straddles the content
+     card's left edge; this sets each half so `calc(... * 2)` is the full grab
+     width. */
+  --sidebar-draghalf: 0.2145rem; /* ≈3px → ~6px grab target */
+
   /* ── Typography scale (unitless multipliers + em tracking) ─────────── */
   --leading-display: 1.12;
   --leading-body: 1.6;

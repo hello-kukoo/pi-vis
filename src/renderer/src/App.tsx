@@ -56,9 +56,48 @@ export function App(): React.ReactElement {
     setSidebarWidth(persistedSidebarWidth ?? 220);
   }, [persistedSidebarWidth]);
 
-  const handleSidebarResizeEnd = useCallback(
-    (width: number) => {
-      void updateSettings({ sidebarWidth: width });
+  // Sidebar resize drag. Mirrors the original Sidebar.tsx handler: clamp to
+  // the 160–500px range, update live width per mousemove (jank-free, no disk
+  // writes), persist on mouseup. Lives here because the drag handle was
+  // hoisted out of `.sidebar` (clipped by its `overflow: hidden` when pushed
+  // into the canvas gap to meet the content card's left edge).
+  const sidebarDragRef = useRef(false);
+  const handleSidebarResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      sidebarDragRef.current = true;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      // Capture the cursor's offset from the sidebar's right edge at grab time.
+      // The drag sets the sidebar width so this offset stays constant as the
+      // cursor moves — the edge tracks the grab point and there's no jump when
+      // grabbing toward the right side of the strip. Without this, a grab near
+      // the strip's right edge (inside the card) would set the sidebar width to
+      // the raw clientX, snapping the edge leftward by the gap on the first
+      // move and shrinking the card.
+      const sidebarEl = document.querySelector(".sidebar");
+      const sidebarRight = sidebarEl
+        ? sidebarEl.getBoundingClientRect().right
+        : e.clientX;
+      const grabOffset = e.clientX - sidebarRight; // >= 0 (cursor is right of sidebar edge)
+      const compute = (clientX: number) =>
+        Math.max(160, Math.min(500, clientX - grabOffset));
+      let latest = compute(e.clientX);
+      const onMove = (ev: MouseEvent) => {
+        if (!sidebarDragRef.current) return;
+        latest = compute(ev.clientX);
+        setSidebarWidth(latest);
+      };
+      const onUp = () => {
+        sidebarDragRef.current = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        void updateSettings({ sidebarWidth: latest });
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
     [updateSettings],
   );
@@ -367,11 +406,20 @@ export function App(): React.ReactElement {
       )}
       <Sidebar
         onOpenSettings={() => setShowSettings(true)}
-        onResize={setSidebarWidth}
-        onResizeEnd={handleSidebarResizeEnd}
         onMouseEnter={peekSidebar}
         onMouseLeave={scheduleHideSidebar}
       />
+      {/* Sidebar resize handle. Rendered here (not inside `.sidebar`) so
+          it isn't clipped by `.sidebar { overflow: hidden }` when positioned
+          out in the canvas gap to meet the content card's left edge. The
+          `.app` grid container is `position: relative`, so the handle anchors
+          to the sidebar's right column edge and extends right across the
+          `--space-2` canvas gap to the card — exactly on the seam between
+          sidebar and transcript. Hidden in collapsed mode (the sidebar floats
+          as an overlay pill; resizing it there is a different interaction). */}
+      {!sidebarCollapsed && (
+        <div className="app__sidebar-draghandle" onMouseDown={handleSidebarResizeStart} />
+      )}
       <main className="app__main">
         {activeSessionId ? (
           <div className="app__session" style={{ position: "relative" }}>

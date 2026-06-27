@@ -75,14 +75,10 @@ interface ArchiveConfirmState {
 
 export function Sidebar({
   onOpenSettings,
-  onResize,
-  onResizeEnd,
   onMouseEnter,
   onMouseLeave,
 }: {
   onOpenSettings: () => void;
-  onResize: (width: number) => void;
-  onResizeEnd: (width: number) => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
 }): React.ReactElement {
@@ -108,7 +104,6 @@ export function Sidebar({
   const lastActiveWorkspace = useSettingsStore((s) => s.settings.lastActiveWorkspace);
   const savedExpandedWorkspaces = useSettingsStore((s) => s.settings.expandedWorkspaces);
   const sidebarRef = useRef<HTMLElement>(null);
-  const isDragging = useRef(false);
   const dragIndexRef = useRef<number | null>(null);
 
   // Pagination: visible count per workspace
@@ -225,34 +220,9 @@ export function Sidebar({
     [sessions, workspaces, activeSessionId],
   );
 
-  // Sidebar resize via drag handle
-  const handleResizeStart = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      isDragging.current = true;
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      // Track the live width so the final value can be persisted on mouse-up
-      // (persisting on every move would write settings to disk per frame).
-      let latest = Math.max(160, Math.min(500, e.clientX));
-      const onMove = (ev: MouseEvent) => {
-        if (!isDragging.current) return;
-        latest = Math.max(160, Math.min(500, ev.clientX));
-        onResize(latest);
-      };
-      const onUp = () => {
-        isDragging.current = false;
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("mouseup", onUp);
-        onResizeEnd(latest);
-      };
-      window.addEventListener("mousemove", onMove);
-      window.addEventListener("mouseup", onUp);
-    },
-    [onResize, onResizeEnd],
-  );
+  // (Sidebar resize is handled in App.tsx — the drag handle lives there so
+  // it isn't clipped by `.sidebar { overflow: hidden }` when positioned at the
+  // content card's left edge.)
 
   const handleAddWorkspace = useCallback(async () => {
     const path = await window.pivis.invoke("workspace.pick", undefined);
@@ -433,7 +403,10 @@ export function Sidebar({
         />
       )}
 
-      <div className="sidebar__draghandle" onMouseDown={handleResizeStart} />
+      {/* The drag handle lives in App.tsx, not inside `.sidebar`, so it
+          isn't clipped by `.sidebar { overflow: hidden }` (and the fade
+          mask) when pushed out into the canvas gap to meet the content card's
+          left edge. */}
       <div className="sidebar__workspaces">
         {Array.from(workspaces.values()).map((ws, index) => {
           const isActiveWs = activeWorkspacePath === ws.path;

@@ -21,15 +21,10 @@
   position: relative;
 }
 
-.sidebar__draghandle {
-  position: absolute;
-  top: 0;
-  right: -0.214rem;
-  width: 0.429rem;
-  height: 100%;
-  cursor: col-resize;
-  z-index: 20;
-}
+/* The sidebar resize drag handle lives in App.tsx (`.app__sidebar-draghandle`
+   in App.css), not inside `.sidebar` — `.sidebar`'s `overflow: hidden` and
+   fade mask clip any child positioned out into the canvas gap to reach the
+   content card's left edge. See App.css for the rationale. */
 
 .sidebar__workspaces {
   flex: 1;
