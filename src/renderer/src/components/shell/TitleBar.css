@@ -28,8 +28,10 @@
      the leftmost interactive element (the sidebar toggle) just
      past them. */
   padding: 0 16px 0 80px;
+  /* The title bar is the top strip of the window canvas — same color as the
+     sidebar and the area behind the floating content card, with no divider.
+     The content card's own top edge provides the only separation needed. */
   background: var(--color-sidebar);
-  border-bottom: 1px solid var(--ctp-surface0);
   user-select: none;
   -webkit-app-region: drag;
 }
@@ -49,7 +51,7 @@
   padding: 0;
   background: none;
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-overlay1);
   cursor: pointer;
   /* Interactive element inside the drag region — must be clickable. */

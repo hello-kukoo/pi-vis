@@ -4,8 +4,8 @@
   display: flex;
   flex-direction: column;
   background: var(--ctp-base);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   overflow: hidden;
   min-height: 12rem;
   max-height: 50vh;
@@ -16,7 +16,7 @@
   align-items: center;
   gap: 0.571rem;
   padding: 0.571rem 0.857rem;
-  border-bottom: 1px solid var(--ctp-surface1);
+  border-bottom: 1px solid var(--border);
   background: var(--ctp-surface0);
   flex-shrink: 0;
 }
@@ -40,8 +40,8 @@
   font-size: 0.786em;
   color: var(--ctp-subtext0);
   background: transparent;
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 0.143rem 0.5rem;
   cursor: pointer;
 }

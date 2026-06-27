@@ -79,7 +79,7 @@ const components: Components = {
     return <pre>{children}</pre>;
   },
   code: ({ node: _node, children, ...props }) => (
-    <code className="mcm-inline-code" {...props}>
+    <code className="inline-code" {...props}>
       {children}
     </code>
   ),

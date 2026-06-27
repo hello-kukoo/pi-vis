@@ -357,6 +357,21 @@ the user works in another expanded one. `activeWorkspacePath` (focus/active CSS)
 workspace. The `workspace.list` IPC channel (renamed from `workspace.recents`)
 returns the ordered, existence-pruned list.
 
+### Shell layout (canvas + floating content card)
+
+The window is a single unified **canvas** (`.app` background = `mantle`). The title bar
+and sidebar have **no borders** — they're the top and left strips of that canvas, the
+same color. The content area (`.app__main`) is a **floating, rounded card** (`base`
+background, hairline border, `--radius-lg`, `--elevation-1`) inset from the canvas by a
+`--space-2` gap on the left (from the sidebar), right, and bottom, and flush under the
+38px title bar. `overflow: hidden` on the card clips every full-width strip inside it
+(transcript, worktree bar, composer, status bar) to the rounded corners, so none of them
+form hard outer 90° seams — that grid-of-rectangles look was the thing being replaced.
+Setup mode (`.app--setup`, `PiNotFound`) renders directly in `.app`, not `.app__main`,
+so it keeps its full-screen centered treatment. Overlays (diff/picker/toast) live inside
+`.app__session` (positioned ancestor) so they fill and clip to the card; the model/thinking
+dropdowns anchor in the title bar (outside the card) so they're never clipped.
+
 ### Responsive layout system
 
 The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 400` in
@@ -377,8 +392,8 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
   by.
 - **Fluid transcript**: `.app__main` is a size-query container (`container: mainpane /
   inline-size`). The transcript's horizontal padding scales with the pane via
-  `clamp(--mcm-base, 6cqi, --mcm-large)`, and a `@container mainpane (min-width: 560px)`
-  rule restores the MCM reading-measure caps (assistant 80%, user bubble ⅔); below that
+  `clamp(--space-5, 6cqi, --space-8)`, and a `@container mainpane (min-width: 560px)`
+  rule applies the reading-measure caps (assistant 80%, user bubble ⅔); below that
   the caps yield to ~full width so text doesn't wrap into a sliver. The empty-state outer
   padding is likewise `cqi`-scaled. Overlays (diff/picker/toast) live inside
   `.app__session` (its own positioned ancestor), so the container's layout containment
@@ -387,7 +402,7 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
   scrollers, so both set `overflow-x: hidden` — a long unbreakable token (a file path or
   identifier in inline code) or a wide row must never spawn a horizontal scrollbar on the
   whole pane. Wide things instead either wrap (`.transcript-block__content` /
-  `.mcm-inline-code` use `overflow-wrap: anywhere`; blocks carry `min-width: 0`) or scroll
+  `.inline-code` use `overflow-wrap: anywhere`; blocks carry `min-width: 0`) or scroll
   inside their own box (code blocks, and markdown tables via `display: block; width:
   max-content; overflow-x: auto`). `::-webkit-scrollbar-corner` is transparent so the
   corner where two scrollbars meet doesn't render as a light square.
@@ -415,6 +430,7 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 - **Fire-and-forget UI requests**: `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text` are handled as side effects in `addUiRequest` without awaiting a response. Dialog types (`select`/`confirm`/`input`/`editor`) block pi until the renderer responds.
 - **Map immutability**: Zustand stores create new `Map` instances on every update (never mutate in-place) since Zustand uses reference equality for selectors.
 - **CSS**: Custom CSS with BEM naming (`composer__input-row--bash`). No CSS framework. CSS modules co-located with components. `global.css` defines an app-wide focus policy: pointer-driven focus has no outline (`:focus:not(:focus-visible)`), keyboard focus shows a lavender `:focus-visible` ring.
+- **Design tokens** (`theme/theme.css` `:root`): a flat, modern token system that every component composes from — `--space-1…10` (rem spacing scale), `--radius-sm/md/lg/xl/pill` (soft, consistent corners), `--leading-*`/`--tracking-*` (type), and crucially the separation tokens: `--border` / `--border-faint` (both `surface0`) and `--border-strong` (`surface1`) for hairline edges, `--surface-raised` (`surface0`) / `--surface-inset` (`mantle`) for in-flow depth, and `--elevation-1/2/3` shadows for floating layers (menus → `-2`, modals → `-3`). The look leans on hairlines + surface elevation + spacing instead of high-contrast outlines and box-in-box nesting — e.g. tool cards are a raised `surface0` card over a recessed `mantle` well, no inner border. **All color tokens stay faithful to the canonical Catppuccin swatches** (the only sanctioned deviation is Latte's slightly-lightened surfaces in `catppuccin.ts`); borders/surfaces use real swatches, and accent fills use translucent real swatches (e.g. mauve focus ring) — never invented hues. There is **no MCM/mid-century vocabulary** anymore (the previous design language was removed).
 - **Catppuccin theming**: Four variants (latte/frappé/macchiato/mocha). Default is mocha. Theme variables set via CSS custom properties.
 - **Browser preview**: `npm run dev:renderer` loads `preview-stub.ts` which stubs `window.pivis` with a demo session and canned responses including streamed agent output.
 - **Auth**: API keys stored in `~/.pi/agent/auth.json` using `proper-lockfile` for mutual exclusion with pi's token-refresh writes. Environment variables detected via `$SHELL -ilc env` (GUI apps don't inherit shell env). `getSubprocessEnv()` combines `process.env` + login-shell env for consistent subprocess PATH — used across git, updates, pty, and locate-pi. Atomic writes with tmp+rename, chmod 0600.

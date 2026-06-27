@@ -1,8 +1,8 @@
 /* ─────────────────────────────────────────────────────────────────────
-   Sidebar — workspace tree. Compact chrome (12–13px), but the workspace
-   name uses the MCM label style: uppercase, wide architectural tracking,
-   flat 1.0 line-height. Paths and metadata stay in the small em size
-   so they read as secondary information.
+   Sidebar — workspace tree. Compact chrome (12–13px): workspace names are
+   the top tier (color-only state, no block fill), session rows below are
+   rounded pills that fill on hover/active. Paths and metadata stay in the
+   small em size so they read as secondary information.
    ───────────────────────────────────────────────────────────────────── */
 
 .sidebar {
@@ -14,7 +14,9 @@
   background: var(--color-sidebar);
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--ctp-surface0);
+  /* No border: the sidebar is part of the window canvas (same color), and
+     the floating content card to its right is separated by a canvas gap +
+     the card's own edge — not a hard divider line. */
   overflow: hidden;
   position: relative;
 }
@@ -46,7 +48,7 @@
 
 .sidebar__workspace {
   position: relative;
-  border-bottom: 1px solid var(--ctp-surface0);
+  border-bottom: 1px solid var(--border-faint);
 }
 
 .sidebar__workspace-header {
@@ -208,8 +210,8 @@
   font-family: var(--font-display);
   font-size: 0.857em; /* ≈12px @ 14px root */
   font-weight: 500;
-  line-height: var(--mcm-line-label);
-  border-radius: var(--mcm-radius-md);
+  line-height: var(--leading-label);
+  border-radius: var(--radius-md);
   transition: background 0.1s ease, color 0.1s ease, box-shadow 0.1s ease;
 }
 
@@ -246,7 +248,7 @@
   padding: 0.143rem 0.286rem;
   line-height: 1;
   flex-shrink: 0;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   transition: opacity 0.1s, background 0.1s, color 0.1s;
 }
 .sidebar__session:hover .sidebar__session-archive {
@@ -291,8 +293,8 @@
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-overlay1);
-  line-height: var(--mcm-line-label);
-  border-radius: var(--mcm-radius-md);
+  line-height: var(--leading-label);
+  border-radius: var(--radius-md);
   transition: background 0.1s ease, color 0.1s ease, box-shadow 0.1s ease;
 }
 
@@ -315,15 +317,15 @@
   width: 100%;
   margin: 0.286rem 0 0.143rem;
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   padding: 0.357rem 0.571rem;
   text-align: center;
   font-family: var(--font-display);
   font-size: 0.786em;
   color: var(--ctp-overlay1);
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   transition: background 0.1s, color 0.1s;
 }
 
@@ -335,7 +337,7 @@
 .sidebar__footer {
   display: flex;
   align-items: center;
-  border-top: 1px solid var(--ctp-surface0);
+  border-top: 1px solid var(--border);
 }
 
 .sidebar__add-icon {
@@ -367,7 +369,7 @@
   text-align: left;
   font-family: var(--font-display);
   font-size: 0.857em;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   color: var(--ctp-overlay1);
   flex: 1;
   display: inline-flex;
@@ -379,8 +381,7 @@
   color: var(--ctp-mauve);
 }
 
-.sidebar__settings-btn,
-.sidebar__status-toggle {
+.sidebar__settings-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -391,15 +392,13 @@
   flex-shrink: 0;
 }
 
-.sidebar__settings-btn svg,
-.sidebar__status-toggle svg {
+.sidebar__settings-btn svg {
   width: 1.1em;
   height: 1.1em;
   display: block;
 }
 
-.sidebar__settings-btn:hover,
-.sidebar__status-toggle:hover {
+.sidebar__settings-btn:hover {
   color: var(--ctp-mauve);
 }
 
@@ -407,7 +406,6 @@
    global :focus-visible ring is just noise here (and re-appears when focus
    returns to the button after a modal is closed with Escape). */
 .sidebar__settings-btn:focus-visible,
-.sidebar__status-toggle:focus-visible,
 .sidebar__add-workspace:focus-visible {
   outline: none;
 }

@@ -1,10 +1,9 @@
 /* ─────────────────────────────────────────────────────────────────────
    Transcript — the chat surface.
    The chat window is a *conversational* space, not a page-level layout,
-   so we keep its outer padding modest (the MCM "massive" pools are
-   reserved for the page-level outer views: PiNotFound, Settings, etc.).
-   The shelf effect lives at the section level, not per-message: each
-   block sits flush-left within a sensible max-width.
+   so its outer padding stays modest. Each block sits flush-left within a
+   readable max-width; the user's messages are right-aligned bubbles and
+   the assistant's content runs flush-left.
    ───────────────────────────────────────────────────────────────────── */
 
 .transcript-view {
@@ -16,10 +15,10 @@
      letting it spawn a phantom horizontal scrollbar (and its white corner). */
   overflow-x: hidden;
   /* Horizontal padding scales with the pane width (cqi → the `.app__main`
-     size container), so the MCM "negative space" only opens up once there's
-     room for it. On a narrow pane it collapses toward --mcm-base instead of
-     eating ~100px and crushing the text into a 2-words-per-line column. */
-  padding: var(--mcm-base) clamp(var(--mcm-base), 6cqi, var(--mcm-large));
+     size container), so the side margins only open up once there's room for
+     it. On a narrow pane it collapses toward --space-5 instead of eating
+     ~100px and crushing the text into a 2-words-per-line column. */
+  padding: var(--space-5) clamp(var(--space-5), 6cqi, var(--space-8));
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -34,27 +33,27 @@
 .transcript-blocks {
   display: flex;
   flex-direction: column;
-  gap: var(--mcm-base);
+  gap: var(--space-5);
   flex: 1;
 }
 
 .show-earlier-btn {
   background: none;
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   color: var(--ctp-subtext0);
   font-family: var(--font-display);
   font-size: 0.857em;
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.571rem 1.143rem;
   cursor: pointer;
   align-self: center;
-  margin-bottom: var(--mcm-base);
+  margin-bottom: var(--space-5);
 }
 
 .show-earlier-btn:hover {
-  border-color: var(--ctp-overlay0);
+  border-color: var(--border-strong);
   color: var(--ctp-text);
 }
 
@@ -86,12 +85,18 @@
 }
 
 .transcript-block__bubble {
+  /* The user's own message — a soft rounded surface rather than a
+     hard-bordered box. The slightly tighter bottom-right corner gives it a
+     subtle "tail" toward the right edge (a modern messaging convention)
+     without resorting to a drawn pointer. Neutral Catppuccin surfaces; the
+     right-alignment is what marks it as "mine". */
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
-  padding: 0.714rem 1rem; /* ≈10/14 — symmetric, top/bottom 10px, left/right 14px */
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-sm);
+  padding: 0.643rem 1rem; /* ≈9/14 */
   color: var(--ctp-text);
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--font-display);
@@ -106,8 +111,8 @@
   color: var(--ctp-text);
   font-family: var(--font-display);
   font-size: 1em;
-  line-height: var(--mcm-line-body);
-  letter-spacing: var(--mcm-track-body);
+  line-height: var(--leading-body);
+  letter-spacing: var(--tracking-body);
   /* Full width on a narrow pane; the 80% reading-measure cap is restored at
      wider panes via the @container rule at the bottom of this file. */
   max-width: 100%;
@@ -126,10 +131,10 @@
 
 /* ── Comfortable (wide pane) reading measures ─────────────────────────────
    Once the content pane (the `.app__main` size container) is wide enough,
-   restore the MCM asymmetry: the assistant column is capped to a readable
-   measure and the user bubble to two-thirds, leaving deliberate negative
-   space. Below this width the caps above (100% / 90%) keep every word of
-   text on screen instead of wrapping into a sliver. */
+   cap the line length: the assistant column is held to a readable measure
+   and the user bubble to two-thirds. Below this width the caps above
+   (100% / 90%) keep every word of text on screen instead of wrapping into
+   a sliver. */
 @container mainpane (min-width: 560px) {
   .transcript-block__content,
   .thinking-block {
@@ -151,8 +156,8 @@
 .transcript-block__image-thumb {
   max-width: 14.286rem;
   max-height: 14.286rem;
-  border-radius: var(--mcm-radius-sm);
-  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
   object-fit: cover;
   cursor: pointer;
   transition: border-color 0.15s;
@@ -163,7 +168,7 @@
 }
 
 /* Thinking — always visible, italic — uses the display font's true
-   italic variant for architectural contrast.  Capped at 80% width to
+   italic variant for visual contrast.  Capped at 80% width to
    match the assistant content column.
 
    Markdown children (p, ul, ol, h1–h3, code, .shiki) are laid out here
@@ -176,14 +181,14 @@
   font-size: 1em;
   font-style: italic;
   color: var(--color-thinking);
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
   word-break: break-word;
   /* Full width on a narrow pane; 80% cap restored at wider panes (below). */
   max-width: 100%;
 }
 
 .thinking-block p {
-  margin: 0 0 var(--mcm-tight);
+  margin: 0 0 var(--space-2);
 }
 .thinking-block p:last-child {
   margin-bottom: 0;
@@ -192,7 +197,7 @@
 .thinking-block ul,
 .thinking-block ol {
   padding-left: 1.4em;
-  margin: 0 0 var(--mcm-tight);
+  margin: 0 0 var(--space-2);
 }
 
 .thinking-block li {
@@ -225,41 +230,42 @@
 
 .thinking-block pre {
   font-style: normal;
-  margin: var(--mcm-tight) 0;
+  margin: var(--space-2) 0;
 }
 
 .thinking-block .shiki {
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   padding: 0.857rem;
   overflow-x: auto;
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
 }
 
 /* ── Tool/bash cards (terminal boxes) ────────────────────────────────
-   Header layout: MCM label (tool name) · monospace subject (file path /
+   Header layout: label (tool name) · monospace subject (file path /
    command).  The label uses the UI font per the typography spec; the
    subject falls through to the code font because it's a literal value. */
 .tool-card {
   position: relative;
-  background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface0);
-  border-radius: var(--mcm-radius-md);
-  padding: 0.571rem 0.857rem; /* ≈8/12 */
+  background: var(--surface-raised);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-lg);
+  padding: 0.643rem 0.857rem; /* ≈9/12 */
+  transition: border-color 0.15s ease;
 }
 
 .tool-card:hover {
-  border-color: var(--ctp-surface1);
+  border-color: var(--border-strong);
 }
 
 .tool-card--error {
-  background: color-mix(in srgb, var(--ctp-red) 9%, var(--ctp-mantle));
-  border-color: color-mix(in srgb, var(--ctp-red) 35%, var(--ctp-surface0));
+  background: color-mix(in srgb, var(--ctp-red) 9%, var(--ctp-base));
+  border-color: color-mix(in srgb, var(--ctp-red) 26%, transparent);
 }
 
 .tool-card--error:hover {
-  border-color: color-mix(in srgb, var(--ctp-red) 50%, var(--ctp-surface0));
+  border-color: color-mix(in srgb, var(--ctp-red) 40%, transparent);
 }
 
 .tool-card__header {
@@ -286,11 +292,11 @@ button.tool-card__header {
 }
 
 .tool-card__name {
-  /* MCM label: UI font · wide architectural tracking. */
+  /* Tool name: UI font, small, semibold. */
   font-family: var(--font-display);
   font-size: var(--font-size-small);
   font-weight: 600;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   color: var(--ctp-text);
   flex-shrink: 0;
 }
@@ -303,7 +309,7 @@ button.tool-card__header {
   /* Subject is a literal value (file path / command) — monospace. */
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
   color: var(--ctp-teal);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -342,9 +348,9 @@ button.tool-card__header {
    (compact one-liner), diff, and output. One scroll context instead of
    nested scrollable regions per section. */
 .tool-card__scroll {
-  background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-overlay0);
-  border-radius: var(--mcm-radius-sm);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
   padding: 0.571rem 0.857rem;
   max-height: 28.571rem;
   overflow-y: auto;
@@ -358,11 +364,11 @@ button.tool-card__header {
   color: var(--ctp-overlay1);
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
   word-break: break-word;
   margin: 0 0 0.429rem;
   padding: 0 0 0.429rem;
-  border-bottom: 1px dashed var(--ctp-surface1);
+  border-bottom: 1px dashed var(--border);
 }
 
 .tool-card__scroll > .tool-card__args:only-child {
@@ -402,19 +408,19 @@ details[open] > .tool-card__args-summary::before {
   margin: 0.429rem 0 0;
   padding: 0.429rem 0.571rem;
   background: var(--ctp-base);
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--ctp-overlay2);
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
 }
 
 .tool-card__output {
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
@@ -474,7 +480,7 @@ details[open] > .tool-card__args-summary::before {
   font-style: italic;
 }
 
-/* Compaction marker — a thin architectural line */
+/* Compaction marker — a thin divider line */
 .compaction-marker {
   display: flex;
   align-items: center;
@@ -492,7 +498,7 @@ details[open] > .tool-card__args-summary::before {
   font-family: var(--font-display);
   font-size: 0.786em; /* ≈11px @ 14px root */
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   color: var(--ctp-overlay0);
   white-space: nowrap;
 }
@@ -503,7 +509,7 @@ details[open] > .tool-card__args-summary::before {
   font-size: 0.857em;
   color: var(--ctp-subtext0);
   font-style: italic;
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
   margin-top: 0.286rem;
 }
 
@@ -514,7 +520,7 @@ details[open] > .tool-card__args-summary::before {
   color: var(--ctp-overlay1);
   font-style: italic;
   padding: 0.286rem 0;
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 /* Model/provider failure — surfaces pi's `stopReason: "error"` turns */
@@ -522,19 +528,19 @@ details[open] > .tool-card__args-summary::before {
   display: flex;
   align-items: flex-start;
   gap: 0.571rem;
-  padding: 0.571rem 0.857rem;
-  border-radius: 0.429rem;
-  border: 1px solid color-mix(in srgb, var(--ctp-red) 45%, transparent);
-  background: color-mix(in srgb, var(--ctp-red) 12%, var(--ctp-base));
+  padding: 0.643rem 0.857rem;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--ctp-red) 30%, transparent);
+  background: color-mix(in srgb, var(--ctp-red) 11%, var(--ctp-base));
   font-family: var(--font-display);
   font-size: 0.857em;
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 .transcript-block__error-icon {
   color: var(--ctp-red);
   font-size: 1.1em;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   flex-shrink: 0;
 }
 
@@ -557,7 +563,7 @@ details[open] > .tool-card__args-summary::before {
 
 /* ── Markdown content (assistant responses) ───────────────────────── */
 .transcript-block__content p {
-  margin: 0 0 var(--mcm-tight);
+  margin: 0 0 var(--space-2);
 }
 .transcript-block__content p:last-child {
   margin-bottom: 0;
@@ -566,7 +572,7 @@ details[open] > .tool-card__args-summary::before {
 .transcript-block__content ul,
 .transcript-block__content ol {
   padding-left: 1.4em;
-  margin: 0 0 var(--mcm-tight);
+  margin: 0 0 var(--space-2);
 }
 
 .transcript-block__content li {
@@ -577,7 +583,7 @@ details[open] > .tool-card__args-summary::before {
   border-left: 2px solid var(--ctp-surface1);
   padding-left: 0.714rem;
   color: var(--ctp-subtext0);
-  margin: 0 0 var(--mcm-tight);
+  margin: 0 0 var(--space-2);
   font-style: italic;
 }
 
@@ -603,7 +609,7 @@ details[open] > .tool-card__args-summary::before {
 .transcript-block__content table {
   border-collapse: collapse;
   font-size: 0.929em;
-  margin: var(--mcm-tight) 0;
+  margin: var(--space-2) 0;
   font-family: var(--font-code);
   /* A wide table scrolls inside its own box (capped at the column width)
      rather than forcing the whole transcript to scroll horizontally. The
@@ -617,7 +623,7 @@ details[open] > .tool-card__args-summary::before {
 
 .transcript-block__content th,
 .transcript-block__content td {
-  border: 1px solid var(--ctp-surface1);
+  border: 1px solid var(--border);
   padding: 0.286rem 0.571rem;
   text-align: left;
 }
@@ -635,24 +641,24 @@ details[open] > .tool-card__args-summary::before {
 .transcript-block__content .shiki,
 .thinking-block .shiki {
   background: var(--ctp-mantle) !important;
-  border: 1px solid var(--ctp-surface0);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
   padding: 0.857rem;
   overflow-x: auto;
-  margin: var(--mcm-tight) 0;
+  margin: var(--space-2) 0;
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
+  line-height: var(--leading-code);
 }
 
 .code-block--plain {
   background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface0);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
   padding: 0.857rem;
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  line-height: var(--mcm-line-code);
-  margin: var(--mcm-tight) 0;
+  line-height: var(--leading-code);
+  margin: var(--space-2) 0;
   color: var(--ctp-text);
 }

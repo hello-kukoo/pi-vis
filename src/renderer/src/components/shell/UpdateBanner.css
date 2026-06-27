@@ -20,9 +20,9 @@
   padding: 0.357rem 0.5rem 0.357rem 0.857rem;
   max-width: calc(100% - 1.714rem);
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: 0.571rem;
-  box-shadow: 0 0.143rem 0.571rem rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-2);
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-text);
@@ -80,13 +80,13 @@
 .update-banner__btn {
   background: var(--ctp-mauve);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-base);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 0.857em;
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.286rem 0.714rem;
   white-space: nowrap;
 }
@@ -143,7 +143,7 @@
   height: 1.429rem;
   background: none;
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-overlay0);
   cursor: pointer;
   font-size: 1.143em;
@@ -165,7 +165,7 @@
   list-style: none;
   margin: 0;
   padding: 0.5rem 0 0.071rem;
-  border-top: 1px solid var(--ctp-surface1);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 0.143rem;

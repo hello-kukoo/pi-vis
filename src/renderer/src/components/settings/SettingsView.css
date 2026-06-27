@@ -1,9 +1,8 @@
 /* ─────────────────────────────────────────────────────────────────────
-   Settings modal.
-   The MCM character here lives in the typography (uppercase, wide
-   architectural tracking on section titles) rather than in dramatic
-   outer margins — a 520px modal can't afford pools of negative space
-   without its rows looking orphaned.
+   Settings modal — an elevated, rounded panel over a blurred scrim.
+   Sections are separated by spacing and quiet hairline dividers; form
+   rows use the same rounded-field + mauve-focus language as the composer
+   and dialogs.
    ───────────────────────────────────────────────────────────────────── */
 
 .settings-overlay {
@@ -15,27 +14,27 @@
   align-items: center;
   justify-content: center;
   z-index: 500;
-  padding: var(--mcm-base);
+  padding: var(--space-5);
 }
 
 .settings-panel {
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
   width: 100%;
   max-width: 37.143rem; /* ≈520px */
   max-height: 80vh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 0.571rem 2.857rem var(--ctp-shadow);
+  box-shadow: var(--elevation-3);
 }
 
 .settings-panel__header {
   display: flex;
   align-items: center;
   padding: 0.857rem 1rem; /* ≈12/14 */
-  border-bottom: 1px solid var(--ctp-surface1);
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-panel__title {
@@ -43,7 +42,7 @@
   font-family: var(--font-display);
   font-size: 1em;
   font-weight: 600;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   color: var(--ctp-text);
 }
 
@@ -66,7 +65,7 @@
   padding: 1rem 1.143rem; /* ≈14/16 */
   display: flex;
   flex-direction: column;
-  gap: var(--mcm-base); /* standard section separation */
+  gap: var(--space-5); /* standard section separation */
 }
 
 .settings-section {
@@ -79,7 +78,7 @@
   font-family: var(--font-display);
   font-size: 0.857em;
   font-weight: 600;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   color: var(--ctp-subtext0);
   margin-bottom: 0.143rem;
 }
@@ -113,13 +112,13 @@
 .settings-btn {
   background: var(--ctp-surface1);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-md);
   color: var(--ctp-subtext0);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 0.857em;
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.429rem 0.714rem;
 }
 
@@ -131,8 +130,8 @@
 .settings-select,
 .settings-input {
   background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   color: var(--ctp-text);
   font-family: var(--font-display);
   font-size: 0.929em;
@@ -155,7 +154,7 @@
 .settings-stepper__btn {
   background: var(--ctp-surface1);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-md);
   color: var(--ctp-text);
   cursor: pointer;
   font-size: 1em;
@@ -182,7 +181,7 @@
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-overlay0);
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 .settings-hint--error {
@@ -253,7 +252,7 @@
   font-size: 0.786em;
   font-weight: 600;
   color: var(--ctp-overlay0);
-  border-bottom: 1px solid var(--ctp-surface1);
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-update-col-pkg,
@@ -295,7 +294,7 @@
   font-family: var(--font-display);
   font-size: 0.786em;
   padding: 0.143rem 0.429rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -358,7 +357,7 @@
   font-family: var(--font-display);
   font-size: 0.786em;
   padding: 0.143rem 0.429rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   font-weight: 500;
 }
 
@@ -387,7 +386,7 @@
   flex-direction: column;
   gap: 0.429rem;
   padding: 0.571rem 0;
-  border-top: 1px solid var(--ctp-surface1);
+  border-top: 1px solid var(--border);
   margin-top: 0.429rem;
 }
 

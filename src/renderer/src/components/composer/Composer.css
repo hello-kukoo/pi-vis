@@ -10,15 +10,17 @@
    ───────────────────────────────────────────────────────────────────── */
 
 .composer {
+  /* No top border: the composer shares the content card's surface with the
+     transcript above and the status bar below. Its own rounded input field is
+     the only boundary the eye needs — no end-to-end divider line. */
   background: var(--color-bg);
-  border-top: 1px solid var(--ctp-surface0);
   padding: 0;
   flex-shrink: 0;
 }
 
 /* ── Attachments (image previews) ────────────────────────────────────── */
 .composer__attachments {
-  border-bottom: 1px solid var(--ctp-surface0);
+  border-bottom: 1px solid var(--border);
   padding: 0.571rem 0.857rem;
   display: flex;
   flex-wrap: wrap;
@@ -29,9 +31,9 @@
   position: relative;
   width: 4.571em; /* ≈64px @ 14px root */
   height: 4.571em;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   overflow: hidden;
-  border: 1px solid var(--ctp-surface1);
+  border: 1px solid var(--border);
   flex-shrink: 0;
 }
 
@@ -71,7 +73,7 @@
 }
 
 .composer__widget-strip {
-  border-bottom: 1px solid var(--ctp-surface0);
+  border-bottom: 1px solid var(--border);
   padding: 0.429rem 0.857rem;
   display: flex;
   flex-direction: column;
@@ -89,7 +91,7 @@
 }
 
 .composer__suggestions {
-  border-bottom: 1px solid var(--ctp-surface0);
+  border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   background: var(--ctp-surface0);
@@ -134,7 +136,7 @@
   font-size: 0.714em;
   padding: 0.071em 0.357em;
   border-radius: 999px;
-  border: 1px solid var(--ctp-surface2);
+  border: 1px solid var(--border-strong);
   color: var(--ctp-overlay0);
   background: var(--ctp-surface0);
 }
@@ -180,19 +182,27 @@
   display: flex;
   align-items: flex-end;
   gap: 0.143rem;
-  padding: 0.286rem;
+  padding: 0.357rem;
   background: var(--ctp-input-bg);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   font-size: var(--font-size-base);
   line-height: 1.5;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* The text field lifts to an accent ring while focused — the same mauve
+   focus language the dialogs and dropdowns use. */
+.composer__input-box:focus-within {
+  border-color: var(--ctp-mauve);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ctp-mauve) 14%, transparent);
 }
 
 .composer__attach-btn {
   flex-shrink: 0;
   width: 2.1em;
   height: 2.1em;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   border: none;
   background: none;
   color: var(--ctp-overlay0);

@@ -9,26 +9,26 @@
   align-items: center;
   justify-content: center;
   z-index: 600;
-  padding: var(--mcm-base);
+  padding: var(--space-5);
 }
 
 .update-progress {
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
   width: 100%;
   max-width: 42.857rem;
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 0.571rem 2.857rem var(--ctp-shadow);
+  box-shadow: var(--elevation-3);
 }
 
 .update-progress__header {
   display: flex;
   align-items: center;
   padding: 0.857rem 1rem;
-  border-bottom: 1px solid var(--ctp-surface1);
+  border-bottom: 1px solid var(--border);
 }
 
 .update-progress__title {
@@ -83,7 +83,7 @@
   align-items: center;
   gap: 0.857rem;
   padding: 0.857rem 1rem;
-  border-top: 1px solid var(--ctp-surface1);
+  border-top: 1px solid var(--border);
 }
 
 .update-progress__success {
@@ -91,19 +91,19 @@
   font-family: var(--font-display);
   font-size: 0.857em;
   color: var(--ctp-green);
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 .update-progress__btn {
   background: var(--ctp-mauve);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-base);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 0.929em;
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.571rem 1.143rem;
 }
 

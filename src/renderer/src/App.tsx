@@ -375,7 +375,14 @@ export function App(): React.ReactElement {
           </div>
         ) : (
           <div className="app__empty">
-            <div className="app__empty-hint">Select a workspace and open or resume a session</div>
+            <div className="app__empty-content">
+              <div className="app__empty-mark" aria-hidden="true">
+                π
+              </div>
+              <p className="app__empty-hint">
+                Select a workspace in the sidebar, then open or resume a session to start working.
+              </p>
+            </div>
             {/* No composer here to sit above, so the update notice floats in
                 the bottom-right corner of the empty area instead. */}
             <UpdateBanner floating />

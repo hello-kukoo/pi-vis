@@ -1,8 +1,7 @@
 /* DiffViewerHost — modal-style diff viewer overlay.
    The overlay sits on top of the session area (z-index 150, below
    dialogs at 200 and pickers at 250 — agent questions always win).
-   The panel uses the base color for content and mantle for chrome,
-   matching the MCM "code reads like the rest of the app" rule. */
+   The panel uses the base color for content and mantle for chrome. */
 
 .diff-overlay {
   position: absolute;
@@ -12,7 +11,7 @@
   backdrop-filter: blur(0.286rem);
   display: flex;
   justify-content: center;
-  padding: var(--mcm-base);
+  padding: var(--space-5);
   animation: diff-overlay-in 120ms ease-out;
 }
 
@@ -22,9 +21,9 @@
   display: flex;
   flex-direction: column;
   background: var(--ctp-base);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
-  box-shadow: 0 0.571rem 2.286rem var(--ctp-shadow);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-3);
   overflow: hidden;
   animation: diff-pop-in 140ms ease-out;
 }
@@ -111,8 +110,8 @@
 /* Segmented control (UNIFIED / SPLIT). */
 .diff-viewer__seg {
   display: inline-flex;
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -152,7 +151,7 @@
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-subtext0);
   cursor: pointer;
   flex-shrink: 0;
@@ -238,8 +237,8 @@
   gap: 0.214rem;
   padding: 0.214rem 0.286rem 0.214rem 0.5rem;
   background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   box-shadow: 0 0.286rem 1rem var(--ctp-shadow);
   animation: diff-search-in 120ms ease-out;
 }
@@ -317,7 +316,7 @@
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-subtext0);
   cursor: pointer;
   flex-shrink: 0;
@@ -362,8 +361,8 @@
 .diff-rail__search {
   margin: 0.571rem;
   display: flex;
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--ctp-crust);
   flex-shrink: 0;
 }
@@ -426,7 +425,7 @@
   width: 100%;
   padding: 0.286rem 0.5rem;
   padding-left: 0.5rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   cursor: pointer;
@@ -589,7 +588,7 @@
   font-size: 0.929em;
   padding: 2rem;
   text-align: center;
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 .diff-empty__check {
@@ -609,7 +608,7 @@
   font-size: var(--font-size-small);
   background: var(--ctp-surface0);
   padding: 0.143rem 0.429rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   margin-top: 0.286rem;
 }
 
@@ -617,12 +616,12 @@
   background: var(--ctp-mauve);
   color: var(--ctp-base);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 0.857em;
   font-weight: 500;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.429rem 1rem;
   margin-top: 0.429rem;
 }

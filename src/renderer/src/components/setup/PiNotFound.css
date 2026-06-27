@@ -1,7 +1,5 @@
-/* PiNotFound — demonstrates the full MCM layout pattern: the π glyph
-   sits in vast negative space; the title is a flush-left MCM display
-   header; the body copy and instructions are indented to the right
-   via the "shelf" effect. */
+/* PiNotFound — full-screen setup state. The π glyph anchors a flush-left
+   display header, with the body copy and instructions stacked below. */
 
 .pi-not-found {
   display: flex;
@@ -9,8 +7,8 @@
   align-items: flex-start;
   justify-content: center;
   height: 100%;
-  gap: var(--mcm-base);
-  padding: var(--mcm-large) var(--mcm-massive);
+  gap: var(--space-5);
+  padding: var(--space-8) var(--space-10);
   text-align: left;
 }
 
@@ -25,10 +23,10 @@
   font-family: var(--font-display);
   font-size: 1.714em; /* ≈24px @ 14px root */
   font-weight: 700;
-  line-height: var(--mcm-line-display);
-  letter-spacing: var(--mcm-track-display);
+  line-height: var(--leading-display);
+  letter-spacing: var(--tracking-display);
   text-align: left;
-  margin-bottom: var(--mcm-base);
+  margin-bottom: var(--space-5);
   color: var(--ctp-text);
 }
 
@@ -37,10 +35,10 @@
   font-size: 1em;
   color: var(--ctp-subtext0);
   max-width: 28.571rem; /* ≈400px */
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
   /* Indent to the right of the flush-left axis */
   margin-left: 10%;
-  padding-left: var(--mcm-large);
+  padding-left: var(--space-8);
 }
 
 .pi-not-found__desc code {
@@ -52,8 +50,8 @@
 
 .pi-not-found__instructions {
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 1.143rem 1.429rem;
   text-align: left;
   display: flex;
@@ -61,16 +59,16 @@
   gap: 0.571rem;
   max-width: 34.286rem; /* ≈480px */
   width: 100%;
-  /* Architectural shelf */
+  /* Indented body block */
   margin-left: 10%;
-  padding-left: var(--mcm-large);
+  padding-left: var(--space-8);
 }
 
 .pi-not-found__instructions p {
   font-family: var(--font-display);
   font-size: 0.929em;
   color: var(--ctp-subtext0);
-  line-height: var(--mcm-line-body);
+  line-height: var(--leading-body);
 }
 
 .pi-not-found__code {
@@ -79,8 +77,8 @@
   color: var(--ctp-teal);
   background: var(--ctp-mantle);
   padding: 0.571rem 0.857rem;
-  border-radius: var(--mcm-radius-sm);
-  line-height: var(--mcm-line-code);
+  border-radius: var(--radius-sm);
+  line-height: var(--leading-code);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -88,16 +86,16 @@
 .pi-not-found__btn {
   background: var(--ctp-mauve);
   border: none;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-base);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 1em;
   font-weight: 600;
-  line-height: var(--mcm-line-label);
+  line-height: var(--leading-label);
   padding: 0.714rem 1.714rem;
   margin-left: 10%;
-  padding-left: var(--mcm-large);
+  padding-left: var(--space-8);
 }
 
 .pi-not-found__btn:hover {

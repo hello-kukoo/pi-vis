@@ -1,6 +1,5 @@
-/* Session header — slim chrome strip. The session name uses the MCM
-   label style (uppercase, wide tracking); the model/thinking pickers
-   follow the same architectural-signage convention. */
+/* Session header — slim chrome strip. The session name sits flush-left;
+   the model/thinking pickers are quiet filled chips to its right. */
 
 .session-header {
   /* Fill the parent titlebar (both axes). The titlebar is 38px tall
@@ -71,7 +70,7 @@
   min-width: 0;
   text-align: left;
   padding: 0.286rem 0.429rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   /* Interactive element inside the titlebar's drag region — must be
      clickable, not a drag handle. */
   -webkit-app-region: no-drag;
@@ -85,7 +84,7 @@
 .session-header__name-input {
   background: var(--ctp-surface0);
   border: 1px solid var(--ctp-mauve);
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   color: var(--ctp-text);
   font-family: var(--font-display);
   font-size: 0.929em;
@@ -119,7 +118,7 @@
   color: var(--ctp-mauve);
   background: color-mix(in srgb, var(--ctp-mauve) 12%, transparent);
   padding: 0.071rem 0.429rem;
-  border-radius: var(--mcm-radius-sm);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
   -webkit-app-region: no-drag;
@@ -146,8 +145,8 @@
 
 .session-header__picker-btn {
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   color: var(--ctp-subtext0);
   font-family: var(--font-code);
   font-size: 0.857em;
@@ -156,13 +155,14 @@
   line-height: 1.4;
   padding: 0.214rem 0.571rem;
   cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
   /* Picker button (model / thinking level) inside the titlebar's drag
      region. */
   -webkit-app-region: no-drag;
 }
 
 .session-header__picker-btn:hover {
-  border-color: var(--ctp-overlay0);
+  background: var(--ctp-surface1);
   color: var(--ctp-text);
 }
 
@@ -225,16 +225,16 @@
 
 .session-header__dropdown {
   position: absolute;
-  top: calc(100% + 0.286rem);
+  top: calc(100% + 0.429rem);
   right: 0;
   background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   min-width: 14.286rem;
   max-height: 21.429rem;
   overflow-y: auto;
   z-index: 100;
-  box-shadow: 0 0.286rem 1.143rem var(--ctp-shadow);
+  box-shadow: var(--elevation-2);
 }
 
 .session-header__dropdown-search {
@@ -248,8 +248,8 @@
   /* box-sizing is set globally by theme.css */
   width: 100%;
   background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--mcm-radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   color: var(--ctp-text);
   font-family: var(--font-display);
   font-size: 0.857em;
@@ -353,4 +353,22 @@
      to keep the window edge stable. */
   min-width: 5.5rem;
   text-align: right;
+}
+
+/* Status-bar visibility toggle — a compact icon chip at the right end of the
+   controls cluster, beside the context meter + token/cost summary (the
+   status bar's compact counterpart). Inherits the picker-chip surface/hover
+   from .session-header__picker-btn; this just makes it square for the icon. */
+.session-header__statusbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.214rem 0.357rem;
+  color: var(--ctp-subtext0);
+}
+
+.session-header__statusbar-toggle svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  display: block;
 }

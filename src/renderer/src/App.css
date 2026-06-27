@@ -6,6 +6,11 @@
 .app {
   height: 100%;
   display: grid;
+  /* The window is a single unified canvas (mantle); the title bar and
+     sidebar blend into it (no borders), and the content area floats on top
+     as one rounded, inset card. This replaces the old flush rectangular
+     grid — the source of the hard 90° seams between chrome regions. */
+  background: var(--ctp-mantle);
   /* The first row is a constant 38px — the title bar is always that
      tall regardless of whether a session is selected. 38px matches
      the macOS standard window-chrome height (the same height Safari
@@ -59,6 +64,16 @@
   grid-area: main;
   display: flex;
   flex-direction: column;
+  /* The floating content card: a rounded, base-colored panel inset from the
+     canvas on all four sides (a gap below the title bar, beside the sidebar,
+     and off the window's right/bottom edges). overflow:hidden clips every
+     full-width strip inside it — transcript, worktree bar, composer, status
+     bar — to the rounded corners, so none of them form hard outer 90° seams. */
+  margin: 0 var(--space-2) var(--space-2) var(--space-2);
+  background: var(--ctp-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-1);
   overflow: hidden;
   min-height: 0;
   /* Establish a size-query container so the transcript, empty state, and
@@ -91,24 +106,51 @@
 }
 
 .app__empty {
-  /* MCM-style empty state: vast outer margins, body content centered. The
-     horizontal padding scales with the pane width (cqi) so the "pools of
-     negative space" don't crush the centered hint on a narrow window. */
+  /* Empty state: a single centered welcome card. The horizontal padding
+     scales with the pane width (cqi) so it stays centered without crushing
+     the content on a narrow window. */
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   height: 100%;
-  gap: var(--mcm-base);
-  padding: var(--mcm-large) clamp(var(--mcm-base), 12cqi, var(--mcm-massive));
+  padding: var(--space-6) clamp(var(--space-5), 10cqi, var(--space-10));
   text-align: center;
+}
+
+.app__empty-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-5);
+  max-width: 26rem;
+}
+
+/* A quiet, rounded "π" tile — a small brand anchor so the blank screen
+   reads as intentional rather than empty. */
+.app__empty-mark {
+  width: 3.75rem;
+  height: 3.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xl);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--border);
+  color: var(--ctp-mauve);
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: var(--elevation-1);
 }
 
 .app__empty-hint {
   font-size: 1em;
-  line-height: var(--mcm-line-body);
-  color: var(--ctp-overlay0);
+  line-height: var(--leading-body);
+  color: var(--ctp-subtext0);
+  margin: 0;
 }
 
 .app-loading {
