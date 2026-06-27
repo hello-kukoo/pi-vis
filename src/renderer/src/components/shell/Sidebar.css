@@ -41,30 +41,77 @@
      ellipsis at the *visible* edge. Clipping x keeps every row sized to the
      visible width so the ellipsis engages. */
   overflow-x: hidden;
-  /* A little top breathing room so the first workspace name isn't crammed
-     against the title-bar divider; bottom keeps the list off the footer.
-     Right margin insets every workspace row by the content column so its
-     border-bottom (the horizontal separator between workspaces) lines up
-     vertically with the right edge of the session pills / show-more /
-     workspace actions / settings button — the single alignment line for the
-     sidebar's right edge. */
+  /* Right margin insets every workspace row by the content column so its
+     right edge lines up vertically with the session pills / show-more /
+     workspace actions / settings button — the single alignment line for
+     the sidebar's right edge. */
   margin-right: 0.429rem;
-  padding: 0.357rem 0 0.571rem 0;
+  /* Edge-fade scroll (asymmetric). The mask fades the top and bottom of
+     the viewport to transparent; the bottom edge also carries the overflow
+     cue. The two edges serve different roles, so they need different sizes.
+
+     Top padding and the top fade size are deliberately *decoupled*: the
+     fade zone is larger than the padding so the dissolution is clearly
+     visible, but the padding stays small so the first workspace name isn't
+     pushed down. The first item lands near the opaque end of a gradual
+     transition, so it reads as fully present at rest — only content
+     scrolling *up out of view* passes through the full fade.
+
+     - Top (the start of the list): the first workspace name sits as close
+       to the top as possible. The fade zone is larger than the top padding,
+       so the gradient is well into opacity by the time it reaches the first
+       item; content above it (scrolling away) dissolves visibly.
+     - Bottom (the overflow indicator): substantially larger. This is the
+       only cue that more content exists below, and the list is full of
+       inter-row gaps (e.g. the space between a workspace header and the
+       next block's "New session" button). A shallow bottom fade can fall
+       entirely inside one of those gaps and vanish — no visible content is
+       being faded, so the indicator disappears. A taller bottom zone spans
+       past the gaps and reliably catches a row, keeping the "more below"
+       cue legible at any scroll position. Here the bottom padding matches
+       the bottom fade so the last item can scroll clear of the fade. */
+  --sidebar-fade-top: 2rem;
+  --sidebar-pad-top: 1.25rem;
+  --sidebar-fade-bottom: 3.5rem;
+  padding: var(--sidebar-pad-top) 0 var(--sidebar-fade-bottom) 0;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--sidebar-fade-top),
+    #000 calc(100% - var(--sidebar-fade-bottom)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--sidebar-fade-top),
+    #000 calc(100% - var(--sidebar-fade-bottom)),
+    transparent 100%
+  );
 }
 
-/* Non-last workspaces get a consistent padding-bottom so the gap between
-   the last visible child (header, last session row, or show-more button) and
-   the border-bottom separator is constant — 0.571rem regardless of what sits
-   above. The sessions container and show-more button no longer carry their
-   own bottom padding/margin, so all three "what sits above" cases resolve to
-   the same vertical gap before the separator. */
+/* The fade mask is the only scroll affordance — hide the native scrollbar.
+   Scoped to the sidebar so other scroll regions (transcript, code blocks,
+   dialogs) keep their thin thumb. */
+.sidebar__workspaces {
+  scrollbar-width: none;
+}
+.sidebar__workspaces::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Spacing between workspace blocks. No separator line: workspaces are
+   already distinguished by their header (bold name) sitting above the
+   recessed mantle sessions well — a border would be redundant noise on top
+   of that. The padding just gives each block breathing room before the next. */
 .sidebar__workspaces > .sidebar__workspace:not(:last-child) {
   padding-bottom: 0.571rem;
 }
 
 .sidebar__workspace {
   position: relative;
-  border-bottom: 1px solid var(--border-faint);
 }
 
 .sidebar__workspace-header {
@@ -339,19 +386,20 @@
   background: var(--ctp-surface0);
 }
 
-/* Show more button */
+/* Show more — a quiet text link, not a bordered button. It's a secondary
+   affordance (expand the session list), so it reads as a link that matches
+   the session rows' alignment rather than a heavyweight call to action. */
 .sidebar__show-more {
   width: 100%;
-  /* Top margin still creates breathing room above the button (separates it
-     from the last session row); bottom margin removed — the workspace row's
-     padding-bottom now owns the gap to the separator. */
   margin: 0.286rem 0 0;
-  background: var(--ctp-surface0);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: none;
+  border: none;
+  border-radius: 0;
   cursor: pointer;
-  padding: 0.357rem 0.571rem;
-  text-align: center;
+  /* Match the session rows' left padding so the label sits under the
+     session names, and a little right padding so the hover wash has room. */
+  padding: 0.357rem 0.643rem 0.357rem 1rem;
+  text-align: left;
   font-family: var(--font-display);
   font-size: 0.786em;
   color: var(--ctp-overlay1);
@@ -360,8 +408,8 @@
 }
 
 .sidebar__show-more:hover {
-  background: var(--ctp-surface1);
   color: var(--ctp-text);
+  background: var(--ctp-surface0);
 }
 
 .sidebar__footer {

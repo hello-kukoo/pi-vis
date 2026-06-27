@@ -18,7 +18,8 @@
      size container), so the side margins only open up once there's room for
      it. On a narrow pane it collapses toward --space-5 instead of eating
      ~100px and crushing the text into a 2-words-per-line column. */
-  padding: var(--space-5) clamp(var(--space-5), 6cqi, var(--space-8));
+  padding: var(--transcript-fade-top) clamp(var(--space-5), 6cqi, var(--space-8))
+    var(--transcript-fade-bottom);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -28,6 +29,48 @@
      emitting scroll events the handler can misread as a user scrolling up —
      which drifts the view off the bottom. Opt the scroller out entirely. */
   overflow-anchor: none;
+  /* Edge-fade scroll (bottom-only). The transcript lives inside the rounded
+     floating content card (`.app__main`): the top is a crisp, deliberate
+     boundary (card border + radius), so content should hard-cut there — a top
+     fade would fight the card's own visual edge and read as a muddy seam
+     rather than a clean frame. Fading the top only makes sense where there's
+     no clean edge to dissolve *into*, which isn't the case here.
+
+     The bottom is different: it abuts the composer, which has no shared
+     border with the transcript — content used to hard-cut against the
+     composer's top. A bottom fade spans that junction so the dissolution is
+     always visible, the cue that older content continues below when scrolled
+     up. When bottom-pinned the latest message sits *above* this zone (the
+     matching bottom padding is empty), so the current response stays fully
+     opaque and readable; only scrolled-up history passes through the fade. */
+  --transcript-pad-top: 1.25rem;
+  --transcript-fade-bottom: 3rem;
+  padding: var(--transcript-pad-top) clamp(var(--space-5), 6cqi, var(--space-8))
+    var(--transcript-fade-bottom);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - var(--transcript-fade-bottom)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - var(--transcript-fade-bottom)),
+    transparent 100%
+  );
+}
+
+/* The fade mask is the only scroll affordance — hide the native scrollbar.
+   Scoped to the transcript so other scroll regions (code blocks, tool cards,
+   dialogs) keep their thin thumb. */
+.transcript-view {
+  scrollbar-width: none;
+}
+.transcript-view::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .transcript-blocks {
