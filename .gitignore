@@ -56,4 +56,8 @@ Desktop.ini
 # CodeGraph
 .codegraph/
 
+# Pi
 .pi/*
+
+# Playwright
+.playwright-cli/*
