@@ -94,10 +94,11 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   // Seed / re-seed local text from the store draft when the pending session
   // or its workspace changes (e.g. user switches away and clicks "+ New
-  // session" again — the typed text comes back). Non-pending sessions start
-  // empty as before. We read the draft via getState() (not a reactive
-  // subscription) so per-keystroke draft writes don't trigger an extra
-  // render here — the setText in handleChange already re-renders.
+  // session" again — the typed text comes back). Non-pending sessions
+  // restore their own per-session draft the same way, so typed text survives
+  // switching to another session and back. We read the draft via getState()
+  // (not a reactive subscription) so per-keystroke draft writes don't
+  // trigger an extra render here — the setText in handleChange already does.
   useEffect(() => {
     if (pending && workspacePath) {
       if (seededWorkspaceRef.current !== workspacePath) {
@@ -109,9 +110,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
     } else {
       seededWorkspaceRef.current = null;
-      setText("");
+      const draft = useSessionsStore.getState().sessionDrafts.get(sessionId) ?? "";
+      setText(draft);
     }
-  }, [pending, workspacePath]);
+  }, [pending, workspacePath, sessionId]);
   const editorInjectionText = session?.editorInjection?.text;
 
   const addUserMessage = useSessionsStore((s) => s.addUserMessage);
@@ -131,6 +133,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const applyWorktree = useSessionsStore((s) => s.applyWorktree);
   const clearWorktreeIntent = useSessionsStore((s) => s.clearWorktreeIntent);
   const setNewSessionDraft = useSessionsStore((s) => s.setNewSessionDraft);
+  const setSessionDraft = useSessionsStore((s) => s.setSessionDraft);
+  const clearEditorInjection = useSessionsStore((s) => s.clearEditorInjection);
   const updateSettings = useSettingsStore((s) => s.update);
 
   const isStreaming = session?.isStreaming ?? false;
@@ -166,11 +170,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     // first send (which would spuriously re-inject stale text).
     if (pendingRef.current && workspacePathRef.current) {
       setNewSessionDraft(workspacePathRef.current, editorInjectionText);
+    } else {
+      setSessionDraft(sessionId, editorInjectionText);
     }
     setSlashIndex(0);
     setAttachments([]);
     textareaRef.current?.focus();
-  }, [editorInjectionNonce, editorInjectionText, setNewSessionDraft]);
+  }, [editorInjectionNonce, editorInjectionText, setNewSessionDraft, setSessionDraft, sessionId]);
 
   // Focus the composer so the user can type right away on app open, session
   // switch, and new-session — all of which mount a fresh Composer (the
@@ -536,12 +542,27 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         // prompts/bash/template/skill sends. But non-promoting slash
         // commands (/model, /name, /settings, /diff, /login, …) add no
         // transcript block, so they'd leave their command text lingering in
-        // the draft — and it would resurface on the next "+ New session".
-        // Clear here too, once the action has dispatched successfully past
-        // all guards. This is idempotent with the store-side clears.
-        if (pendingRef.current && workspacePathRef.current) {
+        // the draft — and it would resurface on the next "+ New session"
+        // (or, for non-pending sessions, on switch-back). Clear here too,
+        // once the action has dispatched successfully past all guards. This
+        // is idempotent with the store-side clears.
+        // Read isNewPending from the store (authoritative at this moment)
+        // rather than pendingRef.current, which may not have re-rendered yet
+        // after addUserMessage flipped isNewPending to false during the await
+        // above. In practice both agree (the store actions already cleared
+        // the relevant draft for content sends; this clear is load-bearing
+        // only for non-promoting slash commands where isNewPending is
+        // unchanged), but reading the store is robust against future
+        // mutations added between executeAction and here.
+        const stillPending = !!useSessionsStore.getState().sessions.get(sessionId)?.isNewPending;
+        if (stillPending && workspacePathRef.current) {
           useSessionsStore.getState().clearNewSessionDraft(workspacePathRef.current);
+        } else {
+          useSessionsStore.getState().setSessionDraft(sessionId, "");
         }
+        // A send also consumes any editor injection — otherwise the stale
+        // injection would re-fire on the next remount and pollute the draft.
+        useSessionsStore.getState().clearEditorInjection(sessionId);
       } finally {
         submittingRef.current = false;
       }
@@ -686,8 +707,16 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       const v = e.target.value;
       setText(v);
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
+      else setSessionDraft(sessionId, v);
+      // Consume any pending editor injection — the user has taken over the
+      // textarea, so a stale injection must not re-fire on remount and
+      // clobber the restored draft. No-op once cleared (subsequent
+      // keystrokes skip the store read-and-write).
+      if (useSessionsStore.getState().sessions.get(sessionId)?.editorInjection !== undefined) {
+        clearEditorInjection(sessionId);
+      }
     },
-    [pending, workspacePath, setNewSessionDraft],
+    [pending, workspacePath, setNewSessionDraft, setSessionDraft, sessionId, clearEditorInjection],
   );
 
   // ── Click to pick a suggestion ─────────────────────────────────────
@@ -697,10 +726,23 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       const v = completionFor(entry);
       setText(v);
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
+      else setSessionDraft(sessionId, v);
+      // Consume any pending editor injection (same rationale as handleChange).
+      if (useSessionsStore.getState().sessions.get(sessionId)?.editorInjection !== undefined) {
+        clearEditorInjection(sessionId);
+      }
       setSlashIndex(0);
       textareaRef.current?.focus();
     },
-    [completionFor, pending, workspacePath, setNewSessionDraft],
+    [
+      completionFor,
+      pending,
+      workspacePath,
+      setNewSessionDraft,
+      setSessionDraft,
+      sessionId,
+      clearEditorInjection,
+    ],
   );
 
   const isBashMode = text.startsWith("!");

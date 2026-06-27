@@ -203,6 +203,22 @@ function clearNewSessionDraftFor(
 }
 
 /**
+ * Returns a `sessionDrafts` map with `sessionId` removed when it exists —
+ * otherwise the same reference (so callers can detect a no-op and skip a
+ * redundant state-field write). The per-session (non-pending) counterpart of
+ * `clearNewSessionDraftFor`.
+ */
+function clearSessionDraftFor(
+  drafts: Map<SessionId, string>,
+  sessionId: SessionId,
+): Map<SessionId, string> {
+  if (!drafts.has(sessionId)) return drafts;
+  const next = new Map(drafts);
+  next.delete(sessionId);
+  return next;
+}
+
+/**
  * Whether the "Running for …" working indicator should be shown.
  *
  * `isStreaming` alone is not enough: an extension slash-command (e.g. /agents)
@@ -243,6 +259,22 @@ interface SessionsStore {
   setNewSessionDraft: (workspacePath: string, text: string) => void;
   /** Clear the per-workspace draft (called when the pending session sends). */
   clearNewSessionDraft: (workspacePath: string) => void;
+
+  /** Per-session unsent composer text for *non-pending* sessions — the
+   *  generalization of `newSessionDrafts` to every session. The pending-new
+   *  case still uses `newSessionDrafts` (keyed by workspace, not session)
+   *  because a pending session is hidden from the sidebar: once the user
+   *  switches away the only way back is clicking "+ New session" again, which
+   *  creates a fresh session that must re-seed from the workspace slot.
+   *
+   *  Lets the user switch away from any real session and come back without
+   *  losing what they typed. Lives only in memory — never persisted — and is
+   *  read via `getState()` in the Composer's seeding effect so per-keystroke
+   *  writes don't trigger re-renders (mirrors `newSessionDrafts`). Cleared
+   *  the moment a message is actually sent. */
+  sessionDrafts: Map<SessionId, string>;
+  /** Update (replace) the per-session draft. Empty text deletes the entry. */
+  setSessionDraft: (sessionId: SessionId, text: string) => void;
 
   addWorkspace: (path: string) => void;
   removeWorkspace: (path: string) => void;
@@ -371,6 +403,11 @@ interface SessionsStore {
   refreshCommands: (sessionId: SessionId) => Promise<void>;
   /** Drop a fresh nonce on editorInjection so the Composer re-picks it up. */
   injectEditorText: (sessionId: SessionId, text: string) => void;
+  /** Clear a stale editorInjection so it won't re-fire on Composer remount.
+   *  Called when the user takes over the textarea (types / picks a suggestion)
+   *  or when content is sent — the injection is "consumed" and must not
+   *  clobber the restored draft on the next switch-back. */
+  clearEditorInjection: (sessionId: SessionId) => void;
   /** Open a built-in picker (model / fork / resume). Single slot. */
   openPicker: (sessionId: SessionId, picker: PickerRequest) => void;
   /** Drop any active picker. */
@@ -399,6 +436,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   expandedWorkspaces: [],
   headerCompact: false,
   newSessionDrafts: new Map(),
+  sessionDrafts: new Map(),
 
   addWorkspace: (path) => {
     set((state) => {
@@ -549,11 +587,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         s.workspacePath,
         isNewSessionPending(s),
       );
+      // Drop this session's per-session draft too — it should never resurface
+      // on some other session. No-op if nothing was stored.
+      const sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
       return {
         sessions,
         workspaces,
         activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
         newSessionDrafts: drafts,
+        sessionDrafts,
       };
     });
   },
@@ -678,6 +720,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionName,
         thinkingLevel,
         isNewPending: promoted ? false : s.isNewPending,
+        editorInjection: promoted ? undefined : s.editorInjection,
       });
       return promoted ? { sessions, newSessionDrafts: drafts } : { sessions };
     });
@@ -719,6 +762,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionTitle,
         lastActivityAt: Date.now(),
         isNewPending: false,
+        editorInjection: undefined,
       });
       // Clear the per-workspace draft exactly when the pending session
       // becomes real (content landed). Doing it here — not in the Composer's
@@ -729,7 +773,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         s.workspacePath,
         !!s.isNewPending,
       );
-      return { sessions, newSessionDrafts: drafts };
+      // Clear the per-session draft (non-pending sessions) — content landed,
+      // so the typed text is consumed and won't resurface on switch-back.
+      // No-op when there's nothing stored (clearSessionDraftFor returns the
+      // same ref). Same early-bail rationale as the per-workspace clear above.
+      const sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
+      return { sessions, newSessionDrafts: drafts, sessionDrafts };
     });
   },
 
@@ -739,7 +788,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const s = sessions.get(sessionId);
       if (!s) return {};
       const transcript = addBashBlock(s.transcript, command);
-      sessions.set(sessionId, { ...s, transcript, isNewPending: false });
+      sessions.set(sessionId, {
+        ...s,
+        transcript,
+        isNewPending: false,
+        editorInjection: undefined,
+      });
       // Clear the per-workspace draft when the pending session becomes real
       // (see addUserMessage for rationale).
       const drafts = clearNewSessionDraftFor(
@@ -747,7 +801,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         s.workspacePath,
         !!s.isNewPending,
       );
-      return { sessions, newSessionDrafts: drafts };
+      const sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
+      return { sessions, newSessionDrafts: drafts, sessionDrafts };
     });
   },
 
@@ -1423,6 +1478,16 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
+  clearEditorInjection: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s?.editorInjection) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...s, editorInjection: undefined });
+      return { sessions };
+    });
+  },
+
   openPicker: (sessionId, picker) => {
     set((state) => {
       const sessions = new Map(state.sessions);
@@ -1452,6 +1517,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         ...s,
         transcript: addCustomMessageBlock(s.transcript, content),
         isNewPending: false,
+        editorInjection: undefined,
       };
       sessions.set(sessionId, next);
       // Clear the per-workspace draft when the pending session becomes real
@@ -1461,7 +1527,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         s.workspacePath,
         !!s.isNewPending,
       );
-      return { sessions, newSessionDrafts: drafts };
+      const sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
+      return { sessions, newSessionDrafts: drafts, sessionDrafts };
     });
   },
 
@@ -1628,6 +1695,20 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const drafts = new Map(state.newSessionDrafts);
       drafts.delete(workspacePath);
       return { newSessionDrafts: drafts };
+    });
+  },
+
+  setSessionDraft: (sessionId, text) => {
+    set((state) => {
+      if (text === "") {
+        if (!state.sessionDrafts.has(sessionId)) return {};
+        const drafts = new Map(state.sessionDrafts);
+        drafts.delete(sessionId);
+        return { sessionDrafts: drafts };
+      }
+      const drafts = new Map(state.sessionDrafts);
+      drafts.set(sessionId, text);
+      return { sessionDrafts: drafts };
     });
   },
 }));

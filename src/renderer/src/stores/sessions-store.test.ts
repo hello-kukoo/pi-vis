@@ -1366,3 +1366,116 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     expect(isPendingNewSessionActiveFor(useSessionsStore.getState(), WORKSPACE)).toBe(false);
   });
 });
+
+describe("sessions store - per-session drafts (non-pending)", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      newSessionDrafts: new Map(),
+      sessionDrafts: new Map(),
+    });
+  });
+
+  it("setSessionDraft stores and clears per-session draft text", () => {
+    const store = useSessionsStore.getState();
+    store.setSessionDraft(SESSION_A, "half-typed");
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_A)).toBe("half-typed");
+    // Empty text deletes the entry (no lingering empty values).
+    store.setSessionDraft(SESSION_A, "");
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+    // Clearing a non-existent entry is a no-op (same ref).
+    const before = useSessionsStore.getState().sessionDrafts;
+    store.setSessionDraft(SESSION_B, "");
+    expect(useSessionsStore.getState().sessionDrafts).toBe(before);
+  });
+
+  it("drafts are isolated per session", () => {
+    const store = useSessionsStore.getState();
+    store.setSessionDraft(SESSION_A, "text in A");
+    store.setSessionDraft(SESSION_B, "text in B");
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_A)).toBe("text in A");
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_B)).toBe("text in B");
+  });
+
+  it("addUserMessage clears the per-session draft once the message lands", () => {
+    const store = useSessionsStore.getState();
+    // A resumed (non-pending) session with an in-progress draft.
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.setSessionDraft(SESSION_A, "unsent follow-up");
+    store.addUserMessage(SESSION_A, "sent message");
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+  });
+
+  it("addBashCommand clears the per-session draft", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.setSessionDraft(SESSION_A, "!ls");
+    store.addBashCommand(SESSION_A, "ls");
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+  });
+
+  it("addCustomMessage clears the per-session draft", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.setSessionDraft(SESSION_A, "/skill");
+    store.addCustomMessage(SESSION_A, "custom content");
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+  });
+
+  it("removeSession clears that session's draft (no leak to other sessions)", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.createSession(SESSION_B, WORKSPACE, "/f/b.jsonl");
+    store.setSessionDraft(SESSION_A, "A's draft");
+    store.setSessionDraft(SESSION_B, "B's draft");
+    store.removeSession(SESSION_A);
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_B)).toBe("B's draft");
+  });
+});
+
+describe("sessions store - editorInjection lifecycle", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      newSessionDrafts: new Map(),
+      sessionDrafts: new Map(),
+    });
+  });
+
+  it("injectEditorText sets and clearEditorInjection clears", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.injectEditorText(SESSION_A, "injected");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection?.text).toBe(
+      "injected",
+    );
+    store.clearEditorInjection(SESSION_A);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toBeUndefined();
+  });
+
+  it("clearEditorInjection is a no-op when nothing is injected (same ref)", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    const before = useSessionsStore.getState().sessions;
+    store.clearEditorInjection(SESSION_A);
+    expect(useSessionsStore.getState().sessions).toBe(before);
+  });
+
+  it("addUserMessage clears a stale editorInjection so it won't re-fire on remount", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.injectEditorText(SESSION_A, "injected");
+    // User typed over it then sent — the injection is consumed.
+    store.setSessionDraft(SESSION_A, "world");
+    store.addUserMessage(SESSION_A, "world");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toBeUndefined();
+    expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
+  });
+});
