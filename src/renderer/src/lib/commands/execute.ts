@@ -50,6 +50,7 @@ import type {
   ScopedModelsData,
   TrustStateData,
 } from "@shared/pi-protocol/responses.js";
+import { modelDisplayName } from "../model-utils.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
 import type { ComposerAction } from "./types.js";
 
@@ -72,10 +73,14 @@ export interface ExecuteDeps {
   /** Bash lifecycle: start block, finish with output. */
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
-  /** Set the active model id in the store (mirrors SessionHeader.handleModelChange). */
-  setCurrentModel: (sessionId: SessionId, modelId: string) => void;
-  /** Persist last-used model so the next session picks it up. */
-  updateLastUsedModel: (provider: string, modelId: string) => Promise<void>;
+  /** Apply a model switch end-to-end: optimistic store update, set_model RPC,
+   *  get_state reconciliation, and supersession-safe last-used persist. The
+   *  single mutation path for the model dropdown — used by /model <search> so
+   *  it shares the same reconcile/supersession semantics as the picker. */
+  applyModelChange: (
+    sessionId: SessionId,
+    model: ModelInfo,
+  ) => Promise<{ ok: boolean; error?: string }>;
   /** Persist a custom_message block (TUI parity for /session). */
   addCustomMessage: (sessionId: SessionId, content: string) => void;
   /** Open the changelog in a modal overlay (for /changelog). */
@@ -384,20 +389,20 @@ async function executeModel(
       );
     const exact = findExactModelReferenceMatch(action.search, candidates);
     if (exact) {
-      const res = await deps.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "set_model", provider: exact.provider, modelId: exact.id },
-      });
-      // Only commit the model (store + last-used preference) once pi confirms.
-      // A failed switch must not move the dropdown or leak into the next
-      // session's default — mirrors applyModelChange's revert-on-failure.
-      if (!res.success) {
+      // Route through the same mutation path as the picker/dropdown so the
+      // slash path gets get_state provider reconciliation and a
+      // supersession-safe last-used persist too (mirrors applyModelChange).
+      const model: ModelInfo = {
+        id: exact.id,
+        provider: exact.provider,
+        ...(exact.name !== undefined ? { name: exact.name } : {}),
+      };
+      const res = await deps.applyModelChange(sessionId, model);
+      if (!res.ok) {
         deps.addToast(sessionId, `Failed to set model: ${res.error ?? "unknown error"}`, "error");
         return;
       }
-      deps.setCurrentModel(sessionId, exact.id);
-      await deps.updateLastUsedModel(exact.provider, exact.id);
-      deps.addToast(sessionId, `Model: ${exact.id}`);
+      deps.addToast(sessionId, `Model: ${modelDisplayName(model)}`);
       return;
     }
   }

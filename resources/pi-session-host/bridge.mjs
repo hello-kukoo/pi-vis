@@ -332,22 +332,45 @@ export function setupCommandBridge({
         }
 
         case "get_available_models": {
-          // Mirror pi's effective available-models logic (AgentSession's
-          // cycleModel filters to scoped models when scopedModels is
-          // non-empty): when the session has a scope, the /model dropdown
-          // must cycle only the scoped subset, NOT every enabled model. The
-          // scoped entry's `.model` is a plain data Model object safe for
-          // IPC, matching the existing shape returned by getAvailable().
+          // Mirror pi's effective available-models logic so the /model
+          // dropdown cycles only the in-scope subset, NOT every enabled
+          // model. Two sources of scope, checked in priority order:
+          //   1. session.scopedModels (session-only scope, e.g. from a prior
+          //      set_scoped_models this session). The scoped entry's `.model`
+          //      is a plain data Model object safe for IPC.
+          //   2. settingsManager.getEnabledModels() — the SAVED scope
+          //      persisted by save_scoped_models. The SDK starts every
+          //      session with scopedModels: [] and, unlike pi's CLI main.js,
+          //      NEVER resolves these saved patterns into session.scopedModels,
+          //      so without this fallback a persisted scope would be invisible
+          //      to the dropdown on a fresh session / after relaunch. We
+          //      resolve the patterns with the same best-effort matcher
+          //      (resolveModelScopePatterns) the scoped-models picker uses for
+          //      its initial checkboxes; it is advisory — the authoritative
+          //      scope lives in pi's settingsManager.
           const scoped = _session.scopedModels;
           if (Array.isArray(scoped) && scoped.length > 0) {
             const scopedModels = scoped
               .map((entry) => entry?.model)
               .filter((m) => m && typeof m === "object");
             send({ type: "response", id, success: true, data: { models: scopedModels } });
-          } else {
-            const models = await _session.modelRegistry.getAvailable();
-            send({ type: "response", id, success: true, data: { models } });
+            break;
           }
+          const models = await _session.modelRegistry.getAvailable();
+          let effective = models;
+          const settingsPatterns = _session.settingsManager?.getEnabledModels?.();
+          if (Array.isArray(settingsPatterns) && settingsPatterns.length > 0) {
+            const enabledIds = new Set(resolveModelScopePatterns(settingsPatterns, models));
+            // Only filter when it actually narrows the list: an empty or
+            // full match means "no scope" (mirrors resolveEnabledModelIds →
+            // null), so fall through to the unfiltered registry list.
+            if (enabledIds.size > 0 && enabledIds.size < models.length) {
+              effective = models.filter((m) =>
+                enabledIds.has(`${m.provider}/${m.id}`.toLowerCase()),
+              );
+            }
+          }
+          send({ type: "response", id, success: true, data: { models: effective } });
           break;
         }
 

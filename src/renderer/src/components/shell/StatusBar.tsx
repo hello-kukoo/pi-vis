@@ -48,7 +48,12 @@ export function StatusBar({ sessionId }: StatusBarProps): React.ReactElement | n
       {usageParts.length > 0 && (
         <div className="statusbar__line statusbar__line--split">
           <span>{usageParts.join(" ")}</span>
-          {session.currentModel && <span className="statusbar__model">{session.currentModel}</span>}
+          {session.currentModel && (
+            <span className="statusbar__model">
+              {session.currentModel}
+              {session.currentProvider ? ` [${session.currentProvider}]` : ""}
+            </span>
+          )}
         </div>
       )}
       {segmentLines.map(({ key, text }) => (

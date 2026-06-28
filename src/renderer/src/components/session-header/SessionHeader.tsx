@@ -5,6 +5,7 @@ import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinkin
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatCost, formatTokens } from "../../lib/format.js";
+import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
@@ -233,7 +234,12 @@ export function SessionControls({
     const q = modelSearch.toLowerCase();
     return (session?.availableModels ?? []).filter((m) => {
       if (!q) return true;
-      return (m.name ?? m.id).toLowerCase().includes(q);
+      const label = m.name ?? m.id;
+      return (
+        label.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q) ||
+        (m.provider ?? "").toLowerCase().includes(q)
+      );
     });
   }, [session?.availableModels, modelSearch]);
 
@@ -286,9 +292,22 @@ export function SessionControls({
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
 
   const currentModelInfo = useMemo<ModelInfo | undefined>(
-    () => (session?.availableModels ?? []).find((m) => m.id === session?.currentModel),
-    [session?.availableModels, session?.currentModel],
+    () =>
+      findCurrentModel(
+        session?.availableModels ?? [],
+        session?.currentModel,
+        session?.currentProvider,
+      ),
+    [session?.availableModels, session?.currentModel, session?.currentProvider],
   );
+  // Button label: the active model's name with its provider in brackets
+  // (mirrors pi's TUI "glm-5.2 [zai]"), so when the same model id is offered
+  // by several providers the user can see which subscription/API is in use.
+  const modelButtonLabel = currentModelInfo
+    ? modelDisplayName(currentModelInfo)
+    : session?.currentModel
+      ? `${session.currentModel}${session.currentProvider ? ` [${session.currentProvider}]` : ""}`
+      : "model";
   const thinkingOptions: readonly ThinkingLevel[] = useMemo(() => {
     if (currentModelInfo?.reasoning === false) {
       return ["off"];
@@ -350,9 +369,9 @@ export function SessionControls({
           type="button"
           className="session-header__picker-btn session-header__model-btn"
           onClick={() => setModelOpen((v) => !v)}
-          title={session?.currentModel ?? "model"}
+          title={modelButtonLabel}
         >
-          <span className="session-header__picker-label">{session?.currentModel ?? "model"}</span>
+          <span className="session-header__picker-label">{modelButtonLabel}</span>
           <span aria-hidden>▾</span>
         </button>
         {modelOpen && (
@@ -402,9 +421,7 @@ export function SessionControls({
                 aria-expanded={modelOpen}
                 aria-controls="model-listbox"
                 aria-activedescendant={
-                  filteredModels.length > 0
-                    ? `model-option-${filteredModels[highlightedIndex]?.id}`
-                    : undefined
+                  filteredModels.length > 0 ? `model-option-${highlightedIndex}` : undefined
                 }
                 aria-autocomplete="list"
               />
@@ -414,25 +431,33 @@ export function SessionControls({
             ) : (
               <div ref={listRef} role="listbox" id="model-listbox">
                 {filteredModels.map((m, idx) => {
-                  const label = m.name ?? m.id;
+                  const label = modelDisplayName(m);
                   const q = modelSearch;
                   const active = idx === highlightedIndex;
-                  const selected = session?.currentModel === m.id;
+                  // Compare against the single resolved current entry by key
+                  // (not per-item id matching) so that when the provider is
+                  // unknown and duplicate same-id entries exist, at most ONE
+                  // row highlights instead of every same-id copy getting a ✓.
+                  const selected =
+                    currentModelInfo != null && modelKey(m) === modelKey(currentModelInfo);
                   return (
                     <button
                       type="button"
-                      key={m.id}
+                      key={modelKey(m)}
                       ref={(el) => {
                         if (el) itemRefs.current.set(idx, el);
                         else itemRefs.current.delete(idx);
                       }}
-                      id={`model-option-${m.id}`}
+                      id={`model-option-${idx}`}
                       role="option"
                       aria-selected={selected}
                       className={`session-header__dropdown-item${active ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
                       onClick={() => void handleModelChange(m)}
                       onMouseEnter={() => setHighlightedIndex(idx)}
                     >
+                      <span className="session-header__dropdown-item-check" aria-hidden>
+                        {selected ? "✓" : ""}
+                      </span>
                       {q ? highlightMatch(label, q) : label}
                     </button>
                   );

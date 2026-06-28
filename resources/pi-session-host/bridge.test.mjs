@@ -219,6 +219,50 @@ describe("setupCommandBridge — command mapping", () => {
     expect(session.modelRegistry.getAvailable).toHaveBeenCalled();
     expect(res.data.models).toEqual([{ provider: "anthropic", id: "claude-x", name: "Claude X" }]);
   });
+
+  it("get_available_models honors saved settings scope when session scope is empty", async () => {
+    // The SDK starts every session with scopedModels: [] and never resolves
+    // settingsManager.getEnabledModels() into it (only pi's CLI main.js does).
+    // So a SAVED scope (save_scoped_models) must still narrow the dropdown on
+    // a fresh session via this settings fallback.
+    const { session, run } = setup({
+      modelRegistry: {
+        getAvailable: vi.fn(async () => [
+          { provider: "anthropic", id: "claude-x", name: "Claude X" },
+          { provider: "openai", id: "gpt-5", name: "GPT-5" },
+        ]),
+      },
+      settingsManager: {
+        setEnabledModels: vi.fn(),
+        getEnabledModels: vi.fn(() => ["anthropic/claude-x"]),
+      },
+    });
+    const res = await run({ type: "get_available_models" });
+    expect(res.success).toBe(true);
+    expect(session.modelRegistry.getAvailable).toHaveBeenCalled();
+    expect(res.data.models).toEqual([
+      { provider: "anthropic", id: "claude-x", name: "Claude X" },
+    ]);
+  });
+
+  it("get_available_models settings fallback is a no-op when patterns match everything", async () => {
+    // resolveEnabledModelIds treats all-matching as "no scope" (null); the
+    // dropdown fallback must do the same so saving "all" doesn't paradoxically
+    // hide models that a pattern glob failed to expand.
+    const all = [
+      { provider: "anthropic", id: "claude-x", name: "Claude X" },
+      { provider: "openai", id: "gpt-5", name: "GPT-5" },
+    ];
+    const { run } = setup({
+      modelRegistry: { getAvailable: vi.fn(async () => all) },
+      settingsManager: {
+        setEnabledModels: vi.fn(),
+        getEnabledModels: vi.fn(() => ["anthropic/claude-x", "openai/gpt-5"]),
+      },
+    });
+    const res = await run({ type: "get_available_models" });
+    expect(res.data.models).toEqual(all);
+  });
   it("compact passes the customInstructions STRING (not an object)", async () => {
     const { session, run } = setup();
     await run({ type: "compact", customInstructions: "be brief" });

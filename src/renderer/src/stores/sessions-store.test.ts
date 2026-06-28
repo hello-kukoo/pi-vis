@@ -1144,6 +1144,296 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.thinkingLevel).toBe("low");
     expect(updateSpy).not.toHaveBeenCalled();
   });
+
+  it("applyModelChange does NOT clobber a same-id/different-provider switch that landed during a failed switch", async () => {
+    // Two providers offer the same id. The user picks the groq copy, then a
+    // concurrent switch to the together copy lands while groq's set_model is
+    // in flight — and groq's RPC then fails. The id-only revert guard would
+    // (wrongly) restore the provider, stomping the in-flight together switch;
+    // the provider-aware guard must leave it intact.
+    useSessionsStore.getState().setCurrentModel(SESSION_A, "llama-4", "groq");
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "set_model") {
+        useSessionsStore.getState().setCurrentModel(SESSION_A, "llama-4", "together");
+        throw new Error("boom");
+      }
+      return { success: true, data: {} };
+    });
+    const GROQ = { id: "llama-4", provider: "groq" } as ModelInfo;
+    await useSessionsStore.getState().applyModelChange(SESSION_A, GROQ);
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.currentModel).toBe("llama-4");
+    expect(s?.currentProvider).toBe("together");
+  });
+
+  it("applyModelChange reconciles the provider with pi's get_state on success", async () => {
+    // pi normalizes the provider string on its side. The store must adopt pi's
+    // authoritative value so the highlight and the persisted last-used
+    // preference stay honest (and the next bootstrap's exact match works).
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state") {
+        return { success: true, data: { model: { id: "llama-4", provider: "Groq" } } };
+      }
+      return { success: true, data: {} };
+    });
+    const res = await useSessionsStore
+      .getState()
+      .applyModelChange(SESSION_A, { id: "llama-4", provider: "groq" } as ModelInfo);
+    expect(res.ok).toBe(true);
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.currentProvider).toBe("Groq");
+    expect(updateSpy).toHaveBeenCalledWith({
+      lastUsedModel: { provider: "Groq", modelId: "llama-4" },
+    });
+  });
+
+  it("applyModelChange does NOT clobber a known provider when get_state omits it", async () => {
+    // If get_state returns a non-string provider, the optimistic provider must
+    // be kept — clobbering it with undefined would re-introduce ambiguous
+    // multi-highlight when duplicate same-id entries exist.
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state")
+        return { success: true, data: { model: { id: "llama-4" } } };
+      return { success: true, data: {} };
+    });
+    const res = await useSessionsStore
+      .getState()
+      .applyModelChange(SESSION_A, { id: "llama-4", provider: "groq" } as ModelInfo);
+    expect(res.ok).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.currentProvider).toBe("groq");
+  });
+
+  it("applyModelChange does NOT persist lastUsedModel when superseded during reconciliation", async () => {
+    // A's set_model succeeds; during A's get_state reconciliation round-trip,
+    // switch B lands (overwrites the store). A must NOT persist its now-stale
+    // model to lastUsedModel — that would leak the superseded model into the
+    // next new session's default. The get_state round-trip is what makes this
+    // ordering reachable (it yields control before the persist).
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state") {
+        // B lands while A's get_state is in flight.
+        useSessionsStore.getState().setCurrentModel(SESSION_A, "other-model", "other");
+        return { success: true, data: { model: { id: "other-model", provider: "other" } } };
+      }
+      return { success: true, data: {} };
+    });
+    const res = await useSessionsStore
+      .getState()
+      .applyModelChange(SESSION_A, { id: "llama-4", provider: "groq" } as ModelInfo);
+    expect(res.ok).toBe(true);
+    // A was superseded — its stale values must not leak into lastUsedModel.
+    expect(updateSpy).not.toHaveBeenCalled();
+    // B's switch survived.
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.currentModel).toBe("other-model");
+  });
+
+  it("applyModelChange does NOT persist lastUsedModel when superseded AND get_state throws", async () => {
+    // Same race as above, but get_state rejects. The catch path must STILL
+    // detect the supersession and skip the persist (a naive catch that left
+    // shouldPersist=true would leak the stale model into the next session).
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state") {
+        useSessionsStore.getState().setCurrentModel(SESSION_A, "other-model", "other");
+        throw new Error("get_state boom");
+      }
+      return { success: true, data: {} };
+    });
+    const res = await useSessionsStore
+      .getState()
+      .applyModelChange(SESSION_A, { id: "llama-4", provider: "groq" } as ModelInfo);
+    expect(res.ok).toBe(true);
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.currentModel).toBe("other-model");
+  });
+
+  it("applyModelChange persists lastUsedModel when get_state throws but the switch still holds", async () => {
+    // get_state fails, but no supersession occurred — the optimistic model is
+    // still in effect, so the preference SHOULD persist (best-effort, using
+    // the resolved provider since pi never got to confirm a normalized one).
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state") throw new Error("get_state boom");
+      return { success: true, data: {} };
+    });
+    const res = await useSessionsStore
+      .getState()
+      .applyModelChange(SESSION_A, { id: "llama-4", provider: "groq" } as ModelInfo);
+    expect(res.ok).toBe(true);
+    expect(updateSpy).toHaveBeenCalledWith({
+      lastUsedModel: { provider: "groq", modelId: "llama-4" },
+    });
+  });
+});
+
+/**
+ * Multi-provider disambiguation: the same model `id` can be offered by
+ * several providers. The last-used preference is provider-scoped
+ * (`settings.lastUsedModel = { provider, modelId }`), so bootstrap must
+ * activate the user's actual last-used provider — not whichever same-id
+ * copy happens to sort first in pi's list — and record that provider in the
+ * store so the dropdown highlights only the right row.
+ */
+describe("sessions store - multi-provider same-id disambiguation", () => {
+  type Cmd = { type: string; modelId?: string | undefined; provider?: string | undefined };
+  type Payload = { sessionId: string; command: Cmd };
+  let setModelCalls: Array<{
+    sessionId: string;
+    provider?: string | undefined;
+    modelId?: string | undefined;
+  }>;
+
+  beforeEach(() => {
+    setModelCalls = [];
+    vi.stubGlobal("window", {
+      pivis: {
+        invoke: vi.fn(async (_channel: string, payload: Payload) => {
+          const { command } = payload;
+          switch (command.type) {
+            case "get_available_models":
+              return {
+                success: true,
+                data: {
+                  // Same id under two providers; `together` is listed first.
+                  models: [
+                    { id: "llama-4", provider: "together" },
+                    { id: "llama-4", provider: "groq" },
+                  ],
+                },
+              };
+            case "set_model":
+              setModelCalls.push({
+                sessionId: payload.sessionId,
+                provider: command.provider,
+                modelId: command.modelId,
+              });
+              return { success: true };
+            case "get_state":
+              return { success: true, data: { thinkingLevel: "off" } };
+            default:
+              return { success: true, data: {} };
+          }
+        }),
+      },
+    });
+    useSettingsStore.setState({
+      settings: {
+        ...useSettingsStore.getState().settings,
+        lastUsedModel: null,
+        lastUsedThinkingLevel: null,
+      },
+    });
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("bootstrap activates the last-used PROVIDER, not whichever copy sorts first", async () => {
+    useSettingsStore.setState({
+      settings: {
+        ...useSettingsStore.getState().settings,
+        lastUsedModel: { provider: "groq", modelId: "llama-4" },
+      },
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    await useSessionsStore.getState().bootstrapModelState(SESSION_A);
+
+    expect(setModelCalls).toEqual([{ sessionId: SESSION_A, provider: "groq", modelId: "llama-4" }]);
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.currentModel).toBe("llama-4");
+    expect(s?.currentProvider).toBe("groq");
+  });
+
+  it("does NOT silently swap providers when the last-used provider's copy is gone but another same-id copy remains", async () => {
+    // The user's last-used was llama-4/groq, but groq is no longer offered —
+    // only llama-4/together and llama-4/openrouter remain. With multiple
+    // same-id copies and no provider-precise match, bootstrap must refuse to
+    // guess (no set_model) and fall through to pi's reported current model
+    // rather than silently switching the user's subscription.
+    vi.stubGlobal("window", {
+      pivis: {
+        invoke: vi.fn(async (_channel: string, payload: { command: { type: string } }) => {
+          switch (payload.command.type) {
+            case "get_available_models":
+              return {
+                success: true,
+                data: {
+                  models: [
+                    { id: "llama-4", provider: "together" },
+                    { id: "llama-4", provider: "openrouter" },
+                  ],
+                },
+              };
+            case "get_state":
+              return { success: true, data: { thinkingLevel: "off" } };
+            default:
+              return { success: true, data: {} };
+          }
+        }),
+      },
+    });
+    useSettingsStore.setState({
+      settings: {
+        ...useSettingsStore.getState().settings,
+        lastUsedModel: { provider: "groq", modelId: "llama-4" },
+      },
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    await useSessionsStore.getState().bootstrapModelState(SESSION_A);
+
+    // No preference-driven set_model was sent.
+    expect(setModelCalls).toEqual([]);
+    // And no model was pinned into the store (falls through cleanly).
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.currentModel).toBeUndefined();
+    expect(s?.currentProvider).toBeUndefined();
+  });
+
+  it("preserves the matched provider when get_state omits it (no clobber)", async () => {
+    // Step 1 matches the last-used groq copy and sets currentProvider="groq".
+    // Step 2's get_state returns the model id WITHOUT a provider (legacy pi
+    // shape). It must NOT clobber the known provider with undefined, or the
+    // dropdown would fall back to id-only matching and highlight the wrong
+    // (first) same-id copy.
+    vi.stubGlobal("window", {
+      pivis: {
+        invoke: vi.fn(async (_channel: string, payload: { command: { type: string } }) => {
+          switch (payload.command.type) {
+            case "get_available_models":
+              return {
+                success: true,
+                data: {
+                  models: [
+                    { id: "llama-4", provider: "together" },
+                    { id: "llama-4", provider: "groq" },
+                  ],
+                },
+              };
+            case "get_state":
+              return { success: true, data: { thinkingLevel: "off", model: { id: "llama-4" } } };
+            default:
+              return { success: true, data: {} };
+          }
+        }),
+      },
+    });
+    useSettingsStore.setState({
+      settings: {
+        ...useSettingsStore.getState().settings,
+        lastUsedModel: { provider: "groq", modelId: "llama-4" },
+      },
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    await useSessionsStore.getState().bootstrapModelState(SESSION_A);
+    const s2 = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s2?.currentModel).toBe("llama-4");
+    expect(s2?.currentProvider).toBe("groq");
+  });
 });
 
 /**

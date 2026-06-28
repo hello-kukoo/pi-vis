@@ -316,6 +316,14 @@
   color: var(--ctp-mauve);
 }
 
+/* A reserved-width check gutter rendered on every row (empty when not
+   selected) so the label position never shifts as selection changes. */
+.session-header__dropdown-item-check {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--ctp-mauve);
+}
+
 .session-header__dropdown-item--highlighted {
   background: var(--ctp-surface1);
   color: var(--ctp-text);

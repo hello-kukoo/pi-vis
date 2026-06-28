@@ -5,6 +5,7 @@ import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PickerRequest } from "../../lib/commands/execute.js";
+import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import "./AppPickerHost.css";
 
@@ -67,7 +68,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
             if (!model.provider) return;
             const res = await applyModelChange(sessionId, model);
             if (res.ok) {
-              addToast(sessionId, `Model: ${model.id}`);
+              addToast(sessionId, `Model: ${modelDisplayName(model)}`);
             } else {
               addToast(sessionId, `Failed to set model: ${res.error}`, "error");
             }
@@ -233,6 +234,13 @@ function ModelPicker({
   onPick: (model: ModelInfo) => void;
 }): React.ReactElement {
   const availableModels = useSessionsStore((s) => s.sessions.get(sessionId)?.availableModels ?? []);
+  const currentModel = useSessionsStore((s) => s.sessions.get(sessionId)?.currentModel);
+  const currentProvider = useSessionsStore((s) => s.sessions.get(sessionId)?.currentProvider);
+  // Resolve the single active entry once and compare items by key — so that
+  // when the provider is unknown and duplicate same-id entries exist, at most
+  // ONE row is marked selected (not every same-id copy).
+  const currentModelInfo = findCurrentModel(availableModels, currentModel, currentProvider);
+  const selectedKey = currentModelInfo ? modelKey(currentModelInfo) : null;
   const [query, setQuery] = useState(search ?? "");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -299,25 +307,27 @@ function ModelPicker({
       <div className="picker__list" role="listbox">
         {filtered.length === 0 && <div className="picker__empty">No models found</div>}
         {filtered.map((m, idx) => {
-          const label = m.name ?? m.id;
+          const label = modelDisplayName(m);
+          const selected = selectedKey != null && modelKey(m) === selectedKey;
           return (
             <button
               type="button"
-              key={m.id}
+              key={modelKey(m)}
               ref={(el) => {
                 if (el) itemRefs.current.set(idx, el);
                 else itemRefs.current.delete(idx);
               }}
-              className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+              className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""} ${selected ? "picker__item--selected" : ""}`}
               onClick={() => onPick(m)}
               onMouseEnter={() => setHighlightedIndex(idx)}
               role="option"
-              aria-selected={idx === highlightedIndex}
+              aria-selected={selected}
             >
-              <span className="picker__item-name">{label}</span>
-              <span className="picker__item-meta">
-                {m.provider}/{m.id}
+              <span className="picker__selected-mark" aria-hidden>
+                {selected ? "✓" : ""}
               </span>
+              <span className="picker__item-name">{label}</span>
+              <span className="picker__item-meta">{m.id}</span>
             </button>
           );
         })}
@@ -625,7 +635,7 @@ function ScopedModelsPicker({
         {filtered.map((m, idx) => {
           const id = `${m.provider ?? ""}/${m.id}`;
           const isChecked = checked.has(id);
-          const label = m.name ?? m.id;
+          const label = modelDisplayName(m);
           return (
             <button
               type="button"
@@ -645,7 +655,7 @@ function ScopedModelsPicker({
                 aria-hidden="true"
               />
               <span className="picker__item-name">{label}</span>
-              <span className="picker__item-meta">{id}</span>
+              <span className="picker__item-meta">{m.id}</span>
             </button>
           );
         })}

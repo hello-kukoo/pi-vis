@@ -139,6 +139,21 @@
   border-color: var(--ctp-surface2);
 }
 
+/* The leading ✓ on the session's active model in the /model picker. A
+   reserved-width gutter keeps every row aligned — only the selected row has
+   the glyph, but its space is always accounted for so the list doesn't
+   shift when selection changes. */
+.picker__selected-mark {
+  display: inline-block;
+  width: 1em;
+  flex: 0 0 1em;
+  color: var(--ctp-mauve);
+}
+
+.picker__item--selected .picker__item-name {
+  color: var(--ctp-mauve);
+}
+
 .picker__item-name {
   flex: 1;
   overflow: hidden;

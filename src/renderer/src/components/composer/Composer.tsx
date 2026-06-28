@@ -9,11 +9,11 @@ import {
   executeAction,
   parseComposerInput,
 } from "../../lib/commands/index.js";
+import { findCurrentModel } from "../../lib/model-utils.js";
 import { useChangelogStore } from "../../stores/changelog-store.js";
 import { openDiffForSession } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { isNewSessionPending } from "../../stores/sessions-store.js";
-import { useSettingsStore } from "../../stores/settings-store.js";
 import "./Composer.css";
 
 interface ComposerProps {
@@ -126,7 +126,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const finishBashCommand = useSessionsStore((s) => s.finishBashCommand);
   const setStreaming = useSessionsStore((s) => s.setStreaming);
   const addToast = useSessionsStore((s) => s.addToast);
-  const setCurrentModel = useSessionsStore((s) => s.setCurrentModel);
+  const applyModelChange = useSessionsStore((s) => s.applyModelChange);
   const addCustomMessage = useSessionsStore((s) => s.addCustomMessage);
   const openPicker = useSessionsStore((s) => s.openPicker);
   const adoptSessionFile = useSessionsStore((s) => s.adoptSessionFile);
@@ -140,7 +140,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const setNewSessionDraft = useSessionsStore((s) => s.setNewSessionDraft);
   const setSessionDraft = useSessionsStore((s) => s.setSessionDraft);
   const clearEditorInjection = useSessionsStore((s) => s.clearEditorInjection);
-  const updateSettings = useSettingsStore((s) => s.update);
 
   const isStreaming = session?.isStreaming ?? false;
   const worktreeCreating = session?.worktreeCreating ?? false;
@@ -156,8 +155,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // accept images. Unknown capability (model not yet in availableModels)
   // defaults to allowed so we never block a vision model on a data race.
   const currentModelInfo = useMemo<ModelInfo | undefined>(
-    () => (session?.availableModels ?? []).find((m) => m.id === session?.currentModel),
-    [session?.availableModels, session?.currentModel],
+    () =>
+      findCurrentModel(
+        session?.availableModels ?? [],
+        session?.currentModel,
+        session?.currentProvider,
+      ),
+    [session?.availableModels, session?.currentModel, session?.currentProvider],
   );
   const modelSupportsImages = currentModelInfo?.input
     ? currentModelInfo.input.includes("image")
@@ -543,10 +547,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           addUserMessage,
           addBashCommand,
           finishBashCommand,
-          setCurrentModel,
-          updateLastUsedModel: async (provider: string, modelId: string) => {
-            await updateSettings({ lastUsedModel: { provider, modelId } });
-          },
+          applyModelChange,
           addCustomMessage,
           openChangelog: (markdown: string) => {
             // The changelog modal is mounted at the App level (overlay over
@@ -643,8 +644,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       addUserMessage,
       addBashCommand,
       finishBashCommand,
-      setCurrentModel,
-      updateSettings,
+      applyModelChange,
       addCustomMessage,
       openPicker,
       adoptSessionFile,

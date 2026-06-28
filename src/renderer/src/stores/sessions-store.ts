@@ -60,6 +60,12 @@ export interface SessionViewState {
   stats?: SessionStats | undefined;
   availableModels: ModelInfo[];
   currentModel?: string | undefined;
+  /** Provider of the active model (when known). Paired with `currentModel` so the
+   *  dropdown can disambiguate same-id models offered by different providers
+   *  (e.g. the same model via two subscriptions) and highlight only the
+   *  actually-selected one. `undefined` for legacy pi shapes that omit it —
+   *  the UI then falls back to id-only matching. */
+  currentProvider?: string | undefined;
   thinkingLevel?: ThinkingLevel | undefined;
   sessionTitle?: string | undefined;
   sessionName?: string | undefined;
@@ -368,7 +374,7 @@ interface SessionsStore {
    *  without a second fetch. Best-effort: swallows fetch errors (the
    *  dropdown keeps whatever it had) and returns []. */
   refreshAvailableModels: (sessionId: SessionId) => Promise<ModelInfo[]>;
-  setCurrentModel: (sessionId: SessionId, model: string) => void;
+  setCurrentModel: (sessionId: SessionId, model: string, provider?: string) => void;
   setThinkingLevel: (sessionId: SessionId, level: ThinkingLevel) => void;
   /**
    * One-time, idempotent model/thinking-level bootstrap for a session. Seeds
@@ -1191,12 +1197,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     }
   },
 
-  setCurrentModel: (sessionId, model) => {
+  setCurrentModel: (sessionId, model, provider) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      sessions.set(sessionId, { ...s, currentModel: model });
+      sessions.set(sessionId, { ...s, currentModel: model, currentProvider: provider });
       return { sessions };
     });
   },
@@ -1246,21 +1252,33 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     // in step 2 from `get_state` (the authoritative source).
     try {
       const models = await get().refreshAvailableModels(sessionId);
-      const match = lum ? models.find((m) => m.id === lum.modelId) : undefined;
+      // Match the last-used preference on BOTH id and provider — the
+      // preference is provider-scoped (settings.lastUsedModel = {provider,
+      // modelId}), so when two providers offer the same id we must pick the
+      // user's actual last-used provider, not whichever copy happens to sort
+      // first. We only fall back to an id-only match when it is UNAMBIGUOUS
+      // (exactly one same-id copy exists, e.g. a provider-string casing
+      // drift on a single-provider model); with multiple same-id copies we
+      // refuse to guess and let pi's reported current model apply instead.
+      const sameId = lum ? models.filter((m) => m.id === lum.modelId) : [];
+      const match = lum
+        ? (sameId.find((m) => m.provider === lum.provider) ??
+          (sameId.length === 1 ? sameId[0] : undefined))
+        : undefined;
       if (match?.provider) {
         await window.pivis
           .invoke("session.sendCommand", {
             sessionId,
             command: { type: "set_model", provider: match.provider, modelId: match.id },
           })
-          .then(() => get().setCurrentModel(sessionId, match.id))
+          .then(() => get().setCurrentModel(sessionId, match.id, match.provider))
           .catch(() => {});
       } else {
         // No last-used match: fall back to pi's reported current model. The
         // list endpoint tags the active model with `current: true`; step 2's
         // `get_state` is the authoritative source and will overwrite this.
         const active = models.find((m) => (m as Record<string, unknown>)["current"] === true);
-        if (active) get().setCurrentModel(sessionId, active.id);
+        if (active) get().setCurrentModel(sessionId, active.id, active.provider);
       }
     } catch {
       /* best effort — leave the dropdown showing whatever the store already has */
@@ -1275,7 +1293,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const raw = res?.data as
         | {
             thinkingLevel?: unknown;
-            model?: { id?: unknown };
+            model?: { id?: unknown; provider?: unknown };
             sessionName?: unknown;
             sessionFile?: unknown;
           }
@@ -1298,7 +1316,20 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         await get().applyThinkingLevel(sessionId, ltl);
       }
       if (raw.model && typeof raw.model.id === "string") {
-        get().setCurrentModel(sessionId, raw.model.id);
+        // Adopt pi's authoritative model id, and its provider when pi reports
+        // one. But DON'T clobber an already-known provider (set in step 1 from
+        // the last-used match) when pi omits it — that would blank
+        // `currentProvider` and make the dropdown fall back to id-only matching,
+        // highlighting the wrong same-id row. Only carry over the existing
+        // provider when the id is unchanged (a different id has no basis).
+        const existing = get().sessions.get(sessionId);
+        const provider =
+          typeof raw.model.provider === "string"
+            ? raw.model.provider
+            : raw.model.id === existing?.currentModel
+              ? existing?.currentProvider
+              : undefined;
+        get().setCurrentModel(sessionId, raw.model.id, provider);
       }
       if (typeof raw.sessionName === "string" && raw.sessionName) {
         get().setSessionName(sessionId, raw.sessionName);
@@ -1318,11 +1349,18 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     const before = get().sessions.get(sessionId);
     if (!before) return { ok: false, error: "Unknown session" };
     const prevModel = before.currentModel;
+    const prevProvider = before.currentProvider;
+    // The provider we actually send to pi, and the one stored optimistically
+    // so the store matches the RPC during the in-flight window (avoids the
+    // dropdown falling back to id-only matching and highlighting a wrong
+    // same-id copy when `model.provider` is absent but the id carries one,
+    // e.g. "anthropic/claude-haiku"). `split("/")[0]` is `string | undefined`
+    // under noUncheckedIndexedAccess; the `?? ""` narrows it back to `string`.
     const provider = model.provider ?? model.id.split("/")[0] ?? "";
 
     // Optimistic: show the requested model right away (invariant #1's "queued
-    // change about to be sent").
-    get().setCurrentModel(sessionId, model.id);
+    // change about to be sent"). Store the resolved provider (what we send).
+    get().setCurrentModel(sessionId, model.id, provider);
 
     try {
       const res = await window.pivis.invoke("session.sendCommand", {
@@ -1333,20 +1371,65 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     } catch (err) {
       // Revert so the dropdown reflects the model still actually in effect —
       // but only if our optimistic value is still the one showing. A newer
-      // change (or a pi event) that landed in the meantime wins.
+      // change (or a pi event) that landed in the meantime wins. We compare
+      // BOTH id and provider: two rapid switches between same-id/different-
+      // provider copies must not let a failed earlier switch revert the
+      // in-flight later one's provider.
       set((state) => {
         const sessions = new Map(state.sessions);
         const s = sessions.get(sessionId);
-        if (!s || s.currentModel !== model.id) return {};
-        sessions.set(sessionId, { ...s, currentModel: prevModel });
+        if (!s || s.currentModel !== model.id || s.currentProvider !== provider) return {};
+        sessions.set(sessionId, { ...s, currentModel: prevModel, currentProvider: prevProvider });
         return { sessions };
       });
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
 
-    // Persist the global last-used preference ONLY on success — a failed
-    // switch must not leak into the next new session's default.
-    void useSettingsStore.getState().update({ lastUsedModel: { provider, modelId: model.id } });
+    // Reconcile with the model pi actually applied (mirrors applyThinkingLevel's
+    // get_state reconciliation, improved with a supersession-safe persist). pi
+    // may normalize the provider string (or, in principle, the id); adopting
+    // its authoritative value keeps the store, the dropdown highlight, and the
+    // persisted last-used preference honest. We persist the reconciled values
+    // ONLY when this switch is still in effect — a newer change that lands
+    // during the round-trip owns its own persist, and a failed get_state must
+    // not leak a stale preference either.
+    let persistId = model.id;
+    let persistProvider = provider;
+    let shouldPersist = true;
+    try {
+      const stateRes = await window.pivis.invoke("session.sendCommand", {
+        sessionId,
+        command: { type: "get_state" },
+      });
+      const raw = stateRes?.data as { model?: { id?: unknown; provider?: unknown } } | undefined;
+      const s = get().sessions.get(sessionId);
+      if (s && s.currentModel === model.id && s.currentProvider === provider) {
+        // Still our optimistic value — adopt pi's authoritative id/provider.
+        // Only adopt the provider when pi returns a string: a missing/non-string
+        // provider must not clobber the one we sent (that would re-introduce
+        // ambiguous highlighting when duplicate same-id entries exist).
+        if (raw?.model && typeof raw.model.id === "string") {
+          persistId = raw.model.id;
+          if (typeof raw.model.provider === "string") persistProvider = raw.model.provider;
+          get().setCurrentModel(sessionId, persistId, persistProvider);
+        }
+      } else {
+        // A newer change landed during the get_state round-trip — don't persist
+        // our now-stale values; the newer change owns its own persist.
+        shouldPersist = false;
+      }
+    } catch {
+      // get_state failed: keep the optimistic value, but only persist if our
+      // switch is still the one in effect (a newer change may have landed).
+      const s = get().sessions.get(sessionId);
+      shouldPersist = !!(s && s.currentModel === model.id && s.currentProvider === provider);
+    }
+
+    if (shouldPersist) {
+      void useSettingsStore.getState().update({
+        lastUsedModel: { provider: persistProvider, modelId: persistId },
+      });
+    }
     return { ok: true };
   },
 

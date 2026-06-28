@@ -29,8 +29,10 @@ function makeDeps(overrides: Partial<ExecuteDeps> = {}): {
     addUserMessage: make("addUserMessage") as ExecuteDeps["addUserMessage"],
     addBashCommand: make("addBashCommand") as ExecuteDeps["addBashCommand"],
     finishBashCommand: make("finishBashCommand") as ExecuteDeps["finishBashCommand"],
-    setCurrentModel: make("setCurrentModel") as ExecuteDeps["setCurrentModel"],
-    updateLastUsedModel: vi.fn(async () => {}) as ExecuteDeps["updateLastUsedModel"],
+    applyModelChange: (async (...args: unknown[]) => {
+      (calls["applyModelChange"] ??= []).push(args);
+      return { ok: true };
+    }) as ExecuteDeps["applyModelChange"],
     addCustomMessage: make("addCustomMessage") as ExecuteDeps["addCustomMessage"],
     openChangelog: make("openChangelog") as ExecuteDeps["openChangelog"],
     openPicker: make("openPicker") as ExecuteDeps["openPicker"],
@@ -67,32 +69,23 @@ describe("executeAction — model", () => {
     expect(calls["openPicker"]).toEqual([[SID, { kind: "model" }]]);
   });
 
-  it("/model <search> with exact canonical match (provider/id) sets the model directly", async () => {
+  it("/model <search> with exact canonical match (provider/id) applies the model via applyModelChange", async () => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "model", search: "anthropic/claude-haiku" }, deps);
-    expect(calls["invoke"]).toEqual([
-      [
-        {
-          sessionId: SID,
-          command: { type: "set_model", provider: "anthropic", modelId: "claude-haiku" },
-        },
-      ],
+    expect(calls["applyModelChange"]).toEqual([
+      [SID, { id: "claude-haiku", provider: "anthropic", name: "Claude Haiku" }],
     ]);
-    expect(calls["setCurrentModel"]).toEqual([[SID, "claude-haiku"]]);
+    expect(calls["invoke"]).toBeUndefined();
     expect(calls["openPicker"]).toBeUndefined();
   });
 
-  it("/model <search> with exact id (case-insensitive) sets the model directly", async () => {
+  it("/model <search> with exact id (case-insensitive) applies the model via applyModelChange", async () => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "model", search: "DEEPSEEK-V3" }, deps);
-    expect(calls["invoke"]).toEqual([
-      [
-        {
-          sessionId: SID,
-          command: { type: "set_model", provider: "deepseek", modelId: "deepseek-v3" },
-        },
-      ],
+    expect(calls["applyModelChange"]).toEqual([
+      [SID, { id: "deepseek-v3", provider: "deepseek", name: "DeepSeek V3" }],
     ]);
+    expect(calls["invoke"]).toBeUndefined();
   });
 
   it("/model <search> with no match opens the picker (search prefilled)", async () => {
