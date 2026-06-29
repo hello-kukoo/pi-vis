@@ -133,6 +133,16 @@ export interface IpcInvokeContract {
   "worktree.pickDirectory": { req: { workspacePath: string }; res: string | null };
   "session.close": { req: { sessionId: SessionId }; res: undefined };
   "session.loadHistory": { req: { sessionId: SessionId }; res: TranscriptBlock[] };
+  // Replay a branch (an ordered array of SessionTreeEntry) from the host's
+  // in-memory state into the same TranscriptBlock[] shape the renderer
+  // already consumes via session.loadHistory. The renderer calls this after
+  // /tree's navigate_tree returns, with the returned `branch` array, to
+  // rebuild the transcript for the new active leaf without re-reading the
+  // session file (which may be stale for freshly-appended entries).
+  "session.transcriptForEntries": {
+    req: { sessionId: SessionId; entries: import("./pi-protocol/responses.js").SessionTreeEntry[] };
+    res: TranscriptBlock[];
+  };
   "session.sendCommand": {
     req: { sessionId: SessionId; command: PiRpcCommand };
     res: PiRpcResponse;

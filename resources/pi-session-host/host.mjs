@@ -58,7 +58,14 @@ let panelCounter = 0;
 const panels = new Map(); // panelId -> { inputHandler, resizeHandler }
 
 function send(msg) {
-  if (process.send) process.send(msg);
+  // Guard the channel state: during graceful shutdown the IPC channel can
+  // close (parent disconnected / exited) while pi's extension shutdown hooks
+  // are still firing (e.g. plan-mode's clearUi → setStatus → send). Writing to
+  // a closed channel throws ERR_IPC_CHANNEL_CLOSED and, since these calls
+  // originate deep inside pi's dispose(), would surface as an uncaught error
+  // that crashes the host mid-teardown. `process.connected` is false once the
+  // channel is gone, so this is a no-op in exactly that window.
+  if (process.send && process.connected) process.send(msg);
 }
 
 function sendUiRequest(req) {

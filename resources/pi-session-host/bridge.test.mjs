@@ -340,6 +340,185 @@ describe("setupCommandBridge — command mapping", () => {
 
 // ─── Capability self-check ───────────────────────────────────────────────────
 
+describe("conversation-tree commands (get_tree / navigate_tree / set_label)", () => {
+  it("get_tree returns the sessionManager's nodes (flattened) + the current leafId", async () => {
+    // The bridge FLATTENS pi's nested getTree() output into a parentId-keyed
+    // list before sending — the recursive nesting (depth = longest message
+    // chain) blows Electron's contextBridge 1000-level limit on long sessions.
+    // The flat list mirrors the nested structure exactly, just depth-bounded.
+    const fakeTree = [
+      {
+        entry: { id: "u1", type: "message", timestamp: "t1" },
+        children: [
+          {
+            entry: { id: "u2", type: "message", timestamp: "t2" },
+            children: [],
+            label: "after-fork",
+          },
+        ],
+      },
+    ];
+    const { run } = setup({
+      sessionManager: {
+        getLeafId: vi.fn(() => "u2"),
+        getTree: vi.fn(() => fakeTree),
+        appendLabelChange: vi.fn(() => "label-1"),
+      },
+    });
+    const res = await run({ type: "get_tree" });
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual({
+      nodes: [
+        {
+          entry: { id: "u1", type: "message", timestamp: "t1" },
+          parentId: undefined,
+          label: undefined,
+          labelTimestamp: undefined,
+        },
+        {
+          entry: { id: "u2", type: "message", timestamp: "t2" },
+          parentId: "u1",
+          label: "after-fork",
+          labelTimestamp: undefined,
+        },
+      ],
+      leafId: "u2",
+    });
+  });
+
+  it("get_tree returns leafId: null when the session is in its pre-leaf state", async () => {
+    const { run } = setup({
+      sessionManager: {
+        getLeafId: vi.fn(() => null),
+        getTree: vi.fn(() => []),
+      },
+    });
+    const res = await run({ type: "get_tree" });
+    expect(res.data).toEqual({ nodes: [], leafId: null });
+  });
+
+  it("get_tree with missing getTree/getLeafId returns data.unsupported (capability gap, not a thrown error)", async () => {
+    // Older pi (or a build without the tree surface) lacks
+    // sessionManager.getTree. The bridge must NOT throw a TypeError (which
+    // the outer try/catch would flatten into a generic success:false and the
+    // renderer couldn't distinguish from a transient). Instead it returns a
+    // structured `unsupported` flag so the renderer maps it to the permanent
+    // "unsupported" phase and everything else to retryable "error".
+    const { run } = setup({ sessionManager: {} });
+    const res = await run({ type: "get_tree" });
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual({ unsupported: true, nodes: [], leafId: null });
+  });
+
+  it("navigate_tree calls session.navigateTree with target + options", async () => {
+    const navigateTree = vi.fn(async () => ({ cancelled: false }));
+    const { session, run } = setup({
+      navigateTree,
+      sessionManager: {
+        getLeafId: vi.fn(() => "new-leaf"),
+        getBranch: vi.fn(() => [{ id: "u1", type: "message" }]),
+      },
+    });
+    const res = await run({
+      type: "navigate_tree",
+      targetId: "u2",
+      summarize: true,
+      label: "alt-approach",
+    });
+    expect(session.navigateTree).toHaveBeenCalledWith("u2", {
+      summarize: true,
+      label: "alt-approach",
+    });
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual({
+      cancelled: false,
+      editorText: undefined,
+      aborted: undefined,
+      leafId: "new-leaf",
+      branch: [{ id: "u1", type: "message" }],
+    });
+  });
+
+  it("navigate_tree returns editorText when pi supplies one (user-message target)", async () => {
+    const { run } = setup({
+      navigateTree: vi.fn(async () => ({
+        cancelled: false,
+        editorText: "the first message",
+      })),
+      sessionManager: {
+        getLeafId: vi.fn(() => "u1"),
+        getBranch: vi.fn(() => [{ id: "u1", type: "message", message: { role: "user" } }]),
+      },
+    });
+    const res = await run({ type: "navigate_tree", targetId: "u1" });
+    expect(res.data?.editorText).toBe("the first message");
+  });
+
+  it("navigate_tree with cancelled=true omits leafId/branch (review S3: no post-nav state)", async () => {
+    const { run } = setup({
+      navigateTree: vi.fn(async () => ({ cancelled: true })),
+      sessionManager: {
+        getLeafId: vi.fn(() => "old-leaf"),
+        getBranch: vi.fn(() => []),
+      },
+    });
+    const res = await run({ type: "navigate_tree", targetId: "x" });
+    expect(res.success).toBe(true);
+    expect(res.data?.cancelled).toBe(true);
+    expect(res.data?.leafId).toBeUndefined();
+    expect(res.data?.branch).toBeUndefined();
+  });
+
+  it("set_label forwards targetId + label to appendLabelChange (sync)", async () => {
+    const appendLabelChange = vi.fn(() => "label-entry-1");
+    const { run } = setup({
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-1"),
+        appendLabelChange,
+      },
+    });
+    const res = await run({ type: "set_label", targetId: "u3", label: "checkpoint" });
+    expect(appendLabelChange).toHaveBeenCalledWith("u3", "checkpoint");
+    expect(res.success).toBe(true);
+  });
+
+  it("set_label with no label argument clears the label (undefined forwarded)", async () => {
+    const appendLabelChange = vi.fn(() => "label-entry-1");
+    const { run } = setup({
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-1"),
+        appendLabelChange,
+      },
+    });
+    await run({ type: "set_label", targetId: "u3" });
+    expect(appendLabelChange).toHaveBeenCalledWith("u3", undefined);
+  });
+
+  it("navigate_tree degrades gracefully when the SDK lacks session.navigateTree (per-command, NOT host-wide)", async () => {
+    // Old pi version: session.navigateTree is undefined. The bridge's outer
+    // try/catch must turn this into success:false (so the renderer can show
+    // the friendly "requires SDK host" state) without killing the host —
+    // panels must continue to work.
+    const { session, run } = setup();
+    session.navigateTree = undefined;
+    const res = await run({ type: "navigate_tree", targetId: "x" });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/navigateTree|not a function/);
+  });
+
+  it("get_tree degrades gracefully when the SDK lacks session.sessionManager.getTree (review B3)", async () => {
+    // Old pi version: getTree is missing. The bridge returns a structured
+    // `unsupported` flag (NOT a thrown TypeError / success:false) so the
+    // renderer can distinguish a genuine capability gap from a transient
+    // failure. Panels remain enabled.
+    const { session, run } = setup();
+    session.sessionManager = { getLeafId: vi.fn(() => null) };
+    const res = await run({ type: "get_tree" });
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual({ unsupported: true, nodes: [], leafId: null });
+  });
+});
+
 describe("assertHostCapabilities", () => {
   it("passes for a complete session + runtime", () => {
     const session = makeSession();

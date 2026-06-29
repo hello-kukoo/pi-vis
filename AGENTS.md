@@ -172,6 +172,7 @@ src/
 - `session.open` → `{ outcome: "opened"|"existing"|"missing", sessionId, ... }`
 - `session.activate` / `session.reload` / `session.close` / `session.loadHistory`
 - `session.sendCommand` — sends PiRpcCommand, returns PiRpcResponse
+- `session.transcriptForEntries` — converts a raw `SessionTreeEntry[]` (root→leaf) to `TranscriptBlock[]` via the shared `entriesToTranscript` helper; used by the tree viewer after `navigate_tree` to rebuild the transcript from pi's in-memory branch without re-reading the session file
 - `session.respondToUiRequest` — sends ExtensionUiResponse back to pi
 - `session.panelInput` — keystrokes from the xterm.js panel overlay → host's custom() TUI
 - `session.panelResize` — new xterm.js cols/rows → host, so the TUI layout matches the panel
@@ -417,11 +418,30 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
 
 `/reload` restarts a session's pi subprocess so settings, keybindings, extensions, skills, prompts, and themes are re-read from disk. pi's TUI `/reload` calls `session.reload()` in-process, but **RPC mode does not expose `reload` as a sendable command** — it's only wired as an extension command-context action. Restarting the subprocess is the equivalent available over RPC. The session record and its `sessionFile` are preserved (so pi resumes the same session), and the renderer's transcript is untouched. Refuses while the session is mid-turn (mirrors pi's "Wait for the current response to finish before reloading." guard). On success, pi re-emits `session_info_changed` and the renderer refreshes commands.
 
+### Conversation tree (`/tree`)
+
+`/tree` opens a first-class, native overlay (Catppuccin-themed) for browsing the conversation DAG and switching the active leaf **in place** — distinct from `/fork`, which spawns a *new* session. Built on top of the SDK host's public tree surface; pi exposes `session.sessionManager.{getTree, getLeafId, getBranch, appendLabelChange}` and `session.navigateTree(targetId, options)` synchronously. The host bridge handles three new RPC commands: **`get_tree`**, **`navigate_tree`** (returns `branch` + `leafId` post-navigation), and **`set_label`** (sync, in-memory labelsById update). Capability gating is **per-command**, not host-wide: a missing `getTree`/`navigateTree` on older pi versions degrades to `phase: "unsupported"` (with the friendly "Tree view requires the SDK host — update pi" message — never pi's raw `"Unknown command: get_tree"`), so panels still work.
+
+**Flat wire format (contextBridge depth limit).** pi's `getTree()` returns a *recursively nested* tree (`{entry, children:[...]}`) whose depth equals the longest root→leaf message chain — unbounded. Electron's `contextBridge` hardcodes a **1000-level object-nesting limit**, so a session with >1000 messages in its longest chain threw `recursion depth exceeded` the instant the response crossed the preload→renderer boundary, before the renderer ever saw it. The host bridge therefore **flattens** the nested tree into a `FlatTreeNode[]` (`{entry, parentId, label?, labelTimestamp?}`, `parentId: undefined` for top-level roots, sibling order preserved) — wire depth is now a constant. The renderer re-nests it in its own world (no contextBridge limit there) via `buildNestedTree` (`tree-flatten.ts`, iterative so a multi-thousand-deep chain can't stack-overflow). The recursive `SessionTreeNode`/`SessionTreeNodeSchema` types are kept for the renderer-internal nested form the flattener consumes; they NEVER cross the IPC/contextBridge boundary. Only `get_tree`'s response was affected — `navigate_tree`'s `branch` and `transcriptForEntries`' input are already flat arrays of shallow entries.
+
+The transcript rebuild after navigation reads from pi's authoritative in-memory state via `_session.sessionManager.getBranch()` (synchronous; already root→leaf ordered) rather than re-reading the session file — freshly-appended entries (e.g. a just-synthesized `branch_summary`) may not be on disk yet. The conversion lives in a pure helper `entriesToTranscript(orderedEntries)` (`src/main/sessions/history-loader.ts`) extracted from the existing file-load path. `branch_summary` entries render as the existing `compaction` block type (with the summary text) — no new `TypedTranscriptBlock` member. Renderer state lives in `useTreeStore` (`src/renderer/src/stores/tree-store.ts`); the overlay is `TreeViewerHost` (`src/renderer/src/components/tree/TreeViewerHost.tsx`).
+
+**Modal semantics mirror `DiffViewerHost` exactly** — `TreeViewerHost` is a direct child of `.app` (next to `DiffViewerHost`, NOT inside `.app__session`), and `.tree-overlay`/`.tree-viewer` copy `.diff-overlay`/`.diff-viewer` verbatim (`grid-area: main`, card-inset, scrim + backdrop blur, `--elevation-3`, the `.app--sidebar-collapsed` full-window variant, the pop-in animation, backdrop-click-to-close, `useEscapeClaim`). So the two overlays open at identical dimensions/shadow.
+
+**The flattener (`tree-flatten.ts`, `flattenVisible` + display helpers; unit-tested in `tree-flatten.test.ts`) is a faithful port of pi's TUI tree-selector** (`modes/interactive/components/tree-selector.js`). Three parity facts the original implementation got wrong and that this port fixes:
+- **Per-node filtering, NOT subtree pruning.** Real sessions begin with settings entries (`model_change`/`thinking_level_change`/`session_info`) at the *root*; the default filter hides those. The old code recursively skipped a filtered node's entire subtree, so default-filtering the settings roots pruned every message beneath them → the overlay showed nothing unless you switched to "All". The port flattens once, then filters each node independently; hidden nodes' descendants reattach to the nearest visible ancestor.
+- **Branch-only indentation.** Depth increases only under a genuine branch point (a node with ≥2 *visible* children), so a linear conversation renders flat — no per-line staircase. Computed from the nearest-visible-ancestor chain.
+- **No `tool_call` entry type exists in pi.** Tool calls live inside assistant-message content; tool *results* are `message` entries with `role: "toolResult"`. The "no-tools" filter hides those toolResult messages (the old code filtered a non-existent `tool_call` type, so "no-tools" was a no-op). A `toolCallMap` harvested from assistant content names each toolResult row.
+
+The active root→leaf path is marked with a `•` bullet (pi's marker) and the active branch is sorted first among siblings. Filters are **keyboard-driven** (⌘/⌃ + d/t/u/l/a, mirroring pi — no button bar; the active non-default filter shows as a small tag by the title), and search matches per-node (AND-tokenized). The overlay-aware keydown guards in `App.tsx` (`useGlobalEscapeInterrupt` defer + the Cmd+G handler) include `.tree-overlay` so Escape/Cmd-G don't double-fire.
+
+**Mid-turn guard**: `navigateTo` checks `useSessionsStore.getState().sessions.get(sessionId)?.isStreaming` first; pi's `navigateTree` has no internal streaming guard and overwrites agent state, so navigating mid-stream would corrupt the active turn (mirrors `executeReload`'s wording). On success → `seedHistory` from the returned branch, `injectEditorText` if `editorText` present, re-fetch `get_session_stats` only (no model/thinking reconcile — `navigateTree` mutates only `agent.state.messages`).
+
 ### Command System (`renderer/src/lib/commands/`)
 
 The composer parses input into typed `ComposerAction` discriminated unions:
 - `!text` → bash command
-- `/command [args]` → slash command (builtins mirror pi's TUI: model, compact, name, session, new, export, fork, clone, resume, copy, quit, settings, diff, login, reload)
+- `/command [args]` → slash command (builtins mirror pi's TUI: model, compact, name, session, new, export, fork, clone, resume, copy, quit, settings, diff, tree, login, reload)
 - Otherwise → user prompt
 
 Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discovered commands (extensions/prompts/skills) come from `get_commands` RPC. `parse.ts` resolves input to an action; `execute.ts` dispatches it.
@@ -483,6 +503,10 @@ Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discov
 | `src/renderer/src/components/common/BranchDropdown.tsx` | Presentational branch dropdown (search, keyboard nav, remote toggle) |
 | `src/renderer/src/components/common/BranchDropdown.css` | Branch dropdown styles (extracted from DiffViewer.css) |
 | `src/renderer/src/components/composer/WorktreeBar.tsx` | Pre-send worktree bar — 3-way segmented control (`In Workspace | New Worktree | Existing Worktree`) + mode-specific controls (branch dropdown for New, path input + Browse + live validation line for Existing) |
+| `src/renderer/src/stores/tree-store.ts` | Conversation-tree viewer state — `openTreeForSession`/`navigateTo`/`setLabel` actions; degrades to `phase: "unsupported"` on RPC fallback or older pi versions |
+| `src/renderer/src/components/tree/TreeViewerHost.tsx` | Native conversation-tree overlay (Catppuccin-themed) — tree rendering, current-leaf marker, filter modes, search, label add/edit, opt-in `summarize on switch` toggle |
+| `src/renderer/src/components/tree/tree-flatten.ts` | Pure filter/search/fold flattening + display helpers for the tree overlay (`flattenVisible`, `entryDisplayText`, `roleGlyph`, `buildNestedTree` — flat→nested reconstitution of the wire `FlatTreeNode[]`); unit-tested in `tree-flatten.test.ts` |
+| `src/main/sessions/history-loader.ts` (`entriesToTranscript`) | Pure helper that converts an ordered branch (root→leaf) of session-tree entries into the renderer-facing `TranscriptBlock[]` — reused by `/tree`'s navigate path to rebuild transcripts from pi's in-memory state without re-reading the session file |
 | `src/renderer/src/components/composer/WorktreeBar.css` | WorktreeBar styles (segmented control, attach input, status line) |
 | `src/renderer/src/components/session-header/SessionSubBar.tsx` | Compact-mode secondary controls strip |
 | `src/renderer/src/components/session-header/SessionSubBar.css` | SessionSubBar styles |

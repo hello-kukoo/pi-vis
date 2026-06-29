@@ -170,7 +170,7 @@ describe("parseComposerInput — arg-less built-ins with trailing text fall thro
 });
 
 describe("parseComposerInput — unsupported TUI commands", () => {
-  it.each(["import", "tree", "hotkeys", "debug"])("/%s → unsupported", (name) => {
+  it.each(["import", "hotkeys", "debug"])("/%s → unsupported", (name) => {
     expect(parseComposerInput(`/${name}`, { discovered: new Map() })).toEqual({
       kind: "unsupported",
       name,

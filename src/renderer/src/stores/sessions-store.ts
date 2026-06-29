@@ -1195,6 +1195,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       closeSessionTab: get().closeSessionTab,
       openAppSettings: () => window.dispatchEvent(new CustomEvent("pivis:open-settings")),
       openDiffViewer: (sid: SessionId) => openDiffForSession(sid),
+      // Lazy import: tree-store imports sessions-store, so a static import here
+      // would be circular. The unified-TUI submit path rarely hits /tree, so
+      // deferring the module load is fine.
+      openTreeViewer: (sid: SessionId) => {
+        void import("./tree-store.js").then((m) =>
+          m.useTreeStore.getState().openTreeForSession(sid),
+        );
+      },
       openLogin: () => window.dispatchEvent(new CustomEvent("pivis:open-login")),
       copyToClipboard: async (t: string) => {
         await window.pivis.invoke("clipboard.writeText", { text: t });

@@ -174,6 +174,8 @@ function dispatchArgless(name: string): ComposerAction {
       return { kind: "share" };
     case "changelog":
       return { kind: "changelog" };
+    case "tree":
+      return { kind: "open-tree" };
     default:
       return { kind: "send-prompt", text: `/${name}` };
   }

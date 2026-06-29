@@ -210,3 +210,101 @@ export const LogoutProvidersDataSchema = z
   .passthrough();
 
 export type LogoutProvidersData = z.infer<typeof LogoutProvidersDataSchema>;
+
+// Conversation-tree response schemas. `SessionTreeEntrySchema` is intentionally
+// loose — the renderer only needs `id`, `parentId`, `type`, `timestamp` plus
+// enough per-type fields to render the preview text. The discriminated shapes
+// in src/shared/session-file/entries.ts cover every concrete variant; we
+// .passthrough() so type-specific extras (message bodies, summary text,
+// modelId, etc.) survive the wire trip without us enumerating each one.
+export const SessionTreeEntrySchema = z
+  .object({
+    id: z.string(),
+    parentId: z.string().optional(),
+    type: z.string(),
+    timestamp: z.union([z.string(), z.number()]).optional(),
+  })
+  .passthrough();
+
+export type SessionTreeEntry = z.infer<typeof SessionTreeEntrySchema>;
+
+// The WIRE shape is FLAT, not nested. pi's sessionManager.getTree() returns a
+// recursively-nested tree ({entry, children:[...]}) whose depth equals the
+// longest root→leaf message chain — unbounded. Electron's contextBridge
+// hardcodes a 1000-level object-nesting limit, so any session with >1000
+// messages in its longest chain threw "recursion depth exceeded" the moment
+// the response crossed the preload→renderer boundary, before the renderer
+// ever saw it. Flattening to a parentId-keyed list caps the wire depth at a
+// constant (one level of nodes + the shallow per-entry fields); the renderer
+// re-nests in its own world (no contextBridge limit there) via buildNestedTree.
+export interface FlatTreeNode {
+  entry: SessionTreeEntry;
+  /** undefined/absent for top-level roots (mirrors their position in pi's nested tree). */
+  parentId?: string | undefined;
+  label?: string | undefined;
+  labelTimestamp?: string | undefined;
+}
+
+export const FlatTreeNodeSchema = z.object({
+  entry: SessionTreeEntrySchema,
+  parentId: z.string().optional(),
+  label: z.string().optional(),
+  labelTimestamp: z.string().optional(),
+});
+
+// Nested form — used ONLY renderer-side (after buildNestedTree reconstitutes
+// the tree in the renderer's main world, which has no contextBridge depth
+// limit). Kept recursive for the flattener (a faithful port of pi's TUI
+// tree-selector); never crosses the IPC/contextBridge boundary.
+export interface SessionTreeNode {
+  entry: SessionTreeEntry;
+  children: SessionTreeNode[];
+  label?: string | undefined;
+  labelTimestamp?: string | undefined;
+}
+
+export const SessionTreeNodeSchema: z.ZodType<SessionTreeNode, z.ZodTypeDef, unknown> = z.lazy(() =>
+  z.object({
+    entry: SessionTreeEntrySchema,
+    children: z.array(SessionTreeNodeSchema),
+    label: z.string().optional(),
+    labelTimestamp: z.string().optional(),
+  }),
+);
+
+export const GetTreeDataSchema = z.object({
+  nodes: z.array(FlatTreeNodeSchema),
+  // null when the session is in its pre-leaf state (e.g. immediately after
+  // /new — no user messages have been appended yet).
+  leafId: z.string().nullable(),
+  // True when the host is up but the installed pi lacks the tree surface
+  // (sessionManager.getTree/getLeafId). This is a *capability gap*, distinct
+  // from a transient failure: the renderer maps it to the permanent
+  // "unsupported" phase, while every other failure becomes a retryable
+  // "error" phase. Without this flag the renderer can't tell a genuine gap
+  // from a host-restart hiccup (both surface as a thrown command), so a
+  // transient made the viewer stick on "unsupported" through /reload.
+  unsupported: z.boolean().optional(),
+});
+
+export type GetTreeData = z.infer<typeof GetTreeDataSchema>;
+
+export const NavigateTreeDataSchema = z.object({
+  cancelled: z.boolean(),
+  editorText: z.string().optional(),
+  // The new active leaf AFTER navigation. null when the user navigated
+  // back to the very first user message — see review S3 in the plan.
+  leafId: z.string().nullable().optional(),
+  aborted: z.boolean().optional(),
+  // The active branch in root→leaf chronological order, sourced from
+  // session.sessionManager.getBranch() (synchronous in pi). Empty when
+  // navigation was cancelled, or when the new leaf is null (root).
+  //
+  // Note: pi's navigateTree() result also carries `summaryEntry` for the
+  // synthesized branch_summary — deliberately omitted here because that
+  // entry is already present as a node in `branch` whenever a summary was
+  // generated, so carrying it separately would be redundant.
+  branch: z.array(SessionTreeEntrySchema).optional(),
+});
+
+export type NavigateTreeData = z.infer<typeof NavigateTreeDataSchema>;

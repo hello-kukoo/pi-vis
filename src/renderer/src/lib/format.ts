@@ -1,3 +1,10 @@
+export function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+
 export function formatCost(usd: number): string {
   if (usd < 0.001) return "<$0.001";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;

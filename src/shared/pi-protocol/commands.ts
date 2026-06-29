@@ -210,6 +210,30 @@ export const SetTrustCommandSchema = BaseCommand.extend({
   trusted: z.boolean(),
 });
 
+// Conversation-tree navigation — SDK-host-only feature. The bridge in
+// resources/pi-session-host/bridge.mjs implements these against the public
+// session.sessionManager / session.navigateTree surface. In RPC-fallback
+// mode these commands are unrecognized and the bridge returns
+// `success:false` (the renderer maps that to a friendly "unsupported"
+// state — see tree-store.openTreeForSession).
+export const GetTreeCommandSchema = BaseCommand.extend({
+  type: z.literal("get_tree"),
+});
+
+export const NavigateTreeCommandSchema = BaseCommand.extend({
+  type: z.literal("navigate_tree"),
+  targetId: z.string(),
+  summarize: z.boolean().optional(),
+  label: z.string().optional(),
+});
+
+export const SetLabelCommandSchema = BaseCommand.extend({
+  type: z.literal("set_label"),
+  targetId: z.string(),
+  // Omit / empty string = clear the label.
+  label: z.string().optional(),
+});
+
 export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   PromptCommandSchema,
   SteerCommandSchema,
@@ -247,6 +271,9 @@ export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   ExportHtmlCommandSchema,
   GetTrustStateCommandSchema,
   SetTrustCommandSchema,
+  GetTreeCommandSchema,
+  NavigateTreeCommandSchema,
+  SetLabelCommandSchema,
 ]);
 
 export type PiRpcCommand = z.infer<typeof PiRpcCommandSchema>;

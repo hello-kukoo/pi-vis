@@ -405,6 +405,131 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
         cost: 0.0004,
         contextUsage: { tokens: 5400, contextWindow: 1_000_000, percent: 0.5 },
       });
+    case "get_tree": {
+      // Demo tree mirroring the real bridge's getTree() output. Deliberately
+      // realistic so design iteration exercises the things that bit the first
+      // implementation:
+      //   • Settings entries (model_change / thinking_level_change /
+      //     session_info) at the ROOT — the default filter hides them, and the
+      //     messages beneath them must still appear (no subtree pruning).
+      //   • A long single-child (linear) chain — must render FLAT, no staircase.
+      //   • One genuine branch point (u1 has two assistant children) — only the
+      //     branch indents.
+      // There is no `tool_call` entry type in pi; tool calls live in assistant
+      // content and tool results are `message` entries with role "toolResult".
+      const node = (id: string, type: string, extra: object, children: unknown[] = []) => ({
+        entry: { id, type, timestamp: "2026-06-26T12:00:00.000Z", ...extra },
+        children,
+      });
+      const msg = (id: string, message: object, children: unknown[] = [], label?: string) => {
+        const n = node(id, "message", { message }, children);
+        return label ? { ...n, label } : n;
+      };
+      const tree = [
+        node("m1", "model_change", { modelId: "anthropic/claude-opus-4-8" }, [
+          node("tl1", "thinking_level_change", { thinkingLevel: "medium" }, [
+            node("si1", "session_info", { name: "Auth refactor" }, [
+              msg("u1", { role: "user", content: "Fix the config loader." }, [
+                // Active branch first is what the real bridge/getBranch order
+                // produces; the stub lists both — the flattener sorts the
+                // active-leaf branch ahead regardless.
+                msg(
+                  "a1",
+                  {
+                    role: "assistant",
+                    content: [
+                      { type: "text", text: "Looking at the loader now." },
+                      {
+                        type: "toolCall",
+                        id: "tc1",
+                        name: "read",
+                        arguments: { path: "src/config.ts" },
+                      },
+                    ],
+                  },
+                  [
+                    msg("tr1", { role: "toolResult", toolCallId: "tc1", content: "…config.ts…" }, [
+                      msg("a1d", {
+                        role: "assistant",
+                        content: [{ type: "text", text: "Fixed it with absolute paths." }],
+                      }),
+                    ]),
+                  ],
+                ),
+                msg(
+                  "a2",
+                  {
+                    role: "assistant",
+                    content: [
+                      { type: "text", text: "Let me try relative paths instead." },
+                      {
+                        type: "toolCall",
+                        id: "tc2",
+                        name: "read",
+                        arguments: { path: "src/paths.ts" },
+                      },
+                    ],
+                  },
+                  [
+                    msg("tr2", { role: "toolResult", toolCallId: "tc2", content: "…paths.ts…" }, [
+                      msg(
+                        "a2d",
+                        {
+                          role: "assistant",
+                          content: [{ type: "text", text: "Switching to relative-path strategy." }],
+                        },
+                        [],
+                        "alt-approach",
+                      ),
+                    ]),
+                  ],
+                ),
+              ]),
+            ]),
+          ]),
+        ]),
+      ];
+      // Flatten the nested demo tree into the flat wire shape (parentId-
+      // keyed) that the real bridge now sends — see FlatTreeNode / the
+      // contextBridge nesting-limit fix. The renderer re-nests via
+      // buildNestedTree, so this must stay flat here to exercise the real
+      // round-trip during standalone browser dev.
+      const flat: unknown[] = [];
+      const stack: { node: Record<string, unknown>; parentId: string | undefined }[] = [];
+      for (let i = tree.length - 1; i >= 0; i--) {
+        stack.push({ node: tree[i] as Record<string, unknown>, parentId: undefined });
+      }
+      while (stack.length > 0) {
+        const { node: n, parentId } = stack.pop()!;
+        const entry = n["entry"] as { id: string };
+        flat.push({
+          entry: n["entry"],
+          parentId,
+          label: n["label"],
+          labelTimestamp: n["labelTimestamp"],
+        });
+        const kids = (n["children"] as Record<string, unknown>[]) ?? [];
+        for (let i = kids.length - 1; i >= 0; i--) {
+          stack.push({ node: kids[i]!, parentId: entry.id });
+        }
+      }
+      return response("get_tree", { nodes: flat, leafId: "a2d" });
+    }
+    case "navigate_tree":
+      // The preview stub navigates in-place: leaf becomes the target,
+      // branch is just the single target entry. The TreeViewer will show
+      // a toast and re-render; this is enough for design iteration.
+      return response("navigate_tree", {
+        cancelled: false,
+        editorText: `You picked ${String(command.targetId ?? "")}`,
+        leafId:
+          command.targetId === undefined || command.targetId === null
+            ? null
+            : String(command.targetId),
+        branch: [],
+      });
+    case "set_label":
+      return response("set_label");
     default:
       return response(type);
   }
@@ -462,6 +587,27 @@ const stub = {
       }
       case "session.close":
         return undefined;
+      case "session.transcriptForEntries":
+        // Render a tiny representative transcript so designers can iterate on
+        // the TreeViewer UI without writing fixtures. Reuses demo block ids.
+        return [
+          {
+            id: "demo-1",
+            type: "user",
+            data: {
+              role: "user",
+              content: "Can you fix the config loader so relative roots resolve correctly?",
+            },
+          },
+          {
+            id: "demo-2",
+            type: "assistant",
+            data: {
+              role: "assistant",
+              segments: [{ kind: "text", content: "Sure — let me look at the loader first." }],
+            },
+          },
+        ];
       case "session.createWorktree":
         return {
           ok: true,

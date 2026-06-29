@@ -45,6 +45,7 @@ export type ComposerAction =
   | { kind: "trust" }
   | { kind: "share" }
   | { kind: "changelog" }
+  | { kind: "open-tree" }
   // TUI-only commands we deliberately do not surface. The renderer toasts
   // an "unsupported" notice unless a discovered command shadows the name.
   | { kind: "unsupported"; name: string };

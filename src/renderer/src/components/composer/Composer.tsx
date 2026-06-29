@@ -15,6 +15,7 @@ import { useChangelogStore } from "../../stores/changelog-store.js";
 import { openDiffForSession } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { isNewSessionPending } from "../../stores/sessions-store.js";
+import { useTreeStore } from "../../stores/tree-store.js";
 import "./Composer.css";
 
 interface ComposerProps {
@@ -580,6 +581,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             // the session area). The store owns its state; we just call
             // the helper.
             openDiffForSession(sid);
+          },
+          openTreeViewer: (sid: SessionId) => {
+            // Tree viewer mirrors diff viewer's lifecycle: store-owned,
+            // App-mounted. Calling openTreeForSession triggers the
+            // get_tree fetch and flips phase to loading→ready.
+            void useTreeStore.getState().openTreeForSession(sid);
           },
           openLogin: () => {
             window.dispatchEvent(new CustomEvent("pivis:open-login"));

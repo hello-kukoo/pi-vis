@@ -5,7 +5,7 @@ import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
-import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
+import type { PiRpcResponse, SessionTreeEntry } from "@shared/pi-protocol/responses.js";
 import { app, clipboard, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
 import {
@@ -28,7 +28,7 @@ import { readPiChangelog } from "./pi-changelog.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { isSessionHost } from "./pi/session-host.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
-import { loadHistory } from "./sessions/history-loader.js";
+import { entriesToTranscript, loadHistory } from "./sessions/history-loader.js";
 import {
   extractSessionMeta,
   listSessionsForWorkspace,
@@ -333,6 +333,19 @@ export function initIpc(win: BrowserWindow): void {
     if (!rec?.sessionFile) return [];
     return loadHistory(rec.sessionFile);
   });
+
+  // Convert an in-memory branch (root→leaf, as returned by the host's
+  // getBranch() and shipped in navigate_tree's response data) into the
+  // renderer-facing TranscriptBlock[] shape. The host is the source of
+  // truth here — we deliberately do NOT re-read the session file, which
+  // may be stale for freshly-appended entries (e.g. a just-generated
+  // branch_summary).
+  ipcMain.handle(
+    "session.transcriptForEntries",
+    (_evt, args: { sessionId: SessionId; entries: SessionTreeEntry[] }) => {
+      return entriesToTranscript(args.entries);
+    },
+  );
 
   ipcMain.handle(
     "session.sendCommand",

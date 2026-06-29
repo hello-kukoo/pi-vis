@@ -101,6 +101,8 @@ export interface ExecuteDeps {
   openLogin: () => void;
   /** Open the diff viewer for the active session. */
   openDiffViewer: (sessionId: SessionId) => void;
+  /** Open the conversation-tree viewer for the active session. */
+  openTreeViewer: (sessionId: SessionId) => void;
   /** Put text on the system clipboard. */
   copyToClipboard: (text: string) => Promise<void>;
   /** Look up the session's available models (for the /model picker / exact match). */
@@ -206,6 +208,9 @@ export async function executeAction(
       return;
     case "changelog":
       await executeChangelog(sessionId, deps);
+      return;
+    case "open-tree":
+      deps.openTreeViewer(sessionId);
       return;
     case "unsupported":
       deps.addToast(

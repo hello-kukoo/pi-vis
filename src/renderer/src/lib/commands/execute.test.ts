@@ -45,6 +45,7 @@ function makeDeps(overrides: Partial<ExecuteDeps> = {}): {
     openAppSettings: make("openAppSettings") as ExecuteDeps["openAppSettings"],
     openLogin: make("openLogin") as ExecuteDeps["openLogin"],
     openDiffViewer: make("openDiffViewer") as ExecuteDeps["openDiffViewer"],
+    openTreeViewer: make("openTreeViewer") as ExecuteDeps["openTreeViewer"],
     copyToClipboard: vi.fn(async () => {}) as ExecuteDeps["copyToClipboard"],
     getAvailableModels: () =>
       [

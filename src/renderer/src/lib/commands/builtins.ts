@@ -46,6 +46,12 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommandDef[] = [
   { name: "quit", argHint: "", description: "Close the current tab", takesArgs: false },
   { name: "settings", argHint: "", description: "Open app settings", takesArgs: false },
   { name: "diff", argHint: "", description: "View working tree changes", takesArgs: false },
+  {
+    name: "tree",
+    argHint: "",
+    description: "Browse and switch conversation branches",
+    takesArgs: false,
+  },
   { name: "login", argHint: "", description: "Sign in to a provider", takesArgs: false },
   {
     name: "logout",
@@ -88,7 +94,6 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommandDef[] = [
  */
 export const UNSUPPORTED_TUI_COMMANDS: ReadonlySet<string> = new Set([
   "import",
-  "tree",
   "hotkeys",
   "debug",
 ]);

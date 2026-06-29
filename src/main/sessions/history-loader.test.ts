@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadHistory } from "./history-loader.js";
+import { entriesToTranscript, loadHistory } from "./history-loader.js";
 
 let dir: string;
 let file: string;
@@ -209,5 +209,106 @@ describe("loadHistory (real pi v3 nested message format)", () => {
       { kind: "text", content: "Answer" },
       { kind: "thinking", content: "more" },
     ]);
+  });
+});
+
+describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
+  it("returns [] for an empty branch (review S3: navigating to root / leafId null)", () => {
+    expect(entriesToTranscript([])).toEqual([]);
+  });
+
+  it("renders branch_summary entries as compaction blocks so the recap actually appears (review B2)", () => {
+    // Real pi uses `parentId: null` for the root and serializes the new
+    // branch_summary as a sibling of the new active leaf. The bridge (or
+    // any future caller) MUST coerce `null` parentId → undefined before
+    // handing entries to the schema — see plan §3. We omit parentId
+    // here so the fixture matches the post-coercion shape.
+    const branch = [
+      {
+        type: "branch_summary",
+        id: "bs-1",
+        timestamp: "2026-01-01T00:00:00Z",
+        summary: "User explored a refactor branch and reverted.",
+        fromId: "leaf-prev",
+      },
+    ];
+    const blocks = entriesToTranscript(branch);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      id: "bs-1",
+      type: "compaction",
+      data: { summary: "User explored a refactor branch and reverted." },
+    });
+  });
+
+  it("falls back to a placeholder summary when branch_summary.summary is missing", () => {
+    const blocks = entriesToTranscript([
+      { type: "branch_summary", id: "bs-x", timestamp: "2026-01-01T00:00:00Z" },
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe("compaction");
+    expect((blocks[0]?.data as { summary: string }).summary).toMatch(/empty branch summary/i);
+  });
+
+  it("skips meta entries (label/model_change/thinking_level_change/session_info/custom)", () => {
+    const branch = [
+      {
+        type: "message",
+        id: "u1",
+        timestamp: "t1",
+        message: { role: "user", content: "hi" },
+      },
+      {
+        type: "label",
+        id: "l1",
+        parentId: "u1",
+        timestamp: "t2",
+        targetId: "u1",
+        label: "Greeting",
+      },
+      {
+        type: "thinking_level_change",
+        id: "tlc1",
+        parentId: "u1",
+        timestamp: "t3",
+        thinkingLevel: "medium",
+      },
+      {
+        type: "message",
+        id: "a1",
+        parentId: "l1",
+        timestamp: "t4",
+        message: { role: "assistant", content: [{ type: "text", text: "hello!" }] },
+      },
+    ];
+    const blocks = entriesToTranscript(branch);
+    expect(blocks.map((b) => b.type)).toEqual(["user", "assistant"]);
+  });
+
+  it("renders compaction entries as compaction blocks (pre-compaction trimming is the chain walker's job, not ours)", () => {
+    // `SessionManager.getBranch()` returns the post-compaction chain —
+    // pre-compaction entries are already gone before this helper sees them.
+    // We just emit a compaction block for the marker.
+    const branch = [
+      {
+        type: "compaction",
+        id: "c1",
+        parentId: "u1",
+        timestamp: "t2",
+        summary: "compacted earlier",
+        firstKeptEntryId: "u2",
+      },
+      {
+        type: "message",
+        id: "u2",
+        parentId: "c1",
+        timestamp: "t3",
+        message: { role: "user", content: "after" },
+      },
+    ];
+    const blocks = entriesToTranscript(branch);
+    expect(blocks.map((b) => b.type)).toEqual(["compaction", "user"]);
+    expect((blocks[0]?.data as { summary: string }).summary).toBe("compacted earlier");
+    expect((blocks[1]?.data as { content: string }).content).toBe("after");
   });
 });

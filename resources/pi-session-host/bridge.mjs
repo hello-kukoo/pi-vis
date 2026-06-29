@@ -633,6 +633,115 @@ export function setupCommandBridge({
           break;
         }
 
+        // Conversation-tree commands (SDK-host-only — see plan §2).
+        // NOT gated by assertHostCapabilities so older pi versions that
+        // lack session.sessionManager.getTree()/getBranch() or
+        // session.navigateTree() degrade per-command (TypeError → success:false
+        // from the outer try/catch) without forcing the entire host to fall
+        // back to `pi --mode rpc` (which would also disable inline panels).
+        case "get_tree": {
+          // Capability gate (NOT a thrown TypeError). The tree surface is
+          // intentionally NOT in assertHostCapabilities (gating it there would
+          // disable inline panels too on an older pi). So detect it per-command:
+          // if getTree/getLeafId are missing, return a structured `unsupported`
+          // flag the renderer maps to the permanent "unsupported" phase. Every
+          // OTHER failure (host restart, transient, a real error) surfaces as a
+          // thrown command → the renderer's retryable "error" phase. Without
+          // this distinction a transient made the viewer stick on "unsupported".
+          const sm = _session.sessionManager;
+          if (!sm || typeof sm.getTree !== "function" || typeof sm.getLeafId !== "function") {
+            send({
+              type: "response",
+              id,
+              success: true,
+              data: { unsupported: true, nodes: [], leafId: null },
+            });
+            break;
+          }
+          // session.sessionManager.getTree() returns a structured-clone-safe
+          // defensive copy; .getLeafId() is the authoritative active leaf
+          // (null in the pre-leaf state).
+          //
+          // FLATTEN the nested tree into a parentId-keyed list before sending.
+          // pi's tree is recursively nested ({entry, children:[...]}) whose
+          // depth equals the longest root→leaf chain — unbounded. Electron's
+          // contextBridge hardcodes a 1000-level nesting limit, so a long
+          // (1000+ message) linear session threw "recursion depth exceeded"
+          // when the response crossed preload→renderer. The flat list caps
+          // wire depth at a constant; the renderer re-nests in its own world
+          // (buildNestedTree) which has no such limit.
+          const nested = sm.getTree();
+          const nodes = [];
+          // Pre-order DFS preserving sibling order (push children reversed so
+          // they pop in original order). parentId tracks TREE POSITION
+          // (undefined for top-level roots), not entry.parentId — the nested
+          // tree already resolved pi's orphan/root rules.
+          const stack = nested.map((n) => ({ node: n, parentId: undefined })).reverse();
+          while (stack.length > 0) {
+            const { node, parentId } = stack.pop();
+            nodes.push({
+              entry: node.entry,
+              parentId,
+              label: node.label,
+              labelTimestamp: node.labelTimestamp,
+            });
+            const kids = node.children ?? [];
+            for (let i = kids.length - 1; i >= 0; i--) {
+              stack.push({ node: kids[i], parentId: node.entry.id });
+            }
+          }
+          const leafId = sm.getLeafId();
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: { nodes, leafId },
+          });
+          break;
+        }
+
+        case "navigate_tree": {
+          // session.navigateTree() mutates only agent.state.messages — it
+          // does NOT change session.model / thinkingLevel, so the renderer
+          // doesn't need to reconcile those (review S4). It returns
+          // { editorText?, cancelled, aborted?, summaryEntry? }; the host
+          // also captures the new active leaf + branch so the renderer can
+          // rebuild the transcript in-place without re-reading the session
+          // file (which may be stale for freshly-appended entries such as
+          // the synthesized branch_summary).
+          const result = await _session.navigateTree(command.targetId, {
+            summarize: command.summarize,
+            label: command.label,
+          });
+          const data = {
+            cancelled: result.cancelled,
+            editorText: result.editorText,
+            aborted: result.aborted,
+          };
+          if (!result.cancelled) {
+            // Post-navigation: capture the new active leaf + the new branch.
+            // getBranch() is SYNCHRONOUS in pi's SessionManager and returns
+            // the chain in root→leaf order (already reversed internally).
+            // Empty array when the new leaf is null (navigated past the
+            // root / first user message — review S3).
+            data.leafId = _session.sessionManager.getLeafId();
+            data.branch = _session.sessionManager.getBranch();
+          }
+          send({ type: "response", id, success: true, data });
+          break;
+        }
+
+        case "set_label": {
+          // appendLabelChange(targetId, label?) is synchronous; label:undefined
+          // or empty string clears. After it returns, getTree() will surface
+          // node.label/node.labelTimestamp from the in-memory labelsById map
+          // (session-manager.js:900), so the renderer's `refresh()` is the
+          // only follow-up needed (review N2).
+          _session.sessionManager.appendLabelChange(command.targetId, command.label);
+          send({ type: "response", id, success: true });
+          break;
+        }
+
         default: {
           send({
             type: "response",

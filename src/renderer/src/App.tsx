@@ -18,6 +18,7 @@ import { StatusBar } from "./components/shell/StatusBar.js";
 import { TitleBar } from "./components/shell/TitleBar.js";
 import { UpdateBanner } from "./components/shell/UpdateBanner.js";
 import { TranscriptView } from "./components/transcript/TranscriptView.js";
+import { TreeViewerHost } from "./components/tree/TreeViewerHost.js";
 import { UpdateProgress } from "./components/updates/UpdateProgress.js";
 import { useEscapeClaim } from "./hooks/useEscapeClaim.js";
 import { useGlobalEscapeInterrupt } from "./hooks/useGlobalEscapeInterrupt.js";
@@ -243,7 +244,7 @@ export function App(): React.ReactElement {
       // slot — so Escape should still close settings when a question
       // is pending. The user can reopen the dialog (it's still in the
       // pendingDialogs queue) by clicking the session in the sidebar.
-      if (document.querySelector(".picker-overlay, .diff-overlay")) return;
+      if (document.querySelector(".picker-overlay, .diff-overlay, .tree-overlay")) return;
       setShowSettings(false);
     };
     window.addEventListener("keydown", onKey);
@@ -261,7 +262,8 @@ export function App(): React.ReactElement {
       if (e.key.toLowerCase() !== "g") return;
       e.preventDefault();
       if (showSettings) return;
-      if (document.querySelector(".picker-overlay")) return;
+      // Defer to overlay viewers — they consume Escape / Cmd+G themselves.
+      if (document.querySelector(".picker-overlay, .diff-overlay, .tree-overlay")) return;
       const isOpen = useDiffStore.getState().open;
       if (isOpen) {
         useDiffStore.getState().closeViewer();
@@ -550,6 +552,7 @@ export function App(): React.ReactElement {
         would clip the overlay to the content card and the title pill would
         float above the scrim, unshadowed.) */}
       {activeSessionId && <DiffViewerHost sessionId={activeSessionId} />}
+      {activeSessionId && <TreeViewerHost sessionId={activeSessionId} />}
       {showSettings && (
         <SettingsView
           onClose={() => {
