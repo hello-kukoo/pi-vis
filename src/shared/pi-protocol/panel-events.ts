@@ -34,6 +34,28 @@ export const PanelCloseEventSchema = z.object({
   panelId: z.number(),
 });
 
+/**
+ * The unified-TUI panel switched display modes. Emitted by the SessionHost when
+ * an extension shows/hides a pi-tui **overlay** on the unified TUI (e.g. the
+ * pi-subagents "inspect" box).
+ *
+ * - `"viewport"`: an overlay/full-screen component is up whose rendered geometry
+ *   is a function of the terminal `rows` it's given (pi-tui centers/sizes
+ *   overlays to the viewport). The renderer must pin a **fixed** grid here —
+ *   the normal content-tracking sizer would feed a resize→re-layout→re-measure
+ *   loop (the "wiggle"), because the content height it measures depends on the
+ *   rows it just reported.
+ * - `"content"`: normal content-hugging mode (editor + widget stack). The
+ *   renderer tracks the intrinsic content height.
+ *
+ * Absent ⇒ `"content"` (the default before any overlay is shown).
+ */
+export const PanelModeEventSchema = z.object({
+  type: z.literal("panel_mode"),
+  panelId: z.number(),
+  mode: z.enum(["content", "viewport"]),
+});
+
 export const PanelClearAllEventSchema = z.object({
   type: z.literal("panel_clear_all"),
 });
@@ -70,6 +92,7 @@ export const PanelEventSchema = z.discriminatedUnion("type", [
   PanelOpenEventSchema,
   PanelDataEventSchema,
   PanelCloseEventSchema,
+  PanelModeEventSchema,
   PanelClearAllEventSchema,
   UnifiedPanelResetEventSchema,
   HostFallbackEventSchema,
@@ -79,6 +102,7 @@ export const PanelEventSchema = z.discriminatedUnion("type", [
 export type PanelOpenEvent = z.infer<typeof PanelOpenEventSchema>;
 export type PanelDataEvent = z.infer<typeof PanelDataEventSchema>;
 export type PanelCloseEvent = z.infer<typeof PanelCloseEventSchema>;
+export type PanelModeEvent = z.infer<typeof PanelModeEventSchema>;
 export type PanelClearAllEvent = z.infer<typeof PanelClearAllEventSchema>;
 export type UnifiedPanelResetEvent = z.infer<typeof UnifiedPanelResetEventSchema>;
 export type HostFallbackEvent = z.infer<typeof HostFallbackEventSchema>;

@@ -519,6 +519,8 @@ export function createUIContext({
                 /* overlay already gone */
               }
               overlayShown = false;
+              // Overlay gone → back to content-hugging sizing in the renderer.
+              panelBridge.setPanelMode(panelId, "content");
             }
             try {
               component?.dispose?.();
@@ -547,6 +549,12 @@ export function createUIContext({
                   : (options?.overlayOptions ?? (c?.width ? { width: c.width } : {}));
               const handle = tui.showOverlay(component, overlayOpts);
               overlayShown = true;
+              // A pi-tui overlay is now compositing against terminal `rows`, so
+              // its rendered height tracks whatever grid the renderer reports.
+              // Tell the renderer to pin a fixed grid (viewport mode) — otherwise
+              // its content-tracking sizer and the overlay chase each other (the
+              // "wiggle"). Cleared back to "content" in teardown().
+              panelBridge.setPanelMode(panelId, "viewport");
               options?.onHandle?.(handle);
             })
             .catch((err) => {

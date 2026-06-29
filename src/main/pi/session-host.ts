@@ -149,6 +149,7 @@ export interface SessionHostEvents {
   panelOpen: (panelId: number, overlay: boolean, unified: boolean) => void;
   panelData: (panelId: number, data: string) => void;
   panelClose: (panelId: number) => void;
+  panelMode: (panelId: number, mode: "content" | "viewport") => void;
   panelClearAll: () => void;
   /** Unified TUI panel events */
   unifiedSubmitRequest: (id: string, text: string) => void;
@@ -176,6 +177,7 @@ type HostWireMessage =
   | { type: "panel_open"; panelId: number; overlay: boolean; unified?: boolean }
   | { type: "panel_data"; panelId: number; data: string }
   | { type: "panel_close"; panelId: number }
+  | { type: "panel_mode"; panelId: number; mode: "content" | "viewport" }
   | { type: "panel_clear_all" }
   | { type: "unified_submit_request"; id: string; text: string }
   | { type: "clipboard_read_image_request"; id: string };
@@ -507,6 +509,11 @@ export class SessionHost extends EventEmitter {
         break;
       }
 
+      case "panel_mode": {
+        this.emit("panelMode", msg.panelId, msg.mode);
+        break;
+      }
+
       case "panel_clear_all": {
         this.emit("panelClearAll");
         break;
@@ -712,6 +719,7 @@ export interface SessionHost {
   ): this;
   on(event: "panelData", listener: (panelId: number, data: string) => void): this;
   on(event: "panelClose", listener: (panelId: number) => void): this;
+  on(event: "panelMode", listener: (panelId: number, mode: "content" | "viewport") => void): this;
   on(event: "panelClearAll", listener: () => void): this;
   on(event: "unifiedSubmitRequest", listener: (id: string, text: string) => void): this;
   emit(event: "event", data: PiEvent): boolean;
@@ -722,6 +730,7 @@ export interface SessionHost {
   emit(event: "panelOpen", panelId: number, overlay: boolean, unified: boolean): boolean;
   emit(event: "panelData", panelId: number, data: string): boolean;
   emit(event: "panelClose", panelId: number): boolean;
+  emit(event: "panelMode", panelId: number, mode: "content" | "viewport"): boolean;
   emit(event: "panelClearAll"): boolean;
   emit(event: "unifiedSubmitRequest", id: string, text: string): boolean;
 }

@@ -101,6 +101,37 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
     expect(m.firstRow).toContain("Fleet");
   });
 
+  test("an overlay (viewport mode): the grid pins to a fixed screen, not the small box", async ({
+    page,
+  }) => {
+    await page.goto("http://127.0.0.1:7317/?unified=overlay");
+    await page.waitForLoadState("domcontentloaded");
+
+    const panel = page.locator(".unified-panel");
+    await expect(panel).toBeVisible({ timeout: 20_000 });
+    // The overlay box painted into the panel.
+    await expect(panel.locator(".xterm-rows")).toContainText("inspect", { timeout: 15_000 });
+
+    // In viewport mode the renderer pins a FIXED grid (the ~50%-column display
+    // cap) instead of hugging the 3-row box — this is the wiggle fix. So the
+    // card is the full cap height (NOT a few-row box height) and does NOT scroll.
+    // The contrast with the "short roster" test (where the card hugs down to the
+    // content) is exactly what distinguishes viewport-pin from content-tracking.
+    const m = await page.evaluate(() => {
+      const card = document.querySelector(".unified-panel") as HTMLElement;
+      const session = document.querySelector(".app__session") as HTMLElement;
+      return {
+        cardH: card.getBoundingClientRect().height,
+        sessionH: session.clientHeight,
+        overflowY: card.style.overflowY,
+      };
+    });
+    // Pinned near the cap — far taller than a 3-row box would hug to.
+    expect(m.cardH).toBeGreaterThan(m.sessionH * 0.4);
+    expect(m.cardH).toBeLessThanOrEqual(m.sessionH * 0.5 + 4);
+    expect(m.overflowY).toBe("hidden");
+  });
+
   test("UnifiedViewToggle switches between the panel and the native composer", async ({ page }) => {
     await page.goto("http://127.0.0.1:7317/?unified=1");
     await page.waitForLoadState("domcontentloaded");

@@ -81,13 +81,31 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const panelRef = useRef<{ id: number; buffer: string[] } | null>(null);
+  const panelRef = useRef<{ id: number; buffer: string[]; mode?: "content" | "viewport" } | null>(
+    null,
+  );
+  // The current sizing pass, exposed by the lifecycle effect so the mode-change
+  // effect below can re-run it without taking sync's deps.
+  const syncRef = useRef<(() => void) | null>(null);
+  // Display mode, read live by sync() without being a rebuild dep (mode flips
+  // mid-panel must NOT tear down xterm).
+  const modeRef = useRef<"content" | "viewport">("content");
   const { unifiedPanel } = useSessionsStore((s) => s.sessions.get(sessionId)) ?? {};
   // Keep panelRef in sync so the lifecycle effect (dep = panelId only) can read
   // the current buffer without taking it as a reactive dep (which would rebuild
   // xterm on every streamed frame).
   panelRef.current = unifiedPanel ?? null;
   const panelId = unifiedPanel?.id;
+  const panelMode = unifiedPanel?.mode ?? "content";
+  modeRef.current = panelMode;
+
+  // Re-run the sizing pass when the mode flips (overlay shown/hidden). The
+  // lifecycle effect is keyed on panelId only, so it doesn't re-fire here — but
+  // viewport↔content needs an immediate re-size, not just on the next frame.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: panelMode is the trigger; the body deliberately only re-runs the current sync
+  useEffect(() => {
+    syncRef.current?.();
+  }, [panelMode]);
 
   // One lifecycle effect: build terminal, stream data, handle input, cleanup.
   // Rebuild xterm ONLY when the panel identity changes (NOT on buffer appends).
@@ -217,9 +235,48 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
         .catch(() => {});
     };
 
-    // Single sizing pass. Resizes the grid toward `contentRows + 1`; when the
-    // grid changes, returns early — the host re-renders and the write callback
-    // re-runs this until it settles. When settled, sizes the mount + card.
+    // Pin a FIXED grid of `rows` (no content tracking) and size mount + card to
+    // match. Used in viewport mode (a pi-tui overlay is up — its geometry tracks
+    // the rows we give it, so a stable grid yields a stable render) and as the
+    // resize-storm circuit breaker. cols still tracks the mount width.
+    const applyFixedViewport = (rows: number, cols: number, cell: number): void => {
+      const gridRows = Math.max(1, Math.min(rows, hardMaxRows()));
+      if (cols !== term.cols || gridRows !== term.rows) term.resize(cols, gridRows);
+      reportSize(cols, gridRows);
+      const displayRows = Math.min(gridRows, maxDisplayRows());
+      container.style.height = `${gridRows * cell}px`;
+      panelEl.style.height = `${displayRows * cell + cardChrome()}px`;
+      panelEl.style.overflowY = gridRows > maxDisplayRows() ? "auto" : "hidden";
+    };
+
+    // ── Resize-storm circuit breaker (damping) ──────────────────────────────
+    // Defense-in-depth for any extension whose rendered height is coupled to the
+    // grid we report (so content-tracking would never converge) but that does NOT
+    // send a viewport signal. If the grid resizes too many times in a short
+    // window, declare the panel unstable: pin to the tallest size seen and stop
+    // tracking for a cooldown, then re-evaluate (the content may have settled).
+    const RESIZE_WINDOW_MS = 400;
+    const MAX_RESIZES_PER_WINDOW = 6;
+    const COOLDOWN_MS = 1000;
+    let resizeTimes: number[] = [];
+    let pinnedRows = 0; // > 0 while the breaker is engaged
+    let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Coalesce a burst of sync triggers (streamed frames, resize observer, the
+    // post-resize convergence pass) into at most one pass per animation frame.
+    let syncQueued = false;
+    const scheduleSync = (): void => {
+      if (syncQueued || disposed) return;
+      syncQueued = true;
+      requestAnimationFrame(() => {
+        syncQueued = false;
+        if (!disposed) sync();
+      });
+    };
+
+    // Single sizing pass. In content mode resizes the grid toward `contentRows+1`
+    // and converges over ≤2 frames; in viewport mode (or while the breaker is
+    // engaged) pins a fixed grid instead. Re-runs are coalesced via scheduleSync.
     const sync = (): void => {
       if (disposed) return;
       const cell = cellHeight();
@@ -232,6 +289,20 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
         // proposeDimensions throws before the mount has a layout; keep current.
       }
 
+      // Viewport mode: a pi-tui overlay is compositing against `rows`. Give it a
+      // steady screen (the display cap) and never chase its height — that chase
+      // is the wiggle. cols still tracks width.
+      if (modeRef.current === "viewport") {
+        applyFixedViewport(maxDisplayRows(), cols, cell);
+        return;
+      }
+
+      // Breaker engaged: hold the pinned grid until the cooldown re-opens tracking.
+      if (pinnedRows > 0) {
+        applyFixedViewport(pinnedRows, cols, cell);
+        return;
+      }
+
       const { rows: contentRows, filled } = measureContent();
       const hardMax = hardMaxRows();
       // If the content filled the grid it may be clipped → jump to the ceiling so
@@ -240,15 +311,30 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
         filled && term.rows < hardMax ? hardMax : Math.min(contentRows + 1, hardMax);
 
       if (cols !== term.cols || targetRows !== term.rows) {
+        // Trip the breaker if resizes are coming too fast to be a real settle.
+        const now = Date.now();
+        resizeTimes.push(now);
+        resizeTimes = resizeTimes.filter((t) => now - t < RESIZE_WINDOW_MS);
+        if (resizeTimes.length > MAX_RESIZES_PER_WINDOW) {
+          pinnedRows = Math.min(hardMax, Math.max(term.rows, targetRows));
+          resizeTimes = [];
+          if (cooldownTimer) clearTimeout(cooldownTimer);
+          cooldownTimer = setTimeout(() => {
+            cooldownTimer = null;
+            pinnedRows = 0; // re-open tracking — content may have settled
+            scheduleSync();
+          }, COOLDOWN_MS);
+          applyFixedViewport(pinnedRows, cols, cell);
+          return;
+        }
+
         term.resize(cols, targetRows);
         reportSize(cols, targetRows);
         // The grid changed: xterm reflows the existing buffer into the new
         // dimensions (and the host re-renders a fresh frame too). Re-measure on
         // the next frame to converge — don't depend on a host frame arriving,
         // so this settles in the preview/host-less case as well.
-        requestAnimationFrame(() => {
-          if (!disposed) sync();
-        });
+        scheduleSync();
         return;
       }
       reportSize(cols, targetRows);
@@ -261,6 +347,9 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
       panelEl.style.overflowY = contentRows > maxDisplayRows() ? "auto" : "hidden";
     };
 
+    // Expose the (coalesced) sizing pass so the mode-change effect can re-run it.
+    syncRef.current = scheduleSync;
+
     // Replay the remount snapshot. Measure in the write CALLBACK (fires after
     // xterm has parsed the bytes) — measuring synchronously read a not-yet-
     // parsed buffer on cold mount, which is why the panel opened too short and
@@ -269,14 +358,14 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
       term.write(chunk);
     }
     term.write("", () => {
-      if (!disposed) sync();
+      if (!disposed) scheduleSync();
     });
 
     unsubPanel = window.pivis.on("session.panelEvent", ({ sessionId: eventSid, event }) => {
       if (eventSid !== sessionId) return;
       if (event.type === "panel_data" && event.panelId === currentPanel.id) {
         term.write(event.data, () => {
-          if (!disposed) sync();
+          if (!disposed) scheduleSync();
         });
       }
     });
@@ -291,7 +380,7 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
     // Re-derive sizing when the transcript column resizes (window resize,
     // sidebar collapse, font change) — both cols and the display cap depend on
     // it. The column is never sized BY us, so this can't feed back.
-    const resizeObserver = new ResizeObserver(() => sync());
+    const resizeObserver = new ResizeObserver(() => scheduleSync());
     if (sessionEl) resizeObserver.observe(sessionEl);
 
     // Wait for the render service to measure cell dimensions before the first
@@ -305,6 +394,8 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
 
     return () => {
       disposed = true;
+      if (cooldownTimer) clearTimeout(cooldownTimer);
+      syncRef.current = null;
       container.removeEventListener("mousedown", refocus);
       onDataDispose.dispose();
       unsubPanel?.();

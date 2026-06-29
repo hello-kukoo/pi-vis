@@ -142,6 +142,7 @@ function makeHarness() {
   const panelBridge = {
     openPanel: vi.fn(() => ++panelCounter),
     closePanel: vi.fn(),
+    setPanelMode: vi.fn(),
     setInputHandler: vi.fn(),
     clearInputHandler: vi.fn(),
     writePanel: vi.fn(),

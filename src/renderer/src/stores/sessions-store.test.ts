@@ -695,6 +695,39 @@ describe("sessions store - custom panel reducer", () => {
     expect(panel()).toBeUndefined();
   });
 
+  const unifiedPanel = (id: SessionId = SESSION_A) =>
+    useSessionsStore.getState().sessions.get(id)?.unifiedPanel;
+
+  it("panel_mode sets the unified panel's sizing mode (viewport ↔ content)", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: false,
+      unified: true,
+    });
+    // Default (no panel_mode yet) leaves mode unset → renderer treats as content.
+    expect(unifiedPanel()?.mode).toBeUndefined();
+
+    s.handlePanelEvent(SESSION_A, { type: "panel_mode", panelId: 1, mode: "viewport" });
+    expect(unifiedPanel()?.mode).toBe("viewport");
+
+    s.handlePanelEvent(SESSION_A, { type: "panel_mode", panelId: 1, mode: "content" });
+    expect(unifiedPanel()?.mode).toBe("content");
+  });
+
+  it("panel_mode for a non-matching panelId is ignored", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: false,
+      unified: true,
+    });
+    s.handlePanelEvent(SESSION_A, { type: "panel_mode", panelId: 99, mode: "viewport" });
+    expect(unifiedPanel()?.mode).toBeUndefined();
+  });
+
   it("host_fallback surfaces a warning toast with the reason", () => {
     useSessionsStore.getState().handlePanelEvent(SESSION_A, {
       type: "host_fallback",

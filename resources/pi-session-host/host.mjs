@@ -22,6 +22,7 @@
  *   { type: "panel_open", panelId, overlay }
  *   { type: "panel_data", panelId, data }
  *   { type: "panel_close", panelId }
+ *   { type: "panel_mode", panelId, mode: "content"|"viewport" }
  *   { type: "panel_clear_all" }
  *   { type: "response", id, success, data?, error? }
  *
@@ -88,6 +89,16 @@ const panelBridge = {
     if (p) {
       send({ type: "panel_close", panelId });
       panels.delete(panelId);
+    }
+  },
+
+  // Tell the renderer which sizing model to use for this panel. "viewport" =
+  // a pi-tui overlay is up (its geometry tracks terminal rows), so the renderer
+  // must pin a fixed grid instead of content-tracking (which would oscillate).
+  // "content" = normal content-hugging mode. See panel-events.ts PanelModeEvent.
+  setPanelMode(panelId, mode) {
+    if (panels.has(panelId)) {
+      send({ type: "panel_mode", panelId, mode });
     }
   },
 

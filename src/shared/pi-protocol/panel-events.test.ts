@@ -58,6 +58,19 @@ describe("PanelEventSchema (discriminated union)", () => {
     expect(PanelEventSchema.parse({ type: "panel_clear_all" }).type).toBe("panel_clear_all");
   });
 
+  it("routes panel_mode (viewport/content) to its variant", () => {
+    expect(PanelEventSchema.parse({ type: "panel_mode", panelId: 1, mode: "viewport" }).type).toBe(
+      "panel_mode",
+    );
+    expect(PanelEventSchema.parse({ type: "panel_mode", panelId: 1, mode: "content" }).type).toBe(
+      "panel_mode",
+    );
+    // Only the two known modes are accepted.
+    expect(() =>
+      PanelEventSchema.parse({ type: "panel_mode", panelId: 1, mode: "weird" }),
+    ).toThrow();
+  });
+
   it("routes unified_panel_reset distinctly from panel_clear_all", () => {
     const evt = PanelEventSchema.parse({ type: "unified_panel_reset" });
     expect(evt.type).toBe("unified_panel_reset");

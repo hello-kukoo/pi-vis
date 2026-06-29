@@ -76,6 +76,9 @@ function makeCapturingBridge() {
     closePanel(panelId) {
       messages.push({ type: "panel_close", panelId });
     },
+    setPanelMode(panelId, mode) {
+      messages.push({ type: "panel_mode", panelId, mode });
+    },
     setInputHandler() {},
     clearInputHandler() {},
     feedInput() {},
@@ -182,6 +185,57 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
     // a blank screen-clear.
     const painted = frames.map((f) => f.data).join("");
     expect(painted).toContain("Fleet");
+  });
+
+  it("custom() overlay on the unified TUI emits panel_mode viewport→content (the wiggle fix)", async () => {
+    await setup();
+    const bridge = makeCapturingBridge();
+    const editorTheme = buildEditorTheme(pi, theme);
+
+    const { context, unified } = createUIContext({
+      theme,
+      editorTheme,
+      panelBridge: bridge,
+      createDialog: async () => ({}),
+      sendToMain: () => {},
+      tuiModules: tuiModules(),
+    });
+    controllers.push(unified);
+
+    // Build the unified TUI so custom() takes the REUSE path (overlay on the
+    // shared TUI) — the path the pi-subagents "inspect" box exercises.
+    context.setWidget(
+      "fleet-list",
+      () => ({ render: () => ["▸ Fleet"], invalidate() {}, dispose() {} }),
+      { placement: "belowEditor" },
+    );
+
+    // Open a custom() overlay (the inspector box). Capture done() to close it.
+    let closeOverlay;
+    const overlay = context.custom((_tui, _theme, _kb, done) => {
+      closeOverlay = done;
+      return {
+        render: () => ["┌─ inspect ─┐", "│ agent     │", "└───────────┘"],
+        invalidate() {},
+        dispose() {},
+      };
+    }, {});
+
+    // showOverlay runs after the factory promise resolves — let it tick.
+    await new Promise((r) => setTimeout(r, 50));
+    const modesWhileOpen = bridge.messages.filter((m) => m.type === "panel_mode");
+    expect(
+      modesWhileOpen.some((m) => m.mode === "viewport"),
+      "showing the overlay must pin the renderer to viewport mode",
+    ).toBe(true);
+
+    // Close the overlay → the renderer must be released back to content mode.
+    closeOverlay(undefined);
+    await overlay;
+    const modes = bridge.messages.filter((m) => m.type === "panel_mode");
+    expect(modes[modes.length - 1].mode, "closing the overlay must restore content mode").toBe(
+      "content",
+    );
   });
 });
 

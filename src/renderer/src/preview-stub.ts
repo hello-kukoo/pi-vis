@@ -679,7 +679,13 @@ function startUnifiedPanelPreview(): void {
   // keeps the short roster the render tests assert on. Use \r\n so each line
   // carriage-returns (xterm's default convertEol is off) — mirrors the real
   // host's cursor-positioned ANSI rather than the bare-\n preview artifact.
-  const tall = new URLSearchParams(window.location.search).get("unified") === "tall";
+  const unifiedParam = new URLSearchParams(window.location.search).get("unified");
+  const tall = unifiedParam === "tall";
+  // `?unified=overlay` simulates an extension showing a pi-tui overlay (the
+  // pi-subagents "inspect" box): after the panel opens, the host sends
+  // panel_mode:viewport + a SMALL box frame. The renderer must pin a fixed grid
+  // (the display cap), not hug the box — that pin is the wiggle fix.
+  const overlay = unifiedParam === "overlay";
   const lines = tall
     ? [
         "▸ Fleet (40 agents)       ↓/↑ navigate · Enter open",
@@ -713,10 +719,26 @@ function startUnifiedPanelPreview(): void {
       sessionId: activeId,
       event: { type: "panel_data", panelId: PANEL_ID, data: roster },
     });
+    if (overlay) {
+      // Show a pi-tui overlay: switch to viewport mode, then paint a small box.
+      const box = `\x1b[2J\x1b[H${["┌─ inspect ─┐", "│ agent-01  │", "└───────────┘"].join("\r\n")}\r\n`;
+      emit("session.panelEvent", {
+        sessionId: activeId,
+        event: { type: "panel_mode", panelId: PANEL_ID, mode: "viewport" },
+      });
+      emit("session.panelEvent", {
+        sessionId: activeId,
+        event: { type: "panel_data", panelId: PANEL_ID, data: box },
+      });
+    }
   }, 600);
 }
 
-if (["1", "tall"].includes(new URLSearchParams(window.location.search).get("unified") ?? "")) {
+if (
+  ["1", "tall", "overlay"].includes(
+    new URLSearchParams(window.location.search).get("unified") ?? "",
+  )
+) {
   startUnifiedPanelPreview();
 }
 

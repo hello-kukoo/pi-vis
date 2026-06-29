@@ -120,8 +120,12 @@ export interface SessionViewState {
    *  `UnifiedTuiHost` (a real pi-tui Editor + widget components). Distinct
    *  from `panel` (transient custom() overlays) so the two never collide and
    *  so `extensionUiActive` doesn't treat the unified panel as a blocking
-   *  dialog. The buffer is a bounded remount snapshot (same rationale as `panel`). */
-  unifiedPanel?: { id: number; buffer: string[] } | undefined;
+   *  dialog. The buffer is a bounded remount snapshot (same rationale as `panel`).
+   *  `mode` selects the renderer's sizing model: `"content"` (default) tracks the
+   *  intrinsic content height; `"viewport"` pins a fixed grid while a pi-tui
+   *  overlay is up, whose geometry would otherwise feed a resize loop. Set by the
+   *  `panel_mode` event from the host (overlay show/hide). */
+  unifiedPanel?: { id: number; buffer: string[]; mode?: "content" | "viewport" } | undefined;
   /** When a `unifiedPanel` is live, the user can toggle between the
    *  extension's TUI surface and the native Composer (both stay mounted-
    *  ready, only the visible one renders). `false` (default) shows the
@@ -1070,6 +1074,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             sessions.set(sessionId, { ...s, unifiedPanel: undefined, unifiedPanelHidden: false });
           } else if (s.panel?.id === event.panelId) {
             sessions.set(sessionId, { ...s, panel: undefined });
+          }
+          break;
+        case "panel_mode":
+          // A pi-tui overlay opened/closed on the unified TUI. Switch the
+          // UnifiedTuiHost sizing model (viewport-pin vs content-tracking). Only
+          // the unified panel has the two modes; custom() overlay panels ignore it.
+          if (s.unifiedPanel?.id === event.panelId && s.unifiedPanel.mode !== event.mode) {
+            sessions.set(sessionId, {
+              ...s,
+              unifiedPanel: { ...s.unifiedPanel, mode: event.mode },
+            });
           }
           break;
         case "panel_clear_all":

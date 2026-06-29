@@ -295,6 +295,10 @@ export class SessionRegistry {
           if (record.proc !== hostProc) return;
           this.onPanelEvent(sessionId, { type: "panel_close", panelId });
         });
+        hostProc.on("panelMode", (panelId, mode) => {
+          if (record.proc !== hostProc) return;
+          this.onPanelEvent(sessionId, { type: "panel_mode", panelId, mode });
+        });
         hostProc.on("panelClearAll", () => {
           if (record.proc !== hostProc) return;
           this.onPanelEvent(sessionId, { type: "panel_clear_all" });
