@@ -115,12 +115,23 @@
 
 /* The mount carries the terminal grid (set in JS). `flex: none` keeps it at its
    set height so it overflows the (shorter) card and is clipped/scrolled by it,
-   rather than shrinking to fit. Padding 0 — the card's padding-block is the
-   inset, so the grid rows map 1:1 to the card's content area. */
+   rather than shrinking to fit.
+
+   Vertical padding stays 0 — the card's `padding-block` is the inset, so the
+   grid rows map 1:1 to the card's content area and the JS `cardChrome()` math
+   (which reads only paddingTop/paddingBottom + borders) stays correct.
+
+   Horizontal padding gives the terminal content symmetric breathing room from
+   the card's border. Without it, pi-tui widgets render left-aligned at column
+   0 of the grid, so the leftmost cell is flush with the inner border while the
+   rightmost cell is empty on short lines — visually asymmetric even though the
+   geometry is "no padding on either side". The inline inset bounds the empty
+   trailing cells on the right by visible padding on the left, matching the
+   inset the Composer and built-in pickers get in the same flex slot. */
 .unified-panel .custom-panel__xterm {
   flex: none;
   min-height: 0;
-  padding: 0;
+  padding: 0 0.5rem;
 }
 
 /* Thin Catppuccin scrollbar for the overflow case (content taller than the
