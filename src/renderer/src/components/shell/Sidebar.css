@@ -378,8 +378,11 @@
 }
 
 .sidebar__new-session:hover {
+  /* Mirror the session rows' hover affordance: a translucent blend reads as
+     hover, the solid surface0 fill is reserved for the selected state (see
+     .sidebar__new-session--selected below). */
   color: var(--ctp-mauve);
-  background: var(--ctp-surface0);
+  background: color-mix(in srgb, var(--ctp-surface0) 50%, transparent);
 }
 
 .sidebar__new-session--selected,
