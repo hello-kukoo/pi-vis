@@ -83,7 +83,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -113,7 +113,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -154,7 +154,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -188,7 +188,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -215,7 +215,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -243,7 +243,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },
@@ -303,7 +303,7 @@ test.describe("Slash commands", () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     await expect(window.locator(".session-header__picker-btn").first()).toContainText(
       "fake-model",
       { timeout: 15_000 },

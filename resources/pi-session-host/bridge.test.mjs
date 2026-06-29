@@ -240,9 +240,7 @@ describe("setupCommandBridge — command mapping", () => {
     const res = await run({ type: "get_available_models" });
     expect(res.success).toBe(true);
     expect(session.modelRegistry.getAvailable).toHaveBeenCalled();
-    expect(res.data.models).toEqual([
-      { provider: "anthropic", id: "claude-x", name: "Claude X" },
-    ]);
+    expect(res.data.models).toEqual([{ provider: "anthropic", id: "claude-x", name: "Claude X" }]);
   });
 
   it("get_available_models settings fallback is a no-op when patterns match everything", async () => {

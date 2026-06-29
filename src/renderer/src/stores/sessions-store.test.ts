@@ -1769,3 +1769,309 @@ describe("sessions store - editorInjection lifecycle", () => {
     expect(useSessionsStore.getState().sessionDrafts.has(SESSION_A)).toBe(false);
   });
 });
+
+// ── Unified-TUI panel reducer ───────────────────────────────────────────────
+// The persistent unified panel (factory setWidget) + its bounded replay buffer,
+// kept distinct from the transient custom() overlay panel so the two never
+// collide and extensionUiActive doesn't treat the unified panel as blocking.
+
+describe("sessions store - unified TUI panel reducer", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+  });
+
+  const unifiedPanel = (id: SessionId = SESSION_A) =>
+    useSessionsStore.getState().sessions.get(id)?.unifiedPanel;
+  const customPanel = (id: SessionId = SESSION_A) =>
+    useSessionsStore.getState().sessions.get(id)?.panel;
+
+  it("panel_open with unified:true creates a unifiedPanel, not a custom panel", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    expect(unifiedPanel()).toEqual({ id: 7, buffer: [] });
+    expect(customPanel()).toBeUndefined();
+  });
+
+  it("panel_open without unified still creates the transient custom panel", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 3,
+      overlay: true,
+    });
+    expect(unifiedPanel()).toBeUndefined();
+    expect(customPanel()).toEqual({ id: 3, overlay: true, buffer: [] });
+  });
+
+  it("panel_data routes to the unifiedPanel buffer when its id matches", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 7, data: "frame1" });
+    expect(unifiedPanel()?.buffer).toEqual(["frame1"]);
+  });
+
+  it("panel_data caps the unified buffer at PANEL_BUFFER_MAX_BYTES", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    const chunk = "x".repeat(300 * 1024);
+    for (let i = 0; i < 4; i++) {
+      s.handlePanelEvent(SESSION_A, { type: "panel_data", panelId: 7, data: chunk });
+    }
+    const buf = unifiedPanel()?.buffer ?? [];
+    const total = buf.reduce((n, c) => n + c.length, 0);
+    expect(total).toBeLessThanOrEqual(PANEL_BUFFER_MAX_BYTES);
+    expect(buf.length).toBeGreaterThan(0);
+  });
+
+  it("panel_close clears the matching unifiedPanel", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 7 });
+    expect(unifiedPanel()).toBeUndefined();
+  });
+
+  it("unified_panel_reset drops stale unified-panel state (host gone on /reload)", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.handlePanelEvent(SESSION_A, { type: "unified_panel_reset" });
+    expect(unifiedPanel()).toBeUndefined();
+  });
+
+  it("panel_clear_all clears custom panels but NOT the unified panel", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 3, overlay: true });
+    s.handlePanelEvent(SESSION_A, { type: "panel_clear_all" });
+    expect(unifiedPanel()?.id).toBe(7); // unified survives
+    expect(customPanel()).toBeUndefined(); // custom cleared
+  });
+
+  // ── View toggle (Composer ⇄ unified TUI) ───────────────────────────────
+  it("a fresh unified panel opens visible (unifiedPanelHidden false)", () => {
+    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(false);
+  });
+
+  it("setUnifiedPanelHidden flips the toggle while keeping the panel live", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.setUnifiedPanelHidden(SESSION_A, true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(true);
+    expect(unifiedPanel()?.id).toBe(7); // panel still live, just not rendered
+    s.setUnifiedPanelHidden(SESSION_A, false);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(false);
+  });
+
+  it("setUnifiedPanelHidden is a no-op when no unified panel is live", () => {
+    // Guards a stale `hidden` flag from suppressing a future panel.
+    useSessionsStore.getState().setUnifiedPanelHidden(SESSION_A, true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBeUndefined();
+  });
+
+  it("re-opening a unified panel after closing resets the toggle to visible", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    s.setUnifiedPanelHidden(SESSION_A, true);
+    s.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 7 });
+    // closed → flag reset
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(false);
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 8,
+      overlay: false,
+      unified: true,
+    });
+    // fresh panel starts visible regardless of the prior toggle
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(false);
+  });
+});
+
+// ── Unified-TUI submit pipeline (handleUnifiedSubmitRequest) ────────────────
+// Pins parity with the React Composer's submit: the same parse → no-model
+// guard → executeAction path, plus the host round-trip reply (ok / bailed) so
+// the TUI editor can restore on a guard bail. Runs under a node env, so we
+// stand up a minimal window.pivis.
+
+describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () => {
+  const invokeMock = vi.fn();
+  const originalWindow = (globalThis as { window?: unknown }).window;
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({ success: true });
+    (globalThis as { window: unknown }).window = {
+      pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window: unknown }).window = originalWindow;
+    }
+  });
+
+  const lastUnifiedResponse = () => {
+    const calls = invokeMock.mock.calls.filter((c) => c[0] === "session.unifiedSubmitResponse");
+    return calls.at(-1)?.[1] as
+      | { id?: string; ok?: boolean; bailed?: boolean; error?: string }
+      | undefined;
+  };
+  const sentCommandType = (t: string) =>
+    invokeMock.mock.calls.some(
+      (c) =>
+        c[0] === "session.sendCommand" &&
+        (c[1] as { command?: { type?: string } }).command?.type === t,
+    );
+
+  it("an empty submit bails without dispatching a prompt", async () => {
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id1", "   ");
+    expect(lastUnifiedResponse()).toMatchObject({ id: "id1", ok: false, bailed: true });
+    expect(sentCommandType("prompt")).toBe(false);
+  });
+
+  it("a send-prompt with no model bails + toasts (no-model guard parity)", async () => {
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id2", "hello");
+    expect(lastUnifiedResponse()).toMatchObject({
+      id: "id2",
+      ok: false,
+      bailed: true,
+      error: "No model selected",
+    });
+    expect(sentCommandType("prompt")).toBe(false);
+    const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
+    expect(toasts.at(-1)).toMatchObject({ type: "error", message: "No model selected" });
+  });
+
+  it("a valid prompt runs the shared pipeline, adds the optimistic bubble, and replies ok:true", async () => {
+    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id3", "hello world");
+    expect(sentCommandType("prompt")).toBe(true);
+    expect(lastUnifiedResponse()).toMatchObject({ id: "id3", ok: true });
+    const blocks = useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks ?? [];
+    expect(blocks.some((b) => b.type === "user")).toBe(true);
+  });
+
+  it("a bash command (!prefix) bypasses the no-model guard and dispatches", async () => {
+    // no currentModel set — bash must still go through (Composer parity)
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id4", "!ls -la");
+    expect(sentCommandType("bash")).toBe(true);
+    expect(lastUnifiedResponse()).toMatchObject({ id: "id4", ok: true });
+  });
+});
+
+// ── adoptSessionFileAndHydrate (unified TUI / Composer parity) ─────────────
+// Regression guard for the bug where the unified-TUI submit path wired the
+// BARE adoptSessionFile (no history load, no sidebar refresh), so /fork,
+// /clone, /switch_session, /resume from the TUI left a blank transcript.
+
+describe("sessions store - adoptSessionFileAndHydrate", () => {
+  const invokeMock = vi.fn();
+  const originalWindow = (globalThis as { window?: unknown }).window;
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    invokeMock.mockReset();
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === "session.loadHistory") return Promise.resolve([]);
+      return Promise.resolve({ success: true });
+    });
+    (globalThis as { window: unknown }).window = {
+      pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window: unknown }).window = originalWindow;
+    }
+  });
+
+  it("adopts the file, loads transcript history, and refreshes the workspace session list", async () => {
+    await useSessionsStore
+      .getState()
+      .adoptSessionFileAndHydrate(SESSION_A, "/new/session.jsonl", "Forked");
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.sessionFile).toBe("/new/session.jsonl");
+    expect(s?.sessionName).toBe("Forked");
+    expect(invokeMock).toHaveBeenCalledWith("session.loadHistory", { sessionId: SESSION_A });
+    expect(invokeMock).toHaveBeenCalledWith("workspace.listSessions", { workspacePath: WORKSPACE });
+  });
+
+  it("skips history/refresh when no file is adopted", async () => {
+    await useSessionsStore.getState().adoptSessionFileAndHydrate(SESSION_A, undefined);
+    expect(invokeMock).not.toHaveBeenCalledWith("session.loadHistory", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("workspace.listSessions", expect.anything());
+  });
+});

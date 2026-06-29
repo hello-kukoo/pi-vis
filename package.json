@@ -21,6 +21,7 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "test:e2e": "playwright test -c tests/e2e/playwright.config.mts",
+    "test:render": "playwright test -c tests/render/playwright.config.mts",
     "preview": "electron-vite preview",
     "make-icon": "bash scripts/make-icon.sh"
   },

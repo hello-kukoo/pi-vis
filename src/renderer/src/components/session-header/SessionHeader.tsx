@@ -8,7 +8,7 @@ import { formatCost, formatTokens } from "../../lib/format.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
-import { useSettingsStore } from "../../stores/settings-store.js";
+import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
 import "./SessionHeader.css";
 
 interface SessionHeaderProps {
@@ -218,8 +218,6 @@ export function SessionControls({
   const applyModelChange = useSessionsStore((s) => s.applyModelChange);
   const applyThinkingLevel = useSessionsStore((s) => s.applyThinkingLevel);
   const addToast = useSessionsStore((s) => s.addToast);
-  const statusBarVisible = useSettingsStore((s) => s.settings.statusBarVisible);
-  const updateSettings = useSettingsStore((s) => s.update);
 
   // ── Model picker state ────────────────────────────────────────────
   const [modelOpen, setModelOpen] = useState(false);
@@ -362,6 +360,12 @@ export function SessionControls({
 
   return (
     <div className="session-header__controls">
+      {/* Unified-TUI view toggle — shown only while a factory `setWidget` panel is live.
+          Placed in the right-side controls cluster, before the changes button, for better
+          visibility. Uses text labels "Extension" and "Input" for clarity. */}
+      {session?.unifiedPanel && (
+        <UnifiedViewToggle sessionId={sessionId} extensionLabel="Extension" inputLabel="Input" />
+      )}
       <ChangesButton sessionId={sessionId} />
       {/* Model picker */}
       <div className="session-header__model-picker">
@@ -525,32 +529,6 @@ export function SessionControls({
           {stats?.cost != null && ` · ${formatCost(stats.cost)}`}
         </span>
       </div>
-
-      {/* Status-bar toggle — lives beside its compact counterpart (the context
-          meter + token/cost summary), since the status bar is the expanded
-          version of the same session status. */}
-      <button
-        type="button"
-        className="session-header__picker-btn session-header__statusbar-toggle"
-        onClick={() => void updateSettings({ statusBarVisible: !statusBarVisible })}
-        title={statusBarVisible ? "Hide status bar" : "Show status bar"}
-        aria-pressed={statusBarVisible}
-      >
-        <svg
-          viewBox="0 0 16 16"
-          aria-hidden="true"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinejoin="round"
-        >
-          <rect x="2" y="3" width="12" height="10" rx="1.5" />
-          <path d="M2 10.5h12" />
-          {statusBarVisible && (
-            <rect x="2.75" y="11" width="10.5" height="1.5" fill="currentColor" stroke="none" />
-          )}
-        </svg>
-      </button>
     </div>
   );
 }

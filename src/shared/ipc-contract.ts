@@ -159,6 +159,15 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; panelId: number };
     res: undefined;
   };
+  /** Respond to a unified-TUI editor submit (host→renderer round-trip).
+   *  The host's `editor.onSubmit` sends the text to the renderer, which runs
+   *  the shared submit pipeline (`submitFromText`). `ok:false` + `bailed:true`
+   *  means a pre-send guard rejected the submit (e.g. no model) — the host
+   *  restores the editor text. */
+  "session.unifiedSubmitResponse": {
+    req: { sessionId: SessionId; id: string; ok: boolean; bailed?: boolean; error?: string };
+    res: { ok: true };
+  };
   "settings.get": { req: undefined; res: AppSettings };
   "settings.set": { req: Partial<AppSettings>; res: AppSettings };
   "app.versions": { req: undefined; res: { app: string; electron: string; node: string } };
@@ -253,6 +262,10 @@ export interface IpcEventContract {
 
   // ── Panels (custom() rendering) ────────────────────────────────────
   "session.panelEvent": { sessionId: SessionId; event: PanelEvent };
+  /** The unified-TUI editor submitted a prompt (host→renderer). The renderer
+   *  runs the shared submit pipeline and replies via
+   *  `session.unifiedSubmitResponse` (correlated by `id`). */
+  "session.unifiedSubmitRequest": { sessionId: SessionId; id: string; text: string };
 }
 
 export type IpcInvokeChannel = keyof IpcInvokeContract;

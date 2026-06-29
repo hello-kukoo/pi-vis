@@ -12,6 +12,10 @@ import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { create } from "zustand";
 import type { PickerRequest } from "../lib/commands/execute.js";
+import { executeAction } from "../lib/commands/execute.js";
+import { parseComposerInput } from "../lib/commands/parse.js";
+import { useChangelogStore } from "./changelog-store.js";
+import { openDiffForSession } from "./diff-store.js";
 import { useSettingsStore } from "./settings-store.js";
 import {
   type TranscriptState,
@@ -112,6 +116,19 @@ export interface SessionViewState {
 
   /** Inline custom panel from extension ctx.ui.custom() — rendered via xterm.js overlay. */
   panel?: { id: number; overlay: boolean; buffer: string[] } | undefined;
+  /** Persistent unified-TUI panel from a factory `setWidget` — rendered via
+   *  `UnifiedTuiHost` (a real pi-tui Editor + widget components). Distinct
+   *  from `panel` (transient custom() overlays) so the two never collide and
+   *  so `extensionUiActive` doesn't treat the unified panel as a blocking
+   *  dialog. The buffer is a bounded remount snapshot (same rationale as `panel`). */
+  unifiedPanel?: { id: number; buffer: string[] } | undefined;
+  /** When a `unifiedPanel` is live, the user can toggle between the
+   *  extension's TUI surface and the native Composer (both stay mounted-
+   *  ready, only the visible one renders). `false` (default) shows the
+   *  unified TUI — the parity-correct surface when a factory widget is
+   *  live; `true` shows the Composer instead. Reset to `false` whenever a
+   *  panel opens/closes/resets so a fresh panel always starts visible. */
+  unifiedPanelHidden?: boolean | undefined;
   /** pi version reported by the SDK-host on ready (undefined for pi --mode rpc).
    *  Surfaced in the SessionHeader tooltip. See P1-c. */
   piVersion?: string | undefined;
@@ -333,6 +350,18 @@ interface SessionsStore {
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
   addUiRequest: (sessionId: SessionId, request: ExtensionUiRequest) => void;
   handlePanelEvent: (sessionId: SessionId, event: PanelEvent) => void;
+  /** Run the unified-TUI editor's submitted text through the shared submit
+   *  pipeline (parseComposerInput + executeAction), then reply to the host
+   *  via `session.unifiedSubmitResponse` so it can restore the editor text on
+   *  a guard bail (e.g. no model). Deps mirror the React Composer's exactly —
+   *  including `adoptSessionFileAndHydrate` (adopt + load history + refresh the
+   *  sidebar), so /fork, /clone, /switch_session, /resume work identically to
+   *  the native Composer. No re-entrancy guard is needed: pi clears the editor
+   *  synchronously in submitValue, so a second Enter before the first resolves
+   *  is an empty submit (caught by the !trimmed bail), and a second DISTINCT
+   *  prompt during an active turn is routed to a `steer` by executeAction
+   *  (the intended course-correction path — a dropping guard would suppress it). */
+  handleUnifiedSubmitRequest: (sessionId: SessionId, id: string, text: string) => Promise<void>;
   dismissUiRequest: (sessionId: SessionId, requestId: string) => void;
   addToast: (sessionId: SessionId, message: string, type?: string) => void;
   dismissToast: (sessionId: SessionId, toastId: string) => void;
@@ -361,6 +390,12 @@ interface SessionsStore {
   ) => void;
   /** Clear pre-send worktree state — called after first send. */
   clearWorktreeIntent: (sessionId: SessionId) => void;
+  /** Toggle whether the live unified-TUI panel or the native Composer is
+   *  shown in the flex slot. Only meaningful while a `unifiedPanel` is
+   *  live; the non-visible surface is simply unrendered (its state — TUI
+   *  editor contents, composer draft — is owned by its own process/store
+   *  and survives the toggle). */
+  setUnifiedPanelHidden: (sessionId: SessionId, hidden: boolean) => void;
   setStats: (sessionId: SessionId, stats: SessionStats) => void;
   setAvailableModels: (sessionId: SessionId, models: ModelInfo[]) => void;
   /** Re-fetch the session's effective available-models list from pi and
@@ -412,6 +447,16 @@ interface SessionsStore {
   setSessionName: (sessionId: SessionId, name: string) => void;
   /** Re-point the session to a new file (overrides the only-if-unset guard). */
   adoptSessionFile: (
+    sessionId: SessionId,
+    sessionFile?: string,
+    sessionName?: string,
+  ) => Promise<void>;
+  /** Adopt a new session file AND hydrate its transcript + refresh the sidebar.
+   *  The single source of truth for the post-`/fork`|`/clone`|`/switch_session`|
+   *  `/resume` steps, shared by the React Composer and the unified-TUI submit
+   *  path so they can't drift (a bare `adoptSessionFile` alone leaves the
+   *  transcript blank and the session list stale — see handleUnifiedSubmitRequest). */
+  adoptSessionFileAndHydrate: (
     sessionId: SessionId,
     sessionFile?: string,
     sessionName?: string,
@@ -953,13 +998,36 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
       switch (event.type) {
         case "panel_open":
-          sessions.set(sessionId, {
-            ...s,
-            panel: { id: event.panelId, overlay: event.overlay, buffer: [] },
-          });
+          if (event.unified) {
+            // Persistent unified-TUI panel (factory setWidget) — rendered by
+            // UnifiedTuiHost, NOT the transient custom() overlay path.
+            // A fresh panel always starts visible (user can toggle to the
+            // Composer via the view switcher afterwards).
+            sessions.set(sessionId, {
+              ...s,
+              unifiedPanel: { id: event.panelId, buffer: [] },
+              unifiedPanelHidden: false,
+            });
+          } else {
+            sessions.set(sessionId, {
+              ...s,
+              panel: { id: event.panelId, overlay: event.overlay, buffer: [] },
+            });
+          }
           break;
         case "panel_data":
-          if (s.panel?.id === event.panelId) {
+          if (s.unifiedPanel?.id === event.panelId) {
+            // Same bounded-tail rationale as the custom() panel buffer: TUI
+            // frames are full repaints, so the most recent PANEL_BUFFER_MAX_BYTES
+            // holds a complete frame to re-seed a fresh xterm from on remount.
+            const ubuffer = [...s.unifiedPanel.buffer, event.data];
+            let utotal = 0;
+            for (const chunk of ubuffer) utotal += chunk.length;
+            while (ubuffer.length > 1 && utotal > PANEL_BUFFER_MAX_BYTES) {
+              utotal -= (ubuffer.shift() as string).length;
+            }
+            sessions.set(sessionId, { ...s, unifiedPanel: { ...s.unifiedPanel, buffer: ubuffer } });
+          } else if (s.panel?.id === event.panelId) {
             // The buffer is only a remount snapshot (CustomPanelHost replays it
             // into a fresh xterm). A TUI panel redraws continuously, so an
             // unbounded buffer is a steady leak. Keep a bounded tail: TUI
@@ -976,12 +1044,21 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           }
           break;
         case "panel_close":
-          if (s.panel?.id === event.panelId) {
+          if (s.unifiedPanel?.id === event.panelId) {
+            sessions.set(sessionId, { ...s, unifiedPanel: undefined, unifiedPanelHidden: false });
+          } else if (s.panel?.id === event.panelId) {
             sessions.set(sessionId, { ...s, panel: undefined });
           }
           break;
         case "panel_clear_all":
           sessions.set(sessionId, { ...s, panel: undefined });
+          break;
+        case "unified_panel_reset":
+          // The unified-TUI host process is gone (/reload, crash, close) and
+          // couldn't emit a reliable panel_close. Drop stale unified-panel
+          // state so the native Composer is restored. (Does NOT clear custom()
+          // overlay panels — those are handled by panel_clear_all.)
+          sessions.set(sessionId, { ...s, unifiedPanel: undefined, unifiedPanelHidden: false });
           break;
         case "host_fallback":
           // The host couldn't start (pi too old / SDK import failed) and we
@@ -1018,6 +1095,102 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       }
       return { sessions };
     });
+  },
+
+  handleUnifiedSubmitRequest: async (sessionId, id, text) => {
+    const trimmed = text.trim();
+    // Mirror the React Composer's early bail: an empty/whitespace submit is a
+    // no-op (pi's submitValue already cleared the editor; the dispatcher would
+    // no-op anyway). Tell the host it bailed so it can restore — though empty
+    // restore is a no-op, keeping the contract uniform is simplest.
+    if (!trimmed) {
+      void window.pivis.invoke("session.unifiedSubmitResponse", {
+        sessionId,
+        id,
+        ok: false,
+        bailed: true,
+      });
+      return;
+    }
+
+    const state = get();
+    const session = state.sessions.get(sessionId);
+    const discovered = new Map((session?.commands ?? []).map((c) => [c.name, c]));
+    const action = parseComposerInput(trimmed, { discovered });
+
+    // No-model guard (send-prompt only; /model and bash bypass). A bail here
+    // tells the host to restore the editor text so the prompt isn't lost.
+    if (
+      action.kind === "send-prompt" &&
+      !session?.currentModel &&
+      action.commandSource === undefined
+    ) {
+      get().addToast(sessionId, "No model selected", "error");
+      void window.pivis.invoke("session.unifiedSubmitResponse", {
+        sessionId,
+        id,
+        ok: false,
+        bailed: true,
+        error: "No model selected",
+      });
+      return;
+    }
+
+    // Build the same deps the React Composer builds, but from store state (the
+    // TUI path has no attachments/worktree pre-send block). executeAction + the
+    // store actions it calls fire the optimistic bubble, draft clear, etc.
+    const deps = {
+      invoke: <T = unknown>(channel: string, payload: unknown) =>
+        window.pivis.invoke(
+          channel as Parameters<typeof window.pivis.invoke>[0],
+          payload as Parameters<typeof window.pivis.invoke>[1],
+        ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+      setStreaming: get().setStreaming,
+      addToast: get().addToast,
+      addUserMessage: get().addUserMessage,
+      addBashCommand: get().addBashCommand,
+      finishBashCommand: get().finishBashCommand,
+      applyModelChange: get().applyModelChange,
+      addCustomMessage: get().addCustomMessage,
+      openChangelog: (markdown: string) => useChangelogStore.getState().openChangelog(markdown),
+      openPicker: get().openPicker,
+      adoptSessionFile: get().adoptSessionFileAndHydrate,
+      closeSessionTab: get().closeSessionTab,
+      openAppSettings: () => window.dispatchEvent(new CustomEvent("pivis:open-settings")),
+      openDiffViewer: (sid: SessionId) => openDiffForSession(sid),
+      openLogin: () => window.dispatchEvent(new CustomEvent("pivis:open-login")),
+      copyToClipboard: async (t: string) => {
+        await window.pivis.invoke("clipboard.writeText", { text: t });
+      },
+      getAvailableModels: (sid: SessionId): ModelInfo[] =>
+        get().sessions.get(sid)?.availableModels ?? [],
+      getSessionName: (sid: SessionId) => get().sessions.get(sid)?.sessionName,
+      getCurrentModel: (sid: SessionId) => get().sessions.get(sid)?.currentModel,
+      isStreaming: (sid: SessionId) => get().sessions.get(sid)?.isStreaming ?? false,
+      getSessionWorkspacePath: (sid: SessionId) => get().sessions.get(sid)?.workspacePath,
+      listSessions: (p: string) =>
+        window.pivis.invoke("workspace.listSessions", { workspacePath: p }),
+    };
+
+    try {
+      await executeAction(sessionId, action, deps);
+      void window.pivis.invoke("session.unifiedSubmitResponse", {
+        sessionId,
+        id,
+        ok: true,
+      });
+    } catch (err) {
+      // executeAction threw (invoke failure, etc.) — tell the host to restore
+      // so the user can retry. The error itself surfaces via addToast inside
+      // executeAction's error handling where applicable.
+      void window.pivis.invoke("session.unifiedSubmitResponse", {
+        sessionId,
+        id,
+        ok: false,
+        bailed: true,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 
   addToast: (sessionId, message, type) => {
@@ -1150,6 +1323,19 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         worktreeCreating: undefined,
         worktreeError: undefined,
       });
+      return { sessions };
+    });
+  },
+
+  setUnifiedPanelHidden: (sessionId, hidden) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      // No-op if there's no live unified panel to toggle away from — avoids
+      // leaving a stale `hidden` flag that would suppress a future panel.
+      if (!s.unifiedPanel) return {};
+      sessions.set(sessionId, { ...s, unifiedPanelHidden: hidden });
       return { sessions };
     });
   },
@@ -1536,6 +1722,21 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, next);
       return { sessions };
     });
+  },
+
+  /** Adopt a new session file, then load its transcript history and refresh the
+   *  workspace session list. Shared by the React Composer and the unified-TUI
+   *  submit path so a `/fork`|`/clone`|`/switch_session`|`/resume` behaves
+   *  identically regardless of which surface dispatched it. Mirrors the exact
+   *  post-adopt steps the Composer used to inline (loadHistory + seedHistory +
+   *  refreshWorkspaceSessions when there's a workspace). */
+  adoptSessionFileAndHydrate: async (sessionId, sessionFile, sessionName) => {
+    await get().adoptSessionFile(sessionId, sessionFile, sessionName);
+    if (!sessionFile) return;
+    const history = await window.pivis.invoke("session.loadHistory", { sessionId });
+    get().seedHistory(sessionId, history ?? []);
+    const workspacePath = get().sessions.get(sessionId)?.workspacePath;
+    if (workspacePath) void get().refreshWorkspaceSessions(workspacePath);
   },
 
   /** Refresh the discovered command list (extension / prompt / skill). */

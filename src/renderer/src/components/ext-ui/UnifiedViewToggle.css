@@ -1,0 +1,66 @@
+/* UnifiedViewToggle — segmented switcher between the unified-TUI panel and the
+   native Composer.
+
+   Lives in the right-side controls cluster of the session header, before the
+   changes button. Uses text labels for clarity. Mirrors the visual language of
+   other header controls: surface0 background, hairline border, mauve active
+   segment.
+
+   The `--header` variant is styled to match the picker buttons (model, thinking)
+   in the same cluster. */
+
+.unified-toggle {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--ctp-surface0);
+  padding: 1px;
+  gap: 1px;
+  width: fit-content;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+/* Header variant: matches picker button styling, visible when active */
+.unified-toggle--header:hover {
+  border-color: var(--border);
+}
+
+.unified-toggle__seg {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ctp-subtext0);
+  padding: 0.214rem 0.571rem;
+  font: inherit;
+  font-size: 0.857em;
+  font-weight: 500;
+  border-radius: calc(var(--radius-md) - 1px);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.unified-toggle__seg:hover:not(.unified-toggle__seg--active) {
+  color: var(--ctp-text);
+  background: var(--ctp-surface1);
+}
+
+.unified-toggle__seg--active {
+  background: var(--ctp-mauve);
+  color: var(--ctp-base);
+  cursor: default;
+}
+
+/* In header context, ensure proper spacing with adjacent controls */
+.session-header__controls .unified-toggle {
+  margin-right: 0;
+}

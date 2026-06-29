@@ -118,6 +118,7 @@ export function setupCommandBridge({
   uiContext,
   send,
   panelBridge,
+  disposeUnifiedTui,
   pi,
   agentDir,
   cwd,
@@ -187,6 +188,10 @@ export function setupCommandBridge({
     // to spam a no-op event the renderer handled as a no-op.
     const hadPanels = panelBridge.closeAll();
     if (hadPanels) send({ type: "panel_clear_all" });
+    // Also dispose the unified TUI if a factory widget left one mounted. The
+    // controller is passed in explicitly (not via globalThis) so the wiring is
+    // testable and there's no implicit host-global coupling.
+    disposeUnifiedTui?.();
   });
 
   // ─── State helpers (mirror RpcSessionState / RPC get_commands) ─────────

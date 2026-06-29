@@ -94,3 +94,45 @@
 .custom-panel :focus-visible {
   outline: none;
 }
+
+/* ── Unified-TUI panel (UnifiedTuiHost) ──────────────────────────────────────
+   Unlike the custom() panel, the unified panel hugs its content: its height is
+   JS-driven (set to the non-blank content height, capped at a deterministic max
+   derived from the transcript column). The grid TRACKS the content (the host's
+   pi-tui bottom-anchors + scrolls when content exceeds the grid), so the card
+   clips the one-row sentinel blank the JS leaves; `overflow-y` is set in JS to
+   `auto` only when the content is taller than the cap. No min-height floor and
+   no 50vh CSS cap fighting the measured height.
+
+   A small vertical padding gives the text breathing room above/below; the JS
+   adds this chrome (read from computed style) to the measured content height so
+   the content area still maps exactly to whole rows. */
+.custom-panel.unified-panel {
+  min-height: 0;
+  max-height: none;
+  padding-block: 0.286rem;
+}
+
+/* The mount carries the terminal grid (set in JS). `flex: none` keeps it at its
+   set height so it overflows the (shorter) card and is clipped/scrolled by it,
+   rather than shrinking to fit. Padding 0 — the card's padding-block is the
+   inset, so the grid rows map 1:1 to the card's content area. */
+.unified-panel .custom-panel__xterm {
+  flex: none;
+  min-height: 0;
+  padding: 0;
+}
+
+/* Thin Catppuccin scrollbar for the overflow case (content taller than the
+   cap) — the card scrolls, not xterm's own viewport. */
+.unified-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ctp-surface1) transparent;
+}
+.unified-panel::-webkit-scrollbar {
+  width: 8px;
+}
+.unified-panel::-webkit-scrollbar-thumb {
+  background: var(--ctp-surface1);
+  border-radius: var(--radius-pill);
+}

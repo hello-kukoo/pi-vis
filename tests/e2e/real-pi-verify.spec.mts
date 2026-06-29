@@ -190,7 +190,7 @@ test.describe("Real-pi verification (mandatory manual check, automated)", () => 
     const { app, window } = await launchApp();
 
     // Create a new session.
-    await window.getByRole("button", { name: "+ New session" }).click();
+    await window.getByRole("button", { name: "New session" }).click();
     // Wait for the picker to show an actual model (a name with "/", e.g. "minimax/minimax-m3").
     await expect(window.locator(".session-header__picker-btn").first()).toContainText("/", {
       timeout: 60_000,

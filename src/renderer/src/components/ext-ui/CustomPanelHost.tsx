@@ -159,11 +159,21 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     });
 
     // ── Resize observer ──
-    // FitAddon recomputes cols/rows from the container; we both apply them
-    // to the xterm instance AND forward to the host so the TUI layout (which
-    // sizes overlays off the Terminal's columns/rows) matches the actual
-    // panel. Without forwarding, the TUI keeps rendering at the initial 80×24
-    // and lines wrap/clip wrong inside a wider/narrower panel.
+    // FitAddon recomputes cols/rows from the container; we apply them to the
+    // xterm AND forward them to the host so the TUI's overlay layout (sized off
+    // the Terminal's columns/rows) matches the actual panel. The reported rows
+    // are exactly `term.rows` — the SAME grid the host renders into — so there
+    // is no grid-vs-host mismatch (that mismatch was the black bar / clipped
+    // frame this changeset had introduced).
+    //
+    // NOTE — custom() panels are deliberately NOT content-hugged (unlike the
+    // unified-TUI panel). An extension sizes its overlay as a FRACTION of
+    // `terminal.rows` and scrolls it internally — e.g. pi-subagents' conversation
+    // viewer opens with `maxHeight: "70%"` and caps its own j/k viewport at
+    // `terminal.rows * 70%`. Shrinking the grid to the rendered content would
+    // feed straight back into that fraction and collapse the overlay toward its
+    // minimum. So the panel is a STABLE, deterministic box (CSS min-height +
+    // max-height: 50vh) that the overlay floats and self-scrolls inside.
     const applyFit = () => {
       if (disposed) return;
       try {
@@ -182,7 +192,15 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     };
     const resizeObserver = new ResizeObserver(applyFit);
     resizeObserver.observe(container);
-    applyFit();
+
+    // Wait for CSS constraints to settle before the initial fit (double rAF
+    // ensures layout — and the render service's cell metrics — are resolved).
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        applyFit();
+      });
+    });
 
     // ── Cleanup ──
     return () => {

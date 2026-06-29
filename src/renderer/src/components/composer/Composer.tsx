@@ -129,10 +129,11 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const applyModelChange = useSessionsStore((s) => s.applyModelChange);
   const addCustomMessage = useSessionsStore((s) => s.addCustomMessage);
   const openPicker = useSessionsStore((s) => s.openPicker);
-  const adoptSessionFile = useSessionsStore((s) => s.adoptSessionFile);
-  const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
+  // Shared with the unified-TUI submit path (handleUnifiedSubmitRequest) so a
+  // /fork|/clone|/switch_session|/resume hydrates the transcript + sidebar the
+  // same way regardless of which surface dispatched it.
+  const adoptSessionFileAndHydrate = useSessionsStore((s) => s.adoptSessionFileAndHydrate);
   const closeSessionTab = useSessionsStore((s) => s.closeSessionTab);
-  const seedHistory = useSessionsStore((s) => s.seedHistory);
   const setWorktreeCreating = useSessionsStore((s) => s.setWorktreeCreating);
   const setWorktreeError = useSessionsStore((s) => s.setWorktreeError);
   const applyWorktree = useSessionsStore((s) => s.applyWorktree);
@@ -556,16 +557,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             useChangelogStore.getState().openChangelog(markdown);
           },
           openPicker: (sid: SessionId, picker: PickerRequest) => openPicker(sid, picker),
-          adoptSessionFile: async (sid: SessionId, file?: string, name?: string) => {
-            await adoptSessionFile(sid, file, name);
-            if (file) {
-              const history = await window.pivis.invoke("session.loadHistory", { sessionId: sid });
-              seedHistory(sid, history ?? []);
-              if (session?.workspacePath) {
-                void refreshWorkspaceSessions(session.workspacePath);
-              }
-            }
-          },
+          adoptSessionFile: (sid: SessionId, file?: string, name?: string) =>
+            adoptSessionFileAndHydrate(sid, file, name),
           closeSessionTab: async (sid: SessionId) => closeSessionTab(sid),
           openAppSettings: () => {
             // The settings panel is owned by App.tsx; we dispatch a custom
@@ -647,10 +640,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       applyModelChange,
       addCustomMessage,
       openPicker,
-      adoptSessionFile,
+      adoptSessionFileAndHydrate,
       closeSessionTab,
-      seedHistory,
-      refreshWorkspaceSessions,
       setWorktreeCreating,
       setWorktreeError,
       applyWorktree,

@@ -275,6 +275,68 @@ describe("SessionHost", () => {
       await expect(p).rejects.toThrow(/Not initialized/);
     });
   });
+
+  describe("unified TUI wire contract", () => {
+    it("panel_open forwards the unified flag (persistent panel vs custom overlay)", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+      let captured: { id: number; overlay: boolean; unified: boolean } | null = null;
+      host.on("panelOpen", (id, overlay, unified) => {
+        captured = { id, overlay, unified };
+      });
+      fake.emitMessage({ type: "panel_open", panelId: 9, overlay: false, unified: true });
+      expect(captured).toEqual({ id: 9, overlay: false, unified: true });
+    });
+
+    it("forwards unified_submit_request as a unifiedSubmitRequest event", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+      let captured: { id: string; text: string } | null = null;
+      host.on("unifiedSubmitRequest", (id, text) => {
+        captured = { id, text };
+      });
+      fake.emitMessage({ type: "unified_submit_request", id: "u1", text: "hello" });
+      expect(captured).toEqual({ id: "u1", text: "hello" });
+    });
+
+    it("sendUnifiedSubmitResponse forwards {type:unified_submit_response} to the host", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+      host.sendUnifiedSubmitResponse("u1", false, true, "No model selected");
+      const last = fake.sent[fake.sent.length - 1];
+      expect(last).toMatchObject({
+        type: "unified_submit_response",
+        id: "u1",
+        ok: false,
+        bailed: true,
+        error: "No model selected",
+      });
+    });
+
+    it("clipboard_read_image_request always replies with a clipboard_read_image_response (matched by id)", async () => {
+      // replyClipboardImage lazy-requires `electron` for clipboard.readImage,
+      // which is unavailable under vitest's node env (it throws, is caught, and
+      // the response carries bytes:undefined). The wire contract this pins: a
+      // request ALWAYS yields a correlated response — so a paste that finds an
+      // empty clipboard, or errors, still unblocks the host's input listener.
+      // (The bytes → temp-file → insert-path logic is covered by ui-context.test.mjs.)
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+      fake.emitMessage({ type: "clipboard_read_image_request", id: "clip1" });
+      const resp = fake.sent[fake.sent.length - 1];
+      expect(resp?.type).toBe("clipboard_read_image_response");
+      expect(resp?.id).toBe("clip1");
+    });
+
+    it("sendUnifiedSubmitResponse after the host exits is a silent no-op", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+      fake.emitExit(0);
+      const before = fake.sent.length;
+      host.sendUnifiedSubmitResponse("u1", true);
+      expect(fake.sent.length).toBe(before); // guarded — no channel-closed noise
+    });
+  });
 });
 
 describe("isSessionHost (panel-capability duck type)", () => {

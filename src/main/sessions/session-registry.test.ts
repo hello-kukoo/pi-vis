@@ -59,6 +59,9 @@ describe("SessionRegistry", () => {
       (_sid: SessionId, _ev: PanelEvent) => {
         // panel events — ignored in test
       },
+      () => {
+        // unified submit requests — ignored in test
+      },
     );
   });
 
@@ -437,6 +440,9 @@ describe("SessionRegistry concurrency & lock lifecycle", () => {
       },
       (sessionId, event) => {
         panelEvents.push({ sessionId, event });
+      },
+      () => {
+        // unified submit requests — ignored in test
       },
     );
   });

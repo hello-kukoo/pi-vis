@@ -8,6 +8,7 @@ import { WorktreeBar } from "./components/composer/WorktreeBar.js";
 import { DiffViewerHost } from "./components/diff/DiffViewerHost.js";
 import { CustomPanelHost } from "./components/ext-ui/CustomPanelHost.js";
 import { ExtensionDialogHost, ToastHost } from "./components/ext-ui/ExtensionDialogHost.js";
+import { UnifiedTuiHost } from "./components/ext-ui/UnifiedTuiHost.js";
 import { AppPickerHost } from "./components/pickers/AppPickerHost.js";
 import { SessionSubBar } from "./components/session-header/SessionSubBar.js";
 import { SettingsView } from "./components/settings/SettingsView.js";
@@ -31,10 +32,9 @@ export function App(): React.ReactElement {
   const addUiRequest = useSessionsStore((s) => s.addUiRequest);
   const compact = useSessionsStore((s) => s.headerCompact);
   const handlePanelEvent = useSessionsStore((s) => s.handlePanelEvent);
-  const adoptSessionFile = useSessionsStore((s) => s.adoptSessionFile);
+  const handleUnifiedSubmitRequest = useSessionsStore((s) => s.handleUnifiedSubmitRequest);
+  const adoptSessionFileAndHydrate = useSessionsStore((s) => s.adoptSessionFileAndHydrate);
   const refreshCommands = useSessionsStore((s) => s.refreshCommands);
-  const seedHistory = useSessionsStore((s) => s.seedHistory);
-  const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
   const setActiveSession = useSessionsStore((s) => s.setActiveSession);
   const loadSettings = useSettingsStore((s) => s.load);
   const statusBarVisible = useSettingsStore((s) => s.settings.statusBarVisible);
@@ -154,6 +154,23 @@ export function App(): React.ReactElement {
     const id = s.activeSessionId;
     if (!id) return false;
     return s.sessions.get(id)?.panel !== undefined;
+  });
+
+  // Persistent unified-TUI panel from a factory `setWidget` — shares the
+  // Composer's flex slot with a view switcher (UnifiedViewToggle) so the
+  // user can flip between the extension's TUI and the native Composer
+  // without closing the widget. Priority below custom() overlay panels and
+  // extension dialogs. Default surface is the unified TUI (parity-correct
+  // when a factory widget is live); `unifiedPanelHidden` flips to Composer.
+  const hasUnifiedPanel = useSessionsStore((s) => {
+    const id = s.activeSessionId;
+    if (!id) return false;
+    return s.sessions.get(id)?.unifiedPanel !== undefined;
+  });
+  const unifiedPanelHidden = useSessionsStore((s) => {
+    const id = s.activeSessionId;
+    if (!id) return false;
+    return s.sessions.get(id)?.unifiedPanelHidden ?? false;
   });
 
   // Built-in pickers (/model, /fork, /resume) also replace the Composer
@@ -299,6 +316,16 @@ export function App(): React.ReactElement {
       handlePanelEvent(sessionId as SessionId, event);
     });
 
+    // Unified-TUI editor submit: the host's editor.onSubmit sent the text to
+    // the renderer; run it through the shared submit pipeline + reply so the
+    // host can restore the editor on a guard bail.
+    const unsubUnifiedSubmit = window.pivis.on(
+      "session.unifiedSubmitRequest",
+      ({ sessionId, id, text }) => {
+        void handleUnifiedSubmitRequest(sessionId as SessionId, id, text);
+      },
+    );
+
     // session.fileChanged: emitted after /new, /fork, /clone, /switch_session
     // when pi has confirmed the new authoritative sessionFile. The
     // renderer adopts the new file (overriding the only-if-unset guard),
@@ -308,21 +335,16 @@ export function App(): React.ReactElement {
       ({ sessionId, sessionFile, sessionName }) => {
         void (async () => {
           const sid = sessionId as SessionId;
-          await adoptSessionFile(sid, sessionFile, sessionName);
           // Re-assert the session as active. Same sessionId re-points to the new
           // file, so activeSessionId is usually already correct — but explicitly
           // setting it clears any stale unreadStatus on the previously-active
           // session and keeps the sidebar highlight in sync (mirrors the
           // pattern used by /resume's picker).
           setActiveSession(sid);
-          if (sessionFile) {
-            const history = await window.pivis.invoke("session.loadHistory", { sessionId: sid });
-            seedHistory(sid, history ?? []);
-          }
-          const workspacePath = useSessionsStore.getState().sessions.get(sid)?.workspacePath;
-          if (workspacePath) {
-            void refreshWorkspaceSessions(workspacePath);
-          }
+          // Adopt the new file + reseed the transcript + refresh the workspace
+          // session list. The single shared helper keeps this identical to the
+          // Composer and unified-TUI submit paths (no drift).
+          await adoptSessionFileAndHydrate(sid, sessionFile, sessionName);
         })();
       },
     );
@@ -366,16 +388,17 @@ export function App(): React.ReactElement {
       unsubUpdateDone();
       unsubAuthChanged();
       unsubPanel();
+      unsubUnifiedSubmit();
     };
   }, [
     applyEvent,
     addUiRequest,
     setSessionStatus,
-    adoptSessionFile,
+    setActiveSession,
+    adoptSessionFileAndHydrate,
     refreshCommands,
-    seedHistory,
-    refreshWorkspaceSessions,
     handlePanelEvent,
+    handleUnifiedSubmitRequest,
   ]);
 
   const handlePiRecheck = useCallback(async () => {
@@ -469,10 +492,24 @@ export function App(): React.ReactElement {
                   None block the rest of the UI — the transcript above
                   stays scrollable, the header stays clickable, and the
                   diff viewer (Cmd+G) still works while any is open. */}
+              {/* Composer, extension dialogs, custom panels, the unified-TUI
+                  panel, and built-in pickers all share the same flex slot:
+                  whichever is active replaces the composer, so they are never
+                  both visible. Priority: extension dialogs (block pi) > custom
+                  panels > unified TUI (factory setWidget, live — unless the
+                  user has flipped the header's UnifiedViewToggle to "Chat",
+                  in which case the Composer shows while the TUI stays ready) >
+                  built-in pickers (/model, /fork, /resume) > composer. */}
               {hasPendingDialog ? (
                 <ExtensionDialogHost sessionId={activeSessionId} />
               ) : hasOpenPanel ? (
                 <CustomPanelHost sessionId={activeSessionId} />
+              ) : hasUnifiedPanel ? (
+                unifiedPanelHidden ? (
+                  <Composer sessionId={activeSessionId} />
+                ) : (
+                  <UnifiedTuiHost sessionId={activeSessionId} />
+                )
               ) : hasPendingPicker ? (
                 <AppPickerHost sessionId={activeSessionId} />
               ) : (

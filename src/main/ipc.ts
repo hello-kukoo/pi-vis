@@ -75,6 +75,9 @@ export function initIpc(win: BrowserWindow): void {
     (sessionId: SessionId, event: PanelEvent) => {
       safeSend("session.panelEvent", { sessionId, event });
     },
+    (sessionId: SessionId, req: { id: string; text: string }) => {
+      safeSend("session.unifiedSubmitRequest", { sessionId, ...req });
+    },
   );
 
   // Init PTY support (must be after safeSend is wired)
@@ -468,6 +471,21 @@ export function initIpc(win: BrowserWindow): void {
     clipboard.writeText(args.text);
     return { ok: true as const };
   });
+
+  // ── Unified TUI panel responses ───────────────────────────────────────
+  ipcMain.handle(
+    "session.unifiedSubmitResponse",
+    async (
+      _evt,
+      args: { sessionId: SessionId; id: string; ok: boolean; bailed?: boolean; error?: string },
+    ) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (rec?.proc && isSessionHost(rec.proc)) {
+        rec.proc.sendUnifiedSubmitResponse(args.id, args.ok, args.bailed, args.error);
+      }
+      return { ok: true as const };
+    },
+  );
 
   // ── Git diff viewer (WP1) ───────────────────────────────────────────
   // Both channels take an explicit `root` (worktree forward-compat). They

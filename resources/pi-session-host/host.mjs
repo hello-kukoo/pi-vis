@@ -38,6 +38,7 @@ import {
   initHostTheme,
 } from "./bootstrap.mjs";
 import { assertHostCapabilities, setupCommandBridge } from "./bridge.mjs";
+import { buildEditorTheme } from "./editor-theme.mjs";
 import { createDialogResolver, createUIContext } from "./ui-context.mjs";
 
 // --- State ---
@@ -46,6 +47,12 @@ let runtime = null;
 let session = null;
 let handleCommand = null;
 let dialogResolver = null;
+// Unified-TUI controller { dispose, resolveSubmit, resolveClipboardImage } —
+// assigned in handleInit (createUIContext returns it as the `unified` bundle)
+// and read by the message handler below. Module-scoped like handleCommand
+// because the message handler is a separate function, NOT globalThis (which
+// would be an untyped, collision-prone bus).
+let unifiedTuiController = null;
 let panelCounter = 0;
 const panels = new Map(); // panelId -> { inputHandler, resizeHandler }
 
@@ -60,10 +67,10 @@ function sendUiRequest(req) {
 // --- Panel bridge (for custom() to ANSI output) ---
 
 const panelBridge = {
-  openPanel({ overlay }) {
+  openPanel({ overlay, unified }) {
     const panelId = ++panelCounter;
     panels.set(panelId, { inputHandler: null });
-    send({ type: "panel_open", panelId, overlay });
+    send({ type: "panel_open", panelId, overlay, ...(unified ? { unified: true } : {}) });
     return panelId;
   },
 
@@ -208,6 +215,8 @@ async function handleInit(msg) {
       TUI: piTui.TUI,
       KeybindingsManager: piTui.KeybindingsManager,
       TUI_KEYBINDINGS: piTui.TUI_KEYBINDINGS,
+      Container: piTui.Container,
+      Editor: piTui.Editor,
     };
 
     // Step 2: Bootstrap
@@ -289,13 +298,19 @@ async function handleInit(msg) {
     assertHostCapabilities(session, runtime);
 
     // Step 5: Create ExtensionUIContext
-    const uiContext = createUIContext({
+    // pi-tui's base Editor needs an EditorTheme ({ borderColor, selectList }),
+    // not pi's Theme singleton. Reconstruct pi's own getEditorTheme() from the
+    // PUBLIC surface (theme.fg + getSelectListTheme) — see ui-context.mjs.
+    const editorTheme = buildEditorTheme(pi, theme);
+    const { context: uiContext, unified: unifiedCtrl } = createUIContext({
       theme,
+      editorTheme,
       panelBridge,
       createDialog,
       sendToMain: sendUiRequest,
       tuiModules,
     });
+    unifiedTuiController = unifiedCtrl;
     // NOTE: uiContext is cwd-independent (theme/dialog/panel/sendToMain don't
     // change with cwd). It's passed to bindExtensions below and reused across
     // rebinds via the bridge's setRebindSession — do NOT stash it on
@@ -310,6 +325,7 @@ async function handleInit(msg) {
       uiContext,
       send,
       panelBridge,
+      disposeUnifiedTui: unifiedCtrl.dispose,
       pi,
       agentDir,
       cwd,
@@ -360,6 +376,28 @@ process.on("message", async (msg) => {
 
       case "panel_close_request":
         panelBridge.cancel(msg.panelId);
+        break;
+
+      // Unified-TUI editor submit: the renderer ran the submit pipeline and
+      // reports the outcome so the host can restore the editor text on a bail
+      // (e.g. no-model guard). Resolved by ui-context's resolveUnifiedSubmit.
+      case "unified_submit_response":
+        unifiedTuiController?.resolveSubmit(msg.id, {
+          ok: msg.ok,
+          bailed: msg.bailed,
+          error: msg.error,
+        });
+        break;
+
+      // Clipboard image read (Ctrl+V paste in the unified editor): the main
+      // process read electron.clipboard and returns the bytes. Resolved by
+      // ui-context's resolveClipboardImage, which writes a temp file and
+      // inserts the path at the cursor (pi parity).
+      case "clipboard_read_image_response":
+        unifiedTuiController?.resolveClipboardImage(msg.id, {
+          bytes: msg.bytes,
+          mimeType: msg.mimeType,
+        });
         break;
 
       default:

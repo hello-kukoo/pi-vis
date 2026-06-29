@@ -84,6 +84,10 @@ type StatusChangedCallback = (
   piVersion?: string,
 ) => void;
 type PanelEventCallback = (sessionId: SessionId, event: PanelEvent) => void;
+type UnifiedSubmitRequestCallback = (
+  sessionId: SessionId,
+  req: { id: string; text: string },
+) => void;
 
 export class SessionRegistry {
   private sessions = new Map<SessionId, SessionRecord>();
@@ -93,17 +97,20 @@ export class SessionRegistry {
   private onUiRequest: UiRequestCallback;
   private onStatusChanged: StatusChangedCallback;
   private onPanelEvent: PanelEventCallback;
+  private onUnifiedSubmitRequest: UnifiedSubmitRequestCallback;
 
   constructor(
     onEvent: SessionEventCallback,
     onUiRequest: UiRequestCallback,
     onStatusChanged: StatusChangedCallback,
     onPanelEvent: PanelEventCallback,
+    onUnifiedSubmitRequest: UnifiedSubmitRequestCallback,
   ) {
     this.onEvent = onEvent;
     this.onUiRequest = onUiRequest;
     this.onStatusChanged = onStatusChanged;
     this.onPanelEvent = onPanelEvent;
+    this.onUnifiedSubmitRequest = onUnifiedSubmitRequest;
   }
 
   /**
@@ -271,9 +278,14 @@ export class SessionRegistry {
         // fallback path reassigns record.proc and these become inert.
         record.proc = hostProc;
         attachUiRequest(hostProc);
-        hostProc.on("panelOpen", (panelId, overlay) => {
+        hostProc.on("panelOpen", (panelId, overlay, unified) => {
           if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, { type: "panel_open", panelId, overlay });
+          this.onPanelEvent(sessionId, {
+            type: "panel_open",
+            panelId,
+            overlay,
+            ...(unified ? { unified: true } : {}),
+          });
         });
         hostProc.on("panelData", (panelId, data) => {
           if (record.proc !== hostProc) return;
@@ -286,6 +298,10 @@ export class SessionRegistry {
         hostProc.on("panelClearAll", () => {
           if (record.proc !== hostProc) return;
           this.onPanelEvent(sessionId, { type: "panel_clear_all" });
+        });
+        hostProc.on("unifiedSubmitRequest", (id, text) => {
+          if (record.proc !== hostProc) return;
+          this.onUnifiedSubmitRequest(sessionId, { id, text });
         });
 
         try {
@@ -389,6 +405,9 @@ export class SessionRegistry {
         // failure is async). closeSession would also release it, but a
         // dead-and-abandoned session otherwise leaks until then.
         this._releaseLockIfHeld(sessionId);
+        // Emit unified_panel_reset so the renderer drops stale unified-panel state
+        // (the dying host can't emit a reliable panel_close for the unified panel).
+        this.onPanelEvent(sessionId, { type: "unified_panel_reset" });
         this.onStatusChanged(sessionId, "exited", record.error);
       });
 

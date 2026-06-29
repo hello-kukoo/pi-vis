@@ -146,9 +146,12 @@ export interface SessionHostEvents {
   exit: (code: number | null, signal: string | null) => void;
   error: (err: Error) => void;
   /** Panel events for custom() rendering */
-  panelOpen: (panelId: number, overlay: boolean) => void;
+  panelOpen: (panelId: number, overlay: boolean, unified: boolean) => void;
   panelData: (panelId: number, data: string) => void;
   panelClose: (panelId: number) => void;
+  panelClearAll: () => void;
+  /** Unified TUI panel events */
+  unifiedSubmitRequest: (id: string, text: string) => void;
 }
 
 interface InitMessage {
@@ -170,10 +173,12 @@ type HostWireMessage =
   | { type: "event"; event: PiEvent }
   | ExtensionUiRequest
   | { type: "response"; id: string; success: boolean; data?: unknown; error?: string }
-  | { type: "panel_open"; panelId: number; overlay: boolean }
+  | { type: "panel_open"; panelId: number; overlay: boolean; unified?: boolean }
   | { type: "panel_data"; panelId: number; data: string }
   | { type: "panel_close"; panelId: number }
-  | { type: "panel_clear_all" };
+  | { type: "panel_clear_all" }
+  | { type: "unified_submit_request"; id: string; text: string }
+  | { type: "clipboard_read_image_request"; id: string };
 
 // biome-ignore lint/suspicious/noUnsafeDeclarationMerging: typed EventEmitter
 export class SessionHost extends EventEmitter {
@@ -217,7 +222,12 @@ export class SessionHost extends EventEmitter {
     super();
     this.sessionFile = sessionFile;
 
-    const hostPath = HOST_SCRIPT;
+    // E2E seam: when PIVIS_TEST_HOST_SCRIPT is set, fork that script instead of
+    // the real host.mjs. Lets the unified-panel Playwright test drive the
+    // factory-setWidget flow through the REAL app (registry → IPC → store →
+    // UnifiedTuiHost) with a deterministic fake host — no real pi/SDK needed.
+    // Production never sets this env var.
+    const hostPath = process.env.PIVIS_TEST_HOST_SCRIPT ?? HOST_SCRIPT;
 
     // Test seam: if a fork override is installed (unit tests only), use it.
     // Otherwise fork the real host.mjs subprocess.
@@ -483,7 +493,7 @@ export class SessionHost extends EventEmitter {
       }
 
       case "panel_open": {
-        this.emit("panelOpen", msg.panelId, msg.overlay);
+        this.emit("panelOpen", msg.panelId, msg.overlay, msg.unified === true);
         break;
       }
 
@@ -502,10 +512,87 @@ export class SessionHost extends EventEmitter {
         break;
       }
 
+      case "unified_submit_request": {
+        this.emit("unifiedSubmitRequest", msg.id, msg.text);
+        break;
+      }
+
+      case "clipboard_read_image_request": {
+        this.replyClipboardImage(msg.id);
+        break;
+      }
+
       // No default: the HostWireMessage union is exhaustive (every member is
       // a `case` above), so an unhandled wire type is a compile-time error
       // rather than a silent runtime drop. This is the whole point of the
       // tagged union — adding a new host message forces a handler here.
+    }
+  }
+
+  /** Reply to a clipboard read image request from the host. */
+  private replyClipboardImage(id: string): void {
+    let bytes: string | undefined;
+    let mimeType: string | undefined;
+    try {
+      // Lazy-require: a static `import { clipboard } from "electron"` would be
+      // evaluated when this module is loaded by the SessionHost unit tests
+      // (which run outside Electron), where `electron` has no `clipboard`.
+      // Requiring at call time keeps the module import-safe in tests; the
+      // clipboard path only runs inside the real Electron main process.
+      const { clipboard } = require("electron");
+      const img = clipboard.readImage();
+      if (!img.isEmpty()) {
+        // Prefer PNG; pi accepts PNG.
+        const png = img.toPNG();
+        bytes = png.toString("base64");
+        mimeType = "image/png";
+      }
+      // else: clipboard is empty → reply with bytes: undefined
+    } catch (err) {
+      // On error, reply with bytes: undefined (fallback behavior)
+      console.error("[SessionHost] Clipboard read error:", err);
+    }
+    this.sendToHost({
+      type: "clipboard_read_image_response",
+      id,
+      bytes,
+      mimeType,
+    });
+  }
+
+  /** Send a unified submit response back to the host. */
+  sendUnifiedSubmitResponse(id: string, ok: boolean, bailed?: boolean, error?: string): void {
+    this.sendToHost({ type: "unified_submit_response", id, ok, bailed, error });
+  }
+
+  /** Send a message to the host child unless its IPC channel is already gone.
+   *
+   *  `ChildProcess.send` after the channel closes returns false AND emits an
+   *  'error' event (no throw), which logs a noisy "channel closed" stack. These
+   *  two callers (clipboard/submit replies) are best-effort responses to an
+   *  async host request; if the host has already exited there is nothing to
+   *  reply to, so drop silently rather than spamming the log. */
+  private sendToHost(
+    msg:
+      | {
+          type: "unified_submit_response";
+          id: string;
+          ok: boolean;
+          bailed?: boolean | undefined;
+          error?: string | undefined;
+        }
+      | {
+          type: "clipboard_read_image_response";
+          id: string;
+          bytes?: string | undefined;
+          mimeType?: string | undefined;
+        },
+  ): void {
+    if (this.proc.exitCode !== null || this.proc.killed || !this.proc.connected) return;
+    try {
+      this.proc.send(msg);
+    } catch {
+      /* channel closed between the check and the send — nothing to do */
     }
   }
 
@@ -619,17 +706,22 @@ export interface SessionHost {
   on(event: "exit", listener: (code: number | null, signal: string | null) => void): this;
   on(event: "error", listener: (err: Error) => void): this;
   on(event: "ready", listener: () => void): this;
-  on(event: "panelOpen", listener: (panelId: number, overlay: boolean) => void): this;
+  on(
+    event: "panelOpen",
+    listener: (panelId: number, overlay: boolean, unified: boolean) => void,
+  ): this;
   on(event: "panelData", listener: (panelId: number, data: string) => void): this;
   on(event: "panelClose", listener: (panelId: number) => void): this;
   on(event: "panelClearAll", listener: () => void): this;
+  on(event: "unifiedSubmitRequest", listener: (id: string, text: string) => void): this;
   emit(event: "event", data: PiEvent): boolean;
   emit(event: "uiRequest", data: ExtensionUiRequest): boolean;
   emit(event: "exit", code: number | null, signal: string | null): boolean;
   emit(event: "error", err: Error): boolean;
   emit(event: "ready"): boolean;
-  emit(event: "panelOpen", panelId: number, overlay: boolean): boolean;
+  emit(event: "panelOpen", panelId: number, overlay: boolean, unified: boolean): boolean;
   emit(event: "panelData", panelId: number, data: string): boolean;
   emit(event: "panelClose", panelId: number): boolean;
   emit(event: "panelClearAll"): boolean;
+  emit(event: "unifiedSubmitRequest", id: string, text: string): boolean;
 }

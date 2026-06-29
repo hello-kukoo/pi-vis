@@ -467,6 +467,11 @@ const stub = {
         return "/Users/me/code/my-repo-worktrees/swift-otter";
       case "session.sendCommand":
         return handleSendCommand(req);
+      // Unified-TUI panel I/O (UnifiedTuiHost calls these). No-op in the stub —
+      // the panel is driven by emitted panel_events, not round-tripped.
+      case "session.panelInput":
+      case "session.panelResize":
+        return undefined;
       case "app.versions":
         return { app: "0.1.0-preview", electron: "stub", node: "stub" };
 
@@ -631,3 +636,100 @@ const stub = {
 (window as unknown as { pivis: typeof stub }).pivis = stub;
 
 seedDemoSession();
+
+// ── Unified-TUI panel preview (factory setWidget) ────────────────────────
+// Enable with ?unified=1 on the preview URL. Emits the panel_open{unified}
+// + panel_data events an extension's factory setWidget produces, so the real
+// UnifiedTuiHost → xterm.js pipeline can be render-tested in a headless
+// browser (see tests/render/unified-panel.spec.ts). Delayed so the App's
+// session.panelEvent subscription is mounted before the first emit.
+function startUnifiedPanelPreview(): void {
+  const PANEL_ID = 2;
+  // `?unified=tall` emits a roster taller than the display cap so the overflow
+  // path (card scrolls, top stays reachable) can be exercised; `?unified=1`
+  // keeps the short roster the render tests assert on. Use \r\n so each line
+  // carriage-returns (xterm's default convertEol is off) — mirrors the real
+  // host's cursor-positioned ANSI rather than the bare-\n preview artifact.
+  const tall = new URLSearchParams(window.location.search).get("unified") === "tall";
+  const lines = tall
+    ? [
+        "▸ Fleet (40 agents)       ↓/↑ navigate · Enter open",
+        ...Array.from(
+          { length: 40 },
+          (_, i) => `  ● agent-${String(i + 1).padStart(2, "0")}   running   ${i + 1} turns`,
+        ),
+        "",
+        "  (unified TUI · type a prompt + Enter)",
+      ]
+    : [
+        "▸ Fleet (2 agents)        ↓/↑ navigate · Enter open",
+        "  ● swift-otter    running   3 turns",
+        "  ○ brave-falcon   queued    —",
+        "",
+        "  (unified TUI · type a prompt + Enter)",
+      ];
+  const roster = `\x1b[2J\x1b[H${lines.join("\r\n")}\r\n`;
+  setTimeout(() => {
+    // Target whichever session is actually active at emit time. The Sidebar's
+    // one-shot boot effect opens a fresh session tab on load (displacing the
+    // seeded demo-session-1), so the active id is NOT DEMO_SESSION_ID — emitting
+    // for the seeded id would hit a non-active session and the panel would
+    // never render (hasUnifiedPanel reads the active session).
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    emit("session.panelEvent", {
+      sessionId: activeId,
+      event: { type: "panel_open", panelId: PANEL_ID, overlay: false, unified: true },
+    });
+    emit("session.panelEvent", {
+      sessionId: activeId,
+      event: { type: "panel_data", panelId: PANEL_ID, data: roster },
+    });
+  }, 600);
+}
+
+if (["1", "tall"].includes(new URLSearchParams(window.location.search).get("unified") ?? "")) {
+  startUnifiedPanelPreview();
+}
+
+// ── Custom() panel preview (transient overlay) ───────────────────────────
+// Enable with ?panel=1. Emits the panel_open (NON-unified) + panel_data an
+// extension's `custom()` overlay produces, so the CustomPanelHost → xterm.js
+// path can be render-tested. The host pads its frame to the terminal height
+// with the overlay composited (centered) inside, so the frame here is a
+// centered bordered dialog with blank padding above/below — exercising that
+// the panel is a STABLE box the overlay floats in (NOT content-hugged).
+function startCustomPanelPreview(): void {
+  const PANEL_ID = 3;
+  const dialog = [
+    "╭─ Conversation: swift-otter ─────────────────╮",
+    "│ user: refactor the theme module             │",
+    "│ assistant: I'll search for theme usage…      │",
+    "│   [Tool: grep] theme                         │",
+    "│ assistant: found 12 references across 4 files│",
+    "╰─────────────── j/k scroll · q close ─────────╯",
+  ];
+  // Center the dialog in a ~24-row frame with blank padding (mirrors the host's
+  // centered overlay), terminated per line with \r\n.
+  const padTop = 6;
+  const frame = [
+    ...Array.from({ length: padTop }, () => ""),
+    ...dialog,
+    ...Array.from({ length: 24 - padTop - dialog.length }, () => ""),
+  ];
+  const data = `\x1b[2J\x1b[H${frame.join("\r\n")}\r\n`;
+  setTimeout(() => {
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    emit("session.panelEvent", {
+      sessionId: activeId,
+      event: { type: "panel_open", panelId: PANEL_ID, overlay: true, unified: false },
+    });
+    emit("session.panelEvent", {
+      sessionId: activeId,
+      event: { type: "panel_data", panelId: PANEL_ID, data },
+    });
+  }, 600);
+}
+
+if (new URLSearchParams(window.location.search).get("panel") === "1") {
+  startCustomPanelPreview();
+}

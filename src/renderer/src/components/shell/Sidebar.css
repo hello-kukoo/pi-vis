@@ -498,6 +498,48 @@
   outline: none;
 }
 
+/* Status bar toggle — CSS-drawn icon (no SVG) */
+.sidebar__statusbar-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.857rem 0.571rem 0.857rem 0.286rem;
+  font-size: 1.3em;
+  color: var(--ctp-overlay1);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.sidebar__statusbar-toggle:hover {
+  color: var(--ctp-mauve);
+}
+
+.sidebar__statusbar-toggle:focus-visible {
+  outline: none;
+}
+
+/* CSS-drawn status bar icon — a small rectangle with a bottom line */
+.sidebar__statusbar-icon {
+  display: block;
+  width: 0.9em;
+  height: 0.65em;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  position: relative;
+}
+
+/* The bottom line that appears when the status bar is visible */
+.sidebar__statusbar-toggle[aria-pressed="true"] .sidebar__statusbar-icon::after {
+  content: "";
+  position: absolute;
+  bottom: 2px;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
 /* Status dots — CSS shapes (font-independent, uniform size) */
 .status-dot {
   display: inline-block;
