@@ -2,6 +2,7 @@ import type { SessionId } from "@shared/ids.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { AnsiText } from "../../lib/ansi.js";
 import {
   BUILTIN_COMMANDS,
@@ -55,6 +56,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
   // Container for the slash-suggestion list. Used to scroll the
   // keyboard-selected row into view during arrow-key navigation so the
   // highlight can't outrun the visible viewport (the list scrolls, not the
@@ -320,6 +322,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     // scrolls (max-height + overflow-y: auto), so return the full list.
     return entries;
   }, [text, commands]);
+
+  const showSuggestions = suggestions.length > 0 && !dismissed; // A1
+
+  // Claim ESC while autocomplete is visible (A2): the global interrupt
+  // handler defers while a claim is active, so the first ESC hides
+  // suggestions instead of aborting the agent (two-press model).
+  useEscapeClaim(showSuggestions);
 
   // Reset highlight when the suggestion list shape changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on shape, not identity; recompute on each keystroke is intentional
@@ -652,17 +661,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     ],
   );
 
-  // ── Abort ──────────────────────────────────────────────────────────
-
-  const handleAbort = useCallback(() => {
-    window.pivis
-      .invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "abort" },
-      })
-      .catch(console.error);
-  }, [sessionId]);
-
   // ── Suggestion completion ───────────────────────────────────────────
   // Mirrors pi's TUI editor (pi-tui components/editor.js): Tab applies the
   // highlighted completion and stays in the editor; Enter applies it *and*
@@ -678,7 +676,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (suggestions.length > 0) {
+      if (showSuggestions) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           setSlashIndex((i) => Math.min(i + 1, suggestions.length - 1));
@@ -727,6 +725,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         }
         if (e.key === "Escape") {
           e.preventDefault();
+          setDismissed(true); // A2: actually hide, not just reset highlight
           setSlashIndex(0);
           return;
         }
@@ -741,17 +740,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         e.preventDefault();
         void handleSubmit();
       }
-
-      if (e.key === "Escape" && isStreaming) {
-        handleAbort();
-      }
     },
     [
+      showSuggestions,
       suggestions,
       slashIndex,
       handleSubmit,
-      isStreaming,
-      handleAbort,
       completionFor,
       pending,
       workspacePath,
@@ -763,6 +757,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const v = e.target.value;
       setText(v);
+      setDismissed(false); // A3 reset on text change
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
       else setSessionDraft(sessionId, v);
       // Consume any pending editor injection — the user has taken over the
@@ -782,6 +777,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     (entry: SuggestionEntry) => {
       const v = completionFor(entry);
       setText(v);
+      setDismissed(false); // A3 reset on pick
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
       else setSessionDraft(sessionId, v);
       // Consume any pending editor injection (same rationale as handleChange).
@@ -858,7 +854,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             (.picker / .picker__list in AppPickerHost.css): a padded card
             wrapping an inner scrolling list of rounded rows. See
             .composer__suggestions in Composer.css. */}
-        {suggestions.length > 0 && (
+        {showSuggestions && (
           <div className="composer__suggestions">
             <div className="composer__suggestion-list" role="listbox" ref={suggestionListRef}>
               {suggestions.map((s, i) => (

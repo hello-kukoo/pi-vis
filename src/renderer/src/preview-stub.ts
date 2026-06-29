@@ -24,6 +24,32 @@ let currentThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
 
+// Test/preview hooks (NOT part of the real IPC contract). Render tests use
+// these to drive deterministic streaming + observe panel input without a
+// real pi. They are attached to window.__pivisPreview and are a no-op for
+// real Electron builds (preview-stub only loads in dev:renderer).
+const previewHooks = {
+  /** Count of `abort` commands dispatched to the stub. */
+  abortCalls: 0,
+  /** Log of every panel input string sent to `session.panelInput`. */
+  panelInputLog: [] as string[],
+  /** Begin a fake turn (agent_start) on the active session. */
+  startStreaming(): void {
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    emit("session.event", { sessionId: activeId, event: { type: "agent_start" } });
+  },
+  /** End a fake turn (final agent_end) on the active session. */
+  stopStreaming(): void {
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    emit("session.event", { sessionId: activeId, event: { type: "agent_end" } });
+  },
+};
+// Attach to window for render-test access (guarded for type safety).
+(window as unknown as { __pivisPreview?: typeof previewHooks }).__pivisPreview = previewHooks;
+// Expose the store for render-test introspection (NOT part of the real
+// IPC contract).
+(window as unknown as { __pivisStore?: typeof useSessionsStore }).__pivisStore = useSessionsStore;
+
 function emit(channel: string, payload: unknown): void {
   const subs = listeners.get(channel);
   if (!subs) return;
@@ -310,6 +336,7 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
       });
     }
     case "abort":
+      previewHooks.abortCalls++;
       emitEvent({ type: "agent_end" });
       return response("abort");
     case "get_commands":
@@ -470,6 +497,8 @@ const stub = {
       // Unified-TUI panel I/O (UnifiedTuiHost calls these). No-op in the stub —
       // the panel is driven by emitted panel_events, not round-tripped.
       case "session.panelInput":
+        previewHooks.panelInputLog.push(String((req as { data?: unknown }).data ?? ""));
+        return undefined;
       case "session.panelResize":
         return undefined;
       case "app.versions":

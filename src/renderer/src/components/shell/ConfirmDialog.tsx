@@ -1,4 +1,5 @@
 import type React from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import "./ConfirmDialog.css";
 
 interface ConfirmDialogProps {
@@ -18,6 +19,9 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps): React.ReactElement {
+  // Mounted ⇒ open. Claim ESC so a background streaming session isn't
+  // aborted (the scrim/key handler cancels the dialog).
+  useEscapeClaim(true);
   return (
     <div
       className="confirm-dialog-scrim"
@@ -47,6 +51,7 @@ export function ConfirmDialog({
             type="button"
             className="confirm-dialog__btn confirm-dialog__btn--confirm"
             onClick={onConfirm}
+            autoFocus
           >
             {confirmLabel}
           </button>

@@ -2,6 +2,7 @@ import type { SessionId } from "@shared/ids.js";
 import type { DialogUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import "./ExtensionDialogHost.css";
 
@@ -241,6 +242,10 @@ export function ExtensionDialogHost({
   const dismissUiRequest = useSessionsStore((s) => s.dismissUiRequest);
   const current = session?.pendingDialogs[0] as DialogUiRequest | undefined;
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Claim ESC while a dialog is open so a background streaming session isn't
+  // aborted (the dialog's own controls respond/cancel).
+  useEscapeClaim(!!current);
 
   const handleRespond = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {

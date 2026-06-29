@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { AnsiText } from "../../lib/ansi.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
 import "./UpdateProgress.css";
@@ -9,6 +10,11 @@ export function UpdateProgress(): React.ReactElement | null {
   const setActiveRun = useUpdatesStore((s) => s.setActiveRun);
   const status = useUpdatesStore((s) => s.status);
   const scrollRef = useRef<HTMLPreElement>(null);
+
+  // Claim ESC while the update modal is up so a background streaming
+  // session isn't aborted (ESC has no close handler here today — pre-
+  // existing — but the claim still prevents the abort).
+  useEscapeClaim(!!activeRun);
 
   // Auto-scroll to bottom when new output arrives
   useEffect(() => {

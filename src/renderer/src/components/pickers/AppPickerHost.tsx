@@ -4,6 +4,7 @@ import type { ProjectTrustOption } from "@shared/pi-protocol/commands.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import type { PickerRequest } from "../../lib/commands/execute.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
@@ -52,6 +53,10 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
   const injectEditorText = useSessionsStore((s) => s.injectEditorText);
   const openSessionTab = useSessionsStore((s) => s.openSessionTab);
   const setActiveSession = useSessionsStore((s) => s.setActiveSession);
+
+  // Claim ESC while any picker is open so a background streaming session
+  // isn't aborted (the picker's own ESC handler closes it).
+  useEscapeClaim(!!picker);
 
   if (!picker) return null;
 

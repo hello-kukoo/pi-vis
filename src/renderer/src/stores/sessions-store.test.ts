@@ -2075,3 +2075,147 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("workspace.listSessions", expect.anything());
   });
 });
+
+// ── S1/S2 turn-end truth table + abortSession contract (ESC-to-interrupt) ──
+// Pins that isStreaming clears at every definitive turn end (final agent_end,
+// terminal SessionStatus, rejected/failed prompt send) and never gets stuck
+// true; and that abortSession is a no-op when idle + rejection-safe.
+
+describe("sessions store - isStreaming turn-end truth (S1, S2) + abortSession (S3)", () => {
+  const invokeMock = vi.fn();
+  const originalWindow = (globalThis as { window?: unknown }).window;
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({ success: true });
+    (globalThis as { window: unknown }).window = {
+      pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window: unknown }).window = originalWindow;
+    }
+  });
+
+  const isStreaming = () =>
+    useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming ?? false;
+  const runningSince = () => useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince;
+
+  it("final agent_end (willRetry:false) clears isStreaming", () => {
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    expect(isStreaming()).toBe(true);
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_end", willRetry: false });
+    expect(isStreaming()).toBe(false);
+    expect(runningSince()).toBeUndefined();
+  });
+
+  it("willRetry agent_end keeps streaming; a following agent_start keeps it true", () => {
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
+    expect(isStreaming()).toBe(true);
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    expect(isStreaming()).toBe(true);
+  });
+
+  it("a rejected prompt invoke clears isStreaming (S2)", async () => {
+    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
+    invokeMock.mockRejectedValueOnce(new Error("dead session"));
+    // Drive through the shared submit pipeline so executeSendPrompt's
+    // try/catch is the path under test.
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id1", "hello");
+    // Give the fire-and-forget clear a tick to settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(isStreaming()).toBe(false);
+  });
+
+  it("a success:false prompt response clears isStreaming (S1)", async () => {
+    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
+    invokeMock.mockResolvedValueOnce({ success: false, error: "guard" });
+    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id2", "hello");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(isStreaming()).toBe(false);
+  });
+
+  it("setSessionStatus -> 'exited' from 'ready' clears isStreaming (S1)", () => {
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    expect(isStreaming()).toBe(true);
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
+    expect(isStreaming()).toBe(false);
+    expect(runningSince()).toBeUndefined();
+  });
+
+  it("setSessionStatus -> 'failed' from 'ready' clears isStreaming (S1)", () => {
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "failed", "boom");
+    expect(isStreaming()).toBe(false);
+  });
+
+  it("setSessionStatus -> 'ready' from 'ready' (benign re-emit) does NOT clear streaming", () => {
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    const before = runningSince();
+    expect(before).toBeDefined();
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+    expect(isStreaming()).toBe(true);
+    expect(runningSince()).toBe(before);
+  });
+
+  it("setSessionStatus -> 'exited' from 'exited' (re-emit) does NOT touch a live turn's timer", () => {
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
+    // Now start a (hypothetical) fresh turn on an exited session and
+    // confirm a duplicate exited re-emit is a no-op.
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    const before = runningSince();
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
+    // becomingTerminal is false (already terminal), so streaming is preserved.
+    expect(isStreaming()).toBe(true);
+    expect(runningSince()).toBe(before);
+  });
+
+  it("abortSession: streaming -> invoke called with {type:'abort'}", () => {
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    invokeMock.mockClear();
+    useSessionsStore.getState().abortSession(SESSION_A);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    const [, payload] = invokeMock.mock.calls[0] as [
+      string,
+      { sessionId: SessionId; command: { type: string } },
+    ];
+    expect(payload).toEqual({ sessionId: SESSION_A, command: { type: "abort" } });
+  });
+
+  it("abortSession: idle -> invoke NOT called (no-op, S3)", () => {
+    invokeMock.mockClear();
+    useSessionsStore.getState().abortSession(SESSION_A);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("abortSession: rejecting invoke -> no unhandled rejection (S3)", async () => {
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    invokeMock.mockRejectedValueOnce(new Error("host fallback"));
+    // Should not throw.
+    useSessionsStore.getState().abortSession(SESSION_A);
+    // Drain microtasks so the rejected promise settles (the .catch swallows).
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(true).toBe(true);
+  });
+});

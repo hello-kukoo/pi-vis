@@ -348,6 +348,10 @@ interface SessionsStore {
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
+  /** Interrupt the active turn. No-op (no IPC) when the session isn't
+   *  streaming; rejection-safe when it does send (host-fallback transition
+   *  can reject). S3. */
+  abortSession: (sessionId: SessionId) => void;
   addUiRequest: (sessionId: SessionId, request: ExtensionUiRequest) => void;
   handlePanelEvent: (sessionId: SessionId, event: PanelEvent) => void;
   /** Run the unified-TUI editor's submitted text through the shared submit
@@ -678,6 +682,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (s) {
+        // S1/S2: a terminal status means the turn is definitively over (host
+        // exited/failed). Clear isStreaming + the working timer so the
+        // indicator stops and the ESC handler never fires abort at a dead
+        // session. ONLY when transitioning INTO a terminal status — never on
+        // a benign ready/starting re-emission (which would prematurely clear
+        // a live turn).
+        const TERMINAL: ReadonlySet<SessionStatus> = new Set(["exited", "failed"]);
+        const becomingTerminal = TERMINAL.has(status) && !TERMINAL.has(s.status);
         // Only store piVersion when explicitly provided (a non-host "ready"
         // or a status change without version info mustn't clobber a prior
         // value). See P1-c.
@@ -685,6 +697,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           ...s,
           status,
           error,
+          isStreaming: becomingTerminal ? false : s.isStreaming,
+          runningSince: becomingTerminal ? undefined : s.runningSince,
           ...(piVersion !== undefined ? { piVersion } : {}),
         });
       }
@@ -898,6 +912,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, { ...s, isStreaming, runningSince });
       return { sessions };
     });
+  },
+
+  abortSession: (sessionId) => {
+    const s = get().sessions.get(sessionId);
+    if (!s || !s.isStreaming) return; // S3 no-op when idle
+    void window.pivis
+      .invoke("session.sendCommand", { sessionId, command: { type: "abort" } })
+      .catch(() => {}); // S3 rejection-safe
   },
 
   addUiRequest: (sessionId, request) => {

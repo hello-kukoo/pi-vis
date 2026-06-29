@@ -4,6 +4,7 @@ import { SessionStatsSchema } from "@shared/pi-protocol/responses.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { formatCost, formatTokens } from "../../lib/format.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
@@ -26,6 +27,10 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // Claim ESC while the rename field is open so a background streaming
+  // session isn't aborted.
+  useEscapeClaim(editingName);
 
   // Cold-aware gate. A boolean on purpose: starting→ready doesn't re-fire
   // effects, but cold→starting does. Sessions whose process is alive get
@@ -288,6 +293,11 @@ export function SessionControls({
   // ── Thinking level picker state ───────────────────────────────────
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Claim ESC while either the model or thinking dropdown is open so a
+  // background streaming session isn't aborted (each dropdown's own
+  // outside-click / Escape handling closes it).
+  useEscapeClaim(modelOpen || thinkingOpen);
 
   const currentModelInfo = useMemo<ModelInfo | undefined>(
     () =>

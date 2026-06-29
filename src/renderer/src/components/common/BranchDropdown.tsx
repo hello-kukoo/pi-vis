@@ -2,6 +2,7 @@
 // the worktree bar. Props drive all behaviour; no store dependency.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import "./BranchDropdown.css";
 
 interface Branch {
@@ -56,6 +57,11 @@ export function BranchDropdown({
   placement = "bottom",
 }: BranchDropdownProps): React.ReactElement {
   const [open, setOpen] = useState(false);
+  // Claim ESC while the dropdown is open so a background streaming session
+  // isn't aborted (the dropdown's own Escape handler closes it). Reused in
+  // multiple places (worktree bar, diff viewer); ref-counting makes this
+  // safe across concurrent instances.
+  useEscapeClaim(open);
   const [search, setSearch] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);

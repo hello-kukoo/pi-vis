@@ -329,12 +329,24 @@ async function executeSendPrompt(
       mimeType: i.mimeType,
     }));
   }
-  await deps.invoke("session.sendCommand", {
-    sessionId,
-    command: promptCommand,
-  });
-  // Streaming cleared by agent_end event (or by the next agent_start);
-  // we don't unset here on purpose.
+  // S1/S2: a rejected prompt (pi guard -> success:false) or a thrown invoke
+  // (dead session / closed IPC channel) will never emit agent_start/
+  // agent_end, so clear streaming here — otherwise isStreaming sticks true
+  // and the working indicator / ESC handler lie. (Success path is still
+  // cleared by agent_end in applyEvent.)
+  let res: { success: boolean; data?: unknown; error?: string };
+  try {
+    res = await deps.invoke("session.sendCommand", {
+      sessionId,
+      command: promptCommand,
+    });
+  } catch (err) {
+    deps.setStreaming(sessionId, false);
+    throw err;
+  }
+  if (!res.success) {
+    deps.setStreaming(sessionId, false);
+  }
 }
 
 // ── bash ────────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type React from "react";
 import { useCallback, useEffect, useRef } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { palettes } from "../../theme/catppuccin.js";
@@ -70,6 +71,9 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   const fitAddonRef = useRef<FitAddon | null>(null);
   const panelRef = useRef<{ id: number; overlay: boolean; buffer: string[] } | null>(null);
   const { panel } = useSessionsStore((s) => s.sessions.get(sessionId)) ?? {};
+  // Claim ESC while a custom panel is open so a background streaming session
+  // isn't aborted (the panel routes ESC to the extension via onData).
+  useEscapeClaim(!!panel);
   // Keep panelRef in sync with the latest panel so the lifecycle effect (which
   // depends on panelId only) can read the current panel + its buffer without
   // taking panel/panel.buffer as reactive deps (which would rebuild xterm on

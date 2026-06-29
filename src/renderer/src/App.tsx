@@ -19,6 +19,8 @@ import { TitleBar } from "./components/shell/TitleBar.js";
 import { UpdateBanner } from "./components/shell/UpdateBanner.js";
 import { TranscriptView } from "./components/transcript/TranscriptView.js";
 import { UpdateProgress } from "./components/updates/UpdateProgress.js";
+import { useEscapeClaim } from "./hooks/useEscapeClaim.js";
+import { useGlobalEscapeInterrupt } from "./hooks/useGlobalEscapeInterrupt.js";
 import { openDiffForSession, useDiffStore } from "./stores/diff-store.js";
 import { useSessionsStore } from "./stores/sessions-store.js";
 import { useSettingsStore } from "./stores/settings-store.js";
@@ -26,6 +28,7 @@ import { useUpdatesStore } from "./stores/updates-store.js";
 import "./App.css";
 
 export function App(): React.ReactElement {
+  useGlobalEscapeInterrupt();
   const activeSessionId = useSessionsStore((s) => s.activeSessionId);
   const setSessionStatus = useSessionsStore((s) => s.setSessionStatus);
   const applyEvent = useSessionsStore((s) => s.applyEvent);
@@ -44,6 +47,9 @@ export function App(): React.ReactElement {
   const [piFound, setPiFound] = useState<boolean | null>(null);
   // onClose	SettingsView handler
   const [showSettings, setShowSettings] = useState(false);
+  // Claim ESC while Settings is open so a background streaming session isn't
+  // aborted when the user presses ESC to close Settings.
+  useEscapeClaim(showSettings);
   const [settingsInitialSection, setSettingsInitialSection] = useState<"account" | undefined>(
     undefined,
   );

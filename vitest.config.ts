@@ -9,7 +9,7 @@ export default defineConfig({
     //   src/, so the old glob silently excluded the entire host: trust resolver,
     //   command bridge, version gate). Only .test.mjs is matched here so it
     //   never collides with the Playwright e2e *.spec.mts under tests/e2e.
-    include: ["src/**/*.test.ts", "resources/**/*.test.mjs"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "resources/**/*.test.mjs"],
     globals: false,
   },
   resolve: {

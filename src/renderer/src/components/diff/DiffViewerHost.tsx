@@ -9,6 +9,7 @@ import type { GitChangedFile } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import type { SearchMatch, SearchableFile } from "../../lib/diff/search.js";
 import { computeMatches } from "../../lib/diff/search.js";
 import { useDiffStore } from "../../stores/diff-store.js";
@@ -26,7 +27,10 @@ const SCROLL_SPY_SUPPRESS_MS = 400;
 const EAGER_LOAD_FIRST = 5;
 
 export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactElement | null {
+  // Claim ESC while the diff viewer is open so a background streaming
+  // session isn't aborted (ESC closes the viewer).
   const open = useDiffStore((s) => s.open);
+  useEscapeClaim(open);
   const storeSessionId = useDiffStore((s) => s.sessionId);
   const closeViewer = useDiffStore((s) => s.closeViewer);
   const phase = useDiffStore((s) => s.phase);

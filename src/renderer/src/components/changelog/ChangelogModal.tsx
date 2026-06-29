@@ -1,5 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef } from "react";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { Markdown } from "../../lib/markdown.js";
 import { useChangelogStore } from "../../stores/changelog-store.js";
 import "./ChangelogModal.css";
@@ -9,6 +10,10 @@ export function ChangelogModal(): React.ReactElement | null {
   const markdown = useChangelogStore((s) => s.markdown);
   const closeChangelog = useChangelogStore((s) => s.closeChangelog);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Claim ESC while the changelog modal is open so a background streaming
+  // session isn't aborted (ESC closes the modal).
+  useEscapeClaim(open);
 
   const handleClose = useCallback(() => {
     closeChangelog();
