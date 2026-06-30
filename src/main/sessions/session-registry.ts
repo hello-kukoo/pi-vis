@@ -8,6 +8,7 @@ import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
 import lockfile from "proper-lockfile";
+import { resolveHostExecPath } from "../pi/locate-node.js";
 import { PiProcess } from "../pi/pi-process.js";
 import { HostVersionTooLowError, SessionHost } from "../pi/session-host.js";
 
@@ -272,7 +273,15 @@ export class SessionRegistry {
       // If the host fails to start, fall back to PiProcess (today's behavior).
       if (useHost) {
         record._useHost = true;
-        const hostProc = new SessionHost(piPath, cwd, record.sessionFile, env);
+        // Retarget the host onto the user's system Node when it's newer than
+        // Electron's bundled Node (e.g. user has Node 22.x, Electron 31 ships
+        // 20.14). Without this, the host misses Node built-ins like
+        // `node:sqlite` (Node ≥ 22.5) that extensions such as @cursor/sdk
+        // require — they work in terminal pi (which runs under the user's
+        // Node) but break in the forked host. Cached, so this is one
+        // login-shell round-trip per app lifetime. See locate-node.ts.
+        const { execPath: hostNodeExecPath } = await resolveHostExecPath();
+        const hostProc = new SessionHost(piPath, cwd, record.sessionFile, env, hostNodeExecPath);
         // Set record.proc + attach forwarders NOW (pre-readiness) so the
         // init-time trust dialog round-trips. If the host fails below, the
         // fallback path reassigns record.proc and these become inert.

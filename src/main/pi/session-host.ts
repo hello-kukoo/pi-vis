@@ -220,6 +220,22 @@ export class SessionHost extends EventEmitter {
     workspacePath: string,
     sessionFile?: string,
     env?: Record<string, string>,
+    /**
+     * Optional override for the executable that runs this host subprocess.
+     *
+     * By default `child_process.fork()` uses `process.execPath` = the Electron
+     * binary, so the host runs under Electron's bundled Node (e.g. Electron 31
+     * → Node 20.14). Passing the user's system `node` here retargets the host
+     * onto the same Node that `pi` itself runs under, which restores parity
+     * for extensions relying on Node built-ins newer than Electron's bundled
+     * version (notably `@cursor/sdk`'s `SqliteLocalAgentStore`, which needs
+     * `node:sqlite`, added in Node v22.5.0). See `locate-node.ts`.
+     *
+     * `undefined` = today's behavior (Electron's bundled Node). The registry
+     * computes this once via `resolveHostExecPath()` and only passes a value
+     * when the system Node is strictly newer than Electron's.
+     */
+    nodeExecPath?: string,
   ) {
     super();
     this.sessionFile = sessionFile;
@@ -239,6 +255,13 @@ export class SessionHost extends EventEmitter {
       env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       execArgv: [], // Don't pass --inspect-brk etc.
+      // When the registry resolved a newer system Node, run the host under it
+      // instead of Electron's bundled Node (see locate-node.ts). `fork()`
+      // still sets up the IPC channel (fd 3) regardless of execPath, and the
+      // host's process.send/on("message") wire is unchanged — plain Node and
+      // Electron share the same fork IPC protocol. Omitting execPath keeps
+      // the default (process.execPath = Electron) for the fallback case.
+      ...(nodeExecPath ? { execPath: nodeExecPath } : {}),
     });
 
     this.proc.stdout?.on("data", (chunk: Buffer) => {

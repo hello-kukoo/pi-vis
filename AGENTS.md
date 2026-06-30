@@ -37,7 +37,8 @@ src/
 │   ├── pi/                  # Pi subprocess management
 │   │   ├── pi-process.ts    # Wraps a single `pi --mode rpc` child process; spawned with login-shell env (PATH etc.); correlated RPC over JSONL
 │   │   ├── jsonl-stream.ts  # Byte-level JSONL parser (splits on \n only, never Unicode separators)
-│   │   └── locate-pi.ts     # Finds pi binary via $SHELL/which/override; validates `--version` with login-shell env (pi's `env node` shebang needs node on PATH); caches result
+│   │   ├── locate-pi.ts     # Finds pi binary via $SHELL/which/override; validates `--version` with login-shell env (pi's `env node` shebang needs node on PATH); caches result
+│   │   └── locate-node.ts   # Resolves the user's system `node` (the same Node `pi` runs under) and decides whether to retarget the SDK-host fork onto it. The host is forked from Electron's main process and so defaults to Electron's BUNDLED Node (Electron 31 → Node 20.14), which lags the user's Node and breaks extensions needing newer built-ins — notably `@cursor/sdk`'s default `SqliteLocalAgentStore`, which needs `node:sqlite` (Node ≥ 22.5; works in terminal pi, breaks in the forked host). `chooseHostExecPath` retargets the host to the system Node ONLY when it's strictly newer than Electron's bundled version (self-justifying + adapts to a future Electron bump); else `undefined` → Electron default (today's behavior, the fallback). `resolveHostExecPath()` is cached (one login-shell round-trip per app lifetime).
 │   ├── sessions/            # Session lifecycle
 │   │   ├── session-registry.ts   # SessionId → PiProcess lifecycle; MAX_IDLE_PROCESSES=10
 │   │   ├── session-discovery.ts  # Scans ~/.pi/agent/sessions/ for workspace-linked session files; extracts per-session `lastActiveAt` (newest user-message timestamp) used as the persistent sidebar sort key (preferred over file mtime, which passive opens bump)
@@ -134,6 +135,7 @@ src/
 
 - **PiProcess** (`src/main/pi/pi-process.ts`): legacy wrapper, spawns `pi --mode rpc` (fallback)
 - **SessionHost** (`src/main/pi/session-host.ts`): SDK-direct wrapper, forks `resources/pi-session-host/host.mjs`
+  - **Runs under the user's Node, not Electron's.** The fork passes `execPath: <system node>` when `resolveHostExecPath()` (`locate-node.ts`) finds a system Node strictly newer than Electron's bundled Node — closing the parity gap where the forked host (default: Electron's Node, e.g. 20.14 for Electron 31) lacked newer Node built-ins that terminal pi has. Concrete case: `@cursor/sdk`'s default `SqliteLocalAgentStore` needs `node:sqlite` (Node ≥ 22.5); it worked in terminal pi (user's Node) but threw in Pi-Vis (Electron's Node). Retargeting restores parity for `node:sqlite` and any newer-Node built-in. Falls back to Electron's bundled Node (`execPath` omitted) when no system Node is found or it isn't newer — today's behavior, so no regression. (Note the `pi --mode rpc` fallback path already ran under the user's Node via pi's `#!/usr/bin/env node` shebang, so only the SDK-host path needed this.)
   - Same EventEmitter shape as PiProcess (event, uiRequest, exit, error events; sendCommand/sendUiResponse methods)
   - Additional panel events: panelOpen, panelData, panelClose, panelClearAll, unifiedSubmitRequest (the unified-TUI editor submitted text → renderer runs the shared submit pipeline)
   - `activateSession` tries SessionHost first; on failure falls back to PiProcess (progressive enhancement)

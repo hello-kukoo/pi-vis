@@ -8,7 +8,18 @@ import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import lockfile from "proper-lockfile";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+// Mock the node-execPath resolver so the registry tests don't shell out to the
+// login shell on every activation (resolveHostExecPath would otherwise run a
+// real `$SHELL -ilc 'command -v node'`, breaking the tight timing of the
+// close-during-activate / pending-queue tests). The retarget DECISION itself is
+// unit-tested in locate-node.test.ts; here we just exercise the fallback path
+// (undefined execPath = Electron's bundled Node), which is what every lifecycle
+// test already implicitly assumes.
+vi.mock("../pi/locate-node.js", () => ({
+  resolveHostExecPath: async () => ({ execPath: undefined, reason: "electron-node-no-system" }),
+}));
+
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeHostProcess } from "../../../tests/fixtures/fake-host-process.mjs";
 import { SessionHost, __forkOverride } from "../pi/session-host.js";
 import { SessionRegistry } from "./session-registry.js";

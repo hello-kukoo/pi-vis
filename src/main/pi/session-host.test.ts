@@ -360,3 +360,38 @@ describe("isSessionHost (panel-capability duck type)", () => {
     expect(isSessionHost({})).toBe(false);
   });
 });
+
+describe("nodeExecPath (host runtime retarget)", () => {
+  // The parity fix: when the registry resolves a newer system Node, the host
+  // fork must run under THAT node (not Electron's bundled Node) so extensions
+  // using newer Node built-ins (e.g. @cursor/sdk's node:sqlite store) work.
+  // Pins that nodeExecPath reaches child_process.fork's opts, and that omitting
+  // it leaves execPath unset (Electron default — the fallback path).
+  it("passes execPath to fork when a nodeExecPath is supplied", () => {
+    const fake = new FakeHostProcess();
+    let capturedOpts: Record<string, unknown> = {};
+    __forkOverride.fn = (_p: string, _a: string[], opts: object) => {
+      capturedOpts = opts as Record<string, unknown>;
+      return fake as unknown as ReturnType<typeof import("node:child_process").fork>;
+    };
+    const host = new SessionHost("/fake/pi", "/tmp/ws", undefined, {}, "/usr/local/bin/node");
+    host.on("error", () => {});
+    expect(capturedOpts.execPath).toBe("/usr/local/bin/node");
+    host.stop();
+    __forkOverride.fn = null;
+  });
+
+  it("omits execPath when no nodeExecPath is supplied (Electron default)", () => {
+    const fake = new FakeHostProcess();
+    let capturedOpts: Record<string, unknown> = {};
+    __forkOverride.fn = (_p: string, _a: string[], opts: object) => {
+      capturedOpts = opts as Record<string, unknown>;
+      return fake as unknown as ReturnType<typeof import("node:child_process").fork>;
+    };
+    const host = new SessionHost("/fake/pi", "/tmp/ws", undefined, {});
+    host.on("error", () => {});
+    expect(capturedOpts.execPath).toBeUndefined();
+    host.stop();
+    __forkOverride.fn = null;
+  });
+});
