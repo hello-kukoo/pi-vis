@@ -12,6 +12,12 @@ export {
   ThemeSchema,
   SyntaxSpecSchema,
 } from "./tokens.js";
+export {
+  buildPiThemeColors,
+  PI_BG_ROLES,
+  PI_ROLES,
+  PI_THEME_DEFAULTS,
+} from "./pi-theme.js";
 
 /**
  * Build an id → Theme registry from the bundled themes plus any extra

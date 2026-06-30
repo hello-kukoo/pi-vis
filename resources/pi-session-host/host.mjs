@@ -32,6 +32,7 @@
  */
 
 import {
+  applyPiVisTheme,
   configureHttpDispatcher,
   createTrustResolver,
   importPi,
@@ -239,12 +240,29 @@ async function handleInit(msg) {
 
     // Step 2: Bootstrap
     configureHttpDispatcher(piPath);
-    // Load the pi theme that matches pi-vis's active color scheme (passed as
-    // PIVIS_PI_THEME = "dark" | "light" by the main process). This is what makes
-    // every host-rendered surface — extension `theme.fg` widgets/status, the
-    // unified TUI, and custom() panels — resolve colors that read correctly on
-    // pi-vis's light/dark UI. Falls back to pi's default when unset (older main).
-    const theme = initHostTheme(pi, process.env.PIVIS_PI_THEME || undefined);
+    // Load the pi theme that matches pi-vis's active color scheme. Two layers:
+    //  (1) PIVIS_PI_THEME loads pi's built-in dark/light as a base (and is the
+    //      fallback for the RPC path / if the custom install below fails).
+    //  (2) PIVIS_PI_THEME_COLORS carries pi-vis's exact palette in pi's OWN
+    //      color vocabulary, so we build a pi Theme from it and install it as
+    //      the active singleton — every host surface (extension theme.fg
+    //      widgets/status, the unified TUI, custom() panels) then resolves to
+    //      pi-vis's colors for ANY scheme, not just pi's two built-ins. A
+    //      failure here is non-fatal: we keep the base theme and log.
+    const baseTheme = initHostTheme(pi, process.env.PIVIS_PI_THEME || undefined);
+    let theme = baseTheme;
+    const paletteJson = process.env.PIVIS_PI_THEME_COLORS;
+    if (paletteJson) {
+      try {
+        const { fg, bg } = JSON.parse(paletteJson);
+        if (fg && bg) theme = applyPiVisTheme(pi, fg, bg);
+      } catch (err) {
+        console.error(
+          "[pi-session-host] pi-vis theme install failed; using base pi theme:",
+          err?.message ?? err,
+        );
+      }
+    }
     const agentDir = pi.getAgentDir();
 
     // Step 3: Dialog resolver — created BEFORE the runtime because the

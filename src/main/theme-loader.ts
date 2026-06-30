@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   type Theme,
   ThemeSchema,
+  buildPiThemeColors,
   buildThemeRegistry,
   piThemeForTheme,
   resolveTheme,
@@ -77,4 +78,21 @@ function readUserThemes(): Theme[] {
 export function piThemeForSchemeId(id: string): "dark" | "light" {
   const registry = buildThemeRegistry(getUserThemes());
   return piThemeForTheme(resolveTheme(id, registry));
+}
+
+/**
+ * Resolve a colorScheme id to the pi `Theme` color maps (`{fg, bg}`, each
+ * role → 6-digit hex) the SDK host should install so pi's TUI/extension
+ * surfaces track THIS app's exact palette instead of pi's two built-in
+ * dark/light themes. Serialized to the `PIVIS_PI_THEME_COLORS` env var per
+ * host spawn (read fresh, like `PIVIS_PI_THEME`, so reloads pick up a change).
+ */
+export function piThemeColorsForSchemeId(id: string): {
+  fg: Record<string, string>;
+  bg: Record<string, string>;
+} {
+  const registry = buildThemeRegistry(getUserThemes());
+  const theme = resolveTheme(id, registry);
+  const { fgColors, bgColors } = buildPiThemeColors(theme);
+  return { fg: fgColors, bg: bgColors };
 }

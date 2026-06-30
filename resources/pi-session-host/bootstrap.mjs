@@ -221,3 +221,31 @@ export function initHostTheme(pi, themeName) {
   }
   return theme;
 }
+
+/**
+ * Install a pi `Theme` built from pi-vis's resolved palette as pi's ACTIVE
+ * theme singleton, so every `ctx.ui.theme.fg(role)` and all pi-tui rendering
+ * emit pi-vis's EXACT colors for any colorscheme — not just pi's two built-in
+ * dark/light themes (which left widget/TUI text reading in pi's generic
+ * palette on non-default schemes like Macchiato/Frappé/Gruvbox/custom).
+ *
+ * Uses ONLY public surface: `Theme` is a public export, so `new pi.Theme(...)`
+ * constructs an instance the same way pi's own `createTheme` does; then we
+ * write it to the SAME `globalThis` symbol `initHostTheme` reads (and that pi's
+ * `theme` Proxy forwards to), which is runtime symbol access — not a private
+ * module import (host-imports.test.ts allows it). `pi.setThemeInstance()` would
+ * do this too but is NOT on pi's public index, so the symbol write is the
+ * sanctioned equivalent.
+ *
+ * @param {object} pi        - pi's public module (from importPi).
+ * @param {object} fgColors  - pi role → 6-digit hex (foregrounds).
+ * @param {object} bgColors  - pi role → 6-digit hex (backgrounds).
+ * @returns {object} the installed Theme instance (also stored on the global so
+ *   extensions/pi-tui read it via `ctx.ui.theme`).
+ */
+export function applyPiVisTheme(pi, fgColors, bgColors) {
+  const theme = new pi.Theme(fgColors, bgColors, "truecolor");
+  globalThis[THEME_KEY] = theme;
+  globalThis[THEME_KEY_OLD] = theme;
+  return theme;
+}

@@ -112,6 +112,24 @@ export type SyntaxSpec = z.infer<typeof SyntaxSpecSchema>;
  *                   `piThemeForColorScheme` luminance check served.
  *  - `colors`     — the semantic role map.
  *  - `syntax`     — Shiki theme (ref or inline).
+ *  - `piTheme`    — OPTIONAL per-theme overrides for pi's OWN theme vocabulary.
+ *                   pi's TUI/extension surfaces speak a DIFFERENT color
+ *                   vocabulary than this app (~50 roles: `muted`, `dim`,
+ *                   `borderMuted`, `syntaxKeyword`, `mdHeading`, …) and pi
+ *                   ships only two built-in themes (`dark`/`light`), so by
+ *                   default those surfaces can't track a specific pi-vis
+ *                   colorscheme. The SDK host builds a pi `Theme` from this
+ *                   app's palette (see shared/theme/pi-theme.ts): each pi role
+ *                   resolves to either a hex literal or a token NAME (one of
+ *                   the 26 roles above, resolved against THIS theme's palette)
+ *                   from `piTheme`, falling back to a palette-agnostic default
+ *                   mapping for any role not listed. Because the defaults are
+ *                   token-based (not swatch-based), a theme with no `piTheme`
+ *                   block still renders coherently on pi's surfaces for ANY
+ *                   palette — Gruvbox gets Gruvbox-flavored syntax via its own
+ *                   `accent`/`success`/`warning`, Catppuccin gets mauve/green.
+ *                   A `piTheme` block lets a theme author fine-tune the roles
+ *                   that genuinely vary (syntax/markdown/thinking) per palette.
  */
 export const ThemeSchema = z.object({
   id: z
@@ -122,6 +140,7 @@ export const ThemeSchema = z.object({
   appearance: z.enum(["dark", "light"]),
   colors: ThemeColorsSchema,
   syntax: SyntaxSpecSchema,
+  piTheme: z.record(z.string(), z.string().min(1)).optional(),
 });
 
 export type Theme = z.infer<typeof ThemeSchema>;

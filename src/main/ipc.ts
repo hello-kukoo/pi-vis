@@ -37,7 +37,7 @@ import {
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { createGistForSession } from "./share.js";
-import { getUserThemes, piThemeForSchemeId } from "./theme-loader.js";
+import { getUserThemes, piThemeColorsForSchemeId, piThemeForSchemeId } from "./theme-loader.js";
 import { checkForUpdates, startUpdate } from "./updates.js";
 import {
   getOrderedWorkspaces,
@@ -50,13 +50,27 @@ let registry: SessionRegistry | null = null;
 let mainWindow: BrowserWindow | null = null;
 let handlersRegistered = false;
 
-// Build the env for spawning a pi process/host. Adds PIVIS_PI_THEME (the pi
-// theme name matching pi-vis's active color scheme) to the login-shell env, so
-// every host-rendered terminal/ANSI surface resolves colors consistently with
-// the UI. Read fresh on each spawn so reloads pick up a scheme change.
+// Build the env for spawning a pi process/host. Adds the pi theme signals so
+// every host-rendered terminal/ANSI surface resolves colors consistent with
+// the active UI scheme:
+//   - PIVIS_PI_THEME        — pi's built-in "dark"|"light", the base theme the
+//                             host loads first (and the fallback if the custom
+//                             install below fails / on the RPC path).
+//   - PIVIS_PI_THEME_COLORS — the active scheme's palette expressed in pi's OWN
+//                             color vocabulary, so the SDK host can build a pi
+//                             `Theme` from pi-vis's exact colors (not just
+//                             dark/light). Fixes the mismatch where widget/TUI
+//                             text read in pi's generic palette on non-default
+//                             schemes (Macchiato/Frappé/Gruvbox/custom).
+// Both are read fresh on each spawn so a reload picks up a scheme change.
 async function getHostEnv(): Promise<Record<string, string>> {
   const env = await getLoginShellEnv();
-  return { ...env, PIVIS_PI_THEME: piThemeForSchemeId(getSettings().colorScheme) };
+  const scheme = getSettings().colorScheme;
+  return {
+    ...env,
+    PIVIS_PI_THEME: piThemeForSchemeId(scheme),
+    PIVIS_PI_THEME_COLORS: JSON.stringify(piThemeColorsForSchemeId(scheme)),
+  };
 }
 
 // During quit, pi processes are SIGTERMed and emit final events/exits after
