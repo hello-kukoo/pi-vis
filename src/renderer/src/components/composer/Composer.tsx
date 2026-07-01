@@ -325,9 +325,11 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   const showSuggestions = suggestions.length > 0 && !dismissed; // A1
 
-  // Claim ESC while autocomplete is visible (A2): the global interrupt
-  // handler defers while a claim is active, so the first ESC hides
-  // suggestions instead of aborting the agent (two-press model).
+  // Claim ESC while autocomplete is visible (A2): the global interrupt handler
+  // defers while a claim is active, so the first ESC hides suggestions instead
+  // of aborting the agent (two-press model). This holds REGARDLESS of streaming
+  // — an open autocomplete always consumes the first ESC; only once it is closed
+  // does ESC abort. (See the ESC-to-interrupt Key Pattern in AGENTS.md.)
   useEscapeClaim(showSuggestions);
 
   // Reset highlight when the suggestion list shape changes.

@@ -17,10 +17,11 @@
      their padding. No top margin (card sits flush under the dock /
      transcript above), 0.857rem sides + bottom.
 
-     A STABLE, deterministic box (CSS min-height + max-height: 50vh) that an
-     extension's overlay floats and self-scrolls inside — deliberately NOT
-     content-hugged (unlike the unified-TUI panel; see CustomPanelHost
-     `applyFit`). */
+     Height is content-driven: the JS sizer (createPanelSizer) grows the
+     panel to fit the extension's rendered rows and caps it at ~half the
+     transcript column, scrolling only past that cap. So there is NO CSS
+     min/max-height fighting the measured height (that fixed 50vh box was
+     the thing that clipped taller content and never re-expanded). */
   position: relative; /* anchor for the floating force-close button */
   margin: 0 0.857rem 0.857rem;
   display: flex;
@@ -29,18 +30,35 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  min-height: 12rem;
-  max-height: 50vh;
+}
+
+/* Invisible top resize handle. The strip is transparent (no background, no
+   border, no grip texture) — the `row-resize` cursor change is the only signal
+   that a drag is possible, per the design. It overlays the card's top edge
+   (there is no margin gap above the card to host it). The panel is bottom-
+   anchored, so dragging this top edge up grows the panel and down shrinks it.
+   z-index sits BELOW the force-close button so the ✕ stays clickable. The
+   overlay covers only the top sliver (~7px, well under one row) of the grid. */
+.custom-panel__resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 7px;
+  z-index: 1;
+  cursor: row-resize;
 }
 
 /* Force-close escape hatch — a minimal floating control in the top-right
    corner (no full-width header bar). Low-prominence until hovered so it
-   doesn't compete with the panel content; positioned over the terminal grid. */
+   doesn't compete with the panel content; positioned over the terminal grid.
+   Anchored to the card (not the scroll wrapper) so it stays put as a tall
+   panel scrolls. */
 .custom-panel__close {
   position: absolute;
   top: 0.286rem;
   right: 0.286rem;
-  z-index: 2;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -64,12 +82,30 @@
   background: var(--surface-2);
 }
 
-/* The xterm mount fills the card; FitAddon computes cols/rows from it and
-   the overlay floats/self-scrolls inside the stable box. */
+/* The scroll wrapper is the JS-sized, scrolling box (the sizer's panelEl):
+   its height is set to the content height capped at the display max, and JS
+   sets `overflow-y: auto` only past the cap. `flex: none` keeps it at the set
+   height. The `padding-block` gives the terminal vertical breathing room; the
+   JS adds it (via cardChrome) to the measured height so the content area still
+   maps to whole rows. Kept off the mount so the grid rows map 1:1 to the
+   measurement. */
+.custom-panel__scroll {
+  flex: none;
+  min-height: 0;
+  padding-block: 0.286rem;
+  overflow: hidden; /* JS sets overflow-y; overflow-x stays hidden */
+}
+
+/* The mount carries the terminal grid (height set in JS). `flex: none` keeps it
+   at its set height so it overflows the (shorter) scroll box and is
+   clipped/scrolled by it, rather than shrinking to fit. Vertical padding stays
+   0 — the scroll box's `padding-block` is the inset, so grid rows map 1:1 to the
+   content area and the JS `cardChrome()` math stays exact. Horizontal padding
+   gives the terminal content symmetric breathing room. */
 .custom-panel__xterm {
-  flex: 1;
-  min-height: 10rem;
-  padding: 0.286rem;
+  flex: none;
+  min-height: 0;
+  padding: 0 0.286rem;
 }
 
 /* Override xterm.js default colors to match Catppuccin theme */
@@ -77,13 +113,21 @@
   height: 100%;
 }
 
-.custom-panel__xterm .xterm-viewport {
+/* Thin Catppuccin scrollbar for the overflow case (content taller than the
+   cap) — the card/scroll-wrapper scrolls, not xterm's own viewport. */
+.custom-panel__scroll,
+.custom-panel.unified-panel {
   scrollbar-width: thin;
   scrollbar-color: var(--surface-2) transparent;
 }
-
-.custom-panel__xterm .xterm-screen {
-  /* Ensure the terminal text rendering uses the code font */
+.custom-panel__scroll::-webkit-scrollbar,
+.custom-panel.unified-panel::-webkit-scrollbar {
+  width: 8px;
+}
+.custom-panel__scroll::-webkit-scrollbar-thumb,
+.custom-panel.unified-panel::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: var(--radius-pill);
 }
 
 /* No focus rings on internal elements — the panel card is the focus
@@ -95,46 +139,22 @@
 }
 
 /* ── Unified-TUI panel (UnifiedTuiHost) ──────────────────────────────────────
-   Unlike the custom() panel (a stable fixed box), the unified panel hugs its
-   content: its height is JS-driven (set to the non-blank content height,
-   capped at a deterministic max derived from the transcript column). The grid
-   TRACKS the content (the host's pi-tui bottom-anchors + scrolls when content
-   exceeds the grid), so the card clips the one-row sentinel blank the JS
-   leaves; `overflow-y` is set in JS to `auto` only when the content is taller
-   than the cap. No min-height floor and no 50vh CSS cap fighting the measured
-   height.
+   Same content-hugging model as the custom() panel, but the CARD itself is the
+   JS-sized/scrolled element (no separate scroll wrapper — the unified panel has
+   no force-close button that would need to stay pinned). Its height is set to
+   the non-blank content height, capped at the deterministic display max; the
+   grid TRACKS the content and the card clips the one-row sentinel blank; JS sets
+   `overflow-y: auto` only when the content is taller than the cap.
 
-   A small vertical padding gives the text breathing room above/below; the JS
-   adds this chrome (read from computed style) to the measured content height so
-   the content area still maps exactly to whole rows. */
+   A small vertical padding gives the text breathing room; the JS adds this
+   chrome (read from computed style) to the measured content height so the
+   content area still maps exactly to whole rows. */
 .custom-panel.unified-panel {
-  min-height: 0;
-  max-height: none;
   padding-block: 0.286rem;
 }
 
-/* The mount carries the terminal grid (set in JS). `flex: none` keeps it at
-   its set height so it overflows the (shorter) card and is clipped/scrolled by
-   it, rather than shrinking to fit. Vertical padding stays 0 — the card's
-   `padding-block` is the inset, so the grid rows map 1:1 to the card's content
-   area and the JS `cardChrome()` math stays exact. Horizontal padding gives the
-   terminal content symmetric breathing room from the card's border. */
+/* The unified mount is a direct flex child of the card; keep it at its set
+   height (don't stretch) and give it wider horizontal breathing room. */
 .unified-panel .custom-panel__xterm {
-  flex: none;
-  min-height: 0;
   padding: 0 0.5rem;
-}
-
-/* Thin Catppuccin scrollbar for the overflow case (content taller than the
-   cap) — the card scrolls, not xterm's own viewport. */
-.unified-panel {
-  scrollbar-width: thin;
-  scrollbar-color: var(--surface-2) transparent;
-}
-.unified-panel::-webkit-scrollbar {
-  width: 8px;
-}
-.unified-panel::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: var(--radius-pill);
 }

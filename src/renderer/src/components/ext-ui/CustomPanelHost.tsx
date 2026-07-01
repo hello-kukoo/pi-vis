@@ -9,11 +9,21 @@
  * 1. Mount: create xterm.js Terminal, load FitAddon, flush buffered ANSI
  * 2. Stream: listen for session.panelEvent (panel_data) → term.write()
  * 3. Input: term.onData → session.panelInput IPC
- * 4. Close: session.panelEvent (panel_close) → unmount; or Escape key
+ * 4. Close: session.panelEvent (panel_close) → unmount; or force-close button
  *
- * Sizing: a STABLE, deterministic box (CSS min-height + max-height: 50vh) that
- * an extension's overlay floats and self-scrolls inside — deliberately NOT
- * content-hugged (unlike the sibling UnifiedTuiHost). See `applyFit` below.
+ * Sizing: a STABLE, deterministic viewport box (shared `createPanelSizer` in
+ * "viewport" mode). Unlike the sibling UnifiedTuiHost — whose base render (the
+ * Editor + widget containers) has an intrinsic content height and so
+ * content-tracks — a custom() panel is ALWAYS a pi-tui *overlay*, composited
+ * full-frame against terminal.rows (blank-padded, often centered — e.g. /rtk's
+ * `maxHeight:"85%" anchor:center` modal). Its rendered height is therefore a
+ * FUNCTION of the grid we report, not an intrinsic height, so content-tracking
+ * chases the centering padding and thrashes (a huge mostly-blank box with the
+ * modal shoved to an edge and clipped). Instead we pin the grid to the display
+ * cap (~half the transcript column), re-derived on resize (deterministic +
+ * re-expands, no window-resize hysteresis), and let the overlay self-scroll
+ * inside it; if the overlay is taller than the box pi-tui clips it (accepted at
+ * small window sizes — the extension's own look is preserved). See panel-sizer.ts.
  */
 
 import type { SessionId } from "@shared/ids.js";
@@ -26,6 +36,7 @@ import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { getTheme } from "../../theme/registry.js";
 import { buildXtermTheme } from "../../theme/xterm.js";
+import { DEFAULT_HEIGHT_FRACTION, createPanelSizer } from "./panel-sizer.js";
 import "@xterm/xterm/css/xterm.css";
 import "./CustomPanelHost.css";
 
@@ -42,13 +53,23 @@ function resolveMonoFont(): string {
   return fromVar || "ui-monospace, Menlo, monospace";
 }
 
+// Bounds for the manual resize (fraction of the transcript column). Mirrors
+// the Zod clamp on settings.customPanelHeightFraction.
+const MIN_HEIGHT_FRACTION = 0.2;
+const MAX_HEIGHT_FRACTION = 0.9;
+
 // ─── Component ────────────────────────────────────────────────────────────
 
 export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const panelRef = useRef<{ id: number; overlay: boolean; buffer: string[] } | null>(null);
+  const panelRef = useRef<{
+    id: number;
+    overlay: boolean;
+    buffer: string[];
+    mode?: "content" | "viewport";
+  } | null>(null);
   const { panel } = useSessionsStore((s) => s.sessions.get(sessionId)) ?? {};
   // Claim ESC while a custom panel is open so a background streaming session
   // isn't aborted (the panel routes ESC to the extension via onData).
@@ -59,6 +80,31 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   // every streamed chunk).
   panelRef.current = panel ?? null;
   const panelId = panel?.id;
+  // Display mode, read live by the sizer without being a rebuild dep. custom()
+  // panels default to "viewport" (a stable pinned grid) because they are always
+  // full-frame overlays — content-tracking them chases the overlay's centering
+  // padding and thrashes. A host `panel_mode` event can still override this
+  // (e.g. a future content-sized custom panel), but none is sent today.
+  const panelMode = panel?.mode ?? "viewport";
+  const modeRef = useRef<"content" | "viewport">("viewport");
+  modeRef.current = panelMode;
+
+  // ── Manual height override (drag the top handle) ──
+  // The effective height fraction is: the in-flight drag value (set while the
+  // user is dragging, so the panel resizes in real time), else the persisted
+  // preference (settings.customPanelHeightFraction), else the default. Read
+  // LIVE by the sizer via a ref so a drag / settings change re-runs sync
+  // WITHOUT rebuilding xterm (the lifecycle effect is keyed on panelId only).
+  // dragFractionRef resets to null when the panel unmounts, so a freshly-opened
+  // panel reads the persisted preference (the cross-session default).
+  const dragFractionRef = useRef<number | null>(null);
+  const fractionGetterRef = useRef<() => number>(() => DEFAULT_HEIGHT_FRACTION);
+  fractionGetterRef.current = () => {
+    const drag = dragFractionRef.current;
+    if (drag != null) return drag;
+    const persisted = useSettingsStore.getState().settings.customPanelHeightFraction;
+    return persisted ?? DEFAULT_HEIGHT_FRACTION;
+  };
 
   // Live re-theme: the host emits role-identity ANSI indices; xterm resolves
   // them against `term.options.theme.extendedAnsi` at paint time, so swapping
@@ -71,6 +117,24 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     if (!term) return;
     term.options.theme = buildXtermTheme(getTheme(colorScheme ?? "mocha"));
   }, [colorScheme]);
+
+  // Re-run the sizing pass when the mode flips (overlay shown/hidden). The
+  // lifecycle effect is keyed on panelId only, so it doesn't re-fire here.
+  const syncRef = useRef<(() => void) | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: panelMode is the trigger; the body deliberately only re-runs the current sync
+  useEffect(() => {
+    syncRef.current?.();
+  }, [panelMode]);
+
+  // Re-run the sizing pass when the persisted height preference changes (e.g.
+  // committed at the end of a drag, or reset by a double-click). The lifecycle
+  // effect is keyed on panelId only, so it doesn't re-fire here; the sizer reads
+  // the new fraction live via fractionGetterRef.
+  const customPanelHeightFraction = useSettingsStore((s) => s.settings.customPanelHeightFraction);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the persisted fraction is the trigger; re-run the current sync only
+  useEffect(() => {
+    syncRef.current?.();
+  }, [customPanelHeightFraction]);
 
   // One lifecycle effect: build terminal, stream data, handle input, cleanup.
   //
@@ -121,21 +185,54 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     const refocus = () => term.focus();
     container.addEventListener("mousedown", refocus);
 
+    // The scroll wrapper (.custom-panel__scroll) is the visible box the sizer
+    // clips/scrolls; the mount (.custom-panel__xterm) holds the terminal grid.
+    // The force-close button lives on the outer card (a non-scrolling ancestor)
+    // so it stays put when the wrapper scrolls a tall panel.
+    const panelEl = container.parentElement as HTMLElement;
+    const sessionEl = container.closest(".app__session") as HTMLElement | null;
+
+    // Deterministic grid-tracks-content sizing (shared with UnifiedTuiHost —
+    // see panel-sizer.ts). The grid grows toward the content height, the card
+    // hugs it capped at ~half the transcript column, and scrolls only past that
+    // cap. This replaces the old fixed 50vh box, which clipped taller content
+    // with no way to scroll to it and never re-expanded when the window grew.
+    const sizer = createPanelSizer({
+      term,
+      container,
+      panelEl,
+      sessionEl,
+      fitAddon,
+      getMode: () => modeRef.current,
+      getHeightFraction: () => fractionGetterRef.current(),
+      fallbackFontSize: fonts?.code?.sizePx ?? 14,
+      onReportSize: (cols, rows) => {
+        void window.pivis
+          .invoke("session.panelResize", { sessionId, panelId: currentPanel.id, cols, rows })
+          .catch(() => {});
+      },
+    });
+    syncRef.current = sizer.scheduleSync;
+
     // ── Write buffered ANSI from the panel's pre-existing buffer ──
     // panel.buffer is a snapshot at mount; live updates arrive via the
-    // session.panelEvent subscription below. Capturing it here (rather than
-    // depending on panel.buffer in the effect deps) keeps the terminal from
-    // being torn down and rebuilt on every streamed chunk.
-    const initialBuffer = currentPanel.buffer;
-    for (const chunk of initialBuffer) {
+    // session.panelEvent subscription below. Measure in the write CALLBACK
+    // (fires after xterm parses the bytes) so the first sizing pass reads the
+    // real content height, not a not-yet-parsed buffer.
+    for (const chunk of currentPanel.buffer) {
       term.write(chunk);
     }
+    term.write("", () => {
+      if (!disposed) sizer.scheduleSync();
+    });
 
     // ── Listen for new panel data ──
     unsubPanel = window.pivis.on("session.panelEvent", ({ sessionId: eventSid, event }) => {
       if (eventSid !== sessionId) return;
       if (event.type === "panel_data" && event.panelId === currentPanel.id) {
-        term.write(event.data);
+        term.write(event.data, () => {
+          if (!disposed) sizer.scheduleSync();
+        });
       }
       if (event.type === "panel_close" && event.panelId === currentPanel.id) {
         // Panel closed by extension — unfold state triggers unmount
@@ -154,56 +251,32 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     });
 
     // ── Resize observer ──
-    // FitAddon recomputes cols/rows from the container; we apply them to the
-    // xterm AND forward them to the host so the TUI's overlay layout (sized off
-    // the Terminal's columns/rows) matches the actual panel. The reported rows
-    // are exactly `term.rows` — the SAME grid the host renders into — so there
-    // is no grid-vs-host mismatch (that mismatch was the black bar / clipped
-    // frame this changeset had introduced).
-    //
-    // NOTE — custom() panels are deliberately NOT content-hugged (unlike the
-    // unified-TUI panel). An extension sizes its overlay as a FRACTION of
-    // `terminal.rows` and scrolls it internally — e.g. pi-subagents' conversation
-    // viewer opens with `maxHeight: "70%"` and caps its own j/k viewport at
-    // `terminal.rows * 70%`. Shrinking the grid to the rendered content would
-    // feed straight back into that fraction and collapse the overlay toward its
-    // minimum. So the panel is a STABLE, deterministic box (CSS min-height +
-    // max-height: 50vh) that the overlay floats and self-scrolls inside.
-    const applyFit = () => {
-      if (disposed) return;
-      try {
-        fitAddon.fit();
-        void window.pivis
-          .invoke("session.panelResize", {
-            sessionId,
-            panelId: currentPanel.id,
-            cols: term.cols,
-            rows: term.rows,
-          })
-          .catch(() => {});
-      } catch {
-        // fit() throws before the container has a layout; ignore.
-      }
-    };
-    const resizeObserver = new ResizeObserver(applyFit);
-    resizeObserver.observe(container);
+    // Re-derive sizing when the transcript column resizes (window resize,
+    // sidebar collapse, font change) — both cols and the display cap depend on
+    // it. Observing the column (never sized BY us) makes the panel size a pure
+    // function of the current column height, so growing the window re-expands
+    // the panel deterministically (no dependence on how it got to that size).
+    const resizeObserver = new ResizeObserver(() => sizer.scheduleSync());
+    if (sessionEl) resizeObserver.observe(sessionEl);
 
-    // Wait for CSS constraints to settle before the initial fit (double rAF
-    // ensures layout — and the render service's cell metrics — are resolved).
+    // Wait for the render service to measure cell dimensions before the first
+    // sizing pass (double rAF: layout + paint).
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (disposed) return;
-        applyFit();
+        sizer.sync();
       });
     });
 
     // ── Cleanup ──
     return () => {
       disposed = true;
+      syncRef.current = null;
       container.removeEventListener("mousedown", refocus);
       onDataDispose.dispose();
       unsubPanel?.();
       resizeObserver.disconnect();
+      sizer.dispose();
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
@@ -219,15 +292,80 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     // Intentionally empty: see comment above.
   }, []);
 
+  // ── Top resize handle ──
+  // Drag the (invisible) top edge to resize the panel; the height is persisted
+  // as a FRACTION of the transcript column so it survives window/sidebar/font
+  // resizes (re-derived on every layout) and applies to future custom() panels.
+  // Double-click resets to the default. The panel is bottom-anchored in the
+  // composer slot, so dragging the top edge up grows it and down shrinks it — a
+  // direct, non-inverted mapping. Resizing snaps to terminal row boundaries
+  // (the grid is integer rows), as is standard for terminal panels.
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const card = containerRef.current?.closest(".custom-panel") as HTMLElement | null;
+    const session = containerRef.current?.closest(".app__session") as HTMLElement | null;
+    if (!card || !session) return;
+    // The panel is bottom-anchored, so its bottom edge is fixed for the whole
+    // drag — capture once. The new height is (bottom − cursorY), expressed as a
+    // fraction of the (also fixed) session-column height.
+    const panelBottom = card.getBoundingClientRect().bottom;
+    const sessionH = session.clientHeight;
+    const clamp = (f: number): number =>
+      Math.min(MAX_HEIGHT_FRACTION, Math.max(MIN_HEIGHT_FRACTION, f));
+
+    const onMove = (ev: MouseEvent): void => {
+      const frac = clamp((panelBottom - ev.clientY) / sessionH);
+      dragFractionRef.current = frac;
+      syncRef.current?.();
+    };
+    const onUp = (): void => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      // Commit the final fraction so the NEXT custom() panel inherits it. Keep
+      // dragFractionRef set so the current panel stays at this size for the
+      // rest of its life (it resets on unmount).
+      const frac = dragFractionRef.current;
+      if (frac != null) {
+        void useSettingsStore.getState().update({ customPanelHeightFraction: frac });
+      }
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
+  // Double-click the handle → reset to the default height (clear the override).
+  const handleResizeReset = useCallback(() => {
+    dragFractionRef.current = null;
+    void useSettingsStore.getState().update({ customPanelHeightFraction: null });
+    syncRef.current?.();
+  }, []);
+
   if (!panel) return <></>;
 
   return (
     <div className="custom-panel" onKeyDown={handleKeyDown}>
-      {/* Escape hatch: an extension owns the panel lifecycle via done(), but a
-          buggy one could never call it and wedge the session. This force-closes
-          the panel — the host resolves the extension's custom() promise with
-          undefined and tears it down. Rendered as a minimal floating control so
-          there is no full-width header bar competing with the panel content. */}
+      {/* Invisible top resize handle. Drag to resize (persisted as a fraction
+          of the transcript column, applies to future custom() panels);
+          double-click resets to the default height. The strip itself is
+          transparent — the `row-resize` cursor is the only affordance. It sits
+          above the scroll wrapper; the force-close button (higher z-index)
+          stays clickable in the top-right corner. */}
+      <div
+        className="custom-panel__resize"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize panel (drag; double-click to reset)"
+        onMouseDown={handleResizeStart}
+        onDoubleClick={handleResizeReset}
+      />
+      {/* Force-close escape hatch — a minimal floating control in the top-right
+          corner (no full-width header bar). Low-prominence until hovered so it
+          doesn't compete with the panel content; positioned over the terminal
+          grid. It lives on the (non-scrolling) card, NOT the scroll wrapper, so
+          it stays reachable when a tall panel scrolls. */}
       <button
         type="button"
         className="custom-panel__close"
@@ -240,11 +378,14 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
       >
         ✕
       </button>
-      {/* The xterm canvas owns keystroke capture. Focus is driven by
+      {/* The scroll wrapper is the JS-sized, scrolling box; the xterm mount
+          inside it holds the full terminal grid. Focus is driven by
           term.focus() on mount + the mousedown refocus handler above, so the
           container doesn't need tabIndex (which would trip a11y rules for a
           non-interactive div). */}
-      <div ref={containerRef} className="custom-panel__xterm" />
+      <div className="custom-panel__scroll">
+        <div ref={containerRef} className="custom-panel__xterm" />
+      </div>
     </div>
   );
 }

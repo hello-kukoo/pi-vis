@@ -44,7 +44,12 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
     await expect(page.locator(".composer__textarea")).toBeVisible({ timeout: 20_000 });
   });
 
-  test("Composer autocomplete: ESC closes suggestions, does NOT abort", async ({ page }) => {
+  test("Composer autocomplete: ESC closes suggestions, does NOT abort (even streaming)", async ({
+    page,
+  }) => {
+    // An open autocomplete ALWAYS consumes the first ESC (the two-press model) —
+    // even while streaming. The abort only happens once suggestions are closed,
+    // so the first ESC here must close them and NOT abort the background turn.
     await startStreaming(page);
     const textarea = page.locator(".composer__textarea");
     await textarea.focus();

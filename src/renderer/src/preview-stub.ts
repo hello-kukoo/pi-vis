@@ -56,6 +56,19 @@ function emit(channel: string, payload: unknown): void {
   for (const cb of subs) cb(payload);
 }
 
+// Faithful mimic of the real host's fullRender(true)-on-resize: the host
+// re-lays-out and re-emits its frame (clearing scrollback) whenever the grid
+// changes, so content never gets stranded in scrollback. The stub records each
+// panel's latest frame and re-emits it on session.panelResize, so the
+// content-tracking sizer (createPanelSizer) converges deterministically here
+// too. Without this the stub bottom-anchors a too-tall write into xterm
+// scrollback and never recovers — a stub-only artifact that cannot happen
+// against a real host (which clears scrollback every resize).
+const panelFrames = new Map<number, { sessionId: unknown; frame: string }>();
+function registerPanelFrame(sessionId: unknown, panelId: number, frame: string): void {
+  panelFrames.set(panelId, { sessionId, frame });
+}
+
 function emitEvent(event: Record<string, unknown>): void {
   emit("session.event", { sessionId: DEMO_SESSION_ID, event });
 }
@@ -657,8 +670,23 @@ const stub = {
       case "session.panelInput":
         previewHooks.panelInputLog.push(String((req as { data?: unknown }).data ?? ""));
         return undefined;
-      case "session.panelResize":
+      case "session.panelResize": {
+        // Mirror the host's fullRender-on-resize: re-emit the panel's frame so
+        // the content re-lays-out top-anchored into the new grid (see
+        // registerPanelFrame). Async (next tick) to match the host's frame and
+        // avoid re-entering the sizer mid-pass.
+        const { panelId } = req as { panelId?: number };
+        const rec = panelId !== undefined ? panelFrames.get(panelId) : undefined;
+        if (rec) {
+          setTimeout(() => {
+            emit("session.panelEvent", {
+              sessionId: rec.sessionId,
+              event: { type: "panel_data", panelId, data: rec.frame },
+            });
+          }, 0);
+        }
         return undefined;
+      }
       case "app.versions":
         return { app: "0.1.0-preview", electron: "stub", node: "stub" };
 
@@ -877,6 +905,7 @@ function startUnifiedPanelPreview(): void {
       sessionId: activeId,
       event: { type: "panel_data", panelId: PANEL_ID, data: roster },
     });
+    registerPanelFrame(activeId, PANEL_ID, roster);
     if (overlay) {
       // Show a pi-tui overlay: switch to viewport mode, then paint a small box.
       const box = `\x1b[2J\x1b[H${["┌─ inspect ─┐", "│ agent-01  │", "└───────────┘"].join("\r\n")}\r\n`;
@@ -888,6 +917,7 @@ function startUnifiedPanelPreview(): void {
         sessionId: activeId,
         event: { type: "panel_data", panelId: PANEL_ID, data: box },
       });
+      registerPanelFrame(activeId, PANEL_ID, box);
     }
   }, 600);
 }
@@ -901,31 +931,25 @@ if (
 }
 
 // ── Custom() panel preview (transient overlay) ───────────────────────────
-// Enable with ?panel=1. Emits the panel_open (NON-unified) + panel_data an
-// extension's `custom()` overlay produces, so the CustomPanelHost → xterm.js
-// path can be render-tested. The host pads its frame to the terminal height
-// with the overlay composited (centered) inside, so the frame here is a
-// centered bordered dialog with blank padding above/below — exercising that
-// the panel is a STABLE box the overlay floats in (NOT content-hugged).
+// Enable with ?panel=1. Emits the panel_open (NON-unified) + panel_data a
+// `custom()` overlay produces. A custom() panel is a full-frame pi-tui overlay
+// (like /rtk's centered config modal), so CustomPanelHost pins it to a STABLE
+// viewport box (~half the transcript column) and the overlay self-scrolls inside
+// — it does NOT content-hug. This short box exercises exactly that: the panel is
+// far taller than the box and does not scroll at the card level. Use \r\n so
+// each line carriage-returns.
 function startCustomPanelPreview(): void {
   const PANEL_ID = 3;
-  const dialog = [
-    "╭─ Conversation: swift-otter ─────────────────╮",
-    "│ user: refactor the theme module             │",
-    "│ assistant: I'll search for theme usage…      │",
-    "│   [Tool: grep] theme                         │",
-    "│ assistant: found 12 references across 4 files│",
-    "╰─────────────── j/k scroll · q close ─────────╯",
+  const box = [
+    "╭─ Pi RTK Optimizer ──────────────────────────╮",
+    "│ [ General ]  Compaction   Read & Source     │",
+    "│ > ▊                                          │",
+    "│ → RTK integration enabled     on            │",
+    "│   Rewrite mode                rewrite        │",
+    "│   Show rewrite notifications  off            │",
+    "╰──── ←/→ tabs · Enter change · Esc close ─────╯",
   ];
-  // Center the dialog in a ~24-row frame with blank padding (mirrors the host's
-  // centered overlay), terminated per line with \r\n.
-  const padTop = 6;
-  const frame = [
-    ...Array.from({ length: padTop }, () => ""),
-    ...dialog,
-    ...Array.from({ length: 24 - padTop - dialog.length }, () => ""),
-  ];
-  const data = `\x1b[2J\x1b[H${frame.join("\r\n")}\r\n`;
+  const data = `\x1b[2J\x1b[H${box.join("\r\n")}\r\n`;
   setTimeout(() => {
     const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
     emit("session.panelEvent", {
@@ -936,6 +960,7 @@ function startCustomPanelPreview(): void {
       sessionId: activeId,
       event: { type: "panel_data", panelId: PANEL_ID, data },
     });
+    registerPanelFrame(activeId, PANEL_ID, data);
   }, 600);
 }
 

@@ -49,9 +49,11 @@ test.describe("ESC-to-interrupt — renderer", () => {
       timeout: 5_000,
     });
 
-    // First ESC closes autocomplete. (useLayoutEffect guarantees the claim
-    // is released within this turn, so the second ESC reaches the interrupt
-    // path, not the deferred one — the pin against a passive useEffect.)
+    // First ESC closes autocomplete — even though a turn is streaming, an open
+    // autocomplete ALWAYS consumes the first ESC (the two-press model). It does
+    // NOT abort. (useLayoutEffect guarantees the claim is released within this
+    // turn, so the second ESC reaches the interrupt path, not the deferred one —
+    // the pin against a passive useEffect.)
     await page.evaluate(() => {
       const ta = document.querySelector<HTMLTextAreaElement>(".composer__textarea")!;
       ta.dispatchEvent(
@@ -60,7 +62,7 @@ test.describe("ESC-to-interrupt — renderer", () => {
     });
     await expect(page.locator(".composer__suggestion")).toHaveCount(0);
 
-    // Second ESC aborts the running turn.
+    // Second ESC (autocomplete now closed) aborts the running turn.
     const beforeAbort = (await getHooks(page)).abortCalls;
     await page.evaluate(() => {
       const ta = document.querySelector<HTMLTextAreaElement>(".composer__textarea")!;
@@ -103,5 +105,33 @@ test.describe("ESC-to-interrupt — renderer", () => {
     // handler preempted the path). The idle autocomplete-cancel path is
     // covered by the host-side unified-tui.test.mjs gate.
     expect(afterStreaming.panelInputLog.length).toBe(beforeInput);
+  });
+
+  test("(c) unified-panel overlay (viewport) + streaming: ESC does NOT abort", async ({ page }) => {
+    // Issue 2 parity: an extension overlay is open on the unified TUI (the
+    // "ESC to close" box), signalled to the renderer as viewport mode. ESC must
+    // behave exactly as in pi's TUI — close the overlay, NOT abort the agent.
+    // The UnifiedTuiHost claims ESC in viewport mode, so the global handler
+    // defers and the keystroke flows to the host instead of aborting.
+    await page.goto("http://127.0.0.1:7317/?unified=overlay");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel).toBeVisible({ timeout: 20_000 });
+    // Wait until the overlay box has painted — by then viewport mode is set and
+    // the ESC claim is active.
+    await expect(panel.locator(".xterm-rows")).toContainText("inspect", { timeout: 15_000 });
+
+    await page.evaluate(() => {
+      (window as unknown as { __pivisPreview: PreviewHooks }).__pivisPreview.startStreaming();
+    });
+
+    const before = (await getHooks(page)).abortCalls;
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+    // No abort: the claim deferred ESC to the host (which closes the overlay).
+    expect((await getHooks(page)).abortCalls).toBe(before);
   });
 });

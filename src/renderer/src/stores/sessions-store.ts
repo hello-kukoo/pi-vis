@@ -114,8 +114,15 @@ export interface SessionViewState {
   /** The base branch the worktree was cut from (for the chip tooltip). */
   worktreeFromBase?: string | undefined;
 
-  /** Inline custom panel from extension ctx.ui.custom() — rendered via xterm.js overlay. */
-  panel?: { id: number; overlay: boolean; buffer: string[] } | undefined;
+  /** Inline custom panel from extension ctx.ui.custom() — rendered via xterm.js overlay.
+   *  `mode` selects the renderer's sizing model, same contract as `unifiedPanel.mode`:
+   *  `"content"` (default) tracks the intrinsic content height; `"viewport"` pins a
+   *  fixed grid for a grid-coupled overlay. Custom panels default to content-tracking
+   *  (the sizer's resize-storm breaker damps any unsignaled grid coupling); a host
+   *  `panel_mode` event is honored if one is sent. */
+  panel?:
+    | { id: number; overlay: boolean; buffer: string[]; mode?: "content" | "viewport" }
+    | undefined;
   /** Persistent unified-TUI panel from a factory `setWidget` — rendered via
    *  `UnifiedTuiHost` (a real pi-tui Editor + widget components). Distinct
    *  from `panel` (transient custom() overlays) so the two never collide and
@@ -1097,14 +1104,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           }
           break;
         case "panel_mode":
-          // A pi-tui overlay opened/closed on the unified TUI. Switch the
-          // UnifiedTuiHost sizing model (viewport-pin vs content-tracking). Only
-          // the unified panel has the two modes; custom() overlay panels ignore it.
+          // A pi-tui overlay opened/closed. Switch the host's sizing model
+          // (viewport-pin vs content-tracking). Routed to whichever panel the
+          // id matches — the unified TUI (reuse-path overlays) or a standalone
+          // custom() panel (both share the createPanelSizer engine).
           if (s.unifiedPanel?.id === event.panelId && s.unifiedPanel.mode !== event.mode) {
             sessions.set(sessionId, {
               ...s,
               unifiedPanel: { ...s.unifiedPanel, mode: event.mode },
             });
+          } else if (s.panel?.id === event.panelId && s.panel.mode !== event.mode) {
+            sessions.set(sessionId, { ...s, panel: { ...s.panel, mode: event.mode } });
           }
           break;
         case "panel_clear_all":

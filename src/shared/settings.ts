@@ -94,6 +94,14 @@ export const AppSettingsSchema = z.object({
   // Whether the diff viewer's file-listing sidebar is shown. Toggled from
   // the viewer header; persisted so the preference survives reopen/relaunch.
   diffRailVisible: z.boolean().default(true),
+  // Preferred height for extension custom() panels (CustomPanelHost), as a
+  // FRACTION of the transcript column (0.2–0.9). Set by dragging the panel's
+  // top resize handle; `null` = the default (~half the column). Persisted so
+  // the preference applies to every custom() panel across sessions and
+  // windows (it is a global preference about how big you like these panels,
+  // not per-content). Does NOT affect the unified TUI panel, which
+  // content-tracks. Double-clicking the handle clears this (back to default).
+  customPanelHeightFraction: z.number().min(0.2).max(0.9).nullable().default(null),
   window: z
     .object({
       x: z.number(),
