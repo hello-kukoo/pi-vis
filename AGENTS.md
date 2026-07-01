@@ -116,7 +116,7 @@ src/
     │   │   ├── catppuccin-mocha.json / catppuccin-macchiato.json / catppuccin-frappe.json / catppuccin-latte.json
     │   │   └── gruvbox-material-dark.json
     │   └── index.ts         # buildThemeRegistry/resolveTheme (fallback to default) + piThemeForTheme (appearance → pi light/dark) + re-exports buildPiThemeColors/buildPiThemeColorIndices/PI_ROLE_INDEX/PI_INDEX_TOKEN/PI_ROLES/PI_THEME_DEFAULTS
-    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, workspaceOrder + expandedWorkspaces, pinnedSessions (global, by session-file path, manual order), lastActiveWorkspace, colorScheme (now a free theme-id string, validated against the registry at apply time), diff mode, diffMaxFileSizeMiB (diff viewer file-size cap, default 5), sidebar width/collapsed, window bounds
+    ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, workspaceOrder + expandedWorkspaces, pinnedSessions (global, by session-file path, manual order), lastActiveWorkspace, colorScheme (now a free theme-id string, validated against the registry at apply time), diff mode, diffMaxFileSizeMiB (diff viewer file-size cap, default 5), diff rail width + visibility (persisted layout for the diff viewer's file-list sidebar), sidebar width/collapsed, window bounds
     ├── git.ts               # GitChangedFile, GitChangesResult, GitFileDiffResult types
     ├── result.ts            # Result<T,E> utility + assertNever
     └── session-file/        # Session file format schemas (header, message/model-change/snapshot entries)

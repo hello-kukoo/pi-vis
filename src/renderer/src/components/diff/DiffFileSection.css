@@ -5,10 +5,19 @@
 
 .diff-file {
   margin: 0.857rem;
-  border: 1px solid var(--surface);
-  border-radius: var(--radius-sm);
+  /* Raised card over the darker `--bg` content pane — the same elevated
+    surface + hairline-outline language the Dock / composer input box use.
+    Depth reads from the surface ramp, not a high-contrast border. */
+  background: var(--surface-raised);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-lg);
   overflow: hidden;
   scroll-margin-top: 0.571rem;
+  transition: border-color 0.15s ease;
+}
+
+.diff-file:hover {
+  border-color: var(--border-strong);
 }
 
 .diff-file__header {
@@ -18,24 +27,68 @@
   display: flex;
   align-items: center;
   gap: 0.571rem;
-  padding: 0.429rem 0.714rem;
-  background: var(--bg-sunken);
-  border-bottom: 1px solid var(--surface);
-  cursor: pointer;
-  user-select: none;
+  padding: 0.5rem 0.857rem;
+  /* Opaque (matching the card surface) so scrolling code is covered when
+    the header is pinned; transparent would let rows bleed through the top
+    edge. No fill contrast against the card — the header is part of the same
+    raised surface, separated from the body by the hairline below. The header
+    itself is a label, not a control — only the chevron toggles, so there's
+    no button chrome (border / bevel) here. */
+  background: var(--surface-raised);
+  min-width: 0;
+  overflow: hidden;
 }
 
-.diff-file__chevron {
+/* The horizontal divider between header and body — only when the body is
+   open, so a collapsed card reads as a single unbroken chip (no dangling
+   seam with nothing below it). Mirrors the Dock/composer shared-seam: a
+   single hairline in the structural-separator token (`--border-strong`),
+   not a boxed subsection. */
+.diff-file--open .diff-file__header {
+  border-bottom: 1px solid var(--border-strong);
+}
+
+/* The collapse/expand affordance — the only clickable part of the header.
+   A ghost icon button: no border or fill at rest, lifts to a lighter surface
+   on hover so it reads as interactive without adding a bevel to the label. */
+.diff-file__chevron-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex-shrink: 0;
+  margin-left: -0.143rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
   color: var(--text-faint);
-  font-family: var(--font-code);
-  font-size: 0.857em;
-  width: 0.857rem;
-  display: inline-block;
-  transition: transform 120ms;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.diff-file__chevron-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* The arrow itself — the same border-drawing technique the Dock's update
+   chip uses (`.dock__chevron`), scaled up so it reads as a primary toggle
+   rather than a glyph. Points right when collapsed, rotates to point down
+   when the file is open. */
+.diff-file__chevron {
+  display: block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
 }
 
 .diff-file--open .diff-file__chevron {
-  transform: rotate(90deg);
+  transform: rotate(45deg);
 }
 
 .diff-file__path {
@@ -99,7 +152,9 @@
 }
 
 .diff-file__body {
-  background: var(--bg);
+  /* No background fill: the body sits on the card's raised surface, so the
+    header/body read as one continuous card divided only by the header's
+    hairline (the seam). */
   font-family: var(--font-code);
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
@@ -175,7 +230,7 @@
 }
 
 .diff-row__num--empty {
-  background: color-mix(in srgb, var(--surface) 40%, transparent);
+  background: color-mix(in srgb, var(--bg-sunken) 50%, transparent);
 }
 
 .diff-row__marker {
@@ -219,7 +274,7 @@
 }
 
 .diff-row__code--empty {
-  background: color-mix(in srgb, var(--surface) 40%, transparent);
+  background: color-mix(in srgb, var(--bg-sunken) 50%, transparent);
 }
 
 /* Split view: side-by-side columns. One CSS grid row holds both sides
@@ -284,8 +339,11 @@
   align-items: center;
   gap: 0.571rem;
   padding: 0.143rem 0.714rem;
-  background: color-mix(in srgb, var(--surface) 55%, transparent);
-  border-block: 1px solid var(--surface);
+  /* Recessed strip on the raised card — drops to the inset tone so the gap
+    reads as a well carved into the surface, matching the elevation
+    vocabulary rather than a flat overlay tint. */
+  background: var(--surface-inset);
+  border-block: 1px solid var(--border);
   user-select: none;
   font-family: var(--font-code);
   font-size: var(--font-size-small);

@@ -551,6 +551,13 @@ const settingsState = {
   lastDismissedPiVersion: null,
   sidebarWidth: 220,
   sidebarCollapsed: false,
+  pinnedSessions: [] as string[],
+  archivedSessions: [] as string[],
+  worktrees: {},
+  diffViewMode: "unified" as "unified" | "split",
+  diffIncludeRemoteBranches: false,
+  diffRailWidth: 280,
+  diffRailVisible: true,
   window: undefined,
 };
 

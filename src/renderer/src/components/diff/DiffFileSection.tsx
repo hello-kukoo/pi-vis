@@ -117,20 +117,20 @@ export function DiffFileSection({
       data-path={file.path}
       data-testid={`diff-section-${file.path}`}
     >
-      <button
-        type="button"
-        className="diff-file__header"
-        onClick={() => toggleCollapsed(file.path)}
-        aria-expanded={open}
-        title={file.path}
-      >
-        <span className="diff-file__chevron" aria-hidden>
-          {open ? "▾" : "▸"}
-        </span>
+      <div className="diff-file__header" title={file.path}>
+        <button
+          type="button"
+          className="diff-file__chevron-btn"
+          onClick={() => toggleCollapsed(file.path)}
+          aria-expanded={open}
+          aria-label={open ? "Collapse file" : "Expand file"}
+        >
+          <span className="diff-file__chevron" aria-hidden />
+        </button>
         <StatusBadge status={file.status} untracked={file.untracked} />
         <FilePath file={file} />
         <Counts insertions={file.insertions} deletions={file.deletions} binary={file.binary} />
-      </button>
+      </div>
       {open && (
         <FileBody
           file={file}

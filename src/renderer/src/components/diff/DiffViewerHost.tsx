@@ -47,6 +47,8 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const select = useDiffStore((s) => s.select);
   const railWidth = useDiffStore((s) => s.railWidth);
   const setRailWidth = useDiffStore((s) => s.setRailWidth);
+  const railVisible = useDiffStore((s) => s.railVisible);
+  const toggleRail = useDiffStore((s) => s.toggleRail);
   const selectedPath = useDiffStore((s) => s.selectedPath);
   const ensureFileLoaded = useDiffStore((s) => s.ensureFileLoaded);
   const refresh = useDiffStore((s) => s.refresh);
@@ -285,6 +287,21 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
         return;
       }
 
+      // Backslash toggles the file-list sidebar (only when not typing in an
+      // input, so it can still be entered into the filter / find fields).
+      if (
+        (e.key === "\\" || e.key === "|") &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !isInFilter &&
+        !isInSearch
+      ) {
+        e.preventDefault();
+        useDiffStore.getState().toggleRail();
+        return;
+      }
+
       if (e.key === "Escape") {
         if (isInFilter && filter) {
           // Clear filter and consume.
@@ -447,6 +464,8 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           stale={stale}
           refreshing={refreshing}
           searchOpen={searchOpen}
+          railVisible={railVisible}
+          onToggleRail={toggleRail}
           onToggleSearch={() => {
             if (searchOpen) {
               closeSearch();
@@ -479,7 +498,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
               }}
             />
           )}
-          {phase === "ready" && (
+          {phase === "ready" && railVisible && (
             <Rail
               files={files}
               filter={filter}
@@ -533,6 +552,8 @@ function ViewerHeader({
   stale,
   refreshing,
   searchOpen,
+  railVisible,
+  onToggleRail,
   onToggleSearch,
   onClose,
   onRefresh,
@@ -545,6 +566,8 @@ function ViewerHeader({
   stale: boolean;
   refreshing: boolean;
   searchOpen: boolean;
+  railVisible: boolean;
+  onToggleRail: () => void;
   onToggleSearch: () => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -562,6 +585,16 @@ function ViewerHeader({
   return (
     <div className="diff-viewer__header viewer-header">
       <div className="viewer-header__left">
+        <button
+          type="button"
+          className={`diff-viewer__icon-btn${railVisible ? " diff-viewer__icon-btn--on" : ""}`}
+          onClick={onToggleRail}
+          title={`${railVisible ? "Hide" : "Show"} file list (\\)`}
+          aria-label={railVisible ? "Hide file list" : "Show file list"}
+          aria-pressed={railVisible}
+        >
+          <SidebarIcon active={railVisible} />
+        </button>
         <span className="diff-viewer__title">Changes</span>
         <BaseBranchDropdown />
         <span className="diff-viewer__summary">
@@ -820,8 +853,13 @@ function buildTree(files: GitChangedFile[]): DirNode {
       insertions: file.insertions,
       deletions: file.deletions,
     });
-    current.insertions += file.insertions;
-    current.deletions += file.deletions;
+    // NOTE: do NOT add the file's counts to `current` here. The loop above
+    // already accumulates the file's counts into EVERY ancestor directory
+    // (including the immediate parent, which is the last dir the loop
+    // descends into). Adding again here double-counts the immediate parent
+    // — e.g. a dir directly containing a +10 file showed +20. The root's own
+    // totals are never displayed (only `root.children` are flattened), so
+    // top-level files need no separate accumulation either.
   }
 
   return root;
@@ -1287,6 +1325,31 @@ function moveSelection(
 }
 
 // ── Icons (inline SVGs; no library) ─────────────────────────────────
+
+function SidebarIcon({ active }: { active: boolean }): React.ReactElement {
+  // A two-pane sidebar glyph. When active (rail visible) the left pane is
+  // emphasized; when hidden, the glyph is hollow so the button reads as
+  // "collapsed / click to show".
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <line x1="6" y1="3" x2="6" y2="13" />
+      {active ? (
+        <rect x="2.5" y="3.5" width="3" height="9" rx="0.5" fill="currentColor" stroke="none" />
+      ) : null}
+    </svg>
+  );
+}
 
 function RefreshIcon(): React.ReactElement {
   return (

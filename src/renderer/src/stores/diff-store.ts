@@ -115,6 +115,8 @@ export interface DiffStore {
   select: (path: string) => void;
   railWidth: number;
   setRailWidth: (w: number) => void;
+  railVisible: boolean;
+  toggleRail: () => void;
   refreshBadge: (root: string) => Promise<void>;
   loadBranches: () => Promise<void>;
   setBase: (base: string | null) => void;
@@ -198,6 +200,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     filter: "",
     viewMode: "unified",
     railWidth: 280,
+    railVisible: true,
     fileState: new Map(),
 
     badge: null,
@@ -217,8 +220,9 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     // ── mutators ────────────────────────────────────────────────────
 
     openViewer: (sessionId, root) => {
-      const viewMode = useSettingsStore.getState().settings.diffViewMode;
-      const includeRemote = useSettingsStore.getState().settings.diffIncludeRemoteBranches;
+      const settings = useSettingsStore.getState().settings;
+      const viewMode = settings.diffViewMode;
+      const includeRemote = settings.diffIncludeRemoteBranches;
       set({
         open: true,
         sessionId,
@@ -231,6 +235,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         selectedPath: null,
         filter: "",
         viewMode,
+        // Restore the persisted rail layout (width + visibility) so the
+        // viewer reopens the way the user left it.
+        railWidth: settings.diffRailWidth,
+        railVisible: settings.diffRailVisible,
         fileState: new Map(),
         // Reset branch selection on open.
         selectedBase: null,
@@ -478,6 +486,12 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     setRailWidth: (w) => {
       set({ railWidth: w });
+    },
+
+    toggleRail: () => {
+      const next = !get().railVisible;
+      set({ railVisible: next });
+      void useSettingsStore.getState().update({ diffRailVisible: next });
     },
 
     refreshBadge: async (root) => {

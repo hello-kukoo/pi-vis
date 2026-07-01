@@ -91,6 +91,9 @@ export const AppSettingsSchema = z.object({
   lastDismissedPiVersion: z.string().nullable().default(null),
   updateCheckEnabled: z.boolean().default(true),
   diffRailWidth: z.number().default(280),
+  // Whether the diff viewer's file-listing sidebar is shown. Toggled from
+  // the viewer header; persisted so the preference survives reopen/relaunch.
+  diffRailVisible: z.boolean().default(true),
   window: z
     .object({
       x: z.number(),

@@ -501,7 +501,6 @@
 .diff-tree__row--active {
   background: var(--surface);
   border-color: var(--surface-2);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .diff-tree__row--dir {
