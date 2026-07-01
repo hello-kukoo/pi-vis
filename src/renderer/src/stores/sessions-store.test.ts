@@ -528,6 +528,44 @@ describe("sessions store - unread turn-result status dot", () => {
     store.applyEvent(SESSION_A, { type: "agent_end" });
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("error");
   });
+
+  // Regression: when pi is sleeping in the exponential backoff between retry
+  // attempts and the user aborts, pi cancels the backoff and emits
+  // `auto_retry_end{success:false}` but NO final (non-retrying) `agent_end`
+  // (the only `agent_end` already fired carried `willRetry:true` before the
+  // backoff). Without handling that event, `isStreaming` + the "Running for …"
+  // timer stick on forever after the abort.
+  it("a failed auto_retry_end clears streaming when no final agent_end follows (abort during backoff)", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    const before = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(before?.isStreaming).toBe(true);
+    expect(before?.runningSince).toBeDefined();
+
+    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
+    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
+    // User aborts during the backoff sleep:
+    store.applyEvent(SESSION_A, {
+      type: "auto_retry_end",
+      success: false,
+      finalError: "Retry cancelled",
+    });
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.isStreaming).toBe(false);
+    expect(s?.runningSince).toBeUndefined();
+    expect(s?.unreadStatus).toBe("error");
+  });
+
+  it("a successful auto_retry_end does not clear streaming (turn continues)", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
+    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
+    store.applyEvent(SESSION_A, { type: "auto_retry_end", success: true, attempt: 1 });
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.isStreaming).toBe(true); // still working
+    expect(s?.runningSince).toBeDefined();
+  });
 });
 
 describe("sessions store - workspace expand / reorder model", () => {

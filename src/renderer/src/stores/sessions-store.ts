@@ -768,6 +768,26 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           turnErrored = false;
         }
       }
+      // A FAILED `auto_retry_end` is terminal in the abort-during-backoff
+      // case: when pi is sleeping between retry attempts and the user aborts,
+      // pi cancels the backoff (`abortRetry`) and emits
+      // `auto_retry_end{success:false}` — but, because the agent loop already
+      // emitted its `agent_end{willRetry:true}` *before* the backoff began, NO
+      // further (non-retrying) `agent_end` ever follows. Without this branch
+      // `isStreaming` + the "Running for …" timer stick on forever after the
+      // abort. The guard on `isStreaming` makes this a no-op in the normal
+      // retry-exhaustion path, where this event arrives AFTER the final
+      // `agent_end{willRetry:false}` already cleared streaming.
+      if (event.type === "auto_retry_end" && event.success === false && isStreaming) {
+        isStreaming = false;
+        runningSince = undefined;
+        // A failed retry end is never a clean success — the turn ended in a
+        // provider error (exhausted) or was cancelled mid-backoff — so mark
+        // it "error". (`turnErrored` was already wiped by the preceding
+        // `willRetry` agent_end, so it can't decide the color here.)
+        unreadStatus = "error";
+        turnErrored = false;
+      }
 
       const thinkingLevel = event.type === "thinking_level_changed" ? event.level : s.thinkingLevel;
       const transcript = applyPiEvent(s.transcript, event);
