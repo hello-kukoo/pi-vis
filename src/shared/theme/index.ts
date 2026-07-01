@@ -13,8 +13,12 @@ export {
   SyntaxSpecSchema,
 } from "./tokens.js";
 export {
+  buildPiThemeColorIndices,
   buildPiThemeColors,
   PI_BG_ROLES,
+  PI_INDEX_ROLE,
+  PI_INDEX_TOKEN,
+  PI_ROLE_INDEX,
   PI_ROLES,
   PI_THEME_DEFAULTS,
 } from "./pi-theme.js";

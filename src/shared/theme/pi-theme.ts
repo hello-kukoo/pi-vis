@@ -12,20 +12,24 @@
  * a Macchiato or Gruvbox surface. That mismatch was previously documented as an
  * "accepted fidelity limit."
  *
- * In SDK mode the host constructs a pi `Theme` from THIS app's resolved palette
- * (the hex values of the 26 semantic roles) and installs it as pi's active theme
- * singleton, so `theme.fg(role)` emits the active colorscheme's exact RGB for
- * ANY theme. `buildPiThemeColors(theme)` produces the `{fgColors, bgColors}`
- * hex maps the host passes to `new pi.Theme(...)`:
+ * In SDK mode the host installs a pi `Theme` whose per-role values are STABLE
+ * ANSI palette INDICES (not hex), so `theme.fg(role)` emits an indexed escape
+ * like `[38;5;42m` that carries role identity rather than RGB. The renderer
+ * (xterm's `extendedAnsi` palette + AnsiText's index→token map) resolves each
+ * index to the active colorscheme's color AT PAINT TIME, so a scheme change
+ * recolors every cell — including ones already in the buffer — with zero
+ * re-emit and zero host involvement. The host is color-agnostic; the renderer
+ * is the single source of color truth. `buildPiThemeColorIndices()` produces
+ * the `{fg, bg}` index maps the host passes to `new pi.Theme(...)`, and
+ * `buildPiThemeColors(theme)` produces the role→hex maps the renderer uses to
+ * fill the palette for the active scheme:
  *
- *  - Each pi role resolves from the theme's optional `piTheme` block if present
- *    (a hex literal `#…` OR a token NAME resolved against the theme's own
- *    palette — per-theme authoring, nothing Catppuccin-anchored).
- *  - Otherwise it falls back to `PI_THEME_DEFAULTS`: a palette-agnostic mapping
- *    from each pi role to one of the 26 semantic tokens. Because the fallback is
- *    token-based (never a swatch name), a theme with NO `piTheme` block still
- *    renders coherently on pi's surfaces for every palette — Gruvbox's syntax
- *    comes out Gruvbox-flavored via its own `accent`/`success`/`warning`.
+ *  - Each pi role resolves from the palette-agnostic default mapping
+ *    `PI_THEME_DEFAULTS` (pi-role → one of the 26 semantic tokens, resolved
+ *    against the theme's own `colors`). Because the mapping is token-based
+ *    (never a swatch name), a theme renders coherently on pi's surfaces for
+ *    EVERY palette — Gruvbox's syntax comes out Gruvbox-flavored via its own
+ *    `accent`/`success`/`warning`.
  *
  * The output is ALWAYS a valid 6-digit hex per role (token-refs that fail to
  * resolve cascade through the default then `text`), so pi's `Theme` constructor
@@ -34,6 +38,16 @@
  */
 
 import type { ColorToken, Theme, ThemeColors } from "./tokens.js";
+
+/**
+ * The base of the stable per-role ANSI palette index range. xterm.js exposes
+ * indices 16–255 as a customizable palette via `ITheme.extendedAnsi` (and the
+ * 16 named slots 0–15 separately). We assign each pi role a FIXED index in
+ * this range so the byte stream pi emits carries role IDENTITY, not RGB —
+ * which is what makes live re-theming possible (see "Indexed semantic
+ * colors" below).
+ */
+const PI_ROLE_INDEX_BASE = 16;
 
 /**
  * The complete set of color roles pi's theme defines (mirrors pi's
@@ -120,13 +134,13 @@ export const PI_BG_ROLES = new Set<string>([
  * Default mapping: pi role → pi-vis semantic token. PALETTE-AGNOSTIC — it never
  * names a swatch, only semantic roles, so it produces coherent results on every
  * colorscheme (Gruvbox's `syntaxKeyword`→`accent` is Gruvbox's mauve-analog,
- * not Catppuccin's). A theme may override any role via its `piTheme` block;
- * this is only the fallback for roles it leaves to the default.
+ * not Catppuccin's). This is the SOLE source of per-role resolution; every
+ * colorscheme's pi surfaces derive from it.
  *
  * The syntax defaults deliberately mirror the conventions both Catppuccin and
  * Gruvbox ship (mauve/accent keywords, green strings, peach/yellow numbers,
- * blue functions, faint comments), so even with no per-theme `piTheme` block
- * the unified-TUI code surface reads as that palette's native syntax coloring.
+ * blue functions, faint comments), so the unified-TUI code surface reads as
+ * that palette's native syntax coloring.
  */
 export const PI_THEME_DEFAULTS: Record<string, ColorToken> = {
   // Core UI
@@ -205,18 +219,16 @@ function normalizeHex(value: string): string | null {
 /**
  * Resolve one pi role to a valid 6-digit hex against a theme's palette.
  *
- * Cascade (first valid hex wins): the explicit value → the palette-agnostic
- * default token → `text`. A value may be a hex literal (`#…`) or a token NAME
- * (resolved through `colors`). An unknown token-ref or non-hex literal just
- * falls through to the next candidate, so a typo'd override can never crash the
- * host — it silently degrades to the default for that role.
+ * Looks up the role's palette-agnostic DEFAULT token ({@link PI_THEME_DEFAULTS})
+ * in the theme's `colors` and returns its hex. Falls back to `text` (a required
+ * token in every theme), so the result is ALWAYS a valid hex and pi's `Theme`
+ * constructor can never throw.
  */
-function resolveRole(value: string | undefined, role: string, colors: ThemeColors): string {
-  const candidates: Array<string | undefined> = [value, PI_THEME_DEFAULTS[role], "text"];
+function resolveRole(role: string, colors: ThemeColors): string {
   const palette = colors as Record<string, string>;
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const hex = normalizeHex(candidate) ?? normalizeHex(palette[candidate] ?? "");
+  for (const token of [PI_THEME_DEFAULTS[role], "text"]) {
+    if (!token) continue;
+    const hex = normalizeHex(palette[token] ?? "");
     if (hex) return hex;
   }
   // Unreachable: "text" is a required token in every theme. Keep a sane literal
@@ -225,8 +237,9 @@ function resolveRole(value: string | undefined, role: string, colors: ThemeColor
 }
 
 /**
- * Build the `{fgColors, bgColors}` hex maps (role → 6-digit hex) the SDK host
- * hands to `new pi.Theme(fgColors, bgColors, "truecolor")`. Every role in
+ * Build the `{fgColors, bgColors}` hex maps (role → 6-digit hex) used by the
+ * RENDERER to resolve each role's color for the current scheme (xterm's
+ * `extendedAnsi` palette, filled from these hexes). Every role in
  * {@link PI_ROLES} is present and split into fg/bg by {@link PI_BG_ROLES}.
  */
 export function buildPiThemeColors(theme: Theme): {
@@ -235,9 +248,8 @@ export function buildPiThemeColors(theme: Theme): {
 } {
   const fgColors: Record<string, string> = {};
   const bgColors: Record<string, string> = {};
-  const overrides = theme.piTheme;
   for (const role of PI_ROLES) {
-    const hex = resolveRole(overrides?.[role], role, theme.colors);
+    const hex = resolveRole(role, theme.colors);
     if (PI_BG_ROLES.has(role)) {
       bgColors[role] = hex;
     } else {
@@ -245,4 +257,59 @@ export function buildPiThemeColors(theme: Theme): {
     }
   }
   return { fgColors, bgColors };
+}
+
+/**
+ * Stable pi-role → ANSI palette index assignment. Each role gets a fixed index
+ * in the xterm extended range (16+), assigned once in {@link PI_ROLES} order.
+ * This map is the SINGLE contract between the host (which emits these indices
+ * into the byte stream) and the renderer (which resolves each index to the
+ * active scheme's color at paint time). It is scheme-independent and constant
+ * for the lifetime of the app.
+ */
+export const PI_ROLE_INDEX: Record<string, number> = Object.fromEntries(
+  PI_ROLES.map((role, i) => [role, PI_ROLE_INDEX_BASE + i]),
+);
+
+/** Reverse lookup: ANSI palette index → pi role. */
+export const PI_INDEX_ROLE: Map<number, string> = new Map(
+  Object.entries(PI_ROLE_INDEX).map(([role, index]) => [index, role]),
+);
+
+/**
+ * ANSI palette index → pi-vis semantic token (via {@link PI_THEME_DEFAULTS}),
+ * precomputed for the renderer's AnsiText path. AnsiText maps each emitted
+ * index to `var(--<token>)`; since CSS variables resolve live at paint, widget
+ * text recolors automatically on a scheme change with no re-render. Indices
+ * outside this map (e.g. an extension hardcoding its own 256-color) fall
+ * through to the standard cube ramp.
+ */
+export const PI_INDEX_TOKEN: Map<number, ColorToken> = new Map(
+  Object.entries(PI_ROLE_INDEX).map(([role, index]) => [index, PI_THEME_DEFAULTS[role] ?? "text"]),
+);
+
+/**
+ * Build the `{fg, bg}` INDEX maps (role → stable palette index) the SDK host
+ * hands to `new pi.Theme(...)`. Because the values are NUMBERS, pi's
+ * `fgAnsi`/`bgAnsi` emits a stable `[38;5;<index>m` / `[48;5;<index>m`
+ * escape that carries role identity — NOT RGB — so the byte stream is
+ * color-agnostic. The scheme is applied only at the renderer, which resolves
+ * these indices against the active palette. This is scheme-independent and
+ * constant; the host never needs re-theming on a scheme change.
+ */
+export function buildPiThemeColorIndices(): {
+  fg: Record<string, number>;
+  bg: Record<string, number>;
+} {
+  const fg: Record<string, number> = {};
+  const bg: Record<string, number> = {};
+  for (const role of PI_ROLES) {
+    const index = PI_ROLE_INDEX[role]!;
+    if (PI_BG_ROLES.has(role)) {
+      bg[role] = index;
+    } else {
+      fg[role] = index;
+    }
+  }
+  return { fg, bg };
 }

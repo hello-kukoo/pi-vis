@@ -72,6 +72,18 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
   const panelMode = unifiedPanel?.mode ?? "content";
   modeRef.current = panelMode;
 
+  // Live re-theme: the host emits role-identity ANSI indices, and xterm
+  // resolves them against `term.options.theme.extendedAnsi` at paint time, so
+  // swapping the palette recolors every buffered cell with no re-emit. The
+  // Terminal persists across scheme changes (the lifecycle effect only
+  // rebuilds on panel-identity change), so we update its theme in place here.
+  const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = buildXtermTheme(getTheme(colorScheme ?? "mocha"));
+  }, [colorScheme]);
+
   // Re-run the sizing pass when the mode flips (overlay shown/hidden). The
   // lifecycle effect is keyed on panelId only, so it doesn't re-fire here — but
   // viewport↔content needs an immediate re-size, not just on the next frame.

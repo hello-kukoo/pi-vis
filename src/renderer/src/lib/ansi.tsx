@@ -1,3 +1,4 @@
+import { PI_INDEX_TOKEN } from "@shared/theme";
 import React from "react";
 
 /**
@@ -41,8 +42,15 @@ const NAMED_COLORS: Record<number, string> = {
   15: "var(--text-muted)", // bright white
 };
 
-// Standard xterm 256-color → rgb
+// Standard xterm 256-color → rgb. pi-theme role indices (a contiguous block
+// starting at 16 — see PI_ROLE_INDEX / PI_INDEX_TOKEN) are resolved to a live
+// CSS variable instead of a literal rgb, so widget text recolors automatically
+// on a scheme change (the host emits these indices; CSS vars resolve at paint).
+// Any other 256-color index (e.g. an extension hardcoding its own) falls back
+// to the standard cube ramp.
 function color256(n: number): string {
+  const tokenVar = PI_INDEX_TOKEN.get(n);
+  if (tokenVar) return `var(--${tokenVar})`;
   if (n < 16) return NAMED_COLORS[n] ?? "var(--text)";
   if (n >= 232) {
     const v = 8 + (n - 232) * 10;

@@ -223,11 +223,13 @@ export function initHostTheme(pi, themeName) {
 }
 
 /**
- * Install a pi `Theme` built from pi-vis's resolved palette as pi's ACTIVE
- * theme singleton, so every `ctx.ui.theme.fg(role)` and all pi-tui rendering
- * emit pi-vis's EXACT colors for any colorscheme — not just pi's two built-in
- * dark/light themes (which left widget/TUI text reading in pi's generic
- * palette on non-default schemes like Macchiato/Frappé/Gruvbox/custom).
+ * Install a pi `Theme` built from STABLE per-role ANSI palette INDICES as pi's
+ * ACTIVE theme singleton, so every `ctx.ui.theme.fg(role)` and all pi-tui
+ * rendering emit role-identity bytes (`\x1b[38;5;N m`) rather than baked RGB.
+ * The RENDERER resolves each index against the active colorscheme at paint
+ * time (xterm `extendedAnsi` + AnsiText's index→token map), so a scheme change
+ * recolors every cell — including ones already in the buffer — with zero
+ * re-emit and zero host involvement.
  *
  * Uses ONLY public surface: `Theme` is a public export, so `new pi.Theme(...)`
  * constructs an instance the same way pi's own `createTheme` does; then we
@@ -237,9 +239,13 @@ export function initHostTheme(pi, themeName) {
  * do this too but is NOT on pi's public index, so the symbol write is the
  * sanctioned equivalent.
  *
+ * Because the per-role VALUES are numbers, pi's `fgAnsi`/`bgAnsi` takes the
+ * numeric branch and emits a stable indexed escape (the `mode` arg is unused
+ * for numeric inputs) — the color is never baked into the byte stream.
+ *
  * @param {object} pi        - pi's public module (from importPi).
- * @param {object} fgColors  - pi role → 6-digit hex (foregrounds).
- * @param {object} bgColors  - pi role → 6-digit hex (backgrounds).
+ * @param {object} fgColors  - pi role → stable ANSI palette index (foregrounds).
+ * @param {object} bgColors  - pi role → stable ANSI palette index (backgrounds).
  * @returns {object} the installed Theme instance (also stored on the global so
  *   extensions/pi-tui read it via `ctx.ui.theme`).
  */

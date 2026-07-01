@@ -37,7 +37,7 @@ import {
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { createGistForSession } from "./share.js";
-import { getUserThemes, piThemeColorsForSchemeId, piThemeForSchemeId } from "./theme-loader.js";
+import { getUserThemes, piThemeColorIndices, piThemeForSchemeId } from "./theme-loader.js";
 import { checkForUpdates, startUpdate } from "./updates.js";
 import {
   getOrderedWorkspaces,
@@ -56,20 +56,22 @@ let handlersRegistered = false;
 //   - PIVIS_PI_THEME        — pi's built-in "dark"|"light", the base theme the
 //                             host loads first (and the fallback if the custom
 //                             install below fails / on the RPC path).
-//   - PIVIS_PI_THEME_COLORS — the active scheme's palette expressed in pi's OWN
-//                             color vocabulary, so the SDK host can build a pi
-//                             `Theme` from pi-vis's exact colors (not just
-//                             dark/light). Fixes the mismatch where widget/TUI
-//                             text read in pi's generic palette on non-default
-//                             schemes (Macchiato/Frappé/Gruvbox/custom).
-// Both are read fresh on each spawn so a reload picks up a scheme change.
+//   - PIVIS_PI_THEME_COLORS — STABLE per-role ANSI palette INDICES (role →
+//                             16–255), scheme-independent. The host installs
+//                             these so pi emits role-identity bytes
+//                             (`\x1b[38;5;N m`) rather than baked RGB; the
+//                             renderer resolves each index against the active
+//                             palette at paint time. Because this is
+//                             color-agnostic, a scheme change does NOT need to
+//                             respawn running sessions — the renderer's palette
+//                             swap recolors them live.
 async function getHostEnv(): Promise<Record<string, string>> {
   const env = await getLoginShellEnv();
   const scheme = getSettings().colorScheme;
   return {
     ...env,
     PIVIS_PI_THEME: piThemeForSchemeId(scheme),
-    PIVIS_PI_THEME_COLORS: JSON.stringify(piThemeColorsForSchemeId(scheme)),
+    PIVIS_PI_THEME_COLORS: JSON.stringify(piThemeColorIndices()),
   };
 }
 
@@ -493,21 +495,12 @@ export function initIpc(win: BrowserWindow): void {
   });
 
   ipcMain.handle("settings.set", async (_evt, updates: Partial<ReturnType<typeof getSettings>>) => {
-    const prevScheme = getSettings().colorScheme;
     const next = saveSettings(updates);
-    // A color-scheme change must re-theme already-running sessions, not just
-    // future ones: the host bakes PIVIS_PI_THEME in at spawn, so reload the
-    // running sessions to respawn them with the matching pi theme (and make
-    // extensions re-emit their widgets in the new colors). Fire-and-forget so
-    // the settings write returns promptly; busy sessions are skipped.
-    if (updates.colorScheme && updates.colorScheme !== prevScheme && registry) {
-      void (async () => {
-        const piInfo = await locatePi(getSettings().piBinaryPath);
-        if (!piInfo) return;
-        const env = await getHostEnv();
-        await registry?.reloadRunningSessions(piInfo.path, env);
-      })();
-    }
+    // Color-scheme changes are handled entirely renderer-side: the host emits
+    // stable per-role ANSI INDICES (color-agnostic), and the renderer resolves
+    // them against the active palette at paint time. So a scheme swap recolors
+    // every running session's widgets/TUI live via `term.options.theme` — no
+    // respawn needed (and no busy-session skip gap).
     return next;
   });
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PI_INDEX_TOKEN, PI_ROLE_INDEX } from "@shared/theme";
 import { parseAnsi, stripAnsi } from "./ansi.js";
 
 describe("parseAnsi", () => {
@@ -48,5 +49,22 @@ describe("parseAnsi", () => {
     const spans = parseAnsi("\x1b[2;3mfaint\x1b[22;23mnormal");
     expect(spans[0]).toEqual({ text: "faint", style: { opacity: 0.6, fontStyle: "italic" } });
     expect(spans[1]).toEqual({ text: "normal", style: {} });
+  });
+
+  // ── Live re-theming: role-identity indices resolve to live CSS vars ───────
+  it("a pi-role index (host-emitted) resolves to var(--token), not literal rgb", () => {
+    // The host emits stable per-role indices; AnsiText maps each to a live CSS
+    // variable so widget text recolors on a scheme change with no re-render.
+    const idx = PI_ROLE_INDEX.text!; // e.g. 25
+    const token = PI_INDEX_TOKEN.get(idx)!; // "text"
+    const spans = parseAnsi(`\x1b[38;5;${idx}mhi\x1b[39m`);
+    expect(spans[0]).toEqual({ text: "hi", style: { color: `var(--${token})` } });
+  });
+
+  it("a role index used as BACKGROUND also resolves to var(--token)", () => {
+    const idx = PI_ROLE_INDEX.success!;
+    const token = PI_INDEX_TOKEN.get(idx)!;
+    const spans = parseAnsi(`\x1b[48;5;${idx}mhi\x1b[49m`);
+    expect(spans[0]).toEqual({ text: "hi", style: { backgroundColor: `var(--${token})` } });
   });
 });

@@ -3,7 +3,7 @@ import path from "node:path";
 import {
   type Theme,
   ThemeSchema,
-  buildPiThemeColors,
+  buildPiThemeColorIndices,
   buildThemeRegistry,
   piThemeForTheme,
   resolveTheme,
@@ -81,18 +81,16 @@ export function piThemeForSchemeId(id: string): "dark" | "light" {
 }
 
 /**
- * Resolve a colorScheme id to the pi `Theme` color maps (`{fg, bg}`, each
- * role → 6-digit hex) the SDK host should install so pi's TUI/extension
- * surfaces track THIS app's exact palette instead of pi's two built-in
- * dark/light themes. Serialized to the `PIVIS_PI_THEME_COLORS` env var per
- * host spawn (read fresh, like `PIVIS_PI_THEME`, so reloads pick up a change).
+ * The stable pi-role → ANSI palette INDEX maps (`{fg, bg}`, each role → a fixed
+ * index in 16–255) the SDK host should install so pi emits role-identity bytes
+ * (`[38;5;N m`) rather than baked RGB. Scheme-INDEPENDENT and constant: the
+ * host is color-agnostic, and the renderer resolves these indices against the
+ * active palette at paint time (see `PI_ROLE_INDEX`). Serialized to the
+ * `PIVIS_PI_THEME_COLORS` env var per host spawn.
  */
-export function piThemeColorsForSchemeId(id: string): {
-  fg: Record<string, string>;
-  bg: Record<string, string>;
+export function piThemeColorIndices(): {
+  fg: Record<string, number>;
+  bg: Record<string, number>;
 } {
-  const registry = buildThemeRegistry(getUserThemes());
-  const theme = resolveTheme(id, registry);
-  const { fgColors, bgColors } = buildPiThemeColors(theme);
-  return { fg: fgColors, bg: bgColors };
+  return buildPiThemeColorIndices();
 }

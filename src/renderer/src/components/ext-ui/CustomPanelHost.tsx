@@ -60,6 +60,18 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   panelRef.current = panel ?? null;
   const panelId = panel?.id;
 
+  // Live re-theme: the host emits role-identity ANSI indices; xterm resolves
+  // them against `term.options.theme.extendedAnsi` at paint time, so swapping
+  // the palette recolors every buffered cell with no re-emit. The Terminal
+  // persists across scheme changes (lifecycle effect rebuilds on panelId
+  // only), so we update its theme in place here.
+  const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = buildXtermTheme(getTheme(colorScheme ?? "mocha"));
+  }, [colorScheme]);
+
   // One lifecycle effect: build terminal, stream data, handle input, cleanup.
   //
   // Deps: [sessionId, panelId]. We rebuild the xterm ONLY when the panel

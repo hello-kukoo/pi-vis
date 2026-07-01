@@ -57,8 +57,19 @@ export function LoginTerminal({
 }: LoginTerminalProps): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const ptyIdRef = useRef<string | null>(null);
+  const termRef = useRef<Terminal | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
   const [errorMsg, setErrorMsg] = useState("");
+
+  // Live re-theme: the OAuth terminal streams pi's role-identity ANSI indices,
+  // which xterm resolves against `term.options.theme.extendedAnsi` at paint
+  // time, so swapping the palette recolors the buffer with no reconnect.
+  const colorScheme = useSettingsStore((s) => s.settings.colorScheme);
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = buildXtermTheme(getTheme(colorScheme ?? "mocha"));
+  }, [colorScheme]);
 
   // One lifecycle effect: build the terminal, wire pty I/O, start the pty, and
   // tear everything down. Consolidated (not split across effects) so the pty is
@@ -123,6 +134,7 @@ export function LoginTerminal({
       term.open(container);
       fitAddon.fit();
       term.focus();
+      termRef.current = term;
       resizeObserver.observe(container);
 
       const dims = fitAddon.proposeDimensions();
@@ -159,6 +171,7 @@ export function LoginTerminal({
         void window.pivis.invoke("pty.kill", { ptyId: localPtyId }).catch(() => {});
       }
       ptyIdRef.current = null;
+      termRef.current = null;
       term.dispose();
     };
   }, []);

@@ -243,12 +243,15 @@ async function handleInit(msg) {
     // Load the pi theme that matches pi-vis's active color scheme. Two layers:
     //  (1) PIVIS_PI_THEME loads pi's built-in dark/light as a base (and is the
     //      fallback for the RPC path / if the custom install below fails).
-    //  (2) PIVIS_PI_THEME_COLORS carries pi-vis's exact palette in pi's OWN
-    //      color vocabulary, so we build a pi Theme from it and install it as
-    //      the active singleton — every host surface (extension theme.fg
-    //      widgets/status, the unified TUI, custom() panels) then resolves to
-    //      pi-vis's colors for ANY scheme, not just pi's two built-ins. A
-    //      failure here is non-fatal: we keep the base theme and log.
+    //  (2) PIVIS_PI_THEME_COLORS carries STABLE per-role ANSI palette INDICES
+    //      (role → 16–255), scheme-independent. We build a pi Theme from them
+    //      and install it as the active singleton, so every host surface
+    //      (extension theme.fg widgets/status, the unified TUI, custom()
+    //      panels) emits role-identity bytes (`\x1b[38;5;N m`) rather than
+    //      baked RGB. The RENDERER resolves each index against the active
+    //      colorscheme at paint time, so a scheme swap recolors everything
+    //      live without re-emitting from the host. A failure here is non-fatal:
+    //      we keep the base theme and log.
     const baseTheme = initHostTheme(pi, process.env.PIVIS_PI_THEME || undefined);
     let theme = baseTheme;
     const paletteJson = process.env.PIVIS_PI_THEME_COLORS;
