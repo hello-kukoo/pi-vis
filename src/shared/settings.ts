@@ -8,6 +8,12 @@ const FontSettingsSchema = z.object({
 
 export const AppSettingsSchema = z.object({
   piBinaryPath: z.string().nullable().default(null),
+  // User-configured environment variables merged into every pi session spawn
+  // (SDK-host and --mode rpc fallback), after the login-shell env and before
+  // Pi-Vis's reserved PIVIS_* control variables. Values are strings, matching
+  // Node's child_process env contract. Invalid/reserved names are filtered at
+  // spawn time so a hand-edited settings.json can't break internal plumbing.
+  piEnv: z.record(z.coerce.string()).default({}),
   fonts: z
     .object({
       display: FontSettingsSchema.default({ family: "Inter", sizePx: 14 }),

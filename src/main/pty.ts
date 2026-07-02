@@ -11,6 +11,7 @@
 
 import os from "node:os";
 import { getSubprocessEnv } from "./auth.js";
+import { mergeUserPiEnv } from "./pi-env.js";
 import { locatePi } from "./pi/locate-pi.js";
 import { getSettings } from "./settings-store.js";
 
@@ -89,7 +90,7 @@ export async function startPty(opts: {
   }
 
   const env: Record<string, string> = {
-    ...(await getSubprocessEnv()),
+    ...mergeUserPiEnv(await getSubprocessEnv(), settings.piEnv),
     TERM: "xterm-256color",
     FORCE_COLOR: "1",
   };

@@ -25,6 +25,7 @@ import {
   inspectWorktree,
 } from "./git/git.js";
 import { readPiChangelog } from "./pi-changelog.js";
+import { mergeUserPiEnv } from "./pi-env.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { isSessionHost } from "./pi/session-host.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
@@ -67,10 +68,12 @@ let handlersRegistered = false;
 //                             swap recolors them live.
 async function getHostEnv(): Promise<Record<string, string>> {
   const env = await getLoginShellEnv();
-  const scheme = getSettings().colorScheme;
+  const settings = getSettings();
   return {
-    ...env,
-    PIVIS_PI_THEME: piThemeForSchemeId(scheme),
+    ...mergeUserPiEnv(env, settings.piEnv),
+    // Pi-Vis-owned variables are written last so user-configured env (or a
+    // hand-edited settings.json) cannot override the host/theme control plane.
+    PIVIS_PI_THEME: piThemeForSchemeId(settings.colorScheme),
     PIVIS_PI_THEME_COLORS: JSON.stringify(piThemeColorIndices()),
   };
 }

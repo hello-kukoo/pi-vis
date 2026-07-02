@@ -49,6 +49,127 @@ function buildFontOptions(localFonts: FontFamily[], current: string): string[] {
 const DIFF_SIZE_MIN_MIB = 1 / 1024; // 1 KiB
 const DIFF_SIZE_MAX_MIB = 1024; // 1 GiB
 
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function envToText(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseEnvText(
+  text: string,
+): { ok: true; env: Record<string, string> } | { ok: false; error: string } {
+  const env: Record<string, string> = {};
+  const seen = new Set<string>();
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i] ?? "";
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const eq = rawLine.indexOf("=");
+    if (eq < 0) return { ok: false, error: `Line ${i + 1}: expected KEY=value.` };
+
+    const name = rawLine.slice(0, eq).trim();
+    const value = rawLine.slice(eq + 1);
+    if (!ENV_NAME_RE.test(name)) {
+      return { ok: false, error: `Line ${i + 1}: “${name}” is not a valid env name.` };
+    }
+    if (name.startsWith("PIVIS_")) {
+      return { ok: false, error: `Line ${i + 1}: PIVIS_* variables are reserved.` };
+    }
+    if (seen.has(name)) return { ok: false, error: `Line ${i + 1}: duplicate “${name}”.` };
+    seen.add(name);
+    env[name] = value;
+  }
+
+  return { ok: true, env };
+}
+
+function PiEnvEditor({
+  value,
+  onCommit,
+}: {
+  value: Record<string, string>;
+  onCommit: (env: Record<string, string>) => Promise<void>;
+}): React.ReactElement {
+  const savedText = envToText(value);
+  const [text, setText] = useState(savedText);
+  const [dirty, setDirty] = useState(false);
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!dirty) setText(savedText);
+  }, [dirty, savedText]);
+
+  const commit = async () => {
+    const parsed = parseEnvText(text);
+    if (!parsed.ok) {
+      setMessage(parsed.error);
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      await onCommit(parsed.env);
+      setDirty(false);
+      setMessage("Saved. Reload running sessions to pick up changes.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="settings-env-editor">
+      <textarea
+        className="settings-input settings-textarea settings-textarea--env"
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          setDirty(true);
+          setMessage("");
+        }}
+        spellCheck={false}
+        placeholder="ANTHROPIC_BASE_URL=https://…\nPI_AGENT_DIR=/path/to/agent"
+        aria-label="Pi environment variables"
+      />
+      <div className="settings-env-editor__actions">
+        <button type="button" className="settings-btn" onClick={commit} disabled={!dirty || saving}>
+          {saving ? "Saving…" : "Apply"}
+        </button>
+        <button
+          type="button"
+          className="settings-btn"
+          onClick={() => {
+            setText("");
+            setDirty(true);
+            setMessage("");
+          }}
+          disabled={saving || (!dirty && !savedText)}
+        >
+          Clear
+        </button>
+        {message && (
+          <span
+            className={`settings-hint ${message.startsWith("Line ") ? "settings-hint--error" : ""}`}
+          >
+            {message}
+          </span>
+        )}
+      </div>
+      <span className="settings-hint">
+        One <code>KEY=value</code> per line. These are merged into pi sessions and the login
+        terminal; restart or <code>/reload</code> a session after changing them.
+      </span>
+    </div>
+  );
+}
+
 /**
  * Freeform max-file-size input. Accepts sizes like "5 MiB", "500 KiB",
  * "1 GiB", or a bare number (read as MiB), validating on blur / Enter. The
@@ -368,6 +489,12 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                   <span className="settings-value settings-value--mono">{piInfo.version}</span>
                 </div>
               )}
+            </section>
+
+            {/* Pi environment */}
+            <section className="settings-section">
+              <h3 className="settings-section__title">Pi environment</h3>
+              <PiEnvEditor value={settings.piEnv} onCommit={(piEnv) => update({ piEnv })} />
             </section>
 
             {/* Color scheme */}

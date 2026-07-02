@@ -14,6 +14,7 @@ describe("AppSettingsSchema", () => {
     // Catppuccin flavor defaults to Mocha (dark) — the pre-existing
     // baseline so first-launch UI is unchanged.
     expect(parsed.colorScheme).toBe("mocha");
+    expect(parsed.piEnv).toEqual({});
   });
 
   it("strips the legacy openTabs / activeSessionFile / openSessions keys on parse (plain z.object)", () => {
@@ -59,6 +60,13 @@ describe("AppSettingsSchema", () => {
     expect("recentWorkspaces" in result.data).toBe(false);
     expect(result.data.workspaceOrder).toEqual([]);
     expect(result.data.expandedWorkspaces).toEqual([]);
+  });
+
+  it("round-trips user-configured pi environment variables", () => {
+    const result = AppSettingsSchema.safeParse({ piEnv: { PI_AGENT_DIR: "/tmp/pi", FOO: "bar" } });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.piEnv).toEqual({ PI_AGENT_DIR: "/tmp/pi", FOO: "bar" });
   });
 
   it("round-trips workspaceOrder and expandedWorkspaces", () => {

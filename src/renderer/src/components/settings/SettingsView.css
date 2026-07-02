@@ -133,6 +133,32 @@
   border-color: var(--accent);
 }
 
+.settings-textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+  line-height: var(--leading-body);
+}
+
+.settings-textarea--env {
+  width: 100%;
+  flex: none;
+  font-family: var(--font-code);
+  white-space: pre;
+}
+
+.settings-env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.429rem;
+}
+
+.settings-env-editor__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.571rem;
+}
+
 .settings-stepper {
   display: flex;
   align-items: center;
