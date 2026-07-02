@@ -170,12 +170,5 @@ export async function resolveHostExecPath(): Promise<{
 }> {
   const systemNode = await resolveSystemNode();
   const electronNode = process.versions.node; // the Node Electron was built with
-  const decision = chooseHostExecPath(systemNode, electronNode);
-  if (decision.execPath) {
-    console.info(
-      `[pi-vis] SDK host retargeted to system Node ${systemNode?.version} ` +
-        `(Electron bundles ${electronNode}) — enables newer Node built-ins (e.g. node:sqlite).`,
-    );
-  }
-  return decision;
+  return chooseHostExecPath(systemNode, electronNode);
 }
