@@ -5,13 +5,14 @@ import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinkin
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
-import { ContextMeter } from "./ContextMeter.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
 import { FadeText } from "../common/FadeText.js";
 import { IconBranch, IconCheck, IconChevronDown } from "../common/icons.js";
 import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
+import { NotificationBellButton } from "../notifications/NotificationStack.js";
+import { ContextMeter } from "./ContextMeter.js";
 import "./SessionHeader.css";
 
 interface SessionHeaderProps {
@@ -204,6 +205,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
         </div>
 
         {!compact && <SessionControls sessionId={sessionId} />}
+        <NotificationBellButton sessionId={sessionId} />
       </div>
     </div>
   );

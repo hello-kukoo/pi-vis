@@ -78,6 +78,16 @@ export function IconClose(props: IconProps): React.ReactElement {
   );
 }
 
+/** Bell — notification history / alerts. */
+export function IconBell(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M3.25 5.4c0-1.65 1.05-2.9 2.75-2.9s2.75 1.25 2.75 2.9v1.5l0.85 1.25H2.4l0.85-1.25z" />
+      <path d="M5 9.1c0.2 0.55 0.55 0.85 1 0.85s0.8-0.3 1-0.85" />
+    </Icon>
+  );
+}
+
 /** Git branch — a trunk with one fork, for worktree chips. */
 export function IconBranch(props: IconProps): React.ReactElement {
   return (

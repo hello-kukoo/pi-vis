@@ -306,39 +306,3 @@ export function ExtensionDialogHost({
     </div>
   );
 }
-
-export function ToastHost({ sessionId }: { sessionId: SessionId }): React.ReactElement | null {
-  const session = useSessionsStore((s) => s.sessions.get(sessionId));
-  const dismissToast = useSessionsStore((s) => s.dismissToast);
-  const toasts = session?.toasts ?? [];
-
-  useEffect(() => {
-    if (toasts.length === 0) return;
-    const oldest = toasts[0];
-    if (!oldest) return;
-    // Time out the oldest toast relative to its creation, not "now".
-    // Resetting on every change to the array was the bug: adding a new
-    // toast would re-fire the timer for the existing one, so old toasts
-    // could linger indefinitely.
-    const remaining = Math.max(0, oldest.createdAt + 4000 - Date.now());
-    const timer = setTimeout(() => dismissToast(sessionId, oldest.id), remaining);
-    return () => clearTimeout(timer);
-  }, [toasts, sessionId, dismissToast]);
-
-  if (toasts.length === 0) return null;
-
-  return (
-    <div className="toast-host">
-      {toasts.map((toast) => (
-        <button
-          type="button"
-          key={toast.id}
-          className={`toast toast--${toast.type ?? "info"}`}
-          onClick={() => dismissToast(sessionId, toast.id)}
-        >
-          {toast.message}
-        </button>
-      ))}
-    </div>
-  );
-}

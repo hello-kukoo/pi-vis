@@ -252,6 +252,19 @@
   overflow: hidden;
 }
 
+/* Transcript region — positioning container for overlays that belong to the
+   transcript panel itself. Notifications live here (not in the whole session),
+   so they float over transcript content without taking layout space and stop
+   before the composer/dock/status area. */
+.transcript-region {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* Session dock — the fixed-height stack (Dock chip rail + WorktreeBar) wedged
    between the scrolling transcript and the composer. `flex: 0 0 auto` makes it
    rigid so the transcript is the *only* flex item that absorbs vertical

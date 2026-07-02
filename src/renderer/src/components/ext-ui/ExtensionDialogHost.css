@@ -49,8 +49,7 @@
   overflow-y: auto;
   /* Soft entry: the dialog swaps in where the composer was, so a
      gentle slide + fade tells the eye "something just asked for your
-     attention" without resorting to a scrim. 180ms matches the toast's
-     entry, so they feel like the same family. */
+     attention" without resorting to a scrim. */
   animation: ext-dialog-slot-in 0.18s ease-out;
 }
 
@@ -257,61 +256,4 @@
 
 .ext-dialog__btn--cancel:hover {
   background: var(--surface-3);
-}
-
-/* Toast host */
-.toast-host {
-  position: absolute;
-  /* Sit above the dialog slot, not the status bar. The original
-     bottom: 5.714rem landed inside the dialog for any dialog taller
-     than ~80px (which is every real one). Bottom: 8rem (~128px)
-     clears a typical select/confirm/input dialog while still
-     hovering over the status bar. The dialog is z-index 0 and toasts
-     are z-index 300, so even when a tall dialog does overlap, the
-     toast stays readable on top. */
-  bottom: 8rem;
-  right: 1.143rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.571rem;
-  z-index: 300;
-  pointer-events: none;
-}
-
-.toast {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 0.714rem 1rem;
-  font-family: var(--font-display);
-  font-size: 0.929em;
-  color: var(--text);
-  max-width: 21.429rem; /* ≈300px */
-  cursor: pointer;
-  pointer-events: all;
-  box-shadow: var(--elevation-2);
-  animation: slideIn 0.2s ease;
-  line-height: var(--leading-body);
-}
-
-.toast--error {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-.toast--warning {
-  border-color: var(--warning);
-}
-.toast--success {
-  border-color: var(--success);
-}
-
-@keyframes slideIn {
-  from {
-    transform: translateX(1.429rem);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
 }

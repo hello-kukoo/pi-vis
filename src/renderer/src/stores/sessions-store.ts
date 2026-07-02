@@ -61,6 +61,7 @@ export interface SessionViewState {
   statusSegments: Map<string, string>; // statusKey → statusText
   widgets: Map<string, string[]>; // widgetKey → lines
   toasts: Array<{ id: string; message: string; type?: string | undefined; createdAt: number }>;
+  notificationPanelOpen?: boolean | undefined;
   stats?: SessionStats | undefined;
   availableModels: ModelInfo[];
   currentModel?: string | undefined;
@@ -380,6 +381,8 @@ interface SessionsStore {
   dismissUiRequest: (sessionId: SessionId, requestId: string) => void;
   addToast: (sessionId: SessionId, message: string, type?: string) => void;
   dismissToast: (sessionId: SessionId, toastId: string) => void;
+  clearToasts: (sessionId: SessionId) => void;
+  setNotificationPanelOpen: (sessionId: SessionId, open: boolean) => void;
   setHeaderCompact: (v: boolean) => void;
 
   // Worktree bar state (pre-send)
@@ -605,6 +608,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         statusSegments: new Map(),
         widgets: new Map(),
         toasts: [],
+        notificationPanelOpen: false,
         availableModels: [],
         // Worktree fields start unset
         worktreeMode: undefined,
@@ -1287,10 +1291,32 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
+      const toasts = s.toasts.filter((t) => t.id !== toastId);
       sessions.set(sessionId, {
         ...s,
-        toasts: s.toasts.filter((t) => t.id !== toastId),
+        toasts,
+        notificationPanelOpen: toasts.length === 0 ? false : s.notificationPanelOpen,
       });
+      return { sessions };
+    });
+  },
+
+  clearToasts: (sessionId) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s || s.toasts.length === 0) return {};
+      sessions.set(sessionId, { ...s, toasts: [], notificationPanelOpen: false });
+      return { sessions };
+    });
+  },
+
+  setNotificationPanelOpen: (sessionId, open) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, { ...s, notificationPanelOpen: open });
       return { sessions };
     });
   },

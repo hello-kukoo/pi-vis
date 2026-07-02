@@ -7,8 +7,9 @@ import { Composer } from "./components/composer/Composer.js";
 import { WorktreeBar } from "./components/composer/WorktreeBar.js";
 import { DiffViewerHost } from "./components/diff/DiffViewerHost.js";
 import { CustomPanelHost } from "./components/ext-ui/CustomPanelHost.js";
-import { ExtensionDialogHost, ToastHost } from "./components/ext-ui/ExtensionDialogHost.js";
+import { ExtensionDialogHost } from "./components/ext-ui/ExtensionDialogHost.js";
 import { UnifiedTuiHost } from "./components/ext-ui/UnifiedTuiHost.js";
+import { NotificationStack } from "./components/notifications/NotificationStack.js";
 import { AppPickerHost } from "./components/pickers/AppPickerHost.js";
 import { SessionSubBar } from "./components/session-header/SessionSubBar.js";
 import { SettingsView } from "./components/settings/SettingsView.js";
@@ -484,7 +485,10 @@ export function App(): React.ReactElement {
                 title bar. */}
               {/* Sub-bar for compact mode — secondary controls below the title bar */}
               {compact && <SessionSubBar sessionId={activeSessionId} />}
-              <TranscriptView sessionId={activeSessionId} />
+              <div className="transcript-region">
+                <TranscriptView sessionId={activeSessionId} />
+                <NotificationStack sessionId={activeSessionId} />
+              </div>
               {/* Session dock — the rigid (non-shrinking) stack of bars that
                   sits between the scrolling transcript and the composer. The
                   WorktreeBar + Dock (above-composer tray) stack as ordered,
@@ -537,7 +541,6 @@ export function App(): React.ReactElement {
                 <Composer sessionId={activeSessionId} />
               )}
               {statusBarVisible && <StatusBar sessionId={activeSessionId} />}
-              <ToastHost sessionId={activeSessionId} />
             </ErrorBoundary>
           </div>
         ) : (

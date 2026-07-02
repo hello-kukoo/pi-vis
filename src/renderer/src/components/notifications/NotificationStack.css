@@ -1,0 +1,368 @@
+/* First-class in-session notifications.
+   Mounted inside the transcript region so alerts overlay only transcript
+   content and never cover the composer/status area. */
+
+.notification-bell {
+  position: relative;
+  min-width: 1.857rem;
+  justify-content: center;
+  padding-inline: 0.5rem;
+  font-family: var(--font-display);
+}
+
+.notification-bell--open {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.notification-bell__count {
+  position: absolute;
+  top: -0.286rem;
+  right: -0.286rem;
+  min-width: 1rem;
+  height: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.286rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.714em;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--bg-sunken);
+}
+
+.notification-stack {
+  position: absolute;
+  top: var(--space-3);
+  right: clamp(var(--space-3), 3cqi, var(--space-5));
+  z-index: 260;
+  width: min(24rem, calc(100% - var(--space-6)));
+  pointer-events: none;
+}
+
+.notification-stack--expanded {
+  bottom: var(--space-3);
+}
+
+.notification-stack__inner {
+  position: relative;
+  width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  overflow: visible;
+  pointer-events: auto;
+}
+
+.notification-stack--expanded .notification-stack__inner {
+  height: 100%;
+  padding: var(--space-2);
+  gap: var(--space-2);
+  overflow: hidden;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--bg-sunken) 76%, transparent);
+  box-shadow: var(--elevation-3);
+  backdrop-filter: blur(18px) saturate(1.05);
+}
+
+.notification-stack--exiting .notification-stack__inner {
+  animation: notification-out 0.18s ease-in forwards;
+}
+
+/* A soft halo behind transient cards keeps them legible over transcript text
+   without drawing a hard rectangle around the whole notification area. */
+.notification-stack:not(.notification-stack--expanded) .notification-stack__inner::before {
+  content: "";
+  position: absolute;
+  inset: -1.25rem -1rem -1.75rem;
+  z-index: 0;
+  border-radius: var(--radius-xl);
+  background: radial-gradient(
+    ellipse at top right,
+    color-mix(in srgb, var(--bg-sunken) 78%, transparent) 0%,
+    color-mix(in srgb, var(--bg-sunken) 46%, transparent) 46%,
+    transparent 76%
+  );
+  filter: blur(0.35rem);
+  pointer-events: none;
+}
+
+.notification-stack__pile {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 100%;
+  min-height: calc(4.9rem + var(--stack-extra, 0rem));
+  padding-bottom: var(--stack-extra, 0rem);
+}
+
+.notification-stack__backplate,
+.notification-stack__pile-card {
+  grid-area: 1 / 1;
+  width: 100%;
+  border-radius: var(--radius-lg);
+}
+
+.notification-stack__backplate {
+  height: 100%;
+  min-height: 4.55rem;
+  z-index: var(--backplate-z, 9);
+  transform: translateY(var(--backplate-offset, 0.5rem)) scale(var(--backplate-scale, 0.972));
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  box-shadow: 0 0.45rem 1.15rem color-mix(in srgb, var(--shadow) 15%, transparent);
+  opacity: var(--backplate-opacity, 0.82);
+  pointer-events: none;
+}
+
+.notification-stack__pile-card {
+  z-index: 20;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.notification-stack__pile-card:hover {
+  transform: translateY(-0.071rem);
+  border-color: var(--border-strong);
+  box-shadow: var(--elevation-3);
+}
+
+.notification-stack__header {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  min-height: 1.75rem;
+}
+
+.notification-stack__clear {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 0.857em;
+  line-height: var(--leading-label);
+  padding: 0.357rem 0.571rem;
+  cursor: pointer;
+}
+
+.notification-stack__clear:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.notification-stack__list-wrap {
+  position: relative;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.notification-stack__list-wrap::before,
+.notification-stack__list-wrap::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1rem;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.notification-stack__list-wrap::before {
+  top: 0;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--bg-sunken) 76%, transparent),
+    transparent
+  );
+}
+
+.notification-stack__list-wrap::after {
+  bottom: 0;
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--bg-sunken) 76%, transparent),
+    transparent
+  );
+}
+
+.notification-stack__list {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 1rem 0.071rem;
+}
+
+.notification-stack__list::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.notification-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr) 1.714rem;
+  column-gap: 0.5rem;
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  color: var(--text-secondary);
+  box-shadow: var(--elevation-2);
+  backdrop-filter: blur(14px) saturate(1.05);
+  padding: 0.75rem 0.786rem;
+  font-family: var(--font-display);
+  text-align: left;
+  animation: notification-in 0.2s ease-out;
+}
+
+.notification-stack--expanded .notification-card {
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  box-shadow: 0 0.571rem 1.429rem color-mix(in srgb, var(--shadow) 12%, transparent);
+}
+
+.notification-stack__pile-card .notification-stack__pile-open {
+  grid-column: 1 / -1;
+}
+
+.notification-stack__pile-open {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0 1.75rem 0 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-card__marker {
+  flex: 0 0 auto;
+  width: 1rem;
+  height: 0.8rem;
+  margin-top: 0.34rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  color: color-mix(in srgb, var(--info) 58%, var(--text-muted));
+  font-size: 0.64rem;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.78;
+}
+
+.notification-card__marker::before {
+  content: "";
+  width: 0.36rem;
+  height: 0.36rem;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.notification-card--success .notification-card__marker {
+  color: color-mix(in srgb, var(--success) 58%, var(--text-muted));
+}
+
+.notification-card--warning .notification-card__marker {
+  color: color-mix(in srgb, var(--warning) 62%, var(--text-muted));
+}
+
+.notification-card--error .notification-card__marker {
+  color: color-mix(in srgb, var(--danger) 62%, var(--text-muted));
+}
+
+.notification-card__message {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: inherit;
+  font-size: 0.929em;
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.notification-stack__pile-card .notification-card__message {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: none;
+}
+
+.notification-card__dismiss {
+  flex: 0 0 auto;
+  margin-top: -0.1rem;
+  color: var(--text-ghost);
+  opacity: 0.72;
+}
+
+.notification-card:hover .notification-card__dismiss,
+.notification-card__dismiss:focus-visible {
+  opacity: 1;
+}
+
+.notification-card__dismiss:hover {
+  color: var(--text);
+}
+
+.notification-card__dismiss--pile {
+  position: absolute;
+  top: 0.64rem;
+  margin-top: 0;
+  right: 0.429rem;
+  z-index: 2;
+}
+
+@keyframes notification-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.429rem) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes notification-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-0.286rem) scale(0.985);
+  }
+}
+
+@media (max-width: 37.5rem) {
+  .notification-stack {
+    top: var(--space-2);
+    right: var(--space-2);
+    width: min(22rem, calc(100% - var(--space-4)));
+  }
+
+  .notification-stack--expanded {
+    bottom: var(--space-2);
+  }
+}
