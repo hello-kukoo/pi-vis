@@ -116,13 +116,11 @@
   width: 100%;
   background: none;
   border: none;
-  /* Right padding reserves a single column for the hover-revealed actions
-     cluster (× above chevron, stacked vertically). One column instead of two
-     maximizes the name's truncation width. The cluster is absolutely
-     positioned (out of flow) at ~1.7rem wide, so 2rem reserves it with a
-     small gap to the name's clip edge. Reserving unconditionally keeps the
-     ellipsis stable across hover (an on-hover padding change would jump it). */
-  padding: 0.571rem 2rem 0.571rem 0.286rem;
+  /* Match session rows' hover-revealed action pattern: no right-side space is
+     reserved at rest, so the workspace label gets the full row. Hover/focus
+     expands the inline action buttons and FadeText re-measures to the reduced
+     width. */
+  padding: 0.571rem 0 0.571rem 0.286rem;
   text-align: left;
   display: flex;
   align-items: center;
@@ -167,64 +165,60 @@
   opacity: 1;
 }
 
-/* Hover-revealed actions cluster: × (remove) stacked above the expand/collapse
-   chevron. Both hidden until the workspace row is hovered so the resting row
-   shows only the name (and the drag grip on the left). Absolutely positioned
-   against the workspace so it overlays the reserved right padding without
-   affecting layout. `right: 0` (was 0.286rem) so the cluster's right edge
-   sits on the workspace's right edge — which is itself the content column
-   (workspaces container is inset by 0.429rem from the sidebar edge). */
-.sidebar__workspace-actions {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-.sidebar__workspace:hover .sidebar__workspace-actions {
-  opacity: 1;
-}
-/* Keep actions visible while hovering them (they're children of the header). */
-.sidebar__workspace-actions:hover {
-  opacity: 1;
-}
-
+/* Workspace action buttons mirror the session archive/pin behavior. At rest
+   they occupy zero width (and cancel the flex gap with a negative margin), so
+   the label can use the whole row. Hovering or keyboard-focusing the header
+   expands them inline, horizontally: remove then expand/collapse. */
 .sidebar__remove-workspace,
 .sidebar__workspace-chevron {
   background: none;
   border: none;
   cursor: pointer;
   color: var(--text-ghost);
-  /* Compact hit area — tight padding around the ~11px icon so the stacked
-     pair sits close together without crowding. */
-  width: 1.143rem;
-  height: 1rem;
+  width: 0;
+  height: 1.286rem;
+  margin-left: -0.286rem; /* cancel .sidebar__workspace-header's flex gap while collapsed */
   padding: 0;
-  display: flex;
+  overflow: hidden;
+  opacity: 0;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 0.214rem;
-  transition: color 0.12s ease;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  line-height: 1;
+  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease, color 0.12s ease, background
+    0.1s ease;
+}
+.sidebar__workspace-header:is(:hover, :has(:focus-visible)) .sidebar__remove-workspace,
+.sidebar__workspace-header:is(:hover, :has(:focus-visible)) .sidebar__workspace-chevron {
+  width: 1.286rem;
+  margin-left: 0;
+  opacity: 1;
 }
 .sidebar__remove-workspace svg,
 .sidebar__workspace-chevron svg {
-  width: 0.786rem;
-  height: 0.786rem;
+  width: 0.857rem;
+  height: 0.857rem;
+  display: block;
 }
 .sidebar__remove-workspace:hover {
+  background: var(--surface-3);
   color: var(--danger);
 }
 .sidebar__workspace-chevron:hover {
+  background: var(--surface-3);
   color: var(--text);
 }
-/* Chevron rotates to point down when the workspace is expanded. */
-.sidebar__workspace-chevron--expanded {
-  transform: rotate(90deg);
+/* Shared IconChevronRight sits a touch low in a flex-centered square; nudge it
+   up here, then rotate the icon (not the button box) when expanded so the two
+   workspace actions stay vertically aligned with each other and the label. */
+.sidebar__workspace-chevron .icon {
+  transform: translateY(-0.071rem);
+  transition: transform 0.12s ease;
+}
+.sidebar__workspace-chevron--expanded .icon {
+  transform: translateY(-0.071rem) rotate(90deg);
 }
 
 .sidebar__workspace-name {
@@ -343,8 +337,7 @@
 
 .sidebar__session-archive {
   font-size: 0.929em;
-  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease, background 0.1s,
-    color 0.1s;
+  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease, background 0.1s, color 0.1s;
 }
 .sidebar__session-archive:hover {
   background: var(--surface-3);
@@ -371,8 +364,8 @@
    Pinned: always expanded and filled accent, so it reads as identity even
    after the archive icon has collapsed away. */
 .sidebar__session-pin {
-  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease,
-    background 0.1s ease, color 0.1s ease, transform 0.12s ease;
+  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease, background 0.1s ease, color
+    0.1s ease, transform 0.12s ease;
 }
 .sidebar__session-pin:hover {
   background: var(--surface-3);

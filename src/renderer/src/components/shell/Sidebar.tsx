@@ -6,6 +6,7 @@ import { useSessionsStore } from "../../stores/sessions-store.js";
 import { isNewSessionPending, isPendingNewSessionActiveFor } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { IconChevronRight, IconClose } from "../common/icons.js";
 import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
 
@@ -530,52 +531,31 @@ export function Sidebar({
                   <FadeText>{ws.path.split("/").pop() ?? ws.path}</FadeText>
                 </button>
 
-                <div className="sidebar__workspace-actions">
-                  <button
-                    type="button"
-                    className="sidebar__remove-workspace"
-                    onClick={() => {
-                      for (const s of Array.from(sessions.values())) {
-                        if (s.workspacePath === ws.path) void closeSessionTab(s.sessionId);
-                      }
-                      window.pivis
-                        .invoke("workspace.remove", { workspacePath: ws.path })
-                        .catch(console.error);
-                      removeWorkspace(ws.path);
-                    }}
-                    title="Remove workspace"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      aria-hidden="true"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                    >
-                      <path d="M4 4l8 8M12 4l-8 8" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    className={`sidebar__workspace-chevron ${isExpanded ? "sidebar__workspace-chevron--expanded" : ""}`}
-                    onClick={() => handleToggleExpand(ws.path)}
-                    title={isExpanded ? "Collapse" : "Expand"}
-                    aria-expanded={isExpanded}
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      aria-hidden="true"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M6 4l4 4-4 4" />
-                    </svg>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className="sidebar__remove-workspace"
+                  onClick={() => {
+                    for (const s of Array.from(sessions.values())) {
+                      if (s.workspacePath === ws.path) void closeSessionTab(s.sessionId);
+                    }
+                    window.pivis
+                      .invoke("workspace.remove", { workspacePath: ws.path })
+                      .catch(console.error);
+                    removeWorkspace(ws.path);
+                  }}
+                  title="Remove workspace"
+                >
+                  <IconClose />
+                </button>
+                <button
+                  type="button"
+                  className={`sidebar__workspace-chevron ${isExpanded ? "sidebar__workspace-chevron--expanded" : ""}`}
+                  onClick={() => handleToggleExpand(ws.path)}
+                  title={isExpanded ? "Collapse" : "Expand"}
+                  aria-expanded={isExpanded}
+                >
+                  <IconChevronRight />
+                </button>
               </div>
 
               {isExpanded && (
