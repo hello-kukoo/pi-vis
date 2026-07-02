@@ -5,7 +5,7 @@ import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinkin
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
-import { formatCost, formatTokens } from "../../lib/format.js";
+import { ContextMeter } from "./ContextMeter.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
@@ -157,10 +157,6 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     ro.observe(el);
     return () => ro.disconnect();
   }, [setHeaderCompact]);
-
-  const stats = session?.stats;
-  const contextPct =
-    stats?.contextUsage?.percent != null ? Math.round(stats.contextUsage.percent) : null;
 
   return (
     <div className="session-header" ref={headerRef}>
@@ -367,10 +363,6 @@ export function SessionControls({
     );
   }, []);
 
-  const stats = session?.stats;
-  const contextPct =
-    stats?.contextUsage?.percent != null ? Math.round(stats.contextUsage.percent) : null;
-
   return (
     <div className="session-header__controls">
       {/* Unified-TUI view toggle — shown only while a factory `setWidget` panel is live.
@@ -528,22 +520,8 @@ export function SessionControls({
         )}
       </div>
 
-      {/* Context meter — always rendered while a session is active. */}
-      <div className="session-header__context">
-        <div
-          className="context-meter"
-          title={contextPct !== null ? `${contextPct}% context used` : "Context usage"}
-        >
-          <div
-            className={`context-meter__fill${(contextPct ?? 0) >= 90 ? " context-meter__fill--danger" : (contextPct ?? 0) >= 80 ? " context-meter__fill--warn" : ""}`}
-            style={{ width: `${contextPct ?? 0}%` }}
-          />
-        </div>
-        <span className="session-header__meta">
-          {stats?.tokens?.total != null && formatTokens(stats.tokens.total)}
-          {stats?.cost != null && ` · ${formatCost(stats.cost)}`}
-        </span>
-      </div>
+      {/* Context ring — click for a usage breakdown dropdown. */}
+      <ContextMeter sessionId={sessionId} />
     </div>
   );
 }

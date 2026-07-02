@@ -22,8 +22,3 @@
   flex-wrap: wrap;
   gap: 0.429rem 0.571rem;
 }
-
-/* In the sub-bar, the context span can shrink more aggressively. */
-.session-sub-bar .session-header__meta {
-  font-size: 0.786em;
-}

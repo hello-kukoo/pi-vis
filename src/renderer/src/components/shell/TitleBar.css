@@ -26,8 +26,17 @@
      positions them natively at ~12px from the window's left edge and
      the three buttons + spacing span ~78px, so 80px of padding puts
      the leftmost interactive element (the sidebar toggle) just
-     past them. */
-  padding: 0 16px 0 80px;
+     past them.
+
+     Right padding is 0: the title bar shares the canvas color
+     (--color-sidebar === --bg-sunken) with the session-header that fills
+     it, so the header can run flush to the window edge with no color
+     seam. The rightmost control's edge offset is then owned entirely by
+     the session-header's own padding, which is tuned so the context ring
+     lines up with the floating content card's right edge (whose margin
+     is --space-2). The sidebar-collapsed pill overrides this to
+     `padding: 0 var(--space-2)` for its floating inset. */
+  padding: 0 0 0 80px;
   /* The title bar is the top strip of the window canvas — same color as the
      sidebar and the area behind the floating content card, with no divider.
      The content card's own top edge provides the only separation needed. */
@@ -45,9 +54,10 @@
 }
 
 /* macOS fullscreen: the native traffic-light buttons disappear, so the
-   80px left clearance they require is dead space. Reclaim it by matching
-   the right padding (16px) so the title bar content stretches back to the
-   window edge. */
+   80px left clearance they require is dead space. Reclaim it (16px keeps
+   the sidebar toggle off the window edge). The right side already runs
+   flush (0 padding) so the context ring stays aligned with the content
+   card's right edge. */
 .app--fullscreen .titlebar {
   padding-left: 16px;
 }
