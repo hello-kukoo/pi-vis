@@ -15,6 +15,7 @@ import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { cssEscape } from "../../lib/format.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { type TreeFilterMode, isTreeUnsupported, useTreeStore } from "../../stores/tree-store.js";
+import { FadeText } from "../common/FadeText.js";
 import { type VisibleRow, flattenVisible } from "./tree-flatten.js";
 import "../common/viewer-header.css";
 import "./TreeViewer.css";
@@ -423,6 +424,7 @@ function TreeRow({
     <div
       className={[
         "tree-viewer__row",
+        "fade-scope",
         selected ? "tree-viewer__row--selected" : "",
         row.isLeaf ? "tree-viewer__row--leaf" : "",
       ].join(" ")}
@@ -466,9 +468,9 @@ function TreeRow({
       >
         {row.onActivePath ? "•" : ""}
       </span>
-      <span className={`tree-viewer__row-text tree-viewer__row-text--${row.kind}`} title={row.text}>
+      <FadeText className={`tree-viewer__row-text tree-viewer__row-text--${row.kind}`}>
         {row.text}
-      </span>
+      </FadeText>
       {row.label && (
         <button
           type="button"

@@ -1,0 +1,129 @@
+/* ── FadeText — fade-out truncation + hover reveal glide ─────────────────
+   The outer span clips; the inner span holds the full-width content. When
+   the content overflows (JS-measured, `data-overflow` set), the trailing
+   edge fades via a mask instead of an ellipsis. Hovering the text — or any
+   ancestor carrying `.fade-scope` (a row/button whose whole area should be
+   the hover target) — glides the inner span left to reveal the tail, then
+   glides back on leave.
+
+   The two mask-edge widths are @property-registered lengths so they can
+   TRANSITION. This keeps the fade attached to the MOTION, not the hover:
+   the leading fade ramps in only as the glide starts (same delay), and the
+   trailing fade dissolves only as the tail arrives at the edge — never an
+   instant mask swap on the first hovered frame.
+
+   `.fade-hover` mirrors `:hover` on both the text and the scope so tests
+   can drive the reveal deterministically. */
+
+@property --fade-txt-l {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --fade-txt-r {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+.fade-text {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  /* Shared by the glide and both mask edges, so they always start together.
+     A cursor merely passing through never jiggles labels. */
+  --fade-delay: 280ms;
+}
+
+.fade-text--pre {
+  white-space: pre;
+}
+
+.fade-text__inner {
+  display: inline-block;
+  white-space: inherit;
+  transform: translateX(0);
+  /* Snap-back on leave — quick, so the label is immediately readable again. */
+  transition: transform 240ms ease-out;
+}
+
+/* ── Tail mode (default): head visible at rest, trailing edge fades ────── */
+
+.fade-text[data-overflow] {
+  --fade-txt-l: 0px;
+  --fade-txt-r: 1.5em;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--fade-txt-l),
+    black calc(100% - var(--fade-txt-r)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--fade-txt-l),
+    black calc(100% - var(--fade-txt-r)),
+    transparent
+  );
+  /* Un-hover: edges return in step with the 240ms glide home. */
+  transition: --fade-txt-l 180ms ease-out, --fade-txt-r 180ms ease-out 60ms;
+}
+
+.fade-text[data-overflow]:is(:hover, .fade-hover),
+:is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text[data-overflow] {
+  --fade-txt-l: 1.25em;
+  --fade-txt-r: 0px;
+  /* Leading fade rides the START of the glide; trailing fade dissolves as
+     the tail ARRIVES at the edge (end of the glide). */
+  transition: --fade-txt-l 200ms linear var(--fade-delay),
+    --fade-txt-r 200ms linear calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms);
+}
+
+.fade-text[data-overflow]:is(:hover, .fade-hover) .fade-text__inner,
+:is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text[data-overflow] .fade-text__inner {
+  transform: translateX(var(--fade-shift));
+  transition: transform var(--fade-dur, 1200ms) linear var(--fade-delay);
+}
+
+/* ── Head mode: tail visible at rest, leading edge fades ─────────────────
+   For values whose tail is the load-bearing part (long directory paths):
+   the inner span sits pre-shifted so the tail shows; hovering glides right
+   to reveal the head. Same motion-synced edges, mirrored. */
+
+.fade-text--head .fade-text__inner {
+  transform: translateX(var(--fade-shift, 0px));
+}
+
+.fade-text--head[data-overflow] {
+  --fade-txt-l: 1.5em;
+  --fade-txt-r: 0px;
+}
+
+.fade-text--head[data-overflow]:is(:hover, .fade-hover),
+:is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text--head[data-overflow] {
+  --fade-txt-l: 0px;
+  --fade-txt-r: 1.25em;
+  transition: --fade-txt-l 200ms linear
+      calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms),
+    --fade-txt-r 200ms linear var(--fade-delay);
+}
+
+.fade-text--head[data-overflow]:is(:hover, .fade-hover) .fade-text__inner,
+:is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text--head[data-overflow] .fade-text__inner {
+  transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-text[data-overflow],
+  .fade-text[data-overflow]:is(:hover, .fade-hover),
+  :is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text[data-overflow],
+  .fade-text__inner,
+  .fade-text[data-overflow]:is(:hover, .fade-hover) .fade-text__inner,
+  :is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text[data-overflow] .fade-text__inner {
+    transition: none;
+  }
+}

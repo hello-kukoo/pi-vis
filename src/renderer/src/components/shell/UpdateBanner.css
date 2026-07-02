@@ -65,9 +65,6 @@
   min-width: 0;
   color: var(--success);
   font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .update-banner__actions {
@@ -185,9 +182,6 @@
 .update-banner__detail-name {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
   font-weight: 500;
 }

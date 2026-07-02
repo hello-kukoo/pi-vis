@@ -14,6 +14,7 @@ import {
   type UserBlockData,
   hasAssistantContent,
 } from "../../stores/transcript.js";
+import { FadeText } from "../common/FadeText.js";
 import { DiffBlock } from "./DiffBlock.js";
 import "./TranscriptView.css";
 
@@ -194,11 +195,16 @@ function ToolCardShell({
   return (
     <div className={classes}>
       {expandable ? (
-        <button type="button" className="tool-card__header" onClick={onToggle} aria-expanded={open}>
+        <button
+          type="button"
+          className="tool-card__header fade-scope"
+          onClick={onToggle}
+          aria-expanded={open}
+        >
           {header}
         </button>
       ) : (
-        <div className="tool-card__header">{header}</div>
+        <div className="tool-card__header fade-scope">{header}</div>
       )}
       {children}
       {expandable && (
@@ -331,7 +337,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
       <span className={`tool-card__name ${isBash ? "tool-card__name--bash" : ""}`}>
         {isBash ? "$" : data.toolName}
       </span>
-      {subject && <span className="tool-card__subject">{subject}</span>}
+      {subject && <FadeText className="tool-card__subject">{subject}</FadeText>}
       {data.isStreaming && <span className="spinner tool-card__spinner" />}
       {data.isError && <span className="tool-card__badge">error</span>}
     </>
@@ -435,7 +441,7 @@ const BashBlock = memo(function BashBlock({
   const header = (
     <>
       <span className="tool-card__name tool-card__name--bash">$</span>
-      <span className="tool-card__subject tool-card__subject--command">{data.command}</span>
+      <FadeText className="tool-card__subject tool-card__subject--command">{data.command}</FadeText>
       {data.isStreaming && <span className="spinner tool-card__spinner" />}
       {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
     </>

@@ -174,9 +174,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ── Scrollbars — one app-wide treatment ─────────────────────────────────
+   A slim rounded pill floating in a transparent gutter (the transparent
+   border + background-clip inset it from the edge). Fixed px so every
+   scroller — UI lists, code blocks, xterm viewports — gets the same bar
+   regardless of the element's own font size (the old 0.4em varied). */
 ::-webkit-scrollbar {
-  width: 0.4em;
-  height: 0.4em;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -185,11 +190,14 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--surface-2);
-  border-radius: var(--radius-sm);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  min-height: 24px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--surface-3);
+  background-color: var(--surface-3);
 }
 
 /* The corner where a horizontal and vertical scrollbar meet. Unstyled, it

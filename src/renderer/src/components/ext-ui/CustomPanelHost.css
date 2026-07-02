@@ -113,22 +113,9 @@
   height: 100%;
 }
 
-/* Thin Catppuccin scrollbar for the overflow case (content taller than the
-   cap) — the card/scroll-wrapper scrolls, not xterm's own viewport. */
-.custom-panel__scroll,
-.custom-panel.unified-panel {
-  scrollbar-width: thin;
-  scrollbar-color: var(--surface-2) transparent;
-}
-.custom-panel__scroll::-webkit-scrollbar,
-.custom-panel.unified-panel::-webkit-scrollbar {
-  width: 8px;
-}
-.custom-panel__scroll::-webkit-scrollbar-thumb,
-.custom-panel.unified-panel::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: var(--radius-pill);
-}
+/* Overflow case (content taller than the cap): the card/scroll-wrapper
+   scrolls, not xterm's own viewport — it inherits the app-wide scrollbar
+   treatment from theme.css. */
 
 /* No focus rings on internal elements — the panel card is the focus
    context (it replaces the Composer's mauve input ring in the same

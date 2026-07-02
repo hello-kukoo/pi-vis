@@ -334,9 +334,6 @@
 
 .tree-viewer__row-text {
   flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   min-width: 0;
   color: var(--text-secondary);
 }

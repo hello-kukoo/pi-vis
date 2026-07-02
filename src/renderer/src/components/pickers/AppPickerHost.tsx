@@ -8,6 +8,7 @@ import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import type { PickerRequest } from "../../lib/commands/execute.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./AppPickerHost.css";
 
 interface PickerHostProps {
@@ -322,7 +323,7 @@ function ModelPicker({
                 if (el) itemRefs.current.set(idx, el);
                 else itemRefs.current.delete(idx);
               }}
-              className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""} ${selected ? "picker__item--selected" : ""}`}
+              className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""} ${selected ? "picker__item--selected" : ""}`}
               onClick={() => onPick(m)}
               onMouseEnter={() => setHighlightedIndex(idx)}
               role="option"
@@ -331,7 +332,7 @@ function ModelPicker({
               <span className="picker__selected-mark" aria-hidden>
                 {selected ? "✓" : ""}
               </span>
-              <span className="picker__item-name">{label}</span>
+              <FadeText className="picker__item-name">{label}</FadeText>
               <span className="picker__item-meta">{m.id}</span>
             </button>
           );
@@ -411,13 +412,13 @@ function ForkPicker({
                 if (el) itemRefs.current.set(idx, el);
                 else itemRefs.current.delete(idx);
               }}
-              className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+              className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
               onClick={() => onPick(m.entryId)}
               onMouseEnter={() => setHighlightedIndex(idx)}
               role="option"
               aria-selected={idx === highlightedIndex}
             >
-              <span className="picker__item-name">{truncated}</span>
+              <FadeText className="picker__item-name">{truncated}</FadeText>
             </button>
           );
         })}
@@ -502,15 +503,15 @@ function ResumePicker({
               if (el) itemRefs.current.set(idx, el);
               else itemRefs.current.delete(idx);
             }}
-            className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+            className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
             onClick={() => onPick(s)}
             onMouseEnter={() => setHighlightedIndex(idx)}
             role="option"
             aria-selected={idx === highlightedIndex}
           >
-            <span className="picker__item-name">
+            <FadeText className="picker__item-name">
               {s.name ?? s.preview ?? s.filePath.split("/").pop()}
-            </span>
+            </FadeText>
             <span className="picker__item-meta">{s.messageCount} messages</span>
           </button>
         ))}
@@ -649,7 +650,7 @@ function ScopedModelsPicker({
                 if (el) itemRefs.current.set(idx, el);
                 else itemRefs.current.delete(idx);
               }}
-              className={`picker__item picker__item--check ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+              className={`picker__item picker__item--check fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
               onClick={() => toggle(id)}
               onMouseEnter={() => setHighlightedIndex(idx)}
               role="option"
@@ -659,7 +660,7 @@ function ScopedModelsPicker({
                 className={`picker__checkbox ${isChecked ? "picker__checkbox--checked" : ""}`}
                 aria-hidden="true"
               />
-              <span className="picker__item-name">{label}</span>
+              <FadeText className="picker__item-name">{label}</FadeText>
               <span className="picker__item-meta">{m.id}</span>
             </button>
           );
@@ -785,13 +786,13 @@ function LogoutPicker({
               if (el) itemRefs.current.set(idx, el);
               else itemRefs.current.delete(idx);
             }}
-            className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+            className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
             onClick={() => onPick(p)}
             onMouseEnter={() => setHighlightedIndex(idx)}
             role="option"
             aria-selected={idx === highlightedIndex}
           >
-            <span className="picker__item-name">{p.name}</span>
+            <FadeText className="picker__item-name">{p.name}</FadeText>
             <span className={`picker__badge picker__badge--${p.authType}`}>
               {p.authType === "oauth" ? "OAuth" : "API Key"}
             </span>
@@ -917,9 +918,9 @@ function TrustPicker({
   return (
     <div className="picker picker--trust">
       <div className="picker__title">Project trust</div>
-      <div className="picker__trust-cwd" title={cwd}>
+      <FadeText head className="picker__trust-cwd" title={cwd}>
         {cwd}
-      </div>
+      </FadeText>
       <div className="picker__trust-status">
         {savedDecision === null
           ? "No saved decision"
@@ -958,12 +959,12 @@ function TrustPicker({
               else itemRefs.current.delete(idx);
             }}
             type="button"
-            className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+            className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
             disabled={saving}
             onMouseEnter={() => setHighlightedIndex(idx)}
             onClick={() => void choose(idx)}
           >
-            <span className="picker__item-name">{option.label}</span>
+            <FadeText className="picker__item-name">{option.label}</FadeText>
             <span className="picker__item-meta">{option.trusted ? "trusted" : "untrusted"}</span>
           </button>
         ))}

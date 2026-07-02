@@ -156,9 +156,7 @@
 
 .picker__item-name {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
 }
 
 .picker__item-meta {
@@ -200,14 +198,12 @@
 
 /* ── /trust picker ───────────────────────────────────────────────────── */
 /* The cwd sits under the title so the user knows which folder a trust
-   decision applies to. Ellipsized so a long path never blows out the card. */
+   decision applies to. Head-truncated (FadeText `head`) so a long path keeps
+   its informative tail without blowing out the card. */
 .picker__trust-cwd {
-  font-family: var(--font-mono);
+  font-family: var(--font-code);
   font-size: 0.857em;
   color: var(--text-ghost);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .picker__trust-status {

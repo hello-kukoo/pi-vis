@@ -15,6 +15,7 @@ import { openDiffForSession } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { isNewSessionPending } from "../../stores/sessions-store.js";
 import { useTreeStore } from "../../stores/tree-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./Composer.css";
 
 interface ComposerProps {
@@ -853,7 +854,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                 <button
                   type="button"
                   key={s.key}
-                  className={`composer__suggestion ${i === slashIndex ? "composer__suggestion--selected" : ""}`}
+                  className={`composer__suggestion fade-scope ${i === slashIndex ? "composer__suggestion--selected" : ""}`}
                   onClick={() => handleSuggestionClick(s)}
                   onMouseEnter={() => setSlashIndex(i)}
                   role="option"
@@ -861,7 +862,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                 >
                   <span className="composer__suggestion-name">/{s.name}</span>
                   <span className="composer__suggestion-arg">{s.argHint ?? ""}</span>
-                  <span className="composer__suggestion-desc">{s.description ?? ""}</span>
+                  <FadeText className="composer__suggestion-desc">{s.description ?? ""}</FadeText>
                   <span
                     className={`composer__suggestion-badge composer__suggestion-badge--${s.badge}`}
                   >
@@ -908,9 +909,11 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             />
             {text === "" && (
               <div className="composer__placeholder" aria-hidden="true">
-                {isStreaming
-                  ? "Streaming… (Enter to steer, Esc to abort)"
-                  : "Message pi… (Enter to send, !cmd for bash, /cmd for commands)"}
+                <FadeText>
+                  {isStreaming
+                    ? "Streaming… (Enter to steer, Esc to abort)"
+                    : "Message pi… (Enter to send, !cmd for bash, /cmd for commands)"}
+                </FadeText>
               </div>
             )}
           </div>

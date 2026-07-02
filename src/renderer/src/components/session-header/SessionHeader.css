@@ -63,17 +63,14 @@
   font-size: 0.929em;
   font-weight: 600;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   /* Left-aligned and sized to its text (flex: 0 1 auto — don't grow, do
      shrink). It used to be flex: 1, which stretched it across the whole left
      half and — with a button's default centered text — produced a dated,
      centered title that also covered the entire region as a no-drag element,
      leaving almost nothing to grab the window by. Now the title sits flush
      left near the toggle (modern editor convention) and the slack to its right
-     stays part of the title bar's drag region. It still shrinks + ellipsizes
-     when space is tight (min-width: 0). */
+     stays part of the title bar's drag region. It still shrinks when space is
+     tight (min-width: 0); the FadeText child owns the clipping. */
   flex: 0 1 auto;
   min-width: 0;
   text-align: left;
@@ -200,9 +197,6 @@
 }
 
 .session-header__picker-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
 }
 
@@ -247,6 +241,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   min-width: 14.286rem;
+  max-width: 24rem;
   max-height: 21.429rem;
   overflow-y: auto;
   z-index: 100;
@@ -296,7 +291,8 @@
   background: none;
   border: none;
   cursor: pointer;
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
   text-align: left;
   padding: 0.571rem 0.857rem;
@@ -307,6 +303,13 @@
   /* Dropdown option inside a popup that's anchored to a control in the
      titlebar's drag region. */
   -webkit-app-region: no-drag;
+}
+
+/* Single-line labels: a long model name fades (FadeText) instead of
+   wrapping the row onto two lines. */
+.session-header__dropdown-item-label {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Hover/highlight is driven solely by the JS-managed --highlighted

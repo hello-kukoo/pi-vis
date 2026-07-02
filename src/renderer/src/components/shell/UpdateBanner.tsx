@@ -3,6 +3,7 @@ import type React from "react";
 import { useCallback, useState } from "react";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./UpdateBanner.css";
 
 export function UpdateBanner({
@@ -76,7 +77,7 @@ export function UpdateBanner({
   return (
     <div className={`update-banner${floating ? " update-banner--floating" : ""}`}>
       <div className="update-banner__row">
-        <span className="update-banner__text">{parts.join(" — ")}</span>
+        <FadeText className="update-banner__text">{parts.join(" — ")}</FadeText>
         <div className="update-banner__actions">
           <button type="button" className="update-banner__btn" onClick={handleUpdateAll}>
             Update now
@@ -109,7 +110,7 @@ export function UpdateBanner({
         <ul id="update-banner-details" className="update-banner__details">
           {hasPiUpdate && status.pi.latest && (
             <li className="update-banner__detail-row">
-              <span className="update-banner__detail-name">pi</span>
+              <FadeText className="update-banner__detail-name">pi</FadeText>
               <span className="update-banner__detail-version">
                 {status.pi.current} → {status.pi.latest}
               </span>
@@ -148,9 +149,9 @@ function ExtensionRow({
           : ext.kind;
   return (
     <li className="update-banner__detail-row">
-      <span className="update-banner__detail-name" title={ext.source}>
+      <FadeText className="update-banner__detail-name" title={ext.source}>
         {ext.name}
-      </span>
+      </FadeText>
       <span className="update-banner__detail-version">{version}</span>
       <button
         type="button"

@@ -3,6 +3,7 @@ import type React from "react";
 import { AnsiText } from "../../lib/ansi.js";
 import { formatCost, formatTokens } from "../../lib/format.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./StatusBar.css";
 
 interface StatusBarProps {
@@ -49,10 +50,10 @@ export function StatusBar({ sessionId }: StatusBarProps): React.ReactElement | n
         <div className="statusbar__line statusbar__line--split">
           <span>{usageParts.join(" ")}</span>
           {session.currentModel && (
-            <span className="statusbar__model">
+            <FadeText className="statusbar__model">
               {session.currentModel}
               {session.currentProvider ? ` [${session.currentProvider}]` : ""}
-            </span>
+            </FadeText>
           )}
         </div>
       )}

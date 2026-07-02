@@ -32,9 +32,9 @@
   /* A vertical list never scrolls horizontally. Without this, `overflow-y:
      auto` resolves overflow-x to `auto` too, so any row whose content can't
      shrink (a long path/session name) would clip into a scrollable region —
-     the text would be cut at the *content* edge instead of truncating with an
-     ellipsis at the *visible* edge. Clipping x keeps every row sized to the
-     visible width so the ellipsis engages. */
+     the text would be cut at the *content* edge instead of truncating at the
+     *visible* edge. Clipping x keeps every row sized to the visible width so
+     the FadeText fade truncation engages. */
   overflow-x: hidden;
   /* Right margin insets every workspace row by the content column so its
      right edge lines up vertically with the session pills / show-more /
@@ -239,11 +239,9 @@
   color: var(--text-muted); /* muted at rest; brightens on hover, mauve when active */
   line-height: 1.4; /* deterministic single-line height → see the × sizing below */
   /* min-width: 0 lets the flex item shrink below its min-content width so the
-     ellipsis engages (same fix the session name uses). */
+     fade truncation engages (same fix the session name uses). Clipping itself
+     is owned by the FadeText child. */
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   text-align: left;
 }
 
@@ -306,29 +304,47 @@
 
 .sidebar__session-name {
   flex: 1;
-  min-width: 0; /* allow the flex item to shrink so the ellipsis engages */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0; /* allow the flex item to shrink so the fade truncation engages */
 }
 
-/* Hover-revealed archive button */
-.sidebar__session-archive {
-  margin-left: auto;
+/* Hover-revealed action buttons (archive + pin). At rest they occupy ZERO
+   width — width, padding, and the row gap (cancelled by the negative
+   margin) all collapse — so the session name gets the entire row and its
+   fade truncation only engages when genuinely out of room. Hovering or
+   keyboard-focusing the row expands them (width + opacity transition); the
+   name's FadeText re-measures live via its ResizeObserver, so the label
+   re-fades to the reduced width as the buttons appear. */
+.sidebar__session-archive,
+.sidebar__session-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  padding: 0.143rem 0;
+  margin-left: -0.429rem; /* cancel the row's flex gap while collapsed */
+  overflow: hidden;
   opacity: 0;
   background: none;
   border: none;
   color: var(--text-ghost);
   cursor: pointer;
-  font-size: 0.929em;
-  padding: 0.143rem 0.286rem;
   line-height: 1;
   flex-shrink: 0;
   border-radius: var(--radius-sm);
-  transition: opacity 0.1s, background 0.1s, color 0.1s;
 }
-.sidebar__session:hover .sidebar__session-archive {
+
+.sidebar__session:is(:hover, :focus-within) .sidebar__session-archive,
+.sidebar__session:is(:hover, :focus-within) .sidebar__session-pin,
+.sidebar__session--pinned .sidebar__session-pin {
+  width: 1.429rem;
+  margin-left: 0;
   opacity: 1;
+}
+
+.sidebar__session-archive {
+  font-size: 0.929em;
+  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease, background 0.1s,
+    color 0.1s;
 }
 .sidebar__session-archive:hover {
   background: var(--surface-3);
@@ -351,23 +367,12 @@
 }
 
 /* Pin button — sits to the right of the archive button. Unpinned: reveals
-   on row hover like the archive button. Pinned: always visible and filled
-   accent, so it reads as identity even after the archive icon has faded. */
+   on row hover like the archive button (shared collapsed treatment above).
+   Pinned: always expanded and filled accent, so it reads as identity even
+   after the archive icon has collapsed away. */
 .sidebar__session-pin {
-  background: none;
-  border: none;
-  color: var(--text-ghost);
-  cursor: pointer;
-  padding: 0.143rem 0.286rem;
-  line-height: 1;
-  flex-shrink: 0;
-  border-radius: var(--radius-sm);
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.1s ease, color 0.1s ease,
-    transform 0.12s ease;
-}
-.sidebar__session:hover .sidebar__session-pin {
-  opacity: 1;
+  transition: width 0.12s ease, margin 0.12s ease, opacity 0.12s ease,
+    background 0.1s ease, color 0.1s ease, transform 0.12s ease;
 }
 .sidebar__session-pin:hover {
   background: var(--surface-3);
@@ -387,13 +392,6 @@
   width: 0.95em;
   height: 0.95em;
   display: block;
-}
-
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text-faint);
 }
 
 .sidebar__session-meta {

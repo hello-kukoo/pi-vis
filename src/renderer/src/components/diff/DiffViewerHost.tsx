@@ -14,6 +14,7 @@ import type { SearchMatch, SearchableFile } from "../../lib/diff/search.js";
 import { computeMatches } from "../../lib/diff/search.js";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
+import { FadeText } from "../common/FadeText.js";
 import { BaseBranchDropdown } from "./BaseBranchDropdown.js";
 import { DiffFileSection } from "./DiffFileSection.js";
 import "../common/viewer-header.css";
@@ -1126,7 +1127,7 @@ function Rail({
                 <button
                   type="button"
                   key={`dir:${row.dirPath}`}
-                  className="diff-tree__row diff-tree__row--dir"
+                  className="diff-tree__row diff-tree__row--dir fade-scope"
                   title={row.dirPath}
                   onClick={() => {
                     if (!filterActive && row.dirPath) {
@@ -1146,9 +1147,9 @@ function Rail({
                   >
                     <ChevronIcon />
                   </span>
-                  <span className="diff-tree__dir-label diff-tree__label--truncate-tail">
+                  <FadeText head className="diff-tree__dir-label">
                     {row.label}
-                  </span>
+                  </FadeText>
                   {(row.insertions > 0 || row.deletions > 0) && (
                     <span className="diff-tree__dir-counts">
                       {row.insertions > 0 && (
@@ -1172,7 +1173,7 @@ function Rail({
                 type="button"
                 key={f.path}
                 data-path={f.path}
-                className={`diff-tree__row diff-tree__row--file${isActive ? " diff-tree__row--active" : ""}`}
+                className={`diff-tree__row diff-tree__row--file fade-scope${isActive ? " diff-tree__row--active" : ""}`}
                 onClick={() => onSelect(f.path)}
                 role="option"
                 aria-selected={isActive}
@@ -1190,10 +1191,10 @@ function Rail({
                 </span>
                 <span className="diff-tree__file-label">
                   {stem === "" ? (
-                    <span className="diff-tree__file-stem">{ext || row.label}</span>
+                    <FadeText className="diff-tree__file-stem">{ext || row.label}</FadeText>
                   ) : (
                     <>
-                      <span className="diff-tree__file-stem">{stem}</span>
+                      <FadeText className="diff-tree__file-stem">{stem}</FadeText>
                       <span className="diff-tree__file-ext">{ext}</span>
                     </>
                   )}

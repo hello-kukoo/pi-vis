@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { isNewSessionPending, isPendingNewSessionActiveFor } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
+import { FadeText } from "../common/FadeText.js";
 import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
 
@@ -522,11 +523,11 @@ export function Sidebar({
                 </span>
                 <button
                   type="button"
-                  className="sidebar__workspace-name"
+                  className="sidebar__workspace-name fade-scope"
                   onClick={() => handleSelectWorkspace(ws.path)}
                   title={ws.path}
                 >
-                  {ws.path.split("/").pop() ?? ws.path}
+                  <FadeText>{ws.path.split("/").pop() ?? ws.path}</FadeText>
                 </button>
 
                 <div className="sidebar__workspace-actions">
@@ -609,7 +610,7 @@ export function Sidebar({
                                 key={entry.sessionId}
                                 role="button"
                                 tabIndex={0}
-                                className={`sidebar__session ${activeSessionId === entry.sessionId ? "sidebar__session--active" : ""} ${isPinned ? "sidebar__session--pinned" : ""}`}
+                                className={`sidebar__session fade-scope ${activeSessionId === entry.sessionId ? "sidebar__session--active" : ""} ${isPinned ? "sidebar__session--pinned" : ""}`}
                                 draggable={isPinned}
                                 onDragStart={
                                   isPinned && entry.filePath
@@ -659,7 +660,7 @@ export function Sidebar({
                                     unreadStatus={liveSession?.unreadStatus}
                                   />
                                 )}
-                                <span className="sidebar__session-name">{entry.name}</span>
+                                <FadeText className="sidebar__session-name">{entry.name}</FadeText>
                                 <button
                                   type="button"
                                   className="sidebar__session-archive"
@@ -694,14 +695,13 @@ export function Sidebar({
                           }
 
                           // Stored session row
-                          const isPinned =
-                            entry.filePath != null && pinnedSet.has(entry.filePath);
+                          const isPinned = entry.filePath != null && pinnedSet.has(entry.filePath);
                           return (
                             <div
                               key={entry.filePath}
                               role="button"
                               tabIndex={0}
-                              className={`sidebar__session ${isPinned ? "sidebar__session--pinned" : ""}`}
+                              className={`sidebar__session fade-scope ${isPinned ? "sidebar__session--pinned" : ""}`}
                               draggable={isPinned}
                               onDragStart={
                                 isPinned
@@ -743,7 +743,7 @@ export function Sidebar({
                               }}
                             >
                               <span className="status-dot status-dot--cold" title="Not running" />
-                              <span className="sidebar__session-name">{entry.name}</span>
+                              <FadeText className="sidebar__session-name">{entry.name}</FadeText>
                               <button
                                 type="button"
                                 className="sidebar__session-archive"

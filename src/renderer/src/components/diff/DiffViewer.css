@@ -535,19 +535,11 @@
   transform: rotate(90deg);
 }
 
+/* Head-truncated (via FadeText `head`) for compressed dir paths — the tail
+   is the informative part, so the leading edge fades instead. */
 .diff-tree__dir-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   flex-shrink: 1;
   min-width: 0;
-}
-
-/* Left-truncated label for compressed dir paths — shows the tail. */
-.diff-tree__label--truncate-tail {
-  direction: rtl;
-  text-align: left;
-  unicode-bidi: plaintext;
 }
 
 .diff-tree__dir-counts {
@@ -559,10 +551,8 @@
   flex-shrink: 0;
 }
 
-/* File label: stem (truncatable) + extension (always visible). */
+/* File label: stem (truncatable via FadeText) + extension (always visible). */
 .diff-tree__file-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 1;
   min-width: 0;
@@ -571,9 +561,6 @@
 }
 
 .diff-tree__file-stem {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   flex-shrink: 1;
   min-width: 0;
   color: var(--text);

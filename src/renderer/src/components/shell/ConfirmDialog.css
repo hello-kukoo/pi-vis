@@ -5,7 +5,10 @@
 .confirm-dialog-scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  /* Same scrim treatment as the settings/changelog/update overlays — the
+     theme-tuned scrim color + soft blur, not an ad-hoc black wash. */
+  background: var(--scrim);
+  backdrop-filter: blur(0.286rem);
   display: flex;
   align-items: center;
   justify-content: center;

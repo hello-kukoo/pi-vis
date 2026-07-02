@@ -22,6 +22,7 @@ import { findOccurrences } from "../../lib/diff/search.js";
 import type { MatchSide } from "../../lib/diff/search.js";
 import type { FileState } from "../../stores/diff-store.js";
 import { useDiffStore } from "../../stores/diff-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./DiffFileSection.css";
 
 /**
@@ -597,21 +598,22 @@ function FilePath({ file }: { file: GitChangedFile }): React.ReactElement {
 function PathPart({ path }: { path: string }): React.ReactElement {
   const slash = path.lastIndexOf("/");
   if (slash === -1) {
-    return <span className="diff-file__basename">{path}</span>;
+    return <FadeText className="diff-file__basename">{path}</FadeText>;
   }
-  // Split the directory and filename into separate spans. The dirname
-  // is rendered in an RTL container so long paths truncate from the
-  // left; a trailing neutral `/` inside that container is reordered
-  // to the front, producing a stray leading slash and a missing
-  // separator (e.g. `…/settingsSettingsView.tsx`). Render the slash
-  // as its own non-truncating span *outside* the RTL context.
+  // Split the directory and filename into separate spans. The dirname is
+  // head-truncated (FadeText `head`) so a long path keeps its informative
+  // tail, and it carries a much larger flex-shrink than the basename so it
+  // gives way first; only once it's gone does the basename itself start to
+  // fade (instead of overflowing onto the counts, the old wart).
   return (
     <>
-      <span className="diff-file__dirname">{path.slice(0, slash)}</span>
+      <FadeText head className="diff-file__dirname">
+        {path.slice(0, slash)}
+      </FadeText>
       <span className="diff-file__sep" aria-hidden>
         /
       </span>
-      <span className="diff-file__basename">{path.slice(slash + 1)}</span>
+      <FadeText className="diff-file__basename">{path.slice(slash + 1)}</FadeText>
     </>
   );
 }

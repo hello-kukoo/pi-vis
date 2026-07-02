@@ -9,6 +9,7 @@ import { formatCost, formatTokens } from "../../lib/format.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
+import { FadeText } from "../common/FadeText.js";
 import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
 import "./SessionHeader.css";
 
@@ -181,7 +182,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
           ) : (
             <button
               type="button"
-              className="session-header__name-btn"
+              className="session-header__name-btn fade-scope"
               onClick={handleRenameStart}
               title={
                 session?.piVersion
@@ -189,7 +190,9 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
                   : (session?.sessionName ?? session?.sessionTitle ?? "Untitled session")
               }
             >
-              {session?.sessionName ?? session?.sessionTitle ?? "Untitled session"}
+              <FadeText>
+                {session?.sessionName ?? session?.sessionTitle ?? "Untitled session"}
+              </FadeText>
             </button>
           )}
           {session?.worktreeName && (
@@ -381,11 +384,11 @@ export function SessionControls({
       <div className="session-header__model-picker">
         <button
           type="button"
-          className="session-header__picker-btn session-header__model-btn"
+          className="session-header__picker-btn session-header__model-btn fade-scope"
           onClick={() => setModelOpen((v) => !v)}
           title={modelButtonLabel}
         >
-          <span className="session-header__picker-label">{modelButtonLabel}</span>
+          <FadeText className="session-header__picker-label">{modelButtonLabel}</FadeText>
           <span aria-hidden>▾</span>
         </button>
         {modelOpen && (
@@ -465,14 +468,16 @@ export function SessionControls({
                       id={`model-option-${idx}`}
                       role="option"
                       aria-selected={selected}
-                      className={`session-header__dropdown-item${active ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
+                      className={`session-header__dropdown-item fade-scope${active ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
                       onClick={() => void handleModelChange(m)}
                       onMouseEnter={() => setHighlightedIndex(idx)}
                     >
                       <span className="session-header__dropdown-item-check" aria-hidden>
                         {selected ? "✓" : ""}
                       </span>
-                      {q ? highlightMatch(label, q) : label}
+                      <FadeText className="session-header__dropdown-item-label">
+                        {q ? highlightMatch(label, q) : label}
+                      </FadeText>
                     </button>
                   );
                 })}

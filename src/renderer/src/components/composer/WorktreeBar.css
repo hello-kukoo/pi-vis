@@ -109,7 +109,7 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   font: inherit;
-  font-family: var(--font-mono);
+  font-family: var(--font-code);
   font-size: 0.857em;
   outline: none;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;

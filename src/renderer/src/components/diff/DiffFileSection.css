@@ -101,22 +101,18 @@
   flex: 1;
 }
 
+/* Head-truncated (FadeText `head`) so a long path keeps its tail. The large
+   shrink factor makes the dirname absorb nearly all of the squeeze before the
+   basename starts to give way. */
 .diff-file__dirname {
   color: var(--text-faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 1;
+  flex-shrink: 30;
   min-width: 0;
-  direction: rtl;
-  text-align: left;
 }
 
 .diff-file__sep {
-  /* Separator slash lives outside the RTL dirname span so a trailing
-     neutral `/` is never reordered to the front (which would produce
-     a stray leading slash + missing separator like
-     `…/settingsSettingsView.tsx`). */
+  /* Separator slash lives outside the truncating dirname span so it is
+     never swallowed by the fade. */
   color: var(--text-faint);
   flex-shrink: 0;
 }
@@ -124,7 +120,10 @@
 .diff-file__basename {
   color: var(--text);
   font-weight: 500;
-  flex-shrink: 0;
+  /* Shrinkable (FadeText clips + fades) so it can never overflow the path box
+     and paint over the counts — but only after the dirname has collapsed. */
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .diff-file__arrow {

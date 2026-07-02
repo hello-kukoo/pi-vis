@@ -366,9 +366,6 @@ button.tool-card__header {
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
   color: var(--cyan);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
 }
 

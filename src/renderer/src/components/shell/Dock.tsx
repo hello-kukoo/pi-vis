@@ -7,6 +7,7 @@ import { AnsiText } from "../../lib/ansi.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
+import { FadeText } from "../common/FadeText.js";
 import "./Dock.css";
 
 /**
@@ -57,9 +58,9 @@ function WidgetItem({ lines }: { lines: string[] }): React.ReactElement {
     <div className="dock__widget">
       {lines.map((line, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: widget lines are appended and stable per key
-        <div key={i} className="dock__widget-line">
+        <FadeText key={i} pre className="dock__widget-line">
           <AnsiText text={line} />
-        </div>
+        </FadeText>
       ))}
     </div>
   );
@@ -169,7 +170,7 @@ function UpdateItem(): React.ReactElement {
           <ul className="dock__update-details">
             {hasPiUpdate && status.pi.latest && (
               <li className="dock__update-detail-row">
-                <span className="dock__update-detail-name">pi</span>
+                <FadeText className="dock__update-detail-name">pi</FadeText>
                 <span className="dock__update-detail-version">
                   {status.pi.current} → {status.pi.latest}
                 </span>
@@ -209,9 +210,9 @@ function ExtensionRow({
           : ext.kind;
   return (
     <li className="dock__update-detail-row">
-      <span className="dock__update-detail-name" title={ext.source}>
+      <FadeText className="dock__update-detail-name" title={ext.source}>
         {ext.name}
-      </span>
+      </FadeText>
       <span className="dock__update-detail-version">{version}</span>
       <button
         type="button"

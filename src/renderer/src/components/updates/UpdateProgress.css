@@ -97,7 +97,7 @@
 .update-progress__btn {
   background: var(--accent);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--bg);
   cursor: pointer;
   font-family: var(--font-display);

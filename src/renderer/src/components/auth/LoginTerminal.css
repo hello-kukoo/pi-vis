@@ -86,11 +86,6 @@
   height: 100%;
 }
 
-.login-terminal__xterm .xterm-viewport {
-  scrollbar-width: thin;
-  scrollbar-color: var(--surface-2) transparent;
-}
-
 .login-terminal__footer {
   display: flex;
   align-items: center;

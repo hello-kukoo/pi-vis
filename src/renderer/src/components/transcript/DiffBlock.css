@@ -21,19 +21,21 @@
   line-height: 1.5;
 }
 
+/* Row tints derive from the semantic tokens (never baked palette RGBA), so
+   every colorscheme — light ones included — tints with its own hues. */
 .diff-block__line--add {
-  background: rgba(166, 227, 161, 0.12);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
   color: var(--success);
 }
 
 .diff-block__line--del {
-  background: rgba(243, 139, 168, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }
 
 .diff-block__line--hunk {
   color: var(--info-soft);
-  background: rgba(116, 199, 236, 0.06);
+  background: color-mix(in srgb, var(--info-soft) 6%, transparent);
 }
 
 .diff-block__text {

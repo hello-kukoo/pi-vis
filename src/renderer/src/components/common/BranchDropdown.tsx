@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { FadeText } from "./FadeText.js";
 import "./BranchDropdown.css";
 
 interface Branch {
@@ -110,24 +111,32 @@ export function BranchDropdown({
     return () => document.removeEventListener("mousedown", onMouseDown, true);
   }, [open]);
 
-  type Item =
-    | { type: "leadingItem"; label: string }
-    | { type: "branch"; branch: Branch }
-    | { type: "checkbox" };
+  type Item = { type: "leadingItem"; label: string } | { type: "branch"; branch: Branch };
 
-  const allItems = useMemo<Item[]>(() => {
+  const listItems = useMemo<Item[]>(() => {
     // The leading item (e.g. the diff viewer's "HEAD") is opt-in. The worktree
-    // picker omits it — its base is always a concrete branch, never null.
-    const items: Item[] = leadingItem
-      ? [{ type: "leadingItem" as const, label: leadingItem.label }]
-      : [];
+    // picker omits it — its base is always a concrete branch, never null. It
+    // respects the search filter like any branch row, so a non-matching query
+    // can actually reach the "No branches found" empty state.
+    const items: Item[] = [];
+    if (
+      leadingItem &&
+      (!search || leadingItem.label.toLowerCase().includes(search.toLowerCase()))
+    ) {
+      items.push({ type: "leadingItem" as const, label: leadingItem.label });
+    }
     for (const b of filtered) {
       if (!includeRemoteBranches && b.remote) continue;
       items.push({ type: "branch" as const, branch: b });
     }
-    items.push({ type: "checkbox" as const });
     return items;
-  }, [filtered, includeRemoteBranches, leadingItem]);
+  }, [filtered, includeRemoteBranches, leadingItem, search]);
+
+  // The "Include remote branches" checkbox is a pinned footer BELOW the
+  // scrolling list (always visible, never scrolled away). It still takes part
+  // in keyboard navigation as the last index.
+  const checkboxIndex = listItems.length;
+  const totalItems = listItems.length + 1;
 
   const handleSelect = useCallback(
     (base: string | null) => {
@@ -152,12 +161,12 @@ export function BranchDropdown({
         case "ArrowDown":
           e.preventDefault();
           e.stopPropagation();
-          setHighlightedIndex((i) => (i < allItems.length - 1 ? i + 1 : 0));
+          setHighlightedIndex((i) => (i < totalItems - 1 ? i + 1 : 0));
           break;
         case "ArrowUp":
           e.preventDefault();
           e.stopPropagation();
-          setHighlightedIndex((i) => (i > 0 ? i - 1 : allItems.length - 1));
+          setHighlightedIndex((i) => (i > 0 ? i - 1 : totalItems - 1));
           break;
         case "Home":
           e.preventDefault();
@@ -167,26 +176,28 @@ export function BranchDropdown({
         case "End":
           e.preventDefault();
           e.stopPropagation();
-          setHighlightedIndex(allItems.length - 1);
+          setHighlightedIndex(totalItems - 1);
           break;
         case "Enter":
           e.preventDefault();
           e.stopPropagation();
           {
-            const item = allItems[highlightedIndex];
+            if (highlightedIndex === checkboxIndex) {
+              onToggleRemote();
+              break;
+            }
+            const item = listItems[highlightedIndex];
             if (!item) break;
             if (item.type === "leadingItem") {
               handleSelect(null);
-            } else if (item.type === "branch") {
+            } else {
               handleSelect(item.branch.name);
-            } else if (item.type === "checkbox") {
-              onToggleRemote();
             }
           }
           break;
       }
     },
-    [search, allItems, highlightedIndex, handleSelect, onToggleRemote],
+    [search, listItems, totalItems, checkboxIndex, highlightedIndex, handleSelect, onToggleRemote],
   );
 
   const label = triggerLabel ?? value ?? currentBranch ?? "branch";
@@ -195,11 +206,12 @@ export function BranchDropdown({
     <div className="branch-dropdown__picker" ref={dropdownRef}>
       <button
         type="button"
-        className="branch-dropdown__trigger"
+        className="branch-dropdown__trigger fade-scope"
         onClick={() => !disabled && setOpen((v) => !v)}
         disabled={disabled}
       >
-        {label} ▾
+        <FadeText>{label}</FadeText>
+        <span aria-hidden>▾</span>
       </button>
       {open && (
         <div
@@ -219,11 +231,11 @@ export function BranchDropdown({
               aria-autocomplete="list"
             />
           </div>
-          {allItems.length === 0 ? (
+          {listItems.length === 0 ? (
             <div className="branch-dropdown__empty">No branches found</div>
           ) : (
-            <div role="listbox" id="branch-dropdown-listbox">
-              {allItems.map((item, idx) => {
+            <div className="branch-dropdown__list" role="listbox" id="branch-dropdown-listbox">
+              {listItems.map((item, idx) => {
                 if (item.type === "leadingItem") {
                   const active = idx === highlightedIndex;
                   return (
@@ -236,46 +248,17 @@ export function BranchDropdown({
                       }}
                       role="option"
                       aria-selected={value === null}
-                      className={`branch-dropdown__item${active ? " branch-dropdown__item--highlighted" : ""}${value === null ? " branch-dropdown__item--active" : ""}`}
+                      className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${value === null ? " branch-dropdown__item--active" : ""}`}
                       onClick={() => handleSelect(null)}
                       onMouseEnter={() => setHighlightedIndex(idx)}
                     >
-                      <span className="branch-dropdown__item-label">
+                      <FadeText className="branch-dropdown__item-label">
                         {search ? highlightMatch(item.label, search) : item.label}
-                      </span>
+                      </FadeText>
                       {value === null && <span className="branch-dropdown__check">✓</span>}
                     </button>
                   );
                 }
-                if (item.type === "checkbox") {
-                  const active = idx === highlightedIndex;
-                  return (
-                    <div
-                      key="__checkbox__"
-                      role="option"
-                      aria-selected={false}
-                      className={`branch-dropdown__checkbox-row${active ? " branch-dropdown__item--highlighted" : ""}`}
-                      onClick={onToggleRemote}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onToggleRemote();
-                        }
-                      }}
-                      onMouseEnter={() => setHighlightedIndex(idx)}
-                    >
-                      <label className="branch-dropdown__checkbox-label">
-                        <input
-                          type="checkbox"
-                          checked={includeRemoteBranches}
-                          onChange={onToggleRemote}
-                        />
-                        <span>Include remote branches</span>
-                      </label>
-                    </div>
-                  );
-                }
-                // branch item
                 const b = item.branch;
                 const active = idx === highlightedIndex;
                 const selected = value === b.name;
@@ -289,13 +272,13 @@ export function BranchDropdown({
                     }}
                     role="option"
                     aria-selected={selected}
-                    className={`branch-dropdown__item${active ? " branch-dropdown__item--highlighted" : ""}${selected ? " branch-dropdown__item--active" : ""}`}
+                    className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${selected ? " branch-dropdown__item--active" : ""}`}
                     onClick={() => handleSelect(b.name)}
                     onMouseEnter={() => setHighlightedIndex(idx)}
                   >
-                    <span className="branch-dropdown__item-label">
+                    <FadeText className="branch-dropdown__item-label">
                       {search ? highlightMatch(b.name, search) : b.name}
-                    </span>
+                    </FadeText>
                     {b.current && <span className="branch-dropdown__current">current</span>}
                     {selected && <span className="branch-dropdown__check">✓</span>}
                   </button>
@@ -303,6 +286,25 @@ export function BranchDropdown({
               })}
             </div>
           )}
+          {/* Pinned footer — always visible regardless of list scroll. */}
+          <div
+            role="option"
+            aria-selected={false}
+            className={`branch-dropdown__checkbox-row${highlightedIndex === checkboxIndex ? " branch-dropdown__item--highlighted" : ""}`}
+            onClick={onToggleRemote}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onToggleRemote();
+              }
+            }}
+            onMouseEnter={() => setHighlightedIndex(checkboxIndex)}
+          >
+            <label className="branch-dropdown__checkbox-label">
+              <input type="checkbox" checked={includeRemoteBranches} onChange={onToggleRemote} />
+              <span>Include remote branches</span>
+            </label>
+          </div>
         </div>
       )}
     </div>
