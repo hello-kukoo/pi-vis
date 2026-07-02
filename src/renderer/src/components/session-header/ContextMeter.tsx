@@ -2,7 +2,7 @@ import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
-import { formatCost, formatTokens } from "../../lib/format.js";
+import { formatTokens } from "../../lib/format.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import "./ContextMeter.css";
 
@@ -110,7 +110,6 @@ export function ContextMeter({ sessionId }: { sessionId: SessionId }): React.Rea
                 <span
                   className={`context-dropdown__pct${danger ? " context-dropdown__pct--danger" : warn ? " context-dropdown__pct--warn" : ""}`}
                 >
-                  {" "}
                   {pct}%
                 </span>
               )}
@@ -134,12 +133,6 @@ export function ContextMeter({ sessionId }: { sessionId: SessionId }): React.Rea
                 {cacheHitRate != null ? `${Math.round(cacheHitRate * 100)}%` : "—"}
               </Row>
             </dl>
-          )}
-          {stats?.cost != null && (
-            <div className="context-dropdown__row context-dropdown__cost">
-              <span className="context-dropdown__label">Cost</span>
-              <span className="context-dropdown__value">{formatCost(stats.cost)}</span>
-            </div>
           )}
         </div>
       )}

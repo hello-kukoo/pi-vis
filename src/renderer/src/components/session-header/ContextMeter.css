@@ -96,6 +96,9 @@
 }
 
 .context-dropdown__pct {
+  margin-left: 0.571rem;
+  padding-left: 0.571rem;
+  border-left: 1px solid var(--border-strong);
   color: var(--accent);
   font-weight: 600;
 }
@@ -138,13 +141,6 @@
   flex-direction: column;
   gap: 0.286rem;
   margin: 0;
-}
-
-/* Cost — set apart from the token breakdown by a hairline. */
-.context-dropdown__cost {
-  margin-top: 0.571rem;
-  padding-top: 0.571rem;
-  border-top: 1px solid var(--border-strong);
 }
 
 .context-dropdown__row {

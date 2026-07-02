@@ -84,7 +84,7 @@
 /* ── Header bar ────────────────────────────────────────────────────── */
 
 .tree-viewer__header {
-  padding: 0.571rem 1rem;
+  padding: 0.429rem 1rem;
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--surface);
   flex-shrink: 0;
@@ -120,6 +120,10 @@
 }
 
 /* Search ───────────────────────────────────────────────────────────── */
+
+.tree-viewer__header .viewer-header__right {
+  gap: 0.857rem;
+}
 
 .tree-viewer__search {
   position: relative;
@@ -283,10 +287,9 @@
   background: var(--surface);
 }
 
-/* Selected row: a left accent bar (pi's `›` cursor), no full-row outline. */
+/* Selected row: subtle filled row; no left-edge accent stripe. */
 .tree-viewer__row--selected {
-  background: var(--surface);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--surface-2);
 }
 
 .tree-viewer__row--selected:hover {
