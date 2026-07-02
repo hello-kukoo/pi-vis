@@ -26,6 +26,8 @@
   margin: 0 0.857rem 0.857rem;
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
+  min-height: 0;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);

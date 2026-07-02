@@ -27,6 +27,10 @@ const ACTIVITY_PREVIEW_CHARS = 420;
 // Any upward scroll unsticks; scrolling back to within this distance of the
 // bottom re-sticks.
 const SCROLL_RESTICK_PX = 24;
+// Scroll events can be caused by layout (e.g. a custom/unified panel replacing
+// the Composer and shrinking the transcript viewport) as well as by the user.
+// Only an actual user scroll input may break bottom-follow.
+const USER_SCROLL_INTENT_MS = 1000;
 
 // ── Label visibility ─────────────────────────────────────────────────────
 // Only show "You" / "Pi" when the *speaker* changes.  Tool/bash blocks are
@@ -636,16 +640,27 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   // not misread as the user scrolling up.
   const pinnedRef = useRef(true);
   const lastPinnedTopRef = useRef(0);
+  const userScrollIntentUntilRef = useRef(0);
+  const prevScrollHeightRef = useRef(0);
+  const prevClientHeightRef = useRef(0);
 
-  // Programmatic pin helper. Always pin to `scrollHeight - clientHeight`
-  // (the absolute bottom) and record the target so handleScroll can
-  // distinguish "we pinned" from "the user moved up from where we were".
+  // Programmatic pin helper. Always pin to the absolute bottom and record the
+  // target so handleScroll can distinguish "we pinned" from "the user moved up
+  // from where we were". Clamp to 0 for short transcripts — browsers clamp the
+  // assignment anyway, but keeping our sentinel non-negative avoids false
+  // comparisons after the viewport later shrinks into an overflowing feed.
   const pinToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const target = el.scrollHeight - el.clientHeight;
-    lastPinnedTopRef.current = target;
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
     el.scrollTop = target;
+    lastPinnedTopRef.current = el.scrollTop;
+    prevScrollHeightRef.current = el.scrollHeight;
+    prevClientHeightRef.current = el.clientHeight;
+  }, []);
+
+  const markUserScrollIntent = useCallback(() => {
+    userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_MS;
   }, []);
 
   // Preserve scroll position during expand/collapse toggles.
@@ -696,14 +711,27 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       // the user actively returning to the bottom).
       pinnedRef.current = true;
       lastPinnedTopRef.current = el.scrollTop;
+      prevScrollHeightRef.current = el.scrollHeight;
+      prevClientHeightRef.current = el.clientHeight;
     } else if (el.scrollTop < lastPinnedTopRef.current - SCROLL_RESTICK_PX) {
-      // The user moved up from where we last pinned.
-      pinnedRef.current = false;
+      // A layout-only viewport change can also move scrollTop upward (for
+      // example when a custom/unified TUI panel replaces the Composer). That
+      // must NOT break the "follow bottom unless the user actively scrolled"
+      // invariant. Only a recent wheel/touch/keyboard scroll intent may unpin;
+      // otherwise restore the bottom immediately.
+      const userInitiated = performance.now() <= userScrollIntentUntilRef.current;
+      if (userInitiated) {
+        pinnedRef.current = false;
+      } else if (pinnedRef.current) {
+        pinToBottom();
+      }
+    } else if (pinnedRef.current && performance.now() > userScrollIntentUntilRef.current) {
+      // Ambiguous transient (content grew below us or the viewport shrank while
+      // scrollTop stayed put). If the user did not cause it, keep following the
+      // bottom instead of waiting for the next streamed token.
+      pinToBottom();
     }
-    // else: ambiguous transient (grew below us, not yet re-pinned) —
-    // leave state as-is. The commit-phase growth pin below (and the
-    // ResizeObserver backstop) will re-pin on the next layout.
-  }, []);
+  }, [pinToBottom]);
 
   // Backstop for size changes that do NOT go through a React render — async
   // syntax highlighting swapping in and images finishing load — neither of
@@ -719,6 +747,22 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     observer.observe(content);
     observer.observe(el);
     return () => observer.disconnect();
+  }, [pinToBottom]);
+
+  // JS-sized Composer replacements (CustomPanelHost / UnifiedTuiHost) can grow
+  // after their React commit when xterm has measured its grid. The panel sizer
+  // emits this bubbling event after it applies a new card height; pin in the
+  // same turn if the transcript was following the bottom.
+  useLayoutEffect(() => {
+    const sessionEl = scrollRef.current?.closest(".app__session");
+    if (!sessionEl) return;
+    const handleComposerSlotResize: EventListener = () => {
+      if (pinnedRef.current) pinToBottom();
+    };
+    sessionEl.addEventListener("pivis:composer-slot-resize", handleComposerSlotResize);
+    return () => {
+      sessionEl.removeEventListener("pivis:composer-slot-resize", handleComposerSlotResize);
+    };
   }, [pinToBottom]);
 
   // Switching sessions always starts pinned to the bottom
@@ -737,18 +781,17 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   // ResizeObserver firing in time. The observer above stays as the backstop
   // for growth that does NOT re-render React: async highlighting and images.
   //
-  // Crucially, we follow only when the viewport was at the bottom BEFORE this
+  // Crucially, we follow when the viewport was at the bottom BEFORE this
   // commit grew the content — judged from the *live* scrollTop against the
-  // PREVIOUS height, not from `pinnedRef`. That measurement reflects a user's
-  // scroll-up immediately, even before their scroll event is delivered, so we
-  // never yank a reader who has scrolled up back down (the failure mode of an
-  // unconditional pin). `pinnedRef` is kept in sync so the ResizeObserver
-  // backstop agrees.
+  // PREVIOUS height — OR when we were already pinned and no user scroll input
+  // caused the displacement. The explicit input guard keeps real wheel/touch/key
+  // scroll-ups from being yanked back down, while layout-only scroll movement
+  // (custom/unified panels resizing the Composer slot) cannot silently break
+  // the bottom-follow invariant. `pinnedRef` is kept in sync so the
+  // ResizeObserver backstop agrees.
   const lastBlockType = allBlocks[allBlocks.length - 1]?.type;
   const blockCount = allBlocks.length;
   const prevBlockCountRef = useRef(blockCount);
-  const prevScrollHeightRef = useRef(0);
-  const prevClientHeightRef = useRef(0);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -784,9 +827,11 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     // detection purely about CONTENT position: a real scroll-up still
     // moves `scrollTop` below the prior bottom and reads as "not at
     // bottom", while a pure viewport change leaves it pinned.
-    const wasAtBottom = prevHeight - el.scrollTop - prevClientHeight <= SCROLL_RESTICK_PX;
-    pinnedRef.current = wasAtBottom;
-    if (wasAtBottom) pinToBottom();
+    const measuredAtBottom = prevHeight - el.scrollTop - prevClientHeight <= SCROLL_RESTICK_PX;
+    const userInitiated = performance.now() <= userScrollIntentUntilRef.current;
+    const shouldFollow = measuredAtBottom || (pinnedRef.current && !userInitiated);
+    pinnedRef.current = shouldFollow;
+    if (shouldFollow) pinToBottom();
   });
 
   const handleClipboard = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
@@ -811,6 +856,13 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       className="transcript-view"
       ref={scrollRef}
       onScroll={handleScroll}
+      onWheelCapture={markUserScrollIntent}
+      onTouchMoveCapture={markUserScrollIntent}
+      onKeyDownCapture={(e) => {
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
+          markUserScrollIntent();
+        }
+      }}
       onCopy={handleClipboard}
     >
       <div className="transcript-blocks" ref={contentRef}>

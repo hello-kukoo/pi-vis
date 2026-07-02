@@ -155,6 +155,14 @@ export function createPanelSizer(opts: PanelSizerOptions): PanelSizer {
   let lastCols = -1;
   let lastRows = -1;
 
+  // Tell the transcript that the Composer slot changed height outside a React
+  // layout pass (xterm measures/render-resizes asynchronously). When the feed is
+  // bottom-pinned it must re-pin immediately, otherwise the new panel appears to
+  // cover the latest transcript lines until another token arrives.
+  const notifyComposerSlotResize = (): void => {
+    panelEl.dispatchEvent(new CustomEvent("pivis:composer-slot-resize", { bubbles: true }));
+  };
+
   // Push the current grid size to the host (only on change — avoids redundant
   // IPC + host re-renders).
   const reportSize = (cols: number, rows: number): void => {
@@ -176,6 +184,7 @@ export function createPanelSizer(opts: PanelSizerOptions): PanelSizer {
     container.style.height = `${gridRows * cell}px`;
     panelEl.style.height = `${displayRows * cell + cardChrome()}px`;
     panelEl.style.overflowY = gridRows > maxDisplayRows() ? "auto" : "hidden";
+    notifyComposerSlotResize();
   };
 
   // ── Resize-storm circuit breaker (damping) ──────────────────────────────
@@ -263,6 +272,7 @@ export function createPanelSizer(opts: PanelSizerOptions): PanelSizer {
     panelEl.style.height = `${displayRows * cell + cardChrome()}px`;
     // Scroll (via the card) only when the content is taller than the cap.
     panelEl.style.overflowY = contentRows > maxDisplayRows() ? "auto" : "hidden";
+    notifyComposerSlotResize();
   };
 
   const dispose = (): void => {
@@ -272,6 +282,7 @@ export function createPanelSizer(opts: PanelSizerOptions): PanelSizer {
     panelEl.style.height = "";
     panelEl.style.overflowY = "";
     container.style.height = "";
+    notifyComposerSlotResize();
   };
 
   return { sync, scheduleSync, dispose };
