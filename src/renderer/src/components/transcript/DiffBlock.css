@@ -5,7 +5,9 @@
 .diff-block {
   font-family: var(--font-code);
   font-size: var(--font-size-code);
-  background: var(--surface);
+  /* Same code canvas as the surrounding tool-card well (--bg) so the diff
+     reads on the transcript base; the border + per-line tints define it. */
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;

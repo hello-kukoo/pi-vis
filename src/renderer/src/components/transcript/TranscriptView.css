@@ -398,9 +398,11 @@ button.tool-card__header {
 
 /* Unified terminal-style box: a single bordered region for the args
    (compact one-liner), diff, and output. One scroll context instead of
-   nested scrollable regions per section. */
+   nested scrollable regions per section. The well uses the transcript base
+   (--bg) so the code canvas matches the chat surface; the raised tool card
+   (--surface) around it provides the contrast frame. */
 .tool-card__scroll {
-  background: var(--surface-inset);
+  background: var(--bg);
   border: 1px solid var(--border-faint);
   border-radius: var(--radius-md);
   padding: 0.571rem 0.857rem;

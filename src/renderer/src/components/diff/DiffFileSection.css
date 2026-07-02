@@ -151,9 +151,12 @@
 }
 
 .diff-file__body {
-  /* No background fill: the body sits on the card's raised surface, so the
-    header/body read as one continuous card divided only by the header's
-    hairline (the seam). */
+  /* Code canvas: the transcript base (--bg), matching the chat surface so
+    Shiki's Catppuccin token colors (calibrated for the base) render
+    correctly. The raised card frame (--surface header + the card's
+    --border-faint outline) provides the contrast; the body reads as a
+    recessed code well within the card, same vocabulary as tool-card wells. */
+  background: var(--bg);
   font-family: var(--font-code);
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
