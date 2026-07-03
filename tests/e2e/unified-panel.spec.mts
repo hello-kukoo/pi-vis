@@ -18,13 +18,8 @@ import fs from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  type ElectronApplication,
-  type Page,
-  _electron as electron,
-  expect,
-  test,
-} from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
+import { type LaunchedElectronApplication, launchElectron } from "./electron-launch.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -51,7 +46,9 @@ async function makeFolders(): Promise<Folders> {
   return folders;
 }
 
-async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; window: Page }> {
+async function launchApp(
+  folders: Folders,
+): Promise<{ app: LaunchedElectronApplication; window: Page }> {
   fs.writeFileSync(
     join(folders.settingsDir, "settings.json"),
     JSON.stringify({
@@ -64,7 +61,7 @@ async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; 
     }),
   );
 
-  const app = await electron.launch({
+  const app = await launchElectron({
     args: [APP_ENTRY],
     env: {
       ...process.env,

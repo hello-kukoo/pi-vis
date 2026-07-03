@@ -19,13 +19,8 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
-import {
-  type ElectronApplication,
-  type Page,
-  _electron as electron,
-  expect,
-  test,
-} from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
+import { type LaunchedElectronApplication, launchElectron } from "./electron-launch.mjs";
 
 const APP_ENTRY = join(import.meta.dirname, "../../out/main/index.js");
 const SETTINGS_DIR = join(os.homedir(), "Library/Application Support/Pi-Vis");
@@ -63,8 +58,8 @@ function countPiProcs(): number {
   return Number.parseInt(execSync("pgrep -fl 'pi --mode rpc' | wc -l").toString().trim(), 10);
 }
 
-async function launchApp(): Promise<{ app: ElectronApplication; window: Page }> {
-  const app = await electron.launch({
+async function launchApp(): Promise<{ app: LaunchedElectronApplication; window: Page }> {
+  const app = await launchElectron({
     args: [APP_ENTRY],
     env: { ...process.env, ELECTRON_RENDERER_URL: undefined },
   });

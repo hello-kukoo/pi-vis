@@ -70,7 +70,13 @@ export function ContextMeter({ sessionId }: { sessionId: SessionId }): React.Rea
         aria-label={pct !== null ? `${pct}% context used` : "Context usage"}
         aria-expanded={open}
       >
-        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden>
+        <svg
+          width={size}
+          height={size}
+          viewBox={`0 0 ${size} ${size}`}
+          aria-hidden="true"
+          focusable="false"
+        >
           <circle
             className="context-ring__track"
             cx={size / 2}

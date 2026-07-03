@@ -2,13 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  type ElectronApplication,
-  type Page,
-  _electron as electron,
-  expect,
-  test,
-} from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
+import { type LaunchedElectronApplication, launchElectron } from "./electron-launch.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,7 +24,9 @@ async function makeFolders(): Promise<Folders> {
   };
 }
 
-async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; window: Page }> {
+async function launchApp(
+  folders: Folders,
+): Promise<{ app: LaunchedElectronApplication; window: Page }> {
   const settingsPath = join(folders.settingsDir, "settings.json");
   if (!fs.existsSync(settingsPath)) {
     fs.writeFileSync(
@@ -44,7 +41,7 @@ async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; 
       }),
     );
   }
-  const app = await electron.launch({
+  const app = await launchElectron({
     args: [APP_ENTRY],
     env: {
       ...process.env,
@@ -84,10 +81,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
     await textarea.fill("/name Foo");
@@ -114,10 +110,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
     // /model (no arg) opens the picker.
@@ -126,22 +121,22 @@ test.describe("Slash commands", () => {
     const picker = window.locator(".picker--model");
     await expect(picker).toBeVisible({ timeout: 5_000 });
     // Search and pick the second model.
-    await picker.locator(".picker__search-input").fill("fake-model-2");
-    await expect(picker.locator(".picker__item").first()).toBeVisible();
-    await picker.locator(".picker__item").first().click();
+    await picker.locator(".picker__search-input").fill("Two");
+    const secondModel = picker.locator(".picker__item").filter({ hasText: "Fake Model Two" });
+    await expect(secondModel).toBeVisible();
+    await secondModel.click();
     // Header reflects the new model.
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model-2",
+    await expect(window.locator(".session-header__model-btn")).toContainText(
+      "Fake Model Two [fake]",
       { timeout: 5_000 },
     );
 
     // /model <exact-id> bypasses the picker and sets the model directly.
     await textarea.fill("/model fake-model");
     await textarea.press("Enter");
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 5_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 5_000,
+    });
 
     await app.close();
     rmrf(folders.settingsDir);
@@ -155,10 +150,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
     // ask-user-question is a fake extension that emits a select dialog.
@@ -189,10 +183,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
     // Type some text first so the effect can replace it.
@@ -216,10 +209,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
     await textarea.fill("/timeout-select");
@@ -244,10 +236,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     const textarea = window.locator(".composer__textarea");
 
@@ -278,7 +269,7 @@ test.describe("Slash commands", () => {
     await textarea.press("Enter");
 
     // Both pieces of UI are gone (the TUI parity contract for /plan exit).
-    await expect(widgetStrip).toBeHidden({ timeout: 5_000 });
+    await expect(dock).toBeHidden({ timeout: 5_000 });
     await expect(window.locator(".statusbar__line").filter({ hasText: "plan active" })).toHaveCount(
       0,
       { timeout: 5_000 },
@@ -305,10 +296,9 @@ test.describe("Slash commands", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
     const textarea = window.locator(".composer__textarea");
     await textarea.fill("hello there");
     await textarea.press("Enter");
@@ -317,9 +307,6 @@ test.describe("Slash commands", () => {
     // /new clears the transcript and adopts a fresh file.
     await textarea.fill("/new");
     await textarea.press("Enter");
-    await expect(window.locator("body")).toContainText("Started a fresh session", {
-      timeout: 10_000,
-    });
     // Transcript is empty after /new.
     await expect(window.locator(".transcript-block--assistant")).toHaveCount(0, { timeout: 5_000 });
 

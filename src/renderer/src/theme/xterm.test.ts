@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { BUNDLED_THEMES, PI_BG_ROLES, PI_ROLES, buildPiThemeColors } from "@shared/theme";
+import { describe, expect, it } from "vitest";
 import { buildXtermTheme } from "./xterm.js";
 
 const mocha = BUNDLED_THEMES.find((t) => t.id === "mocha")!;

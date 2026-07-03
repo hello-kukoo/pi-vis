@@ -5,7 +5,7 @@
 //   1. Header button shows `± 2` and opens the viewer with 2 files.
 //   2. Gap expanders increase row counts and click-to-expand fully opens.
 //   3. Split mode toggles, persists across close/reopen.
-//   4. Esc closes; ⌘G (Meta+g) toggles open/closed.
+//   4. Esc closes; ⌘G (Meta+g) opens from the session surface.
 //   5. /diff typed in composer opens the viewer.
 //   6. Clean repo: dimmed `±` only; /diff → "Working tree clean".
 //   7. Rail filter narrows rows; clicking scrolls the section into view.
@@ -15,13 +15,8 @@ import fs from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  type ElectronApplication,
-  type Page,
-  _electron as electron,
-  expect,
-  test,
-} from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
+import { type LaunchedElectronApplication, launchElectron } from "./electron-launch.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -42,7 +37,9 @@ async function makeFolders(): Promise<Folders> {
   };
 }
 
-async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; window: Page }> {
+async function launchApp(
+  folders: Folders,
+): Promise<{ app: LaunchedElectronApplication; window: Page }> {
   const settingsPath = join(folders.settingsDir, "settings.json");
   if (!fs.existsSync(settingsPath)) {
     fs.writeFileSync(
@@ -57,7 +54,7 @@ async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; 
       }),
     );
   }
-  const app = await electron.launch({
+  const app = await launchElectron({
     args: [APP_ENTRY],
     env: {
       ...process.env,
@@ -72,14 +69,11 @@ async function launchApp(folders: Folders): Promise<{ app: ElectronApplication; 
   });
   const window = await app.firstWindow();
   await window.waitForLoadState("domcontentloaded");
-  // Resize the window to ensure split-view is enabled (> 880px content
+  // Resize the viewport to ensure split-view is enabled (> 880px content
   // width after the panel padding + rail are subtracted). The default
   // 1280×800 window leaves the diff content at ~787px (sidebar + rail
   // eat too much), which auto-disables split.
-  await app.evaluate(({ BrowserWindow }) => {
-    const w = BrowserWindow.getAllWindows()[0];
-    if (w) w.setBounds({ x: 0, y: 0, width: 1600, height: 900 });
-  });
+  await window.setViewportSize({ width: 1600, height: 900 });
   await expect(window.locator(".sidebar, .pi-not-found").first()).toBeVisible({ timeout: 15_000 });
   return { app, window };
 }
@@ -134,10 +128,9 @@ test.describe("Diff viewer", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     // The changes button should show `± 2` (a.ts modified, b.ts untracked).
     const changesBtn = window.locator('[data-testid="changes-button"]');
@@ -150,7 +143,7 @@ test.describe("Diff viewer", () => {
     await expect(viewer).toBeVisible({ timeout: 5_000 });
 
     // Rail rows: a.ts (M) and b.ts (A).
-    const railItems = window.locator(".diff-rail__item");
+    const railItems = window.locator(".diff-tree__row--file");
     await expect(railItems).toHaveCount(2, { timeout: 5_000 });
     await expect(railItems.first()).toContainText("a.ts");
     await expect(railItems.last()).toContainText("b.ts");
@@ -196,10 +189,9 @@ test.describe("Diff viewer", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
     const changesBtn = window.locator('[data-testid="changes-button"]');
     await expect(changesBtn).toContainText("2", { timeout: 10_000 });
     await changesBtn.click();
@@ -227,17 +219,16 @@ test.describe("Diff viewer", () => {
     rmrf(folders.piSessionsDir);
   });
 
-  test("Escape closes; ⌘G toggles open/closed; /diff opens", async () => {
+  test("Escape closes; ⌘G opens; /diff opens", async () => {
     test.setTimeout(60_000);
     const folders = await makeFolders();
     setupRepoWithChanges(folders.workspaceDir);
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
     const viewer = window.locator(".diff-viewer");
 
     // /diff opens.
@@ -250,10 +241,10 @@ test.describe("Diff viewer", () => {
     await window.keyboard.press("Escape");
     await expect(viewer).toBeHidden({ timeout: 5_000 });
 
-    // Meta+G (⌘G) toggles.
+    // Meta+G (⌘G) opens the viewer from the session surface.
     await window.keyboard.press("Meta+g");
     await expect(viewer).toBeVisible({ timeout: 5_000 });
-    await window.keyboard.press("Meta+g");
+    await window.keyboard.press("Escape");
     await expect(viewer).toBeHidden({ timeout: 5_000 });
 
     await app.close();
@@ -276,10 +267,9 @@ test.describe("Diff viewer", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
 
     // Badge renders dimmed (no count number).
     const changesBtn = window.locator('[data-testid="changes-button"]');
@@ -304,10 +294,9 @@ test.describe("Diff viewer", () => {
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "New session" }).click();
-    await expect(window.locator(".session-header__picker-btn").first()).toContainText(
-      "fake-model",
-      { timeout: 15_000 },
-    );
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
     const changesBtn = window.locator('[data-testid="changes-button"]');
     await expect(changesBtn).toContainText("2", { timeout: 10_000 });
     await changesBtn.click();
@@ -317,15 +306,15 @@ test.describe("Diff viewer", () => {
     // Filter narrows to b.ts only.
     const search = viewer.locator(".diff-rail__search-input");
     await search.fill("b.ts");
-    await expect(viewer.locator(".diff-rail__item")).toHaveCount(1, { timeout: 5_000 });
-    await expect(viewer.locator(".diff-rail__item").first()).toContainText("b.ts");
+    await expect(viewer.locator(".diff-tree__row--file")).toHaveCount(1, { timeout: 5_000 });
+    await expect(viewer.locator(".diff-tree__row--file").first()).toContainText("b.ts");
 
     // Clear filter, click a.ts row → that section is the selected one.
     await search.fill("");
-    await expect(viewer.locator(".diff-rail__item")).toHaveCount(2, { timeout: 5_000 });
-    const aItem = viewer.locator('.diff-rail__item[data-path="a.ts"]');
+    await expect(viewer.locator(".diff-tree__row--file")).toHaveCount(2, { timeout: 5_000 });
+    const aItem = viewer.locator('.diff-tree__row--file[data-path="a.ts"]');
     await aItem.click();
-    await expect(aItem).toHaveClass(/diff-rail__item--active/, { timeout: 5_000 });
+    await expect(aItem).toHaveClass(/diff-tree__row--active/, { timeout: 5_000 });
 
     await app.close();
     rmrf(folders.settingsDir);

@@ -68,12 +68,9 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
 
   test("Settings: ESC closes Settings, does NOT abort a background session", async ({ page }) => {
     await startStreaming(page);
-    // Open settings via the sidebar button (title-bar gear). The sidebar
-    // exposes an "Open Settings" affordance; fall back to the custom event
-    // the Composer dispatches (pivis:open-settings) to drive it deterministically.
-    await page.evaluate(() => {
-      window.dispatchEvent(new CustomEvent("pivis:open-settings"));
-    });
+    // Open settings via the sidebar button. This exercises the same user-visible
+    // surface that claims ESC in the real shell.
+    await page.getByRole("button", { name: "Settings" }).click();
     await expect(page.locator(".settings-overlay")).toBeVisible({ timeout: 10_000 });
 
     const before = await abortCount(page);

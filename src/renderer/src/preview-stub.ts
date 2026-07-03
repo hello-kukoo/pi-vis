@@ -568,13 +568,16 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
 
 const settingsState = {
   piBinaryPath: null as string | null,
+  piEnv: {} as Record<string, string>,
   fonts: {
     display: { family: "system-ui", sizePx: 14 },
     code: { family: "monospace", sizePx: 13 },
   },
   workspaceOrder: [DEMO_WORKSPACE],
   expandedWorkspaces: [DEMO_WORKSPACE],
+  lastActiveWorkspace: DEMO_WORKSPACE,
   lastUsedModel: null,
+  lastUsedThinkingLevel: null,
   colorScheme: "mocha" as const,
   diffMaxFileSizeMiB: 5,
   statusBarVisible: true,
@@ -589,6 +592,7 @@ const settingsState = {
   diffIncludeRemoteBranches: false,
   diffRailWidth: 280,
   diffRailVisible: true,
+  customPanelHeightFraction: null,
   window: undefined,
 };
 

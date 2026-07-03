@@ -109,6 +109,28 @@ let pendingName = null;
 let lastEntryId = null;
 let fileCreated = false;
 let currentThinkingLevel = "off";
+let currentModelId = "fake-model";
+
+const fakeModels = [
+  {
+    id: "fake-model",
+    name: "Fake Model",
+    api: "fake",
+    provider: "fake",
+    reasoning: false,
+  },
+  {
+    id: "fake-model-2",
+    name: "Fake Model Two",
+    api: "fake",
+    provider: "fake",
+    reasoning: true,
+  },
+];
+
+function currentModel() {
+  return fakeModels.find((m) => m.id === currentModelId) ?? fakeModels[0];
+}
 // Fork / switch / new-session bookkeeping for parity with real pi.
 let userMessagesForForking = []; // [{ entryId, text }]
 let lastAssistantText = null;
@@ -607,13 +629,7 @@ rl.on("line", async (line) => {
         success: true,
         id,
         data: {
-          model: {
-            id: "fake-model",
-            name: "Fake Model",
-            api: "fake",
-            provider: "fake",
-            reasoning: false,
-          },
+          model: currentModel(),
           thinkingLevel: currentThinkingLevel,
           isStreaming: false,
           isCompacting: false,
@@ -653,28 +669,14 @@ rl.on("line", async (line) => {
         success: true,
         id,
         data: {
-          models: [
-            {
-              id: "fake-model",
-              name: "Fake Model",
-              api: "fake",
-              provider: "fake",
-              reasoning: false,
-            },
-            {
-              id: "fake-model-2",
-              name: "Fake Model Two",
-              api: "fake",
-              provider: "fake",
-              reasoning: true,
-            },
-          ],
-          currentModelId: "fake-model",
+          models: fakeModels,
+          currentModelId,
         },
       });
       break;
 
     case "set_model":
+      currentModelId = msg.modelId ?? currentModelId;
       send({ type: "response", command: "set_model", success: true, id });
       break;
 

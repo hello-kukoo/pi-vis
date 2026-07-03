@@ -13,9 +13,9 @@ import { Terminal } from "@xterm/xterm";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "../../stores/settings-store.js";
-import { IconCheck, IconClose } from "../common/icons.js";
 import { getTheme } from "../../theme/registry.js";
 import { buildXtermTheme } from "../../theme/xterm.js";
+import { IconCheck, IconClose } from "../common/icons.js";
 import "@xterm/xterm/css/xterm.css";
 import "./LoginTerminal.css";
 

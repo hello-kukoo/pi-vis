@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { _electron as electron, expect, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { launchElectron } from "./electron-launch.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,7 +27,7 @@ test.describe("Pi-Vis e2e", () => {
       }),
     );
 
-    const app = await electron.launch({
+    const app = await launchElectron({
       args: [join(__dirname, "../../out/main/index.js")],
       env: {
         ...process.env,

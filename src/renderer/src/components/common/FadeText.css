@@ -79,8 +79,8 @@
   --fade-txt-r: 0px;
   /* Leading fade rides the START of the glide; trailing fade dissolves as
      the tail ARRIVES at the edge (end of the glide). */
-  transition: --fade-txt-l 200ms linear var(--fade-delay),
-    --fade-txt-r 200ms linear calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms);
+  transition: --fade-txt-l 200ms linear var(--fade-delay), --fade-txt-r 200ms linear
+    calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms);
 }
 
 .fade-text[data-overflow]:is(:hover, .fade-hover) .fade-text__inner,
@@ -107,8 +107,7 @@
 :is(.fade-scope:hover, .fade-scope.fade-hover) .fade-text--head[data-overflow] {
   --fade-txt-l: 0px;
   --fade-txt-r: 1.25em;
-  transition: --fade-txt-l 200ms linear
-      calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms),
+  transition: --fade-txt-l 200ms linear calc(var(--fade-delay) + var(--fade-dur, 1200ms) - 200ms),
     --fade-txt-r 200ms linear var(--fade-delay);
 }
 

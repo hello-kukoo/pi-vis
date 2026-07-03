@@ -17,6 +17,17 @@ function boundsOnScreen(b: { x: number; y: number; width: number; height: number
 
 app.setName("Pi-Vis");
 
+// Playwright's Electron launcher passes --remote-debugging-port=0 as a
+// top-level Electron CLI argument, which Electron 43 rejects before app code
+// runs. The e2e launcher sets this env var so tests can enable the same CDP
+// endpoint through Electron's supported app.commandLine API instead.
+if (process.env["PIVIS_TEST_REMOTE_DEBUGGING_PORT"]) {
+  app.commandLine.appendSwitch(
+    "remote-debugging-port",
+    process.env["PIVIS_TEST_REMOTE_DEBUGGING_PORT"],
+  );
+}
+
 // Test isolation: PIVIS_SETTINGS_DIR (set by the e2e suites) redirects the
 // whole userData dir, not just settings.json. The single-instance lock and
 // Chromium's ProcessSingleton are both keyed on userData, so without this a
