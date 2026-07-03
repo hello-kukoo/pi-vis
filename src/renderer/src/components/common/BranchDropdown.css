@@ -16,7 +16,7 @@
   padding: 0.214rem 0.571rem;
   cursor: pointer;
   -webkit-app-region: no-drag;
-  /* A long branch name fades (FadeText) instead of widening the control. */
+  /* A long branch name in the trigger fades instead of widening the control. */
   display: inline-flex;
   align-items: center;
   gap: 0.35em;
@@ -69,6 +69,26 @@
   flex-direction: column;
   gap: 0.143rem;
   padding: 0.143rem var(--space-2) var(--space-2);
+}
+
+.branch-dropdown__list--virtual {
+  display: block;
+  position: relative;
+}
+
+.branch-dropdown__virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.branch-dropdown__virtual-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.143rem;
 }
 
 /* Opens upward — for triggers near the bottom of the viewport (WorktreeBar)
@@ -152,6 +172,9 @@
   flex: 1;
   min-width: 0;
   text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .branch-dropdown__check {

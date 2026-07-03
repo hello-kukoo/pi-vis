@@ -5,6 +5,7 @@ import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinkin
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
@@ -230,10 +231,9 @@ export function SessionControls({
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const modelHighlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   const filteredModels = useMemo(() => {
     const q = modelSearch.toLowerCase();
@@ -251,24 +251,43 @@ export function SessionControls({
   useEffect(() => {
     if (!modelOpen) {
       setModelSearch("");
+      modelHighlightSourceRef.current = "programmatic";
       setHighlightedIndex(0);
       return;
     }
     setModelSearch("");
+    modelHighlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
     setTimeout(() => searchInputRef.current?.focus(), 10);
   }, [modelOpen]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on search value
   useEffect(() => {
+    modelHighlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
   }, [modelSearch]);
 
+  const modelVirtualList = useVirtualList<HTMLDivElement>({
+    count: filteredModels.length,
+    rowHeight: 34,
+    minOverscan: 32,
+    overscanScreens: 2,
+  });
+
+  useEffect(() => {
+    modelHighlightSourceRef.current = "programmatic";
+    setHighlightedIndex((i) =>
+      filteredModels.length === 0 ? 0 : Math.min(i, filteredModels.length - 1),
+    );
+  }, [filteredModels.length]);
+
   useEffect(() => {
     if (!modelOpen) return;
-    const btn = itemRefs.current.get(highlightedIndex);
-    btn?.scrollIntoView({ block: "nearest" });
-  }, [highlightedIndex, modelOpen]);
+    // Hover should update only the visual highlight; keyboard/programmatic
+    // navigation is the only path that should scroll the dropdown.
+    if (modelHighlightSourceRef.current === "pointer") return;
+    modelVirtualList.ensureIndexVisible(highlightedIndex);
+  }, [highlightedIndex, modelOpen, modelVirtualList.ensureIndexVisible]);
 
   useEffect(() => {
     if (!modelOpen) return;
@@ -407,18 +426,22 @@ export function SessionControls({
                       break;
                     case "ArrowDown":
                       e.preventDefault();
+                      modelHighlightSourceRef.current = "keyboard";
                       setHighlightedIndex((i) => (i < filteredModels.length - 1 ? i + 1 : 0));
                       break;
                     case "ArrowUp":
                       e.preventDefault();
+                      modelHighlightSourceRef.current = "keyboard";
                       setHighlightedIndex((i) => (i > 0 ? i - 1 : filteredModels.length - 1));
                       break;
                     case "Home":
                       e.preventDefault();
+                      modelHighlightSourceRef.current = "keyboard";
                       setHighlightedIndex(0);
                       break;
                     case "End":
                       e.preventDefault();
+                      modelHighlightSourceRef.current = "keyboard";
                       setHighlightedIndex(filteredModels.length - 1);
                       break;
                     case "Enter":
@@ -442,45 +465,57 @@ export function SessionControls({
               <div className="session-header__dropdown-empty">No models found</div>
             ) : (
               <div
-                ref={listRef}
+                ref={modelVirtualList.containerRef}
+                onScroll={modelVirtualList.onScroll}
                 role="listbox"
                 id="model-listbox"
-                className="session-header__dropdown-list"
+                className="session-header__dropdown-list session-header__dropdown-list--virtual"
               >
-                {filteredModels.map((m, idx) => {
-                  const label = modelDisplayName(m);
-                  const q = modelSearch;
-                  const active = idx === highlightedIndex;
-                  // Compare against the single resolved current entry by key
-                  // (not per-item id matching) so that when the provider is
-                  // unknown and duplicate same-id entries exist, at most ONE
-                  // row highlights instead of every same-id copy getting a ✓.
-                  const selected =
-                    currentModelInfo != null && modelKey(m) === modelKey(currentModelInfo);
-                  return (
-                    <button
-                      type="button"
-                      key={modelKey(m)}
-                      ref={(el) => {
-                        if (el) itemRefs.current.set(idx, el);
-                        else itemRefs.current.delete(idx);
-                      }}
-                      id={`model-option-${idx}`}
-                      role="option"
-                      aria-selected={selected}
-                      className={`session-header__dropdown-item fade-scope${active ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
-                      onClick={() => void handleModelChange(m)}
-                      onMouseEnter={() => setHighlightedIndex(idx)}
-                    >
-                      <span className="session-header__dropdown-item-check" aria-hidden>
-                        {selected ? <IconCheck /> : null}
-                      </span>
-                      <FadeText className="session-header__dropdown-item-label">
-                        {q ? highlightMatch(label, q) : label}
-                      </FadeText>
-                    </button>
-                  );
-                })}
+                <div
+                  className="session-header__virtual-spacer"
+                  style={{ height: modelVirtualList.totalHeight }}
+                >
+                  <div
+                    className="session-header__virtual-window"
+                    style={{ transform: `translateY(${modelVirtualList.offsetY}px)` }}
+                  >
+                    {modelVirtualList.rows.map(({ index: idx }) => {
+                      const m = filteredModels[idx];
+                      if (!m) return null;
+                      const label = modelDisplayName(m);
+                      const q = modelSearch;
+                      const active = idx === highlightedIndex;
+                      // Compare against the single resolved current entry by key
+                      // (not per-item id matching) so that when the provider is
+                      // unknown and duplicate same-id entries exist, at most ONE
+                      // row highlights instead of every same-id copy getting a ✓.
+                      const selected =
+                        currentModelInfo != null && modelKey(m) === modelKey(currentModelInfo);
+                      return (
+                        <button
+                          type="button"
+                          key={modelKey(m)}
+                          id={`model-option-${idx}`}
+                          role="option"
+                          aria-selected={selected}
+                          className={`session-header__dropdown-item fade-scope${active ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
+                          onClick={() => void handleModelChange(m)}
+                          onMouseEnter={() => {
+                            modelHighlightSourceRef.current = "pointer";
+                            setHighlightedIndex(idx);
+                          }}
+                        >
+                          <span className="session-header__dropdown-item-check" aria-hidden>
+                            {selected ? <IconCheck /> : null}
+                          </span>
+                          <span className="session-header__dropdown-item-label" title={label}>
+                            {q ? highlightMatch(label, q) : label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             )}
           </div>

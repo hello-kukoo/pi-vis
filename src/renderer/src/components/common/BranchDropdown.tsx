@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { FadeText } from "./FadeText.js";
 import { IconCheck, IconChevronDown } from "./icons.js";
 import "./BranchDropdown.css";
@@ -66,9 +67,9 @@ export function BranchDropdown({
   useEscapeClaim(open);
   const [search, setSearch] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
@@ -81,24 +82,21 @@ export function BranchDropdown({
   useEffect(() => {
     if (!open) {
       setSearch("");
+      highlightSourceRef.current = "programmatic";
       setHighlightedIndex(0);
       return;
     }
     setSearch("");
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
     setTimeout(() => searchInputRef.current?.focus(), 10);
   }, [open]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on search value
   useEffect(() => {
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
   }, [search]);
-
-  useEffect(() => {
-    if (!open) return;
-    const btn = itemRefs.current.get(highlightedIndex);
-    btn?.scrollIntoView({ block: "nearest" });
-  }, [highlightedIndex, open]);
 
   // Close on outside click
   useEffect(() => {
@@ -138,6 +136,26 @@ export function BranchDropdown({
   // in keyboard navigation as the last index.
   const checkboxIndex = listItems.length;
   const totalItems = listItems.length + 1;
+  const virtualList = useVirtualList<HTMLDivElement>({
+    count: listItems.length,
+    rowHeight: 34,
+    minOverscan: 32,
+    overscanScreens: 2,
+  });
+
+  useEffect(() => {
+    highlightSourceRef.current = "programmatic";
+    setHighlightedIndex((i) => Math.min(i, totalItems - 1));
+  }, [totalItems]);
+
+  useEffect(() => {
+    if (!open || highlightedIndex === checkboxIndex) return;
+    // Mouse hover should only move the visual highlight. Auto-scrolling on
+    // hover feels jumpy (especially for rows near the bottom of the popup),
+    // so only keyboard/programmatic highlight changes scroll the list.
+    if (highlightSourceRef.current === "pointer") return;
+    virtualList.ensureIndexVisible(highlightedIndex);
+  }, [highlightedIndex, open, checkboxIndex, virtualList.ensureIndexVisible]);
 
   const handleSelect = useCallback(
     (base: string | null) => {
@@ -162,21 +180,25 @@ export function BranchDropdown({
         case "ArrowDown":
           e.preventDefault();
           e.stopPropagation();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex((i) => (i < totalItems - 1 ? i + 1 : 0));
           break;
         case "ArrowUp":
           e.preventDefault();
           e.stopPropagation();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex((i) => (i > 0 ? i - 1 : totalItems - 1));
           break;
         case "Home":
           e.preventDefault();
           e.stopPropagation();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex(0);
           break;
         case "End":
           e.preventDefault();
           e.stopPropagation();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex(totalItems - 1);
           break;
         case "Enter":
@@ -235,64 +257,80 @@ export function BranchDropdown({
           {listItems.length === 0 ? (
             <div className="branch-dropdown__empty">No branches found</div>
           ) : (
-            <div className="branch-dropdown__list" role="listbox" id="branch-dropdown-listbox">
-              {listItems.map((item, idx) => {
-                if (item.type === "leadingItem") {
-                  const active = idx === highlightedIndex;
-                  return (
-                    <button
-                      key="__leading__"
-                      type="button"
-                      ref={(el) => {
-                        if (el) itemRefs.current.set(idx, el);
-                        else itemRefs.current.delete(idx);
-                      }}
-                      role="option"
-                      aria-selected={value === null}
-                      className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${value === null ? " branch-dropdown__item--active" : ""}`}
-                      onClick={() => handleSelect(null)}
-                      onMouseEnter={() => setHighlightedIndex(idx)}
-                    >
-                      <FadeText className="branch-dropdown__item-label">
-                        {search ? highlightMatch(item.label, search) : item.label}
-                      </FadeText>
-                      {value === null && (
-                        <span className="branch-dropdown__check" aria-hidden>
-                          <IconCheck />
+            <div
+              ref={virtualList.containerRef}
+              onScroll={virtualList.onScroll}
+              className="branch-dropdown__list branch-dropdown__list--virtual"
+              role="listbox"
+              id="branch-dropdown-listbox"
+            >
+              <div
+                className="branch-dropdown__virtual-spacer"
+                style={{ height: virtualList.totalHeight }}
+              >
+                <div
+                  className="branch-dropdown__virtual-window"
+                  style={{ transform: `translateY(${virtualList.offsetY}px)` }}
+                >
+                  {virtualList.rows.map(({ index: idx }) => {
+                    const item = listItems[idx];
+                    if (!item) return null;
+                    if (item.type === "leadingItem") {
+                      const active = idx === highlightedIndex;
+                      return (
+                        <button
+                          key="__leading__"
+                          type="button"
+                          role="option"
+                          aria-selected={value === null}
+                          className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${value === null ? " branch-dropdown__item--active" : ""}`}
+                          onClick={() => handleSelect(null)}
+                          onMouseEnter={() => {
+                            highlightSourceRef.current = "pointer";
+                            setHighlightedIndex(idx);
+                          }}
+                        >
+                          <span className="branch-dropdown__item-label" title={item.label}>
+                            {search ? highlightMatch(item.label, search) : item.label}
+                          </span>
+                          {value === null && (
+                            <span className="branch-dropdown__check" aria-hidden>
+                              <IconCheck />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    }
+                    const b = item.branch;
+                    const active = idx === highlightedIndex;
+                    const selected = value === b.name;
+                    return (
+                      <button
+                        key={b.name}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${selected ? " branch-dropdown__item--active" : ""}`}
+                        onClick={() => handleSelect(b.name)}
+                        onMouseEnter={() => {
+                          highlightSourceRef.current = "pointer";
+                          setHighlightedIndex(idx);
+                        }}
+                      >
+                        <span className="branch-dropdown__item-label" title={b.name}>
+                          {search ? highlightMatch(b.name, search) : b.name}
                         </span>
-                      )}
-                    </button>
-                  );
-                }
-                const b = item.branch;
-                const active = idx === highlightedIndex;
-                const selected = value === b.name;
-                return (
-                  <button
-                    key={b.name}
-                    type="button"
-                    ref={(el) => {
-                      if (el) itemRefs.current.set(idx, el);
-                      else itemRefs.current.delete(idx);
-                    }}
-                    role="option"
-                    aria-selected={selected}
-                    className={`branch-dropdown__item fade-scope${active ? " branch-dropdown__item--highlighted" : ""}${selected ? " branch-dropdown__item--active" : ""}`}
-                    onClick={() => handleSelect(b.name)}
-                    onMouseEnter={() => setHighlightedIndex(idx)}
-                  >
-                    <FadeText className="branch-dropdown__item-label">
-                      {search ? highlightMatch(b.name, search) : b.name}
-                    </FadeText>
-                    {b.current && <span className="branch-dropdown__current">current</span>}
-                    {selected && (
-                      <span className="branch-dropdown__check" aria-hidden>
-                        <IconCheck />
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+                        {b.current && <span className="branch-dropdown__current">current</span>}
+                        {selected && (
+                          <span className="branch-dropdown__check" aria-hidden>
+                            <IconCheck />
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
           {/* Pinned footer — always visible regardless of list scroll. */}
@@ -307,7 +345,10 @@ export function BranchDropdown({
                 onToggleRemote();
               }
             }}
-            onMouseEnter={() => setHighlightedIndex(checkboxIndex)}
+            onMouseEnter={() => {
+              highlightSourceRef.current = "pointer";
+              setHighlightedIndex(checkboxIndex);
+            }}
           >
             <label className="branch-dropdown__checkbox-label">
               <input type="checkbox" checked={includeRemoteBranches} onChange={onToggleRemote} />

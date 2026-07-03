@@ -282,6 +282,26 @@
   padding: 0.143rem var(--space-2) var(--space-2);
 }
 
+.session-header__dropdown-list--virtual {
+  display: block;
+  position: relative;
+}
+
+.session-header__virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.session-header__virtual-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.143rem;
+}
+
 .session-header__dropdown-search-input {
   /* box-sizing is set globally by theme.css */
   width: 100%;
@@ -334,11 +354,13 @@
   -webkit-app-region: no-drag;
 }
 
-/* Single-line labels: a long model name fades (FadeText) instead of
-   wrapping the row onto two lines. */
+/* Single-line labels: truncate long model names without per-row measurement. */
 .session-header__dropdown-item-label {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Hover/highlight is driven solely by the JS-managed --highlighted
@@ -370,7 +392,6 @@
   border-radius: 0.143em;
   padding: 0 0.071em;
 }
-
 
 /* Status-bar visibility toggle — a compact icon chip at the right end of the
    controls cluster, beside the context meter + token/cost summary (the

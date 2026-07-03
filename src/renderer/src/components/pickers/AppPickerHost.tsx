@@ -5,6 +5,7 @@ import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { useVirtualList } from "../../hooks/useVirtualList.js";
 import type { PickerRequest } from "../../lib/commands/execute.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
@@ -249,8 +250,8 @@ function ModelPicker({
   const selectedKey = currentModelInfo ? modelKey(currentModelInfo) : null;
   const [query, setQuery] = useState(search ?? "");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const searchRef = useRef<HTMLInputElement>(null);
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   // Pin focus on the search input the moment the picker mounts.
   useEffect(() => {
@@ -273,14 +274,28 @@ function ModelPicker({
   // Reset highlight when the filter changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on the filter value, not on identity
   useEffect(() => {
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
   }, [query]);
 
-  // Scroll the highlighted item into view.
+  const virtualList = useVirtualList<HTMLDivElement>({
+    count: filtered.length,
+    rowHeight: 38,
+    minOverscan: 32,
+    overscanScreens: 2,
+  });
+
   useEffect(() => {
-    const btn = itemRefs.current.get(highlightedIndex);
-    btn?.scrollIntoView({ block: "nearest" });
-  }, [highlightedIndex]);
+    highlightSourceRef.current = "programmatic";
+    setHighlightedIndex((i) => (filtered.length === 0 ? 0 : Math.min(i, filtered.length - 1)));
+  }, [filtered.length]);
+
+  // Scroll keyboard/programmatic highlight changes into view. Pointer hover
+  // only updates the visual highlight; it must not auto-scroll the list.
+  useEffect(() => {
+    if (highlightSourceRef.current === "pointer") return;
+    virtualList.ensureIndexVisible(highlightedIndex);
+  }, [highlightedIndex, virtualList.ensureIndexVisible]);
 
   return (
     <div className="picker picker--model">
@@ -295,9 +310,11 @@ function ModelPicker({
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
@@ -310,33 +327,50 @@ function ModelPicker({
           }}
         />
       </div>
-      <div className="picker__list" role="listbox">
+      <div
+        ref={virtualList.containerRef}
+        onScroll={virtualList.onScroll}
+        className="picker__list picker__list--virtual"
+        role="listbox"
+      >
         {filtered.length === 0 && <div className="picker__empty">No models found</div>}
-        {filtered.map((m, idx) => {
-          const label = modelDisplayName(m);
-          const selected = selectedKey != null && modelKey(m) === selectedKey;
-          return (
-            <button
-              type="button"
-              key={modelKey(m)}
-              ref={(el) => {
-                if (el) itemRefs.current.set(idx, el);
-                else itemRefs.current.delete(idx);
-              }}
-              className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""} ${selected ? "picker__item--selected" : ""}`}
-              onClick={() => onPick(m)}
-              onMouseEnter={() => setHighlightedIndex(idx)}
-              role="option"
-              aria-selected={selected}
+        {filtered.length > 0 && (
+          <div className="picker__virtual-spacer" style={{ height: virtualList.totalHeight }}>
+            <div
+              className="picker__virtual-window"
+              style={{ transform: `translateY(${virtualList.offsetY}px)` }}
             >
-              <span className="picker__selected-mark" aria-hidden>
-                {selected ? "✓" : ""}
-              </span>
-              <FadeText className="picker__item-name">{label}</FadeText>
-              <span className="picker__item-meta">{m.id}</span>
-            </button>
-          );
-        })}
+              {virtualList.rows.map(({ index: idx }) => {
+                const m = filtered[idx];
+                if (!m) return null;
+                const label = modelDisplayName(m);
+                const selected = selectedKey != null && modelKey(m) === selectedKey;
+                return (
+                  <button
+                    type="button"
+                    key={modelKey(m)}
+                    className={`picker__item ${idx === highlightedIndex ? "picker__item--highlighted" : ""} ${selected ? "picker__item--selected" : ""}`}
+                    onClick={() => onPick(m)}
+                    onMouseEnter={() => {
+                      highlightSourceRef.current = "pointer";
+                      setHighlightedIndex(idx);
+                    }}
+                    role="option"
+                    aria-selected={selected}
+                  >
+                    <span className="picker__selected-mark" aria-hidden>
+                      {selected ? "✓" : ""}
+                    </span>
+                    <span className="picker__item-name" title={label}>
+                      {label}
+                    </span>
+                    <span className="picker__item-meta">{m.id}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
       <div className="picker__footer">
         <button type="button" className="picker__btn picker__btn--cancel" onClick={onClose}>
@@ -359,6 +393,7 @@ function ForkPicker({
   onPick: (entryId: string) => void;
 }): React.ReactElement {
   const [highlightedIndex, setHighlightedIndex] = useState(messages.length - 1);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const rootRef = useRef<HTMLDivElement>(null);
@@ -369,10 +404,12 @@ function ForkPicker({
   }, []);
 
   useEffect(() => {
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(messages.length - 1);
   }, [messages.length]);
 
   useEffect(() => {
+    if (highlightSourceRef.current === "pointer") return;
     const btn = itemRefs.current.get(highlightedIndex);
     btn?.scrollIntoView({ block: "nearest" });
   }, [highlightedIndex]);
@@ -385,9 +422,11 @@ function ForkPicker({
       onKeyDown={(e) => {
         if (e.key === "ArrowDown") {
           e.preventDefault();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex((i) => Math.min(i + 1, messages.length - 1));
         } else if (e.key === "ArrowUp") {
           e.preventDefault();
+          highlightSourceRef.current = "keyboard";
           setHighlightedIndex((i) => Math.max(i - 1, 0));
         } else if (e.key === "Enter") {
           e.preventDefault();
@@ -414,7 +453,10 @@ function ForkPicker({
               }}
               className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
               onClick={() => onPick(m.entryId)}
-              onMouseEnter={() => setHighlightedIndex(idx)}
+              onMouseEnter={() => {
+                highlightSourceRef.current = "pointer";
+                setHighlightedIndex(idx);
+              }}
               role="option"
               aria-selected={idx === highlightedIndex}
             >
@@ -555,8 +597,8 @@ function ScopedModelsPicker({
   });
   const [query, setQuery] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const searchRef = useRef<HTMLInputElement>(null);
-  const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
   useEffect(() => {
     setTimeout(() => searchRef.current?.focus(), 10);
@@ -578,13 +620,26 @@ function ScopedModelsPicker({
   // Reset highlight when the filter changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on the filter value, not on identity
   useEffect(() => {
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
   }, [query]);
 
+  const virtualList = useVirtualList<HTMLDivElement>({
+    count: filtered.length,
+    rowHeight: 38,
+    minOverscan: 32,
+    overscanScreens: 2,
+  });
+
   useEffect(() => {
-    const btn = itemRefs.current.get(highlightedIndex);
-    btn?.scrollIntoView({ block: "nearest" });
-  }, [highlightedIndex]);
+    highlightSourceRef.current = "programmatic";
+    setHighlightedIndex((i) => (filtered.length === 0 ? 0 : Math.min(i, filtered.length - 1)));
+  }, [filtered.length]);
+
+  useEffect(() => {
+    if (highlightSourceRef.current === "pointer") return;
+    virtualList.ensureIndexVisible(highlightedIndex);
+  }, [highlightedIndex, virtualList.ensureIndexVisible]);
 
   const toggle = (id: string) => {
     setChecked((prev) => {
@@ -621,9 +676,11 @@ function ScopedModelsPicker({
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
@@ -636,35 +693,52 @@ function ScopedModelsPicker({
           }}
         />
       </div>
-      <div className="picker__list" role="listbox">
+      <div
+        ref={virtualList.containerRef}
+        onScroll={virtualList.onScroll}
+        className="picker__list picker__list--virtual"
+        role="listbox"
+      >
         {filtered.length === 0 && <div className="picker__empty">No models found</div>}
-        {filtered.map((m, idx) => {
-          const id = `${m.provider ?? ""}/${m.id}`;
-          const isChecked = checked.has(id);
-          const label = modelDisplayName(m);
-          return (
-            <button
-              type="button"
-              key={id}
-              ref={(el) => {
-                if (el) itemRefs.current.set(idx, el);
-                else itemRefs.current.delete(idx);
-              }}
-              className={`picker__item picker__item--check fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
-              onClick={() => toggle(id)}
-              onMouseEnter={() => setHighlightedIndex(idx)}
-              role="option"
-              aria-selected={isChecked}
+        {filtered.length > 0 && (
+          <div className="picker__virtual-spacer" style={{ height: virtualList.totalHeight }}>
+            <div
+              className="picker__virtual-window"
+              style={{ transform: `translateY(${virtualList.offsetY}px)` }}
             >
-              <span
-                className={`picker__checkbox ${isChecked ? "picker__checkbox--checked" : ""}`}
-                aria-hidden="true"
-              />
-              <FadeText className="picker__item-name">{label}</FadeText>
-              <span className="picker__item-meta">{m.id}</span>
-            </button>
-          );
-        })}
+              {virtualList.rows.map(({ index: idx }) => {
+                const m = filtered[idx];
+                if (!m) return null;
+                const id = `${m.provider ?? ""}/${m.id}`;
+                const isChecked = checked.has(id);
+                const label = modelDisplayName(m);
+                return (
+                  <button
+                    type="button"
+                    key={id}
+                    className={`picker__item picker__item--check ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
+                    onClick={() => toggle(id)}
+                    onMouseEnter={() => {
+                      highlightSourceRef.current = "pointer";
+                      setHighlightedIndex(idx);
+                    }}
+                    role="option"
+                    aria-selected={isChecked}
+                  >
+                    <span
+                      className={`picker__checkbox ${isChecked ? "picker__checkbox--checked" : ""}`}
+                      aria-hidden="true"
+                    />
+                    <span className="picker__item-name" title={label}>
+                      {label}
+                    </span>
+                    <span className="picker__item-meta">{m.id}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
       <div className="picker__footer">
         <span className="picker__count">
@@ -723,6 +797,7 @@ function LogoutPicker({
 }): React.ReactElement {
   const [query, setQuery] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const searchRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
 
@@ -740,10 +815,12 @@ function LogoutPicker({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: depends on the filter value, not on identity
   useEffect(() => {
+    highlightSourceRef.current = "programmatic";
     setHighlightedIndex(0);
   }, [query]);
 
   useEffect(() => {
+    if (highlightSourceRef.current === "pointer") return;
     const btn = itemRefs.current.get(highlightedIndex);
     btn?.scrollIntoView({ block: "nearest" });
   }, [highlightedIndex]);
@@ -761,9 +838,11 @@ function LogoutPicker({
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
+              highlightSourceRef.current = "keyboard";
               setHighlightedIndex((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
@@ -788,7 +867,10 @@ function LogoutPicker({
             }}
             className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
             onClick={() => onPick(p)}
-            onMouseEnter={() => setHighlightedIndex(idx)}
+            onMouseEnter={() => {
+              highlightSourceRef.current = "pointer";
+              setHighlightedIndex(idx);
+            }}
             role="option"
             aria-selected={idx === highlightedIndex}
           >
@@ -837,6 +919,7 @@ function TrustPicker({
 }): React.ReactElement {
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [saving, setSaving] = useState(false);
+  const highlightSourceRef = useRef<"keyboard" | "pointer" | "programmatic">("programmatic");
   const itemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const addToast = useSessionsStore((s) => s.addToast);
   const closePicker = useSessionsStore((s) => s.closePicker);
@@ -849,6 +932,7 @@ function TrustPicker({
   }, []);
 
   useEffect(() => {
+    if (highlightSourceRef.current === "pointer") return;
     const btn = itemRefs.current.get(highlightedIndex);
     btn?.scrollIntoView({ block: "nearest" });
   }, [highlightedIndex]);
@@ -938,9 +1022,11 @@ function TrustPicker({
         onKeyDown={(e) => {
           if (e.key === "ArrowDown") {
             e.preventDefault();
+            highlightSourceRef.current = "keyboard";
             setHighlightedIndex((i) => Math.min(i + 1, options.length - 1));
           } else if (e.key === "ArrowUp") {
             e.preventDefault();
+            highlightSourceRef.current = "keyboard";
             setHighlightedIndex((i) => Math.max(i - 1, 0));
           } else if (e.key === "Enter") {
             e.preventDefault();
@@ -961,7 +1047,10 @@ function TrustPicker({
             type="button"
             className={`picker__item fade-scope ${idx === highlightedIndex ? "picker__item--highlighted" : ""}`}
             disabled={saving}
-            onMouseEnter={() => setHighlightedIndex(idx)}
+            onMouseEnter={() => {
+              highlightSourceRef.current = "pointer";
+              setHighlightedIndex(idx);
+            }}
             onClick={() => void choose(idx)}
           >
             <FadeText className="picker__item-name">{option.label}</FadeText>

@@ -112,6 +112,26 @@
   min-height: 6.429rem; /* ≈90px */
 }
 
+.picker__list--virtual {
+  display: block;
+  position: relative;
+}
+
+.picker__virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.picker__virtual-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.214rem;
+}
+
 .picker__item {
   background: transparent;
   border: 1px solid transparent;
@@ -157,6 +177,9 @@
 .picker__item-name {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .picker__item-meta {
