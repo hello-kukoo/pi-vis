@@ -107,7 +107,17 @@ export class PiProcess extends EventEmitter {
 
     this.proc.on("error", (err) => {
       this.rejectAllPending(err);
-      this.emit("error", err);
+      // Guard the unlistened case: the registry attaches its 'error' listener
+      // only after activation completes, but a spawn failure (ENOENT on a
+      // deleted pi binary) fires before that. An 'error' emission with no
+      // listeners throws as an uncaughtException, which in Electron's main
+      // process pops a BLOCKING native error dialog and freezes the event
+      // loop. Same guard as SessionHost.emitError.
+      if (this.listenerCount("error") > 0) {
+        this.emit("error", err);
+      } else {
+        console.error("[pi-process] error (no listener):", err.message);
+      }
     });
   }
 

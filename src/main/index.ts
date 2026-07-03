@@ -17,6 +17,16 @@ function boundsOnScreen(b: { x: number; y: number; width: number; height: number
 
 app.setName("Pi-Vis");
 
+// Test isolation: PIVIS_SETTINGS_DIR (set by the e2e suites) redirects the
+// whole userData dir, not just settings.json. The single-instance lock and
+// Chromium's ProcessSingleton are both keyed on userData, so without this a
+// test instance collides with a running production Pi-Vis (or with parallel
+// test workers) and quits before creating a window. Must run before
+// requestSingleInstanceLock().
+if (process.env["PIVIS_SETTINGS_DIR"]) {
+  app.setPath("userData", process.env["PIVIS_SETTINGS_DIR"]);
+}
+
 // Single-instance lock: prevent multiple main processes
 if (!app.requestSingleInstanceLock()) {
   app.quit();

@@ -311,7 +311,7 @@ export class SessionHost extends EventEmitter {
         this.startupReject = null;
       }
       this.rejectAllPending(err);
-      this.emit("error", err);
+      this.emitError(err);
     });
 
     // Send init message
@@ -389,6 +389,26 @@ export class SessionHost extends EventEmitter {
   }
 
   /**
+   * Emit 'error' only when someone is listening. An 'error' emission with no
+   * listeners throws as an uncaughtException — which in Electron's main
+   * process pops a BLOCKING native error dialog and freezes the entire event
+   * loop (renderer IPC, quit handling, everything). This fires in practice on
+   * every startup failure: the host's {type:"error"} message consumes
+   * startupReject, whose cleanup removes waitForReady's once("error")
+   * listener, so the follow-up emit finds zero listeners. Latent on
+   * Electron 31 / Node 20 (the child usually died before its IPC error
+   * message was delivered, so only the safe 'exit' path ran); guaranteed on
+   * Electron 43 / Node 24, which delivers the message reliably.
+   */
+  private emitError(err: Error): void {
+    if (this.listenerCount("error") > 0) {
+      this.emit("error", err);
+    } else {
+      console.error("[SessionHost] error (no listener):", err.message);
+    }
+  }
+
+  /**
    * Build an error whose message includes the host's captured stderr tail.
    * The host subprocess prints the real cause of a startup failure (module
    * load errors, SyntaxErrors, init exceptions) to stderr, but the rejection
@@ -458,7 +478,7 @@ export class SessionHost extends EventEmitter {
           this.startupReject(err);
           this.startupReject = null;
         }
-        this.emit("error", err);
+        this.emitError(err);
         break;
       }
 

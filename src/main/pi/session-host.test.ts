@@ -30,10 +30,9 @@ describe("SessionHost", () => {
     __forkOverride.fn = () =>
       fake as unknown as ReturnType<typeof import("node:child_process").fork>;
     host = new SessionHost("/fake/pi", "/tmp/fake-ws", undefined, {});
-    // Swallow 'error' emissions that race the once("error") cleanup in
-    // waitForReady (startupReject fires, removes the once-listener, then the
-    // emit("error") re-throws). Not the SUT of these tests; avoid noise.
-    host.on("error", () => {});
+    // NOTE: deliberately no host.on("error") swallow here. SessionHost must be
+    // safe to use without an external 'error' listener — emitError guards the
+    // unlistened case (see the "unobserved 'error' safety" suite below).
   });
 
   afterEach(() => {
@@ -75,6 +74,21 @@ describe("SessionHost", () => {
       const p = host.waitForReady();
       fake.emitExit(42);
       await expect(p).rejects.toBeInstanceOf(HostVersionTooLowError);
+    });
+
+    it("a pre-ready host error with no external 'error' listener rejects waitForReady without throwing (Electron 43 / Node 24 regression)", async () => {
+      // The startup-failure sequence: the host's {type:"error"} message
+      // consumes startupReject, whose cleanup removes waitForReady's
+      // once("error") listener — so the follow-up emit("error") fires with
+      // ZERO listeners. An unlistened 'error' emission throws as an
+      // uncaughtException, which in Electron's main process pops a BLOCKING
+      // native error dialog and freezes the whole event loop (IPC, CDP,
+      // quit). Node 20 usually dropped the child's pre-exit IPC message (only
+      // the safe 'exit' path ran); Node 24 delivers it reliably, so every
+      // host-fallback froze the app. emitError must guard the unlistened case.
+      const p = host.waitForReady();
+      expect(() => fake.emitError("boom: module not found")).not.toThrow();
+      await expect(p).rejects.toThrow(/boom/);
     });
 
     it("fires the startup watchdog when the host never sends ready", async () => {
