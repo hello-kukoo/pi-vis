@@ -188,6 +188,7 @@ export interface IpcInvokeContract {
   // against ThemeSchema). Bundled themes are compiled into the renderer; this
   // returns only the user layer, which the renderer merges on top.
   "themes.listUser": { req: undefined; res: Theme[] };
+  "themes.userDir": { req: undefined; res: string };
   "app.versions": { req: undefined; res: { app: string; electron: string; node: string } };
   // Clipboard write. Routed through the main process because the
   // renderer's `navigator.clipboard` API is unreliable in Electron

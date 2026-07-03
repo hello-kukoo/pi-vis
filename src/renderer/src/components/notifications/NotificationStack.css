@@ -213,7 +213,7 @@
 .notification-card {
   position: relative;
   display: grid;
-  grid-template-columns: 1rem minmax(0, 1fr) 1.714rem;
+  grid-template-columns: 1.15rem minmax(0, 1fr) 1.714rem;
   column-gap: 0.5rem;
   align-items: start;
   width: 100%;
@@ -235,6 +235,10 @@
   box-shadow: 0 0.571rem 1.429rem color-mix(in srgb, var(--shadow) 12%, transparent);
 }
 
+.notification-stack__pile-card {
+  padding: 0;
+}
+
 .notification-stack__pile-card .notification-stack__pile-open {
   grid-column: 1 / -1;
 }
@@ -245,7 +249,8 @@
   gap: 0.5rem;
   width: 100%;
   min-width: 0;
-  padding: 0 1.75rem 0 0;
+  min-height: 100%;
+  padding: 0.75rem 2.536rem 0.75rem 0.786rem;
   border: none;
   background: transparent;
   color: inherit;
@@ -256,38 +261,38 @@
 
 .notification-card__marker {
   flex: 0 0 auto;
-  width: 1rem;
-  height: 0.8rem;
-  margin-top: 0.34rem;
+  width: 1.15rem;
+  height: 0.9rem;
+  margin-top: 0.3rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-pill);
-  color: color-mix(in srgb, var(--info) 58%, var(--text-muted));
+  color: color-mix(in srgb, var(--info) 74%, var(--text-muted));
   font-size: 0.64rem;
   font-weight: 700;
   line-height: 1;
-  opacity: 0.78;
+  opacity: 0.95;
 }
 
 .notification-card__marker::before {
   content: "";
-  width: 0.36rem;
-  height: 0.36rem;
+  width: 0.5rem;
+  height: 0.5rem;
   border-radius: var(--radius-pill);
   background: currentColor;
 }
 
 .notification-card--success .notification-card__marker {
-  color: color-mix(in srgb, var(--success) 58%, var(--text-muted));
+  color: color-mix(in srgb, var(--success) 74%, var(--text-muted));
 }
 
 .notification-card--warning .notification-card__marker {
-  color: color-mix(in srgb, var(--warning) 62%, var(--text-muted));
+  color: color-mix(in srgb, var(--warning) 78%, var(--text-muted));
 }
 
 .notification-card--error .notification-card__marker {
-  color: color-mix(in srgb, var(--danger) 62%, var(--text-muted));
+  color: color-mix(in srgb, var(--danger) 78%, var(--text-muted));
 }
 
 .notification-card__message {

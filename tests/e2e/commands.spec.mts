@@ -219,8 +219,10 @@ test.describe("Slash commands", () => {
 
     const card = window.locator(".tool-card").filter({ hasText: "generate-long-report" }).first();
     await expect(card).toBeVisible({ timeout: 15_000 });
-    await expect(card).toContainText("value-value-value");
-    await expect(card).toContainText("tail");
+    await expect(card.locator(".tool-card__subject")).toHaveAttribute(
+      "title",
+      /value-value-value.*tail/,
+    );
 
     await card.locator("button.tool-card__header").click();
     await expect(card.locator(".tool-card__output-panel")).toBeVisible({ timeout: 5_000 });

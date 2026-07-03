@@ -80,6 +80,7 @@ export function NotificationStack({
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewHoveredRef = useRef(false);
+  const stackRef = useRef<HTMLElement | null>(null);
   const toasts = session?.toasts ?? [];
   const panelOpen = !!session?.notificationPanelOpen;
   const latestId = toasts[toasts.length - 1]?.id;
@@ -102,6 +103,16 @@ export function NotificationStack({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [panelOpen, sessionId, setNotificationPanelOpen]);
+
+  useEffect(() => {
+    if (!panelOpen) return;
+    const onMouseDown = (e: MouseEvent): void => {
+      if (stackRef.current?.contains(e.target as Node)) return;
+      setNotificationPanelOpen(sessionId, false);
+    };
+    document.addEventListener("mousedown", onMouseDown, true);
+    return () => document.removeEventListener("mousedown", onMouseDown, true);
   }, [panelOpen, sessionId, setNotificationPanelOpen]);
 
   const clearPreviewTimers = useCallback((): void => {
@@ -191,6 +202,7 @@ export function NotificationStack({
 
   return (
     <aside
+      ref={stackRef}
       className={`notification-stack${panelOpen ? " notification-stack--expanded" : ""}${previewPhase === "exiting" ? " notification-stack--exiting" : ""}`}
       aria-label="Notifications"
       onMouseEnter={panelOpen ? undefined : handlePreviewMouseEnter}

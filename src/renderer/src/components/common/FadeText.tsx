@@ -27,11 +27,10 @@ interface FadeTextProps {
 }
 
 // Reveal glide pacing: proportional to the hidden distance so short and long
-// overflows both read at the same speed, clamped so tiny overflows don't
-// blink and huge paths don't crawl forever.
-const REVEAL_MS_PER_PX = 14;
+// overflows both read at roughly the same readable speed. Do not clamp the
+// maximum duration: doing so makes very long labels accelerate dramatically.
+const REVEAL_PX_PER_SECOND = 48;
 const REVEAL_MIN_MS = 450;
-const REVEAL_MAX_MS = 4500;
 
 export function FadeText({ children, className, pre = false, head = false, title }: FadeTextProps) {
   const outerRef = useRef<HTMLSpanElement>(null);
@@ -49,7 +48,7 @@ export function FadeText({ children, className, pre = false, head = false, title
       if (overflow > 1) {
         outer.dataset.overflow = "true";
         outer.style.setProperty("--fade-shift", `${-overflow}px`);
-        const ms = Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, overflow * REVEAL_MS_PER_PX));
+        const ms = Math.max(REVEAL_MIN_MS, (overflow / REVEAL_PX_PER_SECOND) * 1000);
         outer.style.setProperty("--fade-dur", `${ms}ms`);
       } else if (outer.dataset.overflow) {
         delete outer.dataset.overflow;

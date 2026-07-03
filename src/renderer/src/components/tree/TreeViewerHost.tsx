@@ -10,7 +10,7 @@
  */
 import type { SessionId } from "@shared/ids.js";
 import type * as React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { cssEscape } from "../../lib/format.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
@@ -388,8 +388,36 @@ function TreeList({
   onNavigate: (id: string) => void;
   onEditLabel: (id: string, currentLabel: string | undefined) => void;
 }): React.ReactElement {
+  const treeRef = useRef<HTMLDivElement | null>(null);
+  const didInitialScrollRef = useRef(false);
+
+  // Opening the tree should orient the user around the current leaf instead
+  // of dumping them at the root. Put the selected/current row a few rows above
+  // the bottom so both history and possible descendants are visible; if the
+  // selected row is already near the end, clamp to the true bottom.
+  useLayoutEffect(() => {
+    if (didInitialScrollRef.current) return;
+    const tree = treeRef.current;
+    if (!tree || !selectedId) return;
+    const row = tree.querySelector<HTMLElement>(`[data-entry-id="${cssEscape(selectedId)}"]`);
+    if (!row) return;
+    const selectedIndex = rows.findIndex((r) => r.entry.id === selectedId);
+    const rowsBelow = selectedIndex >= 0 ? rows.length - selectedIndex - 1 : 0;
+    const desiredRowsBelow = 3;
+    didInitialScrollRef.current = true;
+    if (rowsBelow <= desiredRowsBelow) {
+      tree.scrollTop = tree.scrollHeight;
+      return;
+    }
+    const rowHeight = row.getBoundingClientRect().height || 22;
+    const target = row.offsetTop - tree.clientHeight + rowHeight * (desiredRowsBelow + 1);
+    tree.scrollTop = Math.max(0, Math.min(target, tree.scrollHeight - tree.clientHeight));
+    // Run once for this mounted list. Keyboard navigation uses its own nearest
+    // scroll behavior and should not be yanked back to this initial framing.
+  }, [rows, selectedId]);
+
   return (
-    <div className="tree-viewer__tree" role="listbox" aria-label="Conversation tree">
+    <div ref={treeRef} className="tree-viewer__tree" role="listbox" aria-label="Conversation tree">
       {rows.map((row) => (
         <TreeRow
           key={row.entry.id}

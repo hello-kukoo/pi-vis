@@ -608,6 +608,8 @@ const stub = {
         return settingsState;
       case "themes.listUser":
         return []; // preview has no user-droppable themes; bundled themes apply
+      case "themes.userDir":
+        return "~/Library/Application Support/pi-vis/themes";
 
       case "workspace.list":
         return [DEMO_WORKSPACE];

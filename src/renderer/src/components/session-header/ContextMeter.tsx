@@ -45,9 +45,23 @@ export function ContextMeter({ sessionId }: { sessionId: SessionId }): React.Rea
     if (!t) return null;
     const reads = t.cacheRead ?? 0;
     const base = (t.input ?? 0) + reads;
-    if (base <= 0) return null;
+    if (reads <= 0 || base <= 0) return null;
     return reads / base;
   }, [stats?.tokens]);
+
+  const tokenRows = useMemo(() => {
+    const t = stats?.tokens;
+    if (!t) return [];
+    return [
+      { label: "Input", value: formatTokens(t.input ?? 0) },
+      { label: "Output", value: formatTokens(t.output ?? 0) },
+      t.cacheRead > 0 ? { label: "Cache read", value: formatTokens(t.cacheRead) } : null,
+      t.cacheWrite > 0 ? { label: "Cache write", value: formatTokens(t.cacheWrite) } : null,
+      cacheHitRate != null && cacheHitRate > 0
+        ? { label: "Cache hit rate", value: `${Math.round(cacheHitRate * 100)}%` }
+        : null,
+    ].filter((row): row is { label: string; value: string } => row !== null);
+  }, [cacheHitRate, stats?.tokens]);
 
   const danger = (pct ?? 0) >= 90;
   const warn = !danger && (pct ?? 0) >= 80;
@@ -130,14 +144,13 @@ export function ContextMeter({ sessionId }: { sessionId: SessionId }): React.Rea
               style={{ width: `${Math.min(100, ring)}%` }}
             />
           </div>
-          {stats?.tokens && (
+          {tokenRows.length > 0 && (
             <dl className="context-dropdown__rows">
-              <Row label="Input">{formatTokens(stats.tokens.input)}</Row>
-              <Row label="Output">{formatTokens(stats.tokens.output)}</Row>
-              <Row label="Cache read">{formatTokens(stats.tokens.cacheRead)}</Row>
-              <Row label="Cache hit rate">
-                {cacheHitRate != null ? `${Math.round(cacheHitRate * 100)}%` : "—"}
-              </Row>
+              {tokenRows.map((row) => (
+                <Row key={row.label} label={row.label}>
+                  {row.value}
+                </Row>
+              ))}
             </dl>
           )}
         </div>

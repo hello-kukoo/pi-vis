@@ -566,7 +566,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
       <span className={`tool-card__name ${isBash ? "tool-card__name--bash" : ""}`}>
         {isBash ? "$" : data.toolName}
       </span>
-      {subject && <FadeText className="tool-card__subject">{subject}</FadeText>}
+      {subject && (
+        <FadeText className="tool-card__subject" title={subject}>
+          {subject}
+        </FadeText>
+      )}
       {data.isStreaming && <span className="spinner tool-card__spinner" />}
       {data.isError && <span className="tool-card__badge">error</span>}
     </>
@@ -679,7 +683,9 @@ const BashBlock = memo(function BashBlock({
   const header = (
     <>
       <span className="tool-card__name tool-card__name--bash">$</span>
-      <FadeText className="tool-card__subject tool-card__subject--command">{data.command}</FadeText>
+      <FadeText className="tool-card__subject tool-card__subject--command" title={data.command}>
+        {data.command}
+      </FadeText>
       {data.isStreaming && <span className="spinner tool-card__spinner" />}
       {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
     </>
@@ -851,6 +857,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   const userScrollIntentUntilRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
   const prevClientHeightRef = useRef(0);
+  const prevScrollTopRef = useRef(0);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
 
   const updateScrollFades = useCallback(() => {
@@ -877,6 +884,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     lastPinnedTopRef.current = el.scrollTop;
     prevScrollHeightRef.current = el.scrollHeight;
     prevClientHeightRef.current = el.clientHeight;
+    prevScrollTopRef.current = el.scrollTop;
     updateScrollFades();
   }, [updateScrollFades]);
 
@@ -897,6 +905,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     mutate();
     requestAnimationFrame(() => {
       el.scrollTop = prevTop;
+      prevScrollTopRef.current = el.scrollTop;
     });
   }, []);
 
@@ -935,6 +944,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       lastPinnedTopRef.current = el.scrollTop;
       prevScrollHeightRef.current = el.scrollHeight;
       prevClientHeightRef.current = el.clientHeight;
+      prevScrollTopRef.current = el.scrollTop;
     } else if (el.scrollTop < lastPinnedTopRef.current - SCROLL_RESTICK_PX) {
       // A layout-only viewport change can also move scrollTop upward (for
       // example when a custom/unified TUI panel replaces the Composer). That
@@ -944,6 +954,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       const userInitiated = performance.now() <= userScrollIntentUntilRef.current;
       if (userInitiated) {
         pinnedRef.current = false;
+        prevScrollTopRef.current = el.scrollTop;
       } else if (pinnedRef.current) {
         pinToBottom();
       }
@@ -1021,8 +1032,10 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     if (!el) return;
     const prevHeight = prevScrollHeightRef.current;
     const prevClientHeight = prevClientHeightRef.current;
+    const prevScrollTop = prevScrollTopRef.current;
     prevScrollHeightRef.current = el.scrollHeight;
     prevClientHeightRef.current = el.clientHeight;
+    prevScrollTopRef.current = el.scrollTop;
 
     // The user's own send re-pins unconditionally ("I'm caught up"), even if
     // they'd scrolled up.
@@ -1055,7 +1068,17 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     const userInitiated = performance.now() <= userScrollIntentUntilRef.current;
     const shouldFollow = measuredAtBottom || (pinnedRef.current && !userInitiated);
     pinnedRef.current = shouldFollow;
-    if (shouldFollow) pinToBottom();
+    if (shouldFollow) {
+      pinToBottom();
+    } else {
+      // When the user is reading above the bottom, content appended or grown
+      // below the viewport must not move the visible text. Chromium can still
+      // adjust scrollTop during layout despite scroll anchoring being disabled,
+      // so restore the last user/program-visible position after the commit.
+      el.scrollTop = prevScrollTop;
+      prevScrollTopRef.current = el.scrollTop;
+      updateScrollFades();
+    }
   });
 
   useLayoutEffect(() => {

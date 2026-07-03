@@ -13,7 +13,7 @@ import { app } from "electron";
 // User-droppable themes live here. A JSON file conforming to ThemeSchema is
 // loaded as an additional theme; the filename is advisory (the `id` field is
 // authoritative). Invalid files are skipped with a warning, never fatal.
-function themesDir(): string {
+export function getUserThemesDir(): string {
   return path.join(app.getPath("userData"), "themes");
 }
 
@@ -37,7 +37,7 @@ export function reloadUserThemes(): Theme[] {
 }
 
 function readUserThemes(): Theme[] {
-  const dir = themesDir();
+  const dir = getUserThemesDir();
   let entries: string[];
   try {
     entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));

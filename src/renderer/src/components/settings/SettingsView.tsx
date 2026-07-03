@@ -278,6 +278,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   const { settings, update } = useSettingsStore();
   const [localFonts, setLocalFonts] = useState<FontFamily[]>([]);
   const [piInfo, setPiInfo] = useState<{ path: string; version: string } | null>(null);
+  const [userThemesDir, setUserThemesDir] = useState("");
   const [recheckMsg, setRecheckMsg] = useState("");
   const accountRef = useRef<HTMLElement>(null);
 
@@ -328,6 +329,11 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
     window.pivis
       .invoke("appUpdate.status", undefined)
       .then(setAppUpdateStatus)
+      .catch(() => {});
+
+    window.pivis
+      .invoke("themes.userDir", undefined)
+      .then(setUserThemesDir)
       .catch(() => {});
   }, [setAppUpdateStatus]);
 
@@ -574,6 +580,12 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                   ))}
                 </select>
               </div>
+              {userThemesDir && (
+                <span className="settings-hint">
+                  Drop custom theme <code>.json</code> files in <code>{userThemesDir}</code>, then
+                  restart Pi-Vis.
+                </span>
+              )}
             </section>
 
             {/* Display font */}

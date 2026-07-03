@@ -29,18 +29,7 @@ extensions.
 curl -fsSL https://raw.githubusercontent.com/rsingapuri/pi-vis/main/scripts/install.sh | bash
 ```
 
-This downloads the latest release and installs `Pi-Vis.app` to `/Applications`.
-Because the download happens over `curl` rather than a browser, macOS does not
-quarantine it, so the app launches without a Gatekeeper "unidentified developer"
-prompt.
-
-> **Not yet notarized.** v0.1 is ad-hoc signed but not Apple-notarized
-> (notarization is a fast-follow). If you instead download the `.dmg`/`.zip`
-> from the [releases page](https://github.com/rsingapuri/pi-vis/releases) in a
-> browser, macOS will quarantine it; clear that with:
-> ```
-> xattr -dr com.apple.quarantine /Applications/Pi-Vis.app
-> ```
+This downloads the latest notarized release and installs `Pi-Vis.app` to `/Applications`.
 
 Builds are **Apple Silicon (arm64) only** — Intel Macs need a [source build](#building).
 

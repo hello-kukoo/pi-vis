@@ -327,8 +327,8 @@
   border-radius: var(--radius-sm);
 }
 
-.sidebar__session:is(:hover, :focus-within) .sidebar__session-archive,
-.sidebar__session:is(:hover, :focus-within) .sidebar__session-pin,
+.sidebar__session:is(:hover, :has(:focus-visible)) .sidebar__session-archive,
+.sidebar__session:is(:hover, :has(:focus-visible)) .sidebar__session-pin,
 .sidebar__session--pinned .sidebar__session-pin {
   width: 1.429rem;
   margin-left: 0;

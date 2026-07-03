@@ -44,7 +44,12 @@ import {
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { createGistForSession } from "./share.js";
-import { getUserThemes, piThemeColorIndices, piThemeForSchemeId } from "./theme-loader.js";
+import {
+  getUserThemes,
+  getUserThemesDir,
+  piThemeColorIndices,
+  piThemeForSchemeId,
+} from "./theme-loader.js";
 import { checkForUpdates, startUpdate } from "./updates.js";
 import {
   getOrderedWorkspaces,
@@ -505,6 +510,10 @@ export function initIpc(win: BrowserWindow): void {
 
   ipcMain.handle("themes.listUser", async () => {
     return getUserThemes();
+  });
+
+  ipcMain.handle("themes.userDir", async () => {
+    return getUserThemesDir();
   });
 
   ipcMain.handle("settings.set", async (_evt, updates: Partial<ReturnType<typeof getSettings>>) => {

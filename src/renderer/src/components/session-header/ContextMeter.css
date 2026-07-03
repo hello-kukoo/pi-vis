@@ -63,7 +63,7 @@
   top: calc(100% + 0.429rem);
   right: 0;
   z-index: 100;
-  min-width: 15rem;
+  min-width: 22rem;
   padding: 0.714rem 0.857rem;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -93,6 +93,7 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 0.857rem;
+  white-space: nowrap;
 }
 
 .context-dropdown__pct {
@@ -164,6 +165,7 @@
   color: var(--text);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .context-dropdown__dim {
