@@ -71,7 +71,7 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
   // ESC parity with the real TUI: whatever ESC does in pi's terminal, it must
   // do here too. pi's precedence is overlay-close > autocomplete-close >
   // interrupt. The renderer-only global ESC handler supplies the interrupt the
-  // host's base Editor can't (see AGENTS.md "ESC-to-interrupt"), but that
+  // host's base Editor can't (see docs/ui-conventions.md "ESC-to-interrupt"), but that
   // interrupt must be the LOWEST-priority ESC action — it may fire only when
   // the host TUI would not otherwise consume the key. An open pi-tui overlay
   // (the extension's "ESC to close" box) is signalled to us as viewport mode,

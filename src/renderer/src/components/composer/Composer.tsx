@@ -330,7 +330,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // defers while a claim is active, so the first ESC hides suggestions instead
   // of aborting the agent (two-press model). This holds REGARDLESS of streaming
   // — an open autocomplete always consumes the first ESC; only once it is closed
-  // does ESC abort. (See the ESC-to-interrupt Key Pattern in AGENTS.md.)
+  // does ESC abort. (See docs/ui-conventions.md, "ESC-to-interrupt".)
   useEscapeClaim(showSuggestions);
 
   // Reset highlight when the suggestion list shape changes.

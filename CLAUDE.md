@@ -1,5 +1,5 @@
 # Claude Code — Pi-Vis
 
-Read `AGENTS.md` before exploring the codebase — it documents the app's purpose, architecture, and key files.
+Read `AGENTS.md` first for mandatory workflow rules. For architecture or feature context, follow the routing table in `docs/agent-index.md` instead of loading every project note by default.
 
-After making any changes, make sure `AGENTS.md` is up-to-date (not stale).
+After making changes, keep the relevant docs in `docs/` up to date.
