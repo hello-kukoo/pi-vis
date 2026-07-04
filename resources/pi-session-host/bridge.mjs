@@ -452,6 +452,12 @@ export function setupCommandBridge({
           break;
         }
 
+        case "abort_bash": {
+          _session.abortBash();
+          send({ type: "response", id, success: true });
+          break;
+        }
+
         // ── Compaction ─────────────────────────────────────────────────
         // compact(customInstructions?: string) — a STRING, not an options
         // object. The old bridge passed { customInstructions } and pi silently

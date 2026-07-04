@@ -798,9 +798,9 @@ describe("sessions store - custom panel reducer", () => {
 });
 
 // ── Working-indicator gating (shouldShowWorkingIndicator) ──────────────────
-// An extension slash-command (e.g. /agents) runs via session.prompt, so pi
-// reports the turn "active" (isStreaming) while its handler is blocked on a
-// select dialog or custom panel. The indicator must NOT show during that wait.
+// Extension UI that is merely waiting for user input should not look like
+// model/tool work, but a real active transcript stream must stay visible even
+// if an extension UI surface is also open.
 describe("sessions store - shouldShowWorkingIndicator", () => {
   beforeEach(() => {
     useSessionsStore.setState({
@@ -823,7 +823,7 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
     expect(shouldShowWorkingIndicator(session())).toBe(true);
   });
 
-  it("is false when streaming but a dialog is pending (e.g. /agents select)", () => {
+  it("is false when streaming but only a dialog is pending (e.g. /agents select)", () => {
     useSessionsStore.getState().setStreaming(SESSION_A, true);
     useSessionsStore.getState().addUiRequest(SESSION_A, {
       type: "extension_ui_request",
@@ -835,20 +835,24 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
     expect(shouldShowWorkingIndicator(session())).toBe(false);
   });
 
-  it("is false when streaming but a custom panel is open (e.g. Settings)", () => {
+  it("is false when streaming but only a custom panel is open (e.g. Settings)", () => {
     useSessionsStore.getState().setStreaming(SESSION_A, true);
     useSessionsStore
       .getState()
       .handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
-    expect(shouldShowWorkingIndicator(session())).toBe(false); // panel open → suppressed
+    expect(shouldShowWorkingIndicator(session())).toBe(false);
   });
 
-  it("returns to true once the extension UI closes (panel_close) while still streaming", () => {
+  it("stays true when a real tool call is active behind a custom panel", () => {
     const store = useSessionsStore.getState();
     store.setStreaming(SESSION_A, true);
     store.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
-    expect(shouldShowWorkingIndicator(session())).toBe(false);
-    store.handlePanelEvent(SESSION_A, { type: "panel_close", panelId: 1 });
+    store.applyEvent(SESSION_A, {
+      type: "tool_execution_start",
+      toolCallId: "tool-1",
+      toolName: "read",
+      args: {},
+    });
     expect(shouldShowWorkingIndicator(session())).toBe(true);
   });
 

@@ -71,8 +71,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     mode?: "content" | "viewport";
   } | null>(null);
   const { panel } = useSessionsStore((s) => s.sessions.get(sessionId)) ?? {};
-  // Claim ESC while a custom panel is open so a background streaming session
-  // isn't aborted (the panel routes ESC to the extension via onData).
+  // Claim ESC while a custom panel is open so the panel keeps parity with
+  // terminal pi: Escape belongs to the extension surface, not to global abort.
   useEscapeClaim(!!panel);
   // Keep panelRef in sync with the latest panel so the lifecycle effect (which
   // depends on panelId only) can read the current panel + its buffer without
@@ -283,11 +283,11 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     };
   }, [sessionId, panelId]); // Re-create terminal if panel identity changes (NOT on buffer appends)
 
-  // ── Escape key: not a close mechanism ──
+  // ── Escape key: not a panel-close mechanism ──
   // Extensions own the panel lifecycle via the `done` callback; pi-vis cannot
-  // force-close a custom() panel. Escape has no special meaning here — we
-  // explicitly do NOT swallow it, so an extension that binds Escape (e.g. to
-  // cancel an input) still receives the keystroke through onData.
+  // treat Escape as force-close or global abort while this surface is open.
+  // Escape has no special pi-vis meaning here and still reaches extensions
+  // that bind it (e.g. to cancel an input) through onData.
   const handleKeyDown = useCallback((_e: React.KeyboardEvent) => {
     // Intentionally empty: see comment above.
   }, []);

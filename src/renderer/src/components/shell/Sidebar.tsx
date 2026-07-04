@@ -11,6 +11,12 @@ import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
 
 const VISIBLE_PAGE_SIZE = 30;
+const STREAMING_DOT_ANIMATION_MS = 1000;
+
+function useSyncedAnimationDelay(durationMs: number): string {
+  const [delay] = useState(() => `-${Date.now() % durationMs}ms`);
+  return delay;
+}
 
 function StatusDot({
   status,
@@ -81,8 +87,15 @@ function PinIcon({ filled }: { filled: boolean }): React.ReactElement {
 }
 
 function StreamingIndicator({ isStreaming }: StreamingDotProps): React.ReactElement | null {
+  const animationDelay = useSyncedAnimationDelay(STREAMING_DOT_ANIMATION_MS);
   if (!isStreaming) return null;
-  return <span className="status-dot status-dot--streaming" title="Streaming" />;
+  return (
+    <span
+      className="status-dot status-dot--streaming"
+      title="Streaming"
+      style={{ "--status-dot-animation-delay": animationDelay } as React.CSSProperties}
+    />
+  );
 }
 
 interface ArchiveConfirmState {

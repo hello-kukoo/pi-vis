@@ -255,22 +255,31 @@ function clearSessionDraftFor(
   return next;
 }
 
+function hasActiveAgentWork(session: SessionViewState | undefined): boolean {
+  const transcript = session?.transcript;
+  return !!(transcript?.activeAssistantId || (transcript?.activeToolCallIds.size ?? 0) > 0);
+}
+
 /**
  * Whether the "Running for …" working indicator should be shown.
  *
- * `isStreaming` alone is not enough: an extension slash-command (e.g. /agents)
- * runs through `session.prompt`, so pi emits `agent_start` and reports the turn
- * active for the WHOLE time the command's handler is up — including while it's
- * blocked on a select dialog or a custom panel awaiting the user. During that
- * wait nothing is computing, so the indicator is misleading. Treat any open
- * extension UI (a pending dialog or an open panel) as "waiting on the user, not
- * working" and suppress it. This covers the whole category of interactive
- * extension commands, not just /agents.
+ * Most turns show the timer directly from `isStreaming`. Extension UI surfaces
+ * are the exception: opening a dialog/custom panel is often a prompt-backed
+ * command waiting on the user, not model/tool work, so suppress that idle wait
+ * until the transcript proves actual assistant/tool work is active.
  */
 export function shouldShowWorkingIndicator(session: SessionViewState | undefined): boolean {
   if (!session?.isStreaming) return false;
   const extensionUiActive = session.pendingDialogs.length > 0 || session.panel != null;
-  return !extensionUiActive;
+  return !extensionUiActive || hasActiveAgentWork(session);
+}
+
+function hasActiveBash(session: SessionViewState | undefined): boolean {
+  return session?.transcript.activeBashId != null;
+}
+
+export function isSessionAbortable(session: SessionViewState | undefined): boolean {
+  return session?.isStreaming === true || hasActiveAgentWork(session) || hasActiveBash(session);
 }
 
 interface SessionsStore {
@@ -362,9 +371,9 @@ interface SessionsStore {
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
-  /** Interrupt the active turn. No-op (no IPC) when the session isn't
-   *  streaming; rejection-safe when it does send (host-fallback transition
-   *  can reject). S3. */
+  /** Interrupt the active turn or standalone bash command. No-op (no IPC)
+   *  when the session has nothing abortable; rejection-safe when it does send
+   *  (host-fallback transition can reject). S3. */
   abortSession: (sessionId: SessionId) => void;
   addUiRequest: (sessionId: SessionId, request: ExtensionUiRequest) => void;
   handlePanelEvent: (sessionId: SessionId, event: PanelEvent) => void;
@@ -981,10 +990,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   abortSession: (sessionId) => {
     const s = get().sessions.get(sessionId);
-    if (!s || !s.isStreaming) return; // S3 no-op when idle
-    void window.pivis
-      .invoke("session.sendCommand", { sessionId, command: { type: "abort" } })
-      .catch(() => {}); // S3 rejection-safe
+    if (!s) return;
+    const command =
+      s.isStreaming || hasActiveAgentWork(s)
+        ? { type: "abort" as const }
+        : hasActiveBash(s)
+          ? { type: "abort_bash" as const }
+          : null;
+    if (!command) return; // S3 no-op when idle
+    void window.pivis.invoke("session.sendCommand", { sessionId, command }).catch(() => {}); // S3 rejection-safe
   },
 
   addUiRequest: (sessionId, request) => {

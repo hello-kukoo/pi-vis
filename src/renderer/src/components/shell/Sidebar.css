@@ -594,6 +594,7 @@
 .status-dot--streaming {
   background: var(--accent);
   animation: pulse 1s ease-in-out infinite;
+  animation-delay: var(--status-dot-animation-delay, 0ms);
 }
 
 /* filled circle — turn finished (unread sidebar notification) */

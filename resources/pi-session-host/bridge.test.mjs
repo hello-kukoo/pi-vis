@@ -34,6 +34,7 @@ function makeSession(overrides = {}) {
     setModel: vi.fn(async () => {}),
     setThinkingLevel: vi.fn(() => {}),
     executeBash: vi.fn(async () => ({ output: "ok", exitCode: 0, cancelled: false })),
+    abortBash: vi.fn(() => {}),
     compact: vi.fn(async () => {}),
     getSessionStats: vi.fn(() => ({ tokens: { input: 1 } })),
     getLastAssistantText: vi.fn(() => "hi"),
@@ -272,6 +273,13 @@ describe("setupCommandBridge — command mapping", () => {
     const res = await run({ type: "bash", command: "ls" });
     expect(session.executeBash).toHaveBeenCalledWith("ls", undefined, {});
     expect(res.data).toMatchObject({ output: "ok", exitCode: 0 });
+  });
+
+  it("abort_bash calls abortBash and responds immediately", async () => {
+    const { session, run } = setup();
+    const res = await run({ type: "abort_bash" });
+    expect(session.abortBash).toHaveBeenCalledTimes(1);
+    expect(res.success).toBe(true);
   });
 
   it("new_session maps cancelled→success and reports cancelled in data", async () => {

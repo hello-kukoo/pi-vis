@@ -130,6 +130,43 @@ describe("useGlobalEscapeInterrupt — G1–G5", () => {
     expect(invokeSpy).not.toHaveBeenCalled();
   });
 
+  it("G2: no claim + active tool call -> abort called even if streaming flag is stale", () => {
+    mountHook();
+    setActive(SESSION_A);
+    useSessionsStore.getState().applyEvent(SESSION_A, {
+      type: "tool_execution_start",
+      toolCallId: "tool-1",
+      toolName: "read",
+      args: {},
+    });
+    const { defaultPrevented, secondListenerCalled } = dispatchKey();
+    expect(defaultPrevented).toBe(true);
+    expect(secondListenerCalled).toBe(false);
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    const args = invokeSpy.mock.calls[0] as [
+      string,
+      { sessionId: SessionId; command: { type: string } },
+    ];
+    expect(args[0]).toBe("session.sendCommand");
+    expect(args[1]).toEqual({ sessionId: SESSION_A, command: { type: "abort" } });
+  });
+
+  it("G2: no claim + active standalone bash -> abort_bash called", () => {
+    mountHook();
+    setActive(SESSION_A);
+    useSessionsStore.getState().addBashCommand(SESSION_A, "sleep 100");
+    const { defaultPrevented, secondListenerCalled } = dispatchKey();
+    expect(defaultPrevented).toBe(true);
+    expect(secondListenerCalled).toBe(false);
+    expect(invokeSpy).toHaveBeenCalledTimes(1);
+    const args = invokeSpy.mock.calls[0] as [
+      string,
+      { sessionId: SessionId; command: { type: string } },
+    ];
+    expect(args[0]).toBe("session.sendCommand");
+    expect(args[1]).toEqual({ sessionId: SESSION_A, command: { type: "abort_bash" } });
+  });
+
   it("G4: modified ESC (meta/ctrl/alt/shift) -> NOT called", () => {
     mountHook();
     setActive(SESSION_A);

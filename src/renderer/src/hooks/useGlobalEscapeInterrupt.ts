@@ -2,7 +2,7 @@
 //
 // Precedence (active session), first match wins:
 //   1. hasClaim()  -> DEFER (an overlay/autocomplete owns ESC)
-//   2. isStreaming  -> INTERRUPT
+//   2. abortable op -> INTERRUPT (agent turn or standalone bash command)
 //   3. else         -> no-op (let ESC reach whatever is focused)
 //
 // Capture phase + stopImmediatePropagation: preempts React's synthetic
@@ -16,7 +16,7 @@
 
 import { useEffect } from "react";
 import { hasClaim } from "../stores/overlay-store.js";
-import { useSessionsStore } from "../stores/sessions-store.js";
+import { isSessionAbortable, useSessionsStore } from "../stores/sessions-store.js";
 
 export function useGlobalEscapeInterrupt(): void {
   useEffect(() => {
@@ -29,7 +29,7 @@ export function useGlobalEscapeInterrupt(): void {
       const sid = store.activeSessionId; // G5
       if (!sid) return;
       const s = store.sessions.get(sid);
-      if (!s || !s.isStreaming) return; // G3
+      if (!isSessionAbortable(s)) return; // G3
       e.preventDefault();
       e.stopImmediatePropagation(); // G2 preempt Composer + same-node capture listeners
       void store.abortSession(sid);

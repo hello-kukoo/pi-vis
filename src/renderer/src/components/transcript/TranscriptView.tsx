@@ -910,10 +910,9 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   }, []);
 
   const allBlocks: TypedTranscriptBlock[] = session?.transcript.blocks ?? [];
-  // Show the "Running for …" indicator only when the agent is genuinely
-  // computing — NOT while an extension command is blocked on its own UI (a
-  // dialog or custom panel), during which pi still reports the turn active.
-  // See shouldShowWorkingIndicator for the full rationale.
+  // Show the "Running for …" indicator for real agent work. Prompt-backed
+  // extension UI can set isStreaming while merely waiting on the user, so the
+  // store helper applies the UI-vs-tool-work distinction.
   const showWorking = shouldShowWorkingIndicator(session);
 
   const visibleBlocks =
