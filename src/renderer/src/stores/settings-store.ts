@@ -120,10 +120,13 @@ function applyFonts(settings: AppSettings): void {
   // touch a px value: it's the user-set anchor, not a hardcoded layout
   // measurement. All other typography/spacing in the app is rem/em.
   root.style.setProperty("--font-size-base", `${settings.fonts.display.sizePx}px`);
-  // Code and small sizes are derived as em ratios of the base, so they
-  // scale fluidly with the user's base-size setting.
+  // Code and small sizes are derived from the base, so they scale fluidly
+  // with the user's base-size setting. Keep a root-derived code size for
+  // code embedded inside larger serif text, where an em ratio would otherwise
+  // compound with the parent font size.
   const codeRatio = settings.fonts.code.sizePx / settings.fonts.display.sizePx;
   root.style.setProperty("--font-size-code", `${codeRatio}em`);
+  root.style.setProperty("--font-size-code-root", `calc(var(--font-size-base) * ${codeRatio})`);
   root.style.setProperty(
     "--font-size-small",
     `${(settings.fonts.display.sizePx - 2) / settings.fonts.display.sizePx}em`,

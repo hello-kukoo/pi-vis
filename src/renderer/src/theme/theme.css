@@ -105,7 +105,9 @@
   --font-thinking: "IBM Plex Serif", var(--font-display);
   --font-code: "IBM Plex Mono", "Menlo", "Monaco", "Courier New", monospace;
   --font-size-base: 14px;
+  --font-size-serif: calc(var(--font-size-base) * 1.07);
   --font-size-code: 0.929em;
+  --font-size-code-root: calc(var(--font-size-base) * 0.929);
   --font-size-small: 0.857em;
 
   /* ── Spacing scale (rem → scales with the root font size) ────────────
