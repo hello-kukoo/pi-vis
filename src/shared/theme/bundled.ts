@@ -2,8 +2,11 @@ import catppuccinFrappe from "./themes/catppuccin-frappe.json";
 import catppuccinLatte from "./themes/catppuccin-latte.json";
 import catppuccinMacchiato from "./themes/catppuccin-macchiato.json";
 import catppuccinMocha from "./themes/catppuccin-mocha.json";
+import everforestDark from "./themes/everforest-dark.json";
+import everforestLight from "./themes/everforest-light.json";
 import glowSticks from "./themes/glow-sticks.json";
 import gruvboxMaterialDark from "./themes/gruvbox-material-dark.json";
+import gruvboxMaterialLight from "./themes/gruvbox-material-light.json";
 import { type Theme, ThemeSchema } from "./tokens.js";
 
 /**
@@ -23,6 +26,9 @@ export const BUNDLED_THEMES: readonly Theme[] = [
   ThemeSchema.parse(catppuccinFrappe),
   ThemeSchema.parse(catppuccinLatte),
   ThemeSchema.parse(gruvboxMaterialDark),
+  ThemeSchema.parse(gruvboxMaterialLight),
+  ThemeSchema.parse(everforestDark),
+  ThemeSchema.parse(everforestLight),
   ThemeSchema.parse(glowSticks),
 ];
 

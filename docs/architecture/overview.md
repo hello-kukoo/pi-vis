@@ -116,7 +116,9 @@ src/
     │   ├── bundled.ts       # Imports the JSON below, parses each through ThemeSchema, exports BUNDLED_THEMES + DEFAULT_THEME_ID
     │   ├── themes/          # One pure-data JSON colorscheme per file (full Theme shape: id/name/appearance/colors/syntax)
     │   │   ├── catppuccin-mocha.json / catppuccin-macchiato.json / catppuccin-frappe.json / catppuccin-latte.json
-    │   │   └── gruvbox-material-dark.json
+    │   │   ├── gruvbox-material-dark.json / gruvbox-material-light.json
+    │   │   ├── everforest-dark.json / everforest-light.json
+    │   │   └── glow-sticks.json
     │   └── index.ts         # buildThemeRegistry/resolveTheme (fallback to default) + piThemeForTheme (appearance → pi light/dark) + re-exports buildPiThemeColors/buildPiThemeColorIndices/PI_ROLE_INDEX/PI_INDEX_TOKEN/PI_ROLES/PI_THEME_DEFAULTS
     ├── settings.ts          # AppSettingsSchema (Zod): fonts, paths, piEnv (user-configured KEY=value vars merged into every pi session/login-terminal spawn after login-shell env; PIVIS_* reserved), workspaceOrder + expandedWorkspaces, pinnedSessions (global, by session-file path, manual order), lastActiveWorkspace, colorScheme (now a free theme-id string, validated against the registry at apply time), diff mode, diffMaxFileSizeMiB (diff viewer file-size cap, default 5), diff rail width + visibility (persisted layout for the diff viewer's file-list sidebar), sidebar width/collapsed, window bounds
     ├── git.ts               # GitChangedFile, GitChangesResult, GitFileDiffResult types
