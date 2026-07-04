@@ -10,7 +10,7 @@ import { useSettingsStore } from "../../stores/settings-store.js";
 import { useUpdatesStore } from "../../stores/updates-store.js";
 import { listThemes } from "../../theme/registry.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
-import { IconCheck, IconClose } from "../common/icons.js";
+import { IconCheck, IconChevronDown, IconClose } from "../common/icons.js";
 import "./SettingsView.css";
 
 interface FontFamily {
@@ -41,6 +41,77 @@ function buildFontOptions(localFonts: FontFamily[], current: string): string[] {
     }
   }
   return out;
+}
+
+interface SettingsSelectOption {
+  value: string;
+  label: string;
+}
+
+function SettingsSelect({
+  value,
+  options,
+  onChange,
+  compact = false,
+}: {
+  value: string;
+  options: readonly SettingsSelectOption[];
+  onChange: (value: string) => void;
+  compact?: boolean;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return (
+    <div className={`settings-select${compact ? " settings-select--compact" : ""}`} ref={ref}>
+      <button
+        type="button"
+        className="settings-select__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+        }}
+      >
+        <span className="settings-select__label">{selected?.label ?? ""}</span>
+        <IconChevronDown className="settings-select__caret" />
+      </button>
+      {open && (
+        <div className="settings-select__dropdown" role="listbox">
+          {options.map((option) => {
+            const active = option.value === value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={`settings-select__option${active ? " settings-select__option--active" : ""}`}
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span className="settings-select__check">{active && <IconCheck />}</span>
+                <span className="settings-select__option-label">{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Min/max mirror the AppSettingsSchema clamp for diffMaxFileSizeMiB
@@ -561,36 +632,22 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
               <PiEnvEditor value={settings.piEnv} onCommit={(piEnv) => update({ piEnv })} />
             </section>
 
-            {/* Color scheme */}
+            {/* Interface */}
             <section className="settings-section">
-              <h3 className="settings-section__title">Color scheme</h3>
+              <h3 className="settings-section__title">Interface</h3>
               <div className="settings-row">
                 <span className="settings-label">Theme</span>
-                <select
-                  className="settings-select"
+                <SettingsSelect
                   value={settings.colorScheme}
-                  onChange={(e) => update({ colorScheme: e.target.value })}
-                >
-                  {listThemes().map((theme) => (
-                    <option key={theme.id} value={theme.id}>
-                      {theme.name} ({theme.appearance})
-                    </option>
-                  ))}
-                </select>
+                  onChange={(colorScheme) => update({ colorScheme })}
+                  options={listThemes().map((theme) => ({
+                    value: theme.id,
+                    label: `${theme.name} (${theme.appearance})`,
+                  }))}
+                />
               </div>
-              {userThemesDir && (
-                <span className="settings-hint">
-                  Drop custom theme <code>.json</code> files in <code>{userThemesDir}</code>, then
-                  restart Pi-Vis.
-                </span>
-              )}
-            </section>
-
-            {/* Interface font */}
-            <section className="settings-section">
-              <h3 className="settings-section__title">Interface font</h3>
               <div className="settings-row">
-                <span className="settings-label">Size</span>
+                <span className="settings-label">Font Size</span>
                 <div className="settings-stepper">
                   <button
                     type="button"
@@ -629,36 +686,34 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                   </button>
                 </div>
               </div>
-              <span className="settings-hint">
-                Pi-Vis owns interface font families for stable alignment; adjust size here for
-                readability.
-              </span>
+              {userThemesDir && (
+                <span className="settings-hint">
+                  Drop custom theme <code>.json</code> files in <code>{userThemesDir}</code>, then
+                  restart Pi-Vis.
+                </span>
+              )}
             </section>
 
-            {/* Code font */}
+            {/* Code */}
             <section className="settings-section">
-              <h3 className="settings-section__title">Code font</h3>
+              <h3 className="settings-section__title">Code</h3>
               <div className="settings-row">
-                <span className="settings-label">Family</span>
+                <span className="settings-label">Font Family</span>
                 {localFonts.length > 0 ? (
-                  <select
-                    className="settings-select"
+                  <SettingsSelect
                     value={settings.fonts.code.family}
-                    onChange={(e) =>
+                    onChange={(family) =>
                       update({
                         fonts: {
                           ...settings.fonts,
-                          code: { ...settings.fonts.code, family: e.target.value },
+                          code: { ...settings.fonts.code, family },
                         },
                       })
                     }
-                  >
-                    {buildFontOptions(localFonts, settings.fonts.code.family).map((family) => (
-                      <option key={family} value={family}>
-                        {family}
-                      </option>
-                    ))}
-                  </select>
+                    options={buildFontOptions(localFonts, settings.fonts.code.family).map(
+                      (family) => ({ value: family, label: family }),
+                    )}
+                  />
                 ) : (
                   <input
                     className="settings-input"
@@ -675,7 +730,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                 )}
               </div>
               <div className="settings-row">
-                <span className="settings-label">Size</span>
+                <span className="settings-label">Font Size</span>
                 <div className="settings-stepper">
                   <button
                     type="button"
@@ -764,18 +819,18 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
               {/* Add API key */}
               <div className="settings-auth-add">
                 <span className="settings-label settings-label--inline">Add API key</span>
-                <select
-                  className="settings-select settings-select--compact"
+                <SettingsSelect
+                  compact
                   value={newProviderKey}
-                  onChange={(e) => setNewProviderKey(e.target.value)}
-                >
-                  <option value="">Select provider…</option>
-                  {PROVIDERS.filter((p) => !p.supportsOAuth).map((p) => (
-                    <option key={p.key} value={p.key}>
-                      {p.displayName}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setNewProviderKey}
+                  options={[
+                    { value: "", label: "Select provider…" },
+                    ...PROVIDERS.filter((p) => !p.supportsOAuth).map((p) => ({
+                      value: p.key,
+                      label: p.displayName,
+                    })),
+                  ]}
+                />
                 <div className="settings-password-row">
                   <input
                     className="settings-input"

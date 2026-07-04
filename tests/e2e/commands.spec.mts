@@ -75,22 +75,24 @@ test.describe("Slash commands", () => {
     fs.chmodSync(FAKE_PI, 0o755);
   });
 
-  test("settings keep interface font family opinionated while code font remains configurable", async () => {
+  test("settings put interface controls together while code font remains configurable", async () => {
     const folders = await makeFolders();
     const { app, window } = await launchApp(folders);
 
     await window.getByRole("button", { name: "Settings" }).click();
     const interfaceSection = window.locator(".settings-section", {
-      has: window.getByRole("heading", { name: "Interface font" }),
+      has: window.getByRole("heading", { name: "Interface" }),
     });
-    await expect(interfaceSection.getByText("Size", { exact: true })).toBeVisible();
+    await expect(interfaceSection.getByText("Theme", { exact: true })).toBeVisible();
+    await expect(interfaceSection.getByText("Font Size", { exact: true })).toBeVisible();
     await expect(interfaceSection.getByText("Family", { exact: true })).toHaveCount(0);
-    await expect(interfaceSection).toContainText("Pi-Vis owns interface font families");
+    await expect(interfaceSection).not.toContainText("Pi-Vis owns interface font families");
 
     const codeSection = window.locator(".settings-section", {
-      has: window.getByRole("heading", { name: "Code font" }),
+      has: window.getByRole("heading", { name: "Code" }),
     });
-    await expect(codeSection.getByText("Family", { exact: true })).toBeVisible();
+    await expect(codeSection.getByText("Font Family", { exact: true })).toBeVisible();
+    await expect(codeSection.getByText("Font Size", { exact: true })).toBeVisible();
 
     await app.close();
     rmrf(folders.settingsDir);
