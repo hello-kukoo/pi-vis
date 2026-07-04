@@ -46,7 +46,7 @@ export const COLOR_TOKENS = [
 
   // ── Accents / status ───────────────────────────────────────────────────
   "accent", // primary brand accent (was mauve)
-  "accent-soft", // soft accent: primary-action button fills (was lavender)
+  "accent-soft", // soft accent wash / hover state (was lavender)
   "success", // positive / diff-add (was green)
   "warning", // caution (was yellow)
   "warning-soft", // attention / modified marker (was peach)
@@ -65,16 +65,50 @@ export const COLOR_TOKENS = [
 
 export type ColorToken = (typeof COLOR_TOKENS)[number];
 
-/** A theme's color map: every semantic role → a CSS color string. */
-export type ThemeColors = Record<ColorToken, string>;
+/**
+ * OPTIONAL roles — themes may set these; every consumer has a documented
+ * fallback, so omitting them is always safe (which keeps pre-existing user
+ * theme files valid: a strict 27th required key would silently knock them
+ * out of the registry at load).
+ *
+ *  - "accent-fill" — the solid accent plane behind primary actions: button
+ *    fills, active segments, highlighted options, checked controls. Falls
+ *    back to `accent` (the historical single-token behavior). Split from
+ *    `accent` because a color tuned to be accent *text* on the page bg and a
+ *    color tuned to be a *fill under text* are different jobs — on a dark
+ *    bg their luminance windows don't even overlap (AA text needs to be
+ *    light; a fill taking AA light text needs to be dim), so a theme that
+ *    wants both must be able to say so. Indicator dots and gauge fills stay
+ *    `accent`: they ARE the signal, not a plane under one.
+ *  - "on-accent" — text/glyphs painted OVER `accent-fill`/`accent-soft`
+ *    fills (button labels, checkmarks, toggle knobs). Falls back to `bg`,
+ *    which is exactly what components hardcoded historically
+ *    (`color: var(--bg)`), so themes that omit it render pixel-identically.
+ */
+export const OPTIONAL_COLOR_TOKENS = ["accent-fill", "on-accent"] as const;
+
+export type OptionalColorToken = (typeof OPTIONAL_COLOR_TOKENS)[number];
+
+/** A theme's color map: every semantic role → a CSS color string.
+ * The optional-role mapped type spells `string | undefined` explicitly so it
+ * matches zod's `.optional()` inference under exactOptionalPropertyTypes. */
+export type ThemeColors = Record<ColorToken, string> & {
+  [K in OptionalColorToken]?: string | undefined;
+};
 
 // Build the Zod object shape from COLOR_TOKENS so the schema can never drift
 // from the canonical list. Each token is a non-empty string (any CSS color
-// form: hex, rgb(), rgba(), etc.).
-const colorsShape = Object.fromEntries(COLOR_TOKENS.map((t) => [t, z.string().min(1)])) as Record<
-  ColorToken,
-  z.ZodString
->;
+// form: hex, rgb(), rgba(), etc.). Optional roles are the same shape, just
+// omittable.
+const colorsShape = {
+  ...(Object.fromEntries(COLOR_TOKENS.map((t) => [t, z.string().min(1)])) as Record<
+    ColorToken,
+    z.ZodString
+  >),
+  ...(Object.fromEntries(
+    OPTIONAL_COLOR_TOKENS.map((t) => [t, z.string().min(1).optional()]),
+  ) as Record<OptionalColorToken, z.ZodOptional<z.ZodString>>),
+};
 
 export const ThemeColorsSchema = z.object(colorsShape).strict();
 

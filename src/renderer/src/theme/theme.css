@@ -42,6 +42,15 @@
   --shadow: rgba(0, 0, 0, 0.5);
   --scrim: rgba(17, 17, 27, 0.7);
   --input-bg: #313244;
+  /* Optional roles (see OPTIONAL_COLOR_TOKENS in shared/theme/tokens.ts).
+     accent-fill = the solid plane behind primary actions (button fills,
+     checked controls); defaults to the accent itself. on-accent = text over
+     accent-fill/accent-soft fills; defaults to the page bg, which is what
+     components historically hardcoded (`color: var(--bg)`). Themes that set
+     neither are pixel-identical; applyColorScheme always writes both (theme
+     value or fallback). */
+  --accent-fill: var(--accent);
+  --on-accent: var(--bg);
 
   /* ── Composite semantic tokens ───────────────────────────────────────
      Theme-independent structural decisions, expressed on top of the

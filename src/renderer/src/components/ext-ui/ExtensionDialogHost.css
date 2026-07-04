@@ -160,9 +160,9 @@
    :hover background after arrow-key nav moves the highlight elsewhere,
    producing two simultaneously highlighted options. */
 .ext-dialog__option--highlighted {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  color: var(--on-accent);
+  border-color: var(--accent-fill);
 }
 
 .ext-dialog__cancel {
@@ -241,8 +241,8 @@
 }
 
 .ext-dialog__btn--confirm {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-fill);
+  color: var(--on-accent);
 }
 
 .ext-dialog__btn--confirm:hover {

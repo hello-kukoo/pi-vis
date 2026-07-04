@@ -5,6 +5,8 @@ export { BUNDLED_THEMES, DEFAULT_THEME_ID } from "./bundled.js";
 export {
   COLOR_TOKENS,
   type ColorToken,
+  OPTIONAL_COLOR_TOKENS,
+  type OptionalColorToken,
   type SyntaxSpec,
   type Theme,
   type ThemeColors,
@@ -42,7 +44,7 @@ export function buildThemeRegistry(extra: readonly Theme[] = []): Map<string, Th
  * with a real theme even if a persisted id was removed.
  */
 export function resolveTheme(id: string, registry: Map<string, Theme>): Theme {
-  // BUNDLED_THEMES is non-empty (five themes compiled in), so the final
+  // BUNDLED_THEMES is non-empty (six themes compiled in), so the final
   // fallback always yields a real Theme even if the registry was somehow empty.
   const found = registry.get(id) ?? registry.get(DEFAULT_THEME_ID) ?? BUNDLED_THEMES[0];
   return found as Theme;

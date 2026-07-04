@@ -56,8 +56,8 @@
 }
 
 .unified-toggle__seg--active {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-fill);
+  color: var(--on-accent);
   cursor: default;
 }
 

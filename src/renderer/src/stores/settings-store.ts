@@ -88,8 +88,17 @@ function applyColorScheme(settings: AppSettings): void {
   const theme = getTheme(settings.colorScheme);
   const root = document.documentElement;
   for (const [token, value] of Object.entries(theme.colors)) {
-    root.style.setProperty(`--${token}`, value);
+    // Optional roles type as `string | undefined`; skip absent ones (they get
+    // an explicit fallback write below).
+    if (value !== undefined) root.style.setProperty(`--${token}`, value);
   }
+  // Optional roles need an explicit write-with-fallback: the loop above only
+  // writes keys the theme HAS, so switching from a theme that sets one to a
+  // theme that omits it would otherwise leave the previous theme's value
+  // behind. Fallbacks mirror the tokens.ts contract (accent-fill → accent,
+  // on-accent → bg).
+  root.style.setProperty("--accent-fill", theme.colors["accent-fill"] ?? theme.colors.accent);
+  root.style.setProperty("--on-accent", theme.colors["on-accent"] ?? theme.colors.bg);
   // Best-effort: a user theme's syntax may need an async Shiki load. CSS is
   // already applied above, so highlighting catches up on the next tokenize.
   void setShikiTheme(theme);

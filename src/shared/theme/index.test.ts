@@ -65,6 +65,25 @@ describe("ThemeSchema syntax: ref | inline optionality", () => {
     const r = ThemeSchema.safeParse(makeTheme({ colors: partial as Theme["colors"] }));
     expect(r.success).toBe(false);
   });
+
+  it("accepts the optional accent-fill/on-accent roles, present or absent", () => {
+    // Absent — the shape every pre-existing user theme file has.
+    expect(ThemeSchema.safeParse(makeTheme({})).success).toBe(true);
+    // Present.
+    const withOptional = ThemeSchema.safeParse(
+      makeTheme({
+        colors: { ...baseColors, "accent-fill": "#cd3c00", "on-accent": "#fff8f5" },
+      }),
+    );
+    expect(withOptional.success).toBe(true);
+  });
+
+  it("still rejects unknown color keys (strict shape)", () => {
+    const r = ThemeSchema.safeParse(
+      makeTheme({ colors: { ...baseColors, "not-a-role": "#123456" } }),
+    );
+    expect(r.success).toBe(false);
+  });
 });
 
 describe("registry resolution", () => {

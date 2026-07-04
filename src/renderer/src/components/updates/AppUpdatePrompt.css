@@ -54,10 +54,10 @@
 }
 
 .app-update-prompt__btn {
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   border-radius: var(--radius-md);
-  color: var(--bg);
+  color: var(--on-accent);
   cursor: pointer;
   font-family: var(--font-display);
   font-size: 0.929em;

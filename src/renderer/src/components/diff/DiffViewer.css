@@ -673,8 +673,8 @@
 }
 
 .diff-empty__retry {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-fill);
+  color: var(--on-accent);
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;

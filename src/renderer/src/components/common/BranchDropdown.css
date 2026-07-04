@@ -237,8 +237,8 @@
 }
 
 .branch-dropdown__checkbox-label input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 
 .branch-dropdown__checkbox-label input[type="checkbox"]:checked::after {
@@ -248,7 +248,7 @@
   top: 0.107rem;
   width: 0.214rem;
   height: 0.45rem;
-  border: solid var(--bg);
+  border: solid var(--on-accent);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }

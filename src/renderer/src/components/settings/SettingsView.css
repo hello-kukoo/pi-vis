@@ -223,7 +223,7 @@
 }
 
 .settings-toggle--on {
-  background: var(--accent);
+  background: var(--accent-fill);
 }
 
 .settings-toggle--off {
@@ -237,7 +237,7 @@
   width: 1.143rem;
   height: 1.143rem;
   border-radius: 50%;
-  background: var(--bg);
+  background: var(--on-accent);
   transition: transform 0.2s;
 }
 

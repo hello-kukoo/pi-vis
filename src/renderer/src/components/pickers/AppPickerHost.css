@@ -258,8 +258,8 @@
 }
 
 .picker__checkbox--checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 
 .picker__checkbox--checked::after {
@@ -269,7 +269,7 @@
   top: 0.107rem;
   width: 0.286rem;
   height: 0.571rem;
-  border: solid var(--bg);
+  border: solid var(--on-accent);
   border-width: 0 0.143rem 0.143rem 0;
   transform: rotate(45deg);
 }
@@ -285,8 +285,8 @@
 /* Primary Apply button — mauve fill, the one filled affordance in the
    footer (cancel stays a quiet surface button). */
 .picker__btn--primary {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-fill);
+  color: var(--on-accent);
 }
 
 .picker__btn--primary:hover {

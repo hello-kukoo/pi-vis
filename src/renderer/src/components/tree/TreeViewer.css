@@ -182,8 +182,8 @@
 }
 
 .tree-viewer__toggle input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
 }
 
 .tree-viewer__toggle input[type="checkbox"]:checked::after {
@@ -193,7 +193,7 @@
   top: 0.107rem;
   width: 0.214rem;
   height: 0.45rem;
-  border: solid var(--bg);
+  border: solid var(--on-accent);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
@@ -514,6 +514,6 @@
 }
 
 .tree-viewer__label-edit-btn--primary {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--accent-fill);
+  color: var(--on-accent);
 }
