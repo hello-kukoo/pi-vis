@@ -60,6 +60,8 @@ export interface ExecuteDeps {
     channel: string,
     payload: unknown,
   ) => Promise<{ success: boolean; data?: T; error?: string }>;
+  /** Surface that submitted this command; host-side extension UI follows it. */
+  uiSurface?: "composer" | "unified" | undefined;
   /** Add a working "..." indicator while a prompt is in flight. */
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
   /** Add a transient toast notification in the active session. */
@@ -263,6 +265,7 @@ async function executeSendPrompt(
       .invoke("session.sendCommand", {
         sessionId,
         command: extensionCommand,
+        uiSurface: deps.uiSurface,
       })
       .catch((err) => {
         console.error("[execute] extension command failed:", err);
@@ -314,6 +317,7 @@ async function executeSendPrompt(
     await deps.invoke("session.sendCommand", {
       sessionId,
       command: steerCommand,
+      uiSurface: deps.uiSurface,
     });
     return;
   }
@@ -344,6 +348,7 @@ async function executeSendPrompt(
     res = await deps.invoke("session.sendCommand", {
       sessionId,
       command: promptCommand,
+      uiSurface: deps.uiSurface,
     });
   } catch (err) {
     deps.setStreaming(sessionId, false);

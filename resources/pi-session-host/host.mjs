@@ -346,7 +346,11 @@ async function handleInit(msg) {
     // not pi's Theme singleton. Reconstruct pi's own getEditorTheme() from the
     // PUBLIC surface (theme.fg + getSelectListTheme) — see ui-context.mjs.
     const editorTheme = buildEditorTheme(pi, theme);
-    const { context: uiContext, unified: unifiedCtrl } = createUIContext({
+    const {
+      context: uiContext,
+      runWithInvocationSurface,
+      unified: unifiedCtrl,
+    } = createUIContext({
       theme,
       editorTheme,
       panelBridge,
@@ -370,6 +374,7 @@ async function handleInit(msg) {
       send,
       panelBridge,
       disposeUnifiedTui: unifiedCtrl.dispose,
+      runWithInvocationSurface,
       pi,
       agentDir,
       cwd,

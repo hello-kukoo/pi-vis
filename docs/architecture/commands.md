@@ -7,7 +7,7 @@ The composer parses input into typed `ComposerAction` discriminated unions:
 - `/command [args]` → slash command (builtins mirror pi's TUI: model, compact, name, session, new, export, fork, clone, resume, copy, quit, settings, diff, tree, login, reload)
 - Otherwise → user prompt
 
-Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discovered commands (extensions/prompts/skills) come from `get_commands` RPC. `parse.ts` resolves input to an action; `execute.ts` dispatches it.
+Builtins are defined in `builtins.ts` (mirrors pi's interactive-mode.js). Discovered commands (extensions/prompts/skills) come from `get_commands` RPC. `parse.ts` resolves input to an action; `execute.ts` dispatches it. Submitters tag host-bound prompts with their invocation surface (`composer` for the React Composer, `unified` for the unified-TUI editor), so extension custom UI opens where the command was triggered instead of always reusing an existing unified TUI.
 
 **`/login`** dispatches `{ kind: "open-login" }` → the composer fires a `pivis:open-login` CustomEvent → `App.tsx` opens Settings scrolled to the Account section.
 

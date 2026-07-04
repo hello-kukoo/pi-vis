@@ -121,7 +121,10 @@ export class PiProcess extends EventEmitter {
     });
   }
 
-  async sendCommand(command: PiRpcCommand): Promise<PiRpcResponse> {
+  async sendCommand(
+    command: PiRpcCommand,
+    _options: { uiSurface?: "composer" | "unified" | undefined } = {},
+  ): Promise<PiRpcResponse> {
     const id = newRpcRequestId() as string;
     const msg = `${JSON.stringify({ ...command, id })}\n`;
     // Per-command timeout. 0 = no timer; the only termination is process

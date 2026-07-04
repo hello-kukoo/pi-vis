@@ -16,6 +16,7 @@
  * custom() → the panel bridge (writes ANSI to main process)
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -86,6 +87,12 @@ export function createUIContext({
   tuiModules,
 }) {
   const { TUI, KeybindingsManager, TUI_KEYBINDINGS, Container, Editor } = tuiModules;
+  const invocationSurface = new AsyncLocalStorage();
+
+  const runWithInvocationSurface = (surface, fn) => {
+    if (surface !== "composer" && surface !== "unified") return fn();
+    return invocationSurface.run(surface, fn);
+  };
 
   // pi-tui's base `Editor` expects an `EditorTheme` ({ borderColor:(s)=>string,
   // selectList }), NOT pi's full Theme singleton. Passing the singleton makes
@@ -513,13 +520,15 @@ export function createUIContext({
     //    factory-error path (the old code could resolve via done() then reject).
     custom: async (factory, options) => {
       // ── Reuse path: a unified TUI already owns this session's panel. ──
-      // Showing the custom component as an overlay on THAT TUI (rather than
-      // spawning a second TUI/xterm) is necessary for correct focus save/restore
-      // — pi's overlay mechanism (preFocus capture + hideOverlay restore) is
-      // per-TUI, and two TUIs would mean two xterms with a focus hole between
-      // them. done() → hideOverlay() restores editor focus; we never stop() the
-      // shared TUI (that would kill the widgets + editor).
-      if (unifiedTuiState) {
+      // Showing a unified-origin custom component as an overlay on THAT TUI
+      // (rather than spawning a second TUI/xterm) is necessary for correct focus
+      // save/restore — pi's overlay mechanism (preFocus capture + hideOverlay
+      // restore) is per-TUI. But composer-origin custom components must NOT
+      // disappear into the hidden/alternate unified surface: when the user
+      // submits from the React Composer, the custom view should replace the
+      // Composer in its own standalone panel. The AsyncLocalStorage surface is
+      // set by bridge.mjs for prompt/steer/follow-up commands.
+      if (unifiedTuiState && invocationSurface.getStore() !== "composer") {
         const { tui, panelId } = unifiedTuiState;
         const keybindings = new KeybindingsManager(UNIFIED_KEYBINDINGS);
         return new Promise((resolve, reject) => {
@@ -664,6 +673,7 @@ export function createUIContext({
 
   return {
     context,
+    runWithInvocationSurface,
     unified: {
       dispose: disposeUnifiedTui,
       resolveSubmit: resolveUnifiedSubmit,

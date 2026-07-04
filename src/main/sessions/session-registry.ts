@@ -12,6 +12,8 @@ import { resolveHostExecPath } from "../pi/locate-node.js";
 import { PiProcess } from "../pi/pi-process.js";
 import { HostVersionTooLowError, SessionHost } from "../pi/session-host.js";
 
+export type SessionCommandUiSurface = "composer" | "unified";
+
 export interface SessionRecord {
   sessionId: SessionId;
   workspacePath: string;
@@ -68,6 +70,7 @@ export interface SessionRecord {
   _pendingSend?:
     | Array<{
         command: PiRpcCommand;
+        uiSurface?: SessionCommandUiSurface | undefined;
         resolve: (res: PiRpcResponse) => void;
         reject: (err: Error) => void;
       }>
@@ -473,7 +476,11 @@ export class SessionRegistry {
    * get_session_stats). Without buffering those would race the proc
    * assignment and fail with "No active process".
    */
-  async sendCommand(sessionId: SessionId, command: PiRpcCommand): Promise<PiRpcResponse> {
+  async sendCommand(
+    sessionId: SessionId,
+    command: PiRpcCommand,
+    options: { uiSurface?: SessionCommandUiSurface | undefined } = {},
+  ): Promise<PiRpcResponse> {
     const rec = this.sessions.get(sessionId);
     if (!rec) throw new Error(`Unknown session: ${sessionId}`);
     // Gate on readiness, NOT on proc presence: host mode assigns rec.proc
@@ -481,12 +488,12 @@ export class SessionRegistry {
     // "Not initialized" until init completes. _procReady flips true exactly
     // when the proc can accept commands. See P1-i.
     if (rec.proc && rec._procReady) {
-      return rec.proc.sendCommand(command);
+      return rec.proc.sendCommand(command, options);
     }
     if (rec.status === "starting") {
       return new Promise<PiRpcResponse>((resolve, reject) => {
         if (!rec._pendingSend) rec._pendingSend = [];
-        rec._pendingSend.push({ command, resolve, reject });
+        rec._pendingSend.push({ command, uiSurface: options.uiSurface, resolve, reject });
       });
     }
     throw new Error(`No active process for session ${sessionId}`);
@@ -504,7 +511,7 @@ export class SessionRegistry {
         item.reject(new Error(`No active process for session ${sessionId}`));
         continue;
       }
-      proc.sendCommand(item.command).then(item.resolve, item.reject);
+      proc.sendCommand(item.command, { uiSurface: item.uiSurface }).then(item.resolve, item.reject);
     }
   }
 

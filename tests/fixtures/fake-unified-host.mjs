@@ -57,7 +57,7 @@ function reply(id, success, data = {}) {
   send({ type: "response", id, success, data });
 }
 
-function handleCommand(id, command) {
+function handleCommand(id, command, uiSurface) {
   const t = command?.type;
   switch (t) {
     case "get_available_models":
@@ -74,7 +74,16 @@ function handleCommand(id, command) {
       });
       break;
     case "get_commands":
-      reply(id, true, { commands: [] });
+      reply(id, true, {
+        commands: [
+          {
+            name: "custom-panel",
+            description: "Open a fake custom panel",
+            source: "extension",
+            sourceInfo: "fake-unified-host",
+          },
+        ],
+      });
       break;
     case "get_session_stats":
       reply(id, true, {
@@ -96,6 +105,10 @@ function handleCommand(id, command) {
     case "prompt":
     case "steer":
       reply(id, true, {});
+      if (command?.message === "/custom-panel") {
+        openCustomPanel(uiSurface);
+        break;
+      }
       // A whisper of agent activity so the transcript isn't empty.
       send({ type: "event", event: { type: "agent_start" } });
       send({
@@ -158,6 +171,26 @@ function closeUnifiedPanel() {
   send({ type: "panel_close", panelId: PANEL_ID });
 }
 
+function openCustomPanel(uiSurface) {
+  if (uiSurface === "unified") {
+    send({ type: "panel_mode", panelId: PANEL_ID, mode: "viewport" });
+    send({
+      type: "panel_data",
+      panelId: PANEL_ID,
+      data: `\x1b[2J\x1b[H${["Unified custom panel", "opened from the unified editor"].join("\n")}\n`,
+    });
+    return;
+  }
+
+  const customPanelId = 2;
+  send({ type: "panel_open", panelId: customPanelId, overlay: true, unified: false });
+  send({
+    type: "panel_data",
+    panelId: customPanelId,
+    data: `\x1b[2J\x1b[H${["Composer custom panel", "opened from the native composer"].join("\n")}\n`,
+  });
+}
+
 // ─── Wire protocol handling ────────────────────────────────────────────────
 
 process.on("message", (msg) => {
@@ -171,7 +204,7 @@ process.on("message", (msg) => {
         setTimeout(openUnifiedPanel, 300);
         break;
       case "command":
-        handleCommand(msg.id, msg.command);
+        handleCommand(msg.id, msg.command, msg.uiSurface);
         break;
       case "panel_input":
         // Keystrokes from UnifiedTuiHost's xterm → record for the input-routing

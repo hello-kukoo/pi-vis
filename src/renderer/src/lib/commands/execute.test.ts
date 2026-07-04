@@ -418,6 +418,24 @@ describe("executeAction — extension commands (fire-and-forget)", () => {
     expect(invokeResolved).toBe(true);
   });
 
+  it("tags extension prompts with the invoking UI surface", async () => {
+    const { deps, calls } = makeDeps({ uiSurface: "composer" });
+
+    await executeAction(
+      SID,
+      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
+      deps,
+    );
+
+    expect(calls["invoke"]?.[0]).toEqual([
+      {
+        sessionId: SID,
+        command: { type: "prompt", message: "/mcp" },
+        uiSurface: "composer",
+      },
+    ]);
+  });
+
   it("surfaces a rejected invoke as an error toast (P2-a: no silent failure)", async () => {
     // If the invoke rejects (session died, "No active process"), the
     // fire-and-forget catch must toast the error — not just console.error it

@@ -538,6 +538,32 @@ describe("unified TUI: custom() reuse vs standalone", () => {
     await promise;
   });
 
+  it("composer-origin custom() opens a standalone panel even when the unified TUI exists", async () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory()); // unified TUI exists
+    const unifiedTui = h.tui;
+    let doneFn;
+    const factory = vi.fn((_tui, _theme, _kb, done) => {
+      doneFn = done;
+      return { render: () => [], dispose: vi.fn() };
+    });
+
+    const promise = h.bundle.runWithInvocationSurface("composer", () =>
+      h.context.custom(factory, {}),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.panelBridge.openPanel).toHaveBeenCalledTimes(2); // unified + standalone custom panel
+    expect(factory.mock.calls[0][0]).not.toBe(unifiedTui);
+    expect(unifiedTui.overlayShown).toBeNull();
+
+    doneFn(undefined);
+    await promise;
+    expect(h.tui.stopped).toBe(true); // the standalone TUI stopped; unified stayed separate
+    expect(unifiedTui.stopped).toBe(false);
+  });
+
   it("custom() done() hides the overlay but does NOT stop the shared TUI", async () => {
     const h = makeHarness();
     h.context.setWidget("k", makeFactory());

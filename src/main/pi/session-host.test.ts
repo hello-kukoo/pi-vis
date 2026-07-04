@@ -176,6 +176,20 @@ describe("SessionHost", () => {
       expect(res.success).toBe(true);
     });
 
+    it("forwards the invoking UI surface outside the pi RPC command", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+
+      const p = host.sendCommand({ type: "prompt", message: "/custom" } as never, {
+        uiSurface: "composer",
+      });
+      const sentCmd = fake.sent.find((m) => m.type === "command")!;
+      expect(sentCmd.uiSurface).toBe("composer");
+      expect(sentCmd.command).toEqual({ type: "prompt", message: "/custom" });
+      fake.emitMessage({ type: "response", id: sentCmd.id, success: true, data: {} });
+      await expect(p).resolves.toMatchObject({ success: true });
+    });
+
     it("rejects when the host exits mid-command (rejectAllPending)", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();

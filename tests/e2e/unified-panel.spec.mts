@@ -143,4 +143,35 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
       rmrf(folders.piSessionsDir);
     }
   });
+
+  test("a composer-origin extension custom view replaces the composer, not the unified TUI", async () => {
+    test.setTimeout(90_000);
+    const folders = await makeFolders();
+    const { app, window } = await launchApp(folders);
+
+    try {
+      await window.getByRole("button", { name: "New session" }).click();
+      await expect(window.locator(".unified-panel")).toBeVisible({ timeout: 20_000 });
+
+      await window.getByRole("tab", { name: "Input" }).click();
+      const composer = window.locator(".composer__textarea");
+      await expect(composer).toBeVisible({ timeout: 10_000 });
+
+      await composer.fill("/custom-panel");
+      await composer.press("Enter");
+
+      const customPanel = window.locator(".custom-panel");
+      await expect(customPanel).toBeVisible({ timeout: 15_000 });
+      await expect(customPanel.locator(".xterm-rows")).toContainText("Composer custom panel", {
+        timeout: 15_000,
+      });
+      await expect(window.locator(".unified-panel")).toHaveCount(0);
+      await expect(window.locator(".composer__textarea")).toHaveCount(0);
+    } finally {
+      await app.close();
+      rmrf(folders.settingsDir);
+      rmrf(folders.workspaceDir);
+      rmrf(folders.piSessionsDir);
+    }
+  });
 });

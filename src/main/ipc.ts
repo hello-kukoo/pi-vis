@@ -390,13 +390,18 @@ export function initIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     "session.sendCommand",
-    async (_evt, args: { sessionId: SessionId; command: PiRpcCommand }): Promise<PiRpcResponse> => {
+    async (
+      _evt,
+      args: { sessionId: SessionId; command: PiRpcCommand; uiSurface?: "composer" | "unified" },
+    ): Promise<PiRpcResponse> => {
       const reg = registry;
       if (!reg) throw new Error("Session registry not initialized");
       // Route through the registry so a command that arrives mid-activation
       // (status "starting", proc not yet assigned) is queued and flushed once
       // the proc is live, instead of failing with "No active process".
-      const res = await reg.sendCommand(args.sessionId, args.command);
+      const res = await reg.sendCommand(args.sessionId, args.command, {
+        uiSurface: args.uiSurface,
+      });
 
       // Harvest the session file from responses that carry it, so a brand-new
       // session's tab becomes durable the moment pi reports a path. This is

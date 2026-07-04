@@ -1249,6 +1249,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           channel as Parameters<typeof window.pivis.invoke>[0],
           payload as Parameters<typeof window.pivis.invoke>[1],
         ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+      uiSurface: "unified" as const,
       setStreaming: get().setStreaming,
       addToast: get().addToast,
       addUserMessage: get().addUserMessage,

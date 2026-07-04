@@ -106,6 +106,9 @@ export function assertHostCapabilities(session, runtime) {
  *   on every session swap and would lose the uiContext reference)
  * @param {object} ctx.send - process.send (IPC to main)
  * @param {object} ctx.panelBridge - the host panel bridge (for closeAll on swap)
+ * @param {function} [ctx.runWithInvocationSurface] - runs a command callback
+ *   under the renderer surface that invoked it ("composer" or "unified") so
+ *   uiContext.custom can choose the matching render target.
  * @param {object} ctx.pi - the imported pi SDK (for /trust: ProjectTrustStore,
  *   hasTrustRequiringProjectResources)
  * @param {string} ctx.agentDir - pi.getAgentDir() (for the ProjectTrustStore)
@@ -119,6 +122,7 @@ export function setupCommandBridge({
   send,
   panelBridge,
   disposeUnifiedTui,
+  runWithInvocationSurface,
   pi,
   agentDir,
   cwd,
@@ -251,6 +255,10 @@ export function setupCommandBridge({
 
   async function handleCommand(msg) {
     const { id, command } = msg;
+    const runForSurface = (fn) =>
+      typeof runWithInvocationSurface === "function"
+        ? runWithInvocationSurface(msg.uiSurface, fn)
+        : fn();
 
     try {
       switch (command.type) {
@@ -272,8 +280,8 @@ export function setupCommandBridge({
               ...(errMsg ? { error: errMsg } : {}),
             });
           };
-          void _session
-            .prompt(command.message, {
+          void runForSurface(() =>
+            _session.prompt(command.message, {
               ...(command.images?.length ? { images: command.images } : {}),
               ...(command.streamingBehavior
                 ? { streamingBehavior: command.streamingBehavior }
@@ -283,21 +291,21 @@ export function setupCommandBridge({
                 if (didSucceed) respond(true);
                 else respond(false, "Prompt rejected");
               },
-            })
-            .catch((err) => respond(false, err instanceof Error ? err.message : String(err)));
+            }),
+          ).catch((err) => respond(false, err instanceof Error ? err.message : String(err)));
           break;
         }
 
         // steer()/followUp() queue a message; they resolve promptly (no full
         // turn), so a plain await + success is correct.
         case "steer": {
-          await _session.steer(command.message, command.images);
+          await runForSurface(() => _session.steer(command.message, command.images));
           send({ type: "response", id, success: true });
           break;
         }
 
         case "follow_up": {
-          await _session.followUp(command.message, command.images);
+          await runForSurface(() => _session.followUp(command.message, command.images));
           send({ type: "response", id, success: true });
           break;
         }

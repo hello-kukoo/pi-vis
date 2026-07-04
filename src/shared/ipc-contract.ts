@@ -146,7 +146,7 @@ export interface IpcInvokeContract {
     res: TranscriptBlock[];
   };
   "session.sendCommand": {
-    req: { sessionId: SessionId; command: PiRpcCommand };
+    req: { sessionId: SessionId; command: PiRpcCommand; uiSurface?: "composer" | "unified" };
     res: PiRpcResponse;
   };
   "session.respondToUiRequest": {

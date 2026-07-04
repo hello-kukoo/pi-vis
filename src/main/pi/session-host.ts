@@ -648,7 +648,10 @@ export class SessionHost extends EventEmitter {
 
   // ─── Public interface (same shape as PiProcess) ────────────────────────
 
-  async sendCommand(command: PiRpcCommand): Promise<PiRpcResponse> {
+  async sendCommand(
+    command: PiRpcCommand,
+    options: { uiSurface?: "composer" | "unified" | undefined } = {},
+  ): Promise<PiRpcResponse> {
     const id = newRpcRequestId() as string;
     const timeoutMs = COMMAND_TIMEOUTS_MS[command.type] ?? 0;
 
@@ -663,7 +666,7 @@ export class SessionHost extends EventEmitter {
 
       this.pending.set(id, { resolve, reject, timer });
 
-      this.proc.send({ type: "command", id, command }, (err) => {
+      this.proc.send({ type: "command", id, command, uiSurface: options.uiSurface }, (err) => {
         if (err) {
           if (timer) clearTimeout(timer);
           this.pending.delete(id);

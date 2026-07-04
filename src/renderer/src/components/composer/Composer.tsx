@@ -671,6 +671,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
               channel as Parameters<typeof window.pivis.invoke>[0],
               payload as Parameters<typeof window.pivis.invoke>[1],
             ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+          uiSurface: "composer" as const,
           setStreaming,
           addToast,
           addUserMessage,
