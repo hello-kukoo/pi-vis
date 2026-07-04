@@ -253,7 +253,7 @@
   object-fit: cover;
 }
 
-/* Thinking — always visible, italic — uses the display font's true
+/* Thinking — always visible, italic — uses IBM Plex Serif's true
    italic variant for visual contrast.  Capped at 80% width to
    match the assistant content column.
 
@@ -263,9 +263,10 @@
    thinking voice.  Fenced code blocks (.shiki, pre) intentionally reset
    font-style: normal for readability — same as output rendering. */
 .thinking-block {
-  font-family: var(--font-display);
+  font-family: var(--font-thinking);
   font-size: 1em;
   font-style: italic;
+  letter-spacing: 0.02em;
   color: var(--color-thinking);
   line-height: var(--leading-body);
   word-break: break-word;
@@ -274,6 +275,7 @@
 }
 
 .thinking-block p {
+  font-family: inherit;
   margin: 0 0 var(--space-2);
 }
 .thinking-block p:last-child {
@@ -282,11 +284,13 @@
 
 .thinking-block ul,
 .thinking-block ol {
+  font-family: inherit;
   padding-left: 1.4em;
   margin: 0 0 var(--space-2);
 }
 
 .thinking-block li {
+  font-family: inherit;
   margin: 0.2em 0;
 }
 
@@ -294,6 +298,8 @@
 .thinking-block h2,
 .thinking-block h3 {
   color: var(--color-thinking);
+  font-family: inherit;
+  font-style: inherit;
   margin: 0.8em 0 0.4em;
   font-weight: 600;
   line-height: 1.3;
@@ -782,6 +788,8 @@ button.tool-card__header {
 .transcript-block__content h2,
 .transcript-block__content h3 {
   color: var(--text);
+  font-family: var(--font-reading-heading);
+  font-style: normal;
   margin: 0.8em 0 0.4em;
   font-weight: 600;
   line-height: 1.3;
