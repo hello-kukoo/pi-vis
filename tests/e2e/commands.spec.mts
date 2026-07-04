@@ -70,6 +70,20 @@ function rmrf(p: string): void {
   }
 }
 
+function countJsonlFiles(root: string): number {
+  let count = 0;
+  const walk = (dir: string): void => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) count += 1;
+    }
+  };
+  walk(root);
+  return count;
+}
+
 test.describe("Slash commands", () => {
   test.beforeAll(() => {
     fs.chmodSync(FAKE_PI, 0o755);
@@ -379,6 +393,13 @@ test.describe("Slash commands", () => {
     await textarea.fill("hello there");
     await textarea.press("Enter");
     await expect(window.locator("body")).toContainText("your pi coding agent", { timeout: 15_000 });
+    // The full assistant text appears just before fake-pi sends agent_end and
+    // the prompt RPC response. Wait for the turn to be fully idle before
+    // submitting /new; otherwise the Composer's duplicate-submit guard can
+    // legitimately ignore the next Enter on slower full-suite runs.
+    await expect(window.locator(".status-dot--streaming")).toHaveCount(0, { timeout: 5_000 });
+
+    const filesBeforeNew = countJsonlFiles(folders.piSessionsDir);
 
     // /new clears the transcript and adopts a fresh file.
     await textarea.fill("/new");
@@ -386,6 +407,12 @@ test.describe("Slash commands", () => {
     // the selected completion on slower full-suite runs.
     await textarea.press("Escape");
     await textarea.press("Enter");
+    await expect(window.locator("body")).toContainText("Started a fresh session", {
+      timeout: 10_000,
+    });
+    await expect
+      .poll(() => countJsonlFiles(folders.piSessionsDir), { timeout: 5_000 })
+      .toBeGreaterThan(filesBeforeNew);
     // Transcript is empty after /new.
     await expect(window.locator(".transcript-block--assistant")).toHaveCount(0, { timeout: 5_000 });
 
