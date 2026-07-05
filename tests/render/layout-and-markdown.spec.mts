@@ -35,6 +35,38 @@ async function seedHorizontalRuleMessage(page: Page): Promise<void> {
   });
 }
 
+async function seedHierarchicalMarkdownMessage(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const store = (window as unknown as { __pivisStore: { getState: () => PreviewStoreState } })
+      .__pivisStore;
+    const state = store.getState();
+    state.seedHistory(state.activeSessionId, [
+      {
+        id: "hierarchical-markdown-assistant",
+        type: "assistant",
+        data: {
+          thinking: "# Thinking H1\n\n> ## Thinking quoted H2",
+          content: [
+            "# H1",
+            "## H2",
+            "### H3",
+            "#### H4",
+            "##### H5",
+            "###### H6",
+            "",
+            "> # Quoted H1",
+            "> ## Quoted H2",
+            "> Paragraph with `inline code`.",
+            "",
+            "- List item",
+            "  > ### Heading in quote in list",
+          ].join("\n"),
+        },
+      },
+    ]);
+  });
+}
+
 test.describe("layout overflow and markdown separators", () => {
   test("collapsing the sidebar with a fading long title does not widen or clip the main grid", async ({
     page,
@@ -109,5 +141,88 @@ test.describe("layout overflow and markdown separators", () => {
           backgroundImage: expect.stringContaining("linear-gradient"),
         }),
       );
+  });
+
+  test("transcript markdown headings compose with quote and thinking voice", async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 720 });
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
+    await seedHierarchicalMarkdownMessage(page);
+
+    await expect(page.locator(".transcript-block__content.markdown-body h4")).toHaveText("H4");
+    await expect(page.locator(".transcript-block__content.markdown-body h6")).toHaveText("H6");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const px = (selector: string) => {
+            const el = document.querySelector(selector) as HTMLElement | null;
+            return el ? Number.parseFloat(getComputedStyle(el).fontSize) : 0;
+          };
+          return {
+            h1: px(".transcript-block__content.markdown-body > h1"),
+            h2: px(".transcript-block__content.markdown-body > h2"),
+            h3: px(".transcript-block__content.markdown-body > h3"),
+            h4: px(".transcript-block__content.markdown-body > h4"),
+            h5: px(".transcript-block__content.markdown-body > h5"),
+            h6: px(".transcript-block__content.markdown-body > h6"),
+          };
+        }),
+      )
+      .toEqual(
+        expect.objectContaining({
+          h1: expect.any(Number),
+          h2: expect.any(Number),
+          h3: expect.any(Number),
+          h4: expect.any(Number),
+          h5: expect.any(Number),
+          h6: expect.any(Number),
+        }),
+      );
+
+    const headingSizes = await page.evaluate(() => {
+      const px = (selector: string) => {
+        const el = document.querySelector(selector) as HTMLElement;
+        return Number.parseFloat(getComputedStyle(el).fontSize);
+      };
+      return {
+        h1: px(".transcript-block__content.markdown-body > h1"),
+        h2: px(".transcript-block__content.markdown-body > h2"),
+        h3: px(".transcript-block__content.markdown-body > h3"),
+        h4: px(".transcript-block__content.markdown-body > h4"),
+        h5: px(".transcript-block__content.markdown-body > h5"),
+        h6: px(".transcript-block__content.markdown-body > h6"),
+      };
+    });
+    expect(headingSizes.h1).toBeGreaterThan(headingSizes.h2);
+    expect(headingSizes.h2).toBeGreaterThan(headingSizes.h3);
+    expect(headingSizes.h3).toBeGreaterThan(headingSizes.h4);
+    expect(headingSizes.h4).toBeGreaterThan(headingSizes.h5);
+    expect(headingSizes.h5).toBeGreaterThan(headingSizes.h6);
+
+    const composition = await page.evaluate(() => {
+      const styles = (selector: string) => {
+        const style = getComputedStyle(document.querySelector(selector) as HTMLElement);
+        return { color: style.color, fontFamily: style.fontFamily, fontStyle: style.fontStyle };
+      };
+      return {
+        quote: styles(".transcript-block__content.markdown-body blockquote"),
+        quotedHeading: styles(".transcript-block__content.markdown-body blockquote h2"),
+        thinking: styles(".thinking-block.markdown-body"),
+        thinkingHeading: styles(".thinking-block.markdown-body > h1"),
+        thinkingQuote: styles(".thinking-block.markdown-body blockquote"),
+        thinkingQuotedHeading: styles(".thinking-block.markdown-body blockquote h2"),
+      };
+    });
+
+    expect(composition.quotedHeading.color).toBe(composition.quote.color);
+    expect(composition.quotedHeading.fontStyle).toBe(composition.quote.fontStyle);
+    expect(composition.thinkingHeading.color).toBe(composition.thinking.color);
+    expect(composition.thinkingHeading.fontFamily).toBe(composition.thinking.fontFamily);
+    expect(composition.thinkingHeading.fontStyle).toBe(composition.thinking.fontStyle);
+    expect(composition.thinkingQuotedHeading.color).toBe(composition.thinkingQuote.color);
+    expect(composition.thinkingQuotedHeading.fontFamily).toBe(composition.thinking.fontFamily);
+    expect(composition.thinkingQuotedHeading.fontStyle).toBe(composition.thinkingQuote.fontStyle);
   });
 });

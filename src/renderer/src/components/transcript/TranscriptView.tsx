@@ -389,7 +389,7 @@ const ThinkingSegment = memo(function ThinkingSegment({
   content: string;
 }): React.ReactElement {
   return (
-    <div className="thinking-block">
+    <div className="thinking-block markdown-body">
       <Markdown>{content}</Markdown>
     </div>
   );
@@ -401,7 +401,7 @@ const TextSegment = memo(function TextSegment({
   content: string;
 }): React.ReactElement {
   return (
-    <div className="transcript-block__content">
+    <div className="transcript-block__content markdown-body">
       <Markdown>{content}</Markdown>
     </div>
   );
@@ -774,7 +774,7 @@ const ActivityCard = memo(function ActivityCard({
       {showBody && (
         <div className="tool-card__body">
           <div className="tool-card__scroll">
-            <div className="transcript-block__content activity-card__markdown">
+            <div className="transcript-block__content activity-card__markdown markdown-body">
               <Markdown>{open ? text : preview}</Markdown>
             </div>
           </div>
