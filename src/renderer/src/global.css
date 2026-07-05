@@ -21,7 +21,7 @@ h4,
 h5,
 h6 {
   font-family: var(--font-display);
-  font-weight: 650;
+  font-weight: 600;
   line-height: var(--leading-display);
   letter-spacing: var(--tracking-display);
   text-align: left;
