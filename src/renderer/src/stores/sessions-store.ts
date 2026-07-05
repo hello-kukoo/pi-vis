@@ -6,7 +6,7 @@ import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
-import { ModelInfoSchema } from "@shared/pi-protocol/responses.js";
+import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
@@ -29,6 +29,9 @@ import {
   finishBashBlock,
   seedFromHistory,
 } from "./transcript.js";
+
+let nextThinkingRequestId = 1;
+const pendingThinkingRequests = new Map<SessionId, number>();
 
 export interface SessionViewState {
   sessionId: SessionId;
@@ -783,6 +786,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   },
 
   removeSession: (sessionId, opts) => {
+    pendingThinkingRequests.delete(sessionId);
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
@@ -1947,6 +1951,30 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           modelId: persistId,
         },
       });
+
+      // The model switch can change the context window. Refresh stats from pi
+      // once this switch is still known to be current so the context meter's
+      // denominator updates promptly instead of waiting for the header's
+      // periodic/agent_end refresh.
+      try {
+        const statsRes = await window.pivis.invoke("session.sendCommand", {
+          sessionId,
+          command: { type: "get_session_stats" },
+        });
+        if (statsRes.success && statsRes.data) {
+          const parsed = SessionStatsSchema.safeParse(statsRes.data);
+          const s = get().sessions.get(sessionId);
+          if (
+            parsed.success &&
+            s?.currentModel === persistId &&
+            s.currentProvider === persistProvider
+          ) {
+            get().setStats(sessionId, parsed.data as SessionStats);
+          }
+        }
+      } catch {
+        /* best effort — the header's normal stats polling will catch up */
+      }
     }
     return { ok: true };
   },
@@ -1958,6 +1986,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     const before = get().sessions.get(sessionId);
     if (!before) return { ok: false, error: "Unknown session" };
     const prevLevel = before.thinkingLevel;
+
+    const requestId = nextThinkingRequestId++;
+    pendingThinkingRequests.set(sessionId, requestId);
 
     // Optimistic update.
     get().setThinkingLevel(sessionId, level);
@@ -1978,17 +2009,28 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const raw = stateRes?.data as { thinkingLevel?: unknown } | undefined;
       if (raw && typeof raw.thinkingLevel === "string") {
         const confirmed = ThinkingLevelSchema.safeParse(raw.thinkingLevel);
-        // Only adopt pi's value if our optimistic value is still in effect
-        // (not superseded by a newer change).
-        if (confirmed.success && get().sessions.get(sessionId)?.thinkingLevel === level) {
+        // Only adopt pi's value if this request has not been superseded by a
+        // newer user choice. Do NOT key this off the current store value: pi
+        // may have already emitted `thinking_level_changed` for this same
+        // request before the get_state round-trip returns. In that case the
+        // store is already clamped, but the caller still needs `clampedTo` so
+        // SessionHeader can show the warning toast on the first unsupported
+        // choice in a session.
+        if (confirmed.success && pendingThinkingRequests.get(sessionId) === requestId) {
           get().setThinkingLevel(sessionId, confirmed.data);
           if (confirmed.data !== level) clampedTo = confirmed.data;
         }
       }
 
-      void useSettingsStore.getState().update({ lastUsedThinkingLevel: level });
+      if (pendingThinkingRequests.get(sessionId) === requestId) {
+        pendingThinkingRequests.delete(sessionId);
+        void useSettingsStore.getState().update({ lastUsedThinkingLevel: level });
+      }
       return clampedTo ? { ok: true, clampedTo } : { ok: true };
     } catch (err) {
+      if (pendingThinkingRequests.get(sessionId) === requestId) {
+        pendingThinkingRequests.delete(sessionId);
+      }
       set((state) => {
         const sessions = new Map(state.sessions);
         const s = sessions.get(sessionId);

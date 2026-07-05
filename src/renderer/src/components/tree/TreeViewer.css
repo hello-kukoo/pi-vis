@@ -21,11 +21,12 @@
   animation: tree-overlay-in 120ms ease-out;
 }
 
-/* Sidebar-collapsed: span title-bar + main rows so the scrim shadows the
-   floating title pill — identical to .diff-overlay. */
+/* Sidebar-collapsed: span title-bar + main rows and cover the full window so
+   the scrim/blur shadows the floating title pill without leaving thin
+   unblurred strips at the top or bottom — identical to .diff-overlay. */
 .app--sidebar-collapsed .tree-overlay {
   grid-area: titlebar / titlebar / main / main;
-  inset: var(--space-2) 0;
+  inset: 0;
   border-radius: 0;
   padding: 0;
 }

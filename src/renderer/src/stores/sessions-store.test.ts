@@ -1218,6 +1218,59 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
     });
   });
 
+  it("applyModelChange refreshes stats so context window updates after success", async () => {
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_session_stats") {
+        return {
+          success: true,
+          data: {
+            sessionId: SESSION_A,
+            contextUsage: { tokens: 272_000, contextWindow: 1_000_000, percent: 27.2 },
+          },
+        };
+      }
+      return { success: true, data: {} };
+    });
+
+    const res = await useSessionsStore.getState().applyModelChange(SESSION_A, MODEL_Y);
+
+    expect(res.ok).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.stats?.contextUsage).toEqual({
+      tokens: 272_000,
+      contextWindow: 1_000_000,
+      percent: 27.2,
+    });
+  });
+
+  it("applyModelChange ignores stale stats when a newer model switch lands first", async () => {
+    useSessionsStore.getState().setStats(SESSION_A, {
+      sessionId: SESSION_A,
+      contextUsage: { tokens: 10, contextWindow: 100, percent: 10 },
+    });
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_session_stats") {
+        useSessionsStore.getState().setCurrentModel(SESSION_A, "newer-model", "newer");
+        return {
+          success: true,
+          data: {
+            sessionId: SESSION_A,
+            contextUsage: { tokens: 272_000, contextWindow: 1_000_000, percent: 27.2 },
+          },
+        };
+      }
+      return { success: true, data: {} };
+    });
+
+    const res = await useSessionsStore.getState().applyModelChange(SESSION_A, MODEL_Y);
+
+    expect(res.ok).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.stats?.contextUsage).toEqual({
+      tokens: 10,
+      contextWindow: 100,
+      percent: 10,
+    });
+  });
+
   it("applyModelChange reverts to the prior model when pi returns success:false", async () => {
     stubInvoke(async (_c, p) =>
       p.command.type === "set_model"
@@ -1267,6 +1320,26 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
       return { success: true, data: {} };
     });
     const res = await useSessionsStore.getState().applyThinkingLevel(SESSION_A, "high");
+    expect(res.ok).toBe(true);
+    expect(res.clampedTo).toBe("off");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.thinkingLevel).toBe("off");
+    expect(updateSpy).toHaveBeenCalledWith({ lastUsedThinkingLevel: "high" });
+  });
+
+  it("applyThinkingLevel still reports clamping if pi's event reconciles before get_state returns", async () => {
+    stubInvoke(async (_c, p) => {
+      if (p.command.type === "get_state") {
+        useSessionsStore.getState().applyEvent(SESSION_A, {
+          type: "thinking_level_changed",
+          level: "off",
+        });
+        return { success: true, data: { thinkingLevel: "off" } };
+      }
+      return { success: true, data: {} };
+    });
+
+    const res = await useSessionsStore.getState().applyThinkingLevel(SESSION_A, "high");
+
     expect(res.ok).toBe(true);
     expect(res.clampedTo).toBe("off");
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.thinkingLevel).toBe("off");

@@ -13,9 +13,8 @@
    the card's content box and the card's own border + rounded corners paint
    *around* the scrim and stay visible — the floating-card frame is preserved
    (the scrim is the backdrop *inside* the card, not a rectangle covering its
-   frame). In sidebar-collapsed mode (below) it spans the full window to
-   shadow the pill, with a symmetric top/bottom inset clearing the traffic
-   lights. */
+   frame). In sidebar-collapsed mode (below) it spans the full window so the
+   blur/scrim also covers the strips above the title pill and below the panel. */
 
 .diff-overlay {
   /* The overlay is a direct child of `.app` (sibling of <main> and
@@ -53,16 +52,16 @@
    shadow it. `grid-area: titlebar / titlebar / main / main` spans from the
    title-bar row through the main row, so the scrim covers the pill.
 
-   The scrim goes full-width (left/right 0). The panel (`.diff-viewer`)
-   inside it is sized by its own top/bottom margins, set so the gap above
-   the panel — clearing the macOS traffic lights, which sit ~12px from the
-   window's top-left and are ~14px tall — equals the gap below the panel at
-   the window bottom. The scrim itself extends nearly to the window edges so
-   it shadows the pill; only the panel is symmetric. Square corners — the
-   full-window scrim isn't a floating card in this mode. */
+   The scrim goes full-window (`inset: 0`) so blur/shadow coverage reaches the
+   top and bottom window edges. The panel (`.diff-viewer`) inside it is sized
+   by its own top/bottom margins, set so the gap above the panel — clearing
+   the macOS traffic lights, which sit ~12px from the window's top-left and
+   are ~14px tall — equals the gap below the panel at the window bottom. Only
+   the panel is symmetric. Square corners — the full-window scrim isn't a
+   floating card in this mode. */
 .app--sidebar-collapsed .diff-overlay {
   grid-area: titlebar / titlebar / main / main;
-  inset: var(--space-2) 0;
+  inset: 0;
   border-radius: 0;
   /* Reset the sidebar-visible padding; the panel's top/bottom gaps are
      driven by its own margins below so they're symmetric and explicit. */

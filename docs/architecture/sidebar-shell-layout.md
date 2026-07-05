@@ -78,7 +78,11 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
   traffic-light clearance leaves a real gutter before the sidebar toggle; in collapsed
   mode, the floating pill's extra breathing room is its outer inset, not extra internal
   padding on the end controls. The collapsed floating pill uses a border but no
-  side-casting shadow, so it doesn't read as a stray fade over the transcript. A
+  side-casting shadow, so it doesn't read as a stray fade over the transcript.
+  Full-window viewers such as the diff and tree overlays render as direct
+  `.app` children; in collapsed mode their scrim spans the whole titlebar+main
+  area with no top/bottom inset, while the viewer panel itself supplies the
+  traffic-light-clearing margins. A
   full-width centered title would otherwise cover the whole bar as a no-drag element,
   leaving nothing to grab the window by.
 - **Fluid transcript**: `.app__main` is a size-query container (`container: mainpane /
