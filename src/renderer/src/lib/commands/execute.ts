@@ -311,19 +311,32 @@ async function executeSendPrompt(
     return;
   }
 
+  // Unknown slash passthrough is intentionally conservative. If the renderer's
+  // discovered-command list is stale, an extension/custom UI command can arrive
+  // here with `commandSource === undefined` even though pi will handle it as a
+  // slash command and may only open UI (no agent_start / user echo). Do NOT add
+  // an optimistic text bubble or optimistic streaming for those slash-shaped
+  // prompts; let pi's authoritative events decide whether real agent work began.
+  const isUnknownSlashPassthrough =
+    action.commandSource === undefined && action.text.startsWith("/");
+
   // If the model is mid-turn, send a `steer` instead of a new `prompt`.
   // A `prompt` sent while busy is queued by pi and only runs after the
   // current turn finishes; `steer` injects the message into the running
-  // turn so the user's course correction takes effect immediately.
-  const isSteer = deps.isStreaming(sessionId);
+  // turn so the user's course correction takes effect immediately. Unknown
+  // slash passthrough is excluded for the same reason as above: a stale
+  // extension command should not be converted into a steer message.
+  const isSteer = !isUnknownSlashPassthrough && deps.isStreaming(sessionId);
 
-  // Plain text + prompt-template / skill / unknown /foo: pi will deliver a
-  // user message via the wire (role: "user" message_start) which renders
-  // the authoritative text — we still seed the bubble optimistically so
-  // the user sees their text instantly. Steer messages are optimistic too,
-  // but do not register a pending echo: pi does not echo steer as a normal
-  // user message_start, and a stale token would suppress the next real echo.
-  if (action.commandSource === undefined) {
+  // Plain text: pi will deliver a user message via the wire (role: "user"
+  // message_start) which renders the authoritative text — we still seed the
+  // bubble optimistically so the user sees their text instantly. Steer messages
+  // are optimistic too, but do not register a pending echo: pi does not echo
+  // steer as a normal user message_start, and a stale token would suppress the
+  // next real echo. Prompt-template / skill / unknown slash sends rely on the
+  // wire echo (if any) instead of optimistic local text.
+  const registeredOptimisticEcho = action.commandSource === undefined && !isUnknownSlashPassthrough;
+  if (registeredOptimisticEcho) {
     deps.addUserMessage(
       sessionId,
       action.text,
@@ -372,7 +385,8 @@ async function executeSendPrompt(
     return;
   }
 
-  deps.setStreaming(sessionId, true);
+  const setOptimisticStreaming = !isUnknownSlashPassthrough;
+  if (setOptimisticStreaming) deps.setStreaming(sessionId, true);
   const promptCommand: {
     type: "prompt";
     message: string;
@@ -401,16 +415,16 @@ async function executeSendPrompt(
       uiSurface: deps.uiSurface,
     });
   } catch (err) {
-    deps.setStreaming(sessionId, false);
-    if (action.commandSource === undefined) deps.clearPendingUserEcho(sessionId, action.text);
+    if (setOptimisticStreaming) deps.setStreaming(sessionId, false);
+    if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
     const message = err instanceof Error ? err.message : `Failed to send prompt: ${String(err)}`;
     deps.addToast(sessionId, message, "error");
     if (deps.uiSurface === "unified") throw new Error(message);
     return;
   }
   if (!res.success) {
-    deps.setStreaming(sessionId, false);
-    if (action.commandSource === undefined) deps.clearPendingUserEcho(sessionId, action.text);
+    if (setOptimisticStreaming) deps.setStreaming(sessionId, false);
+    if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
     const message = res.error ?? "Failed to send prompt";
     deps.addToast(sessionId, message, "error");
     if (deps.uiSurface === "unified") throw new Error(message);

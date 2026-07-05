@@ -276,6 +276,30 @@ describe("executeAction — send-prompt vs steer", () => {
     expect(calls["addToast"]).toEqual([[SID, "IPC channel closed", "error"]]);
   });
 
+  it("sends unknown slash passthrough without optimistic text or streaming", async () => {
+    const { deps, calls } = makeDeps();
+    await executeAction(SID, { kind: "send-prompt", text: "/custom-ui" }, deps);
+
+    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
+    const send = invocations.find((c) => c[0] === "session.sendCommand");
+    expect(send).toBeDefined();
+    expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
+    expect(calls["addUserMessage"]).toBeUndefined();
+    expect(calls["setStreaming"]).toBeUndefined();
+  });
+
+  it("does not convert unknown slash passthrough into steer while streaming", async () => {
+    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    await executeAction(SID, { kind: "send-prompt", text: "/custom-ui" }, deps);
+
+    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
+    const send = invocations.find((c) => c[0] === "session.sendCommand");
+    expect(send).toBeDefined();
+    expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
+    expect(calls["addUserMessage"]).toBeUndefined();
+    expect(calls["setStreaming"]).toBeUndefined();
+  });
+
   it("throws after toast on unified prompt failure so the host restores editor text", async () => {
     const { deps, calls } = makeDeps({ uiSurface: "unified" });
     (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
