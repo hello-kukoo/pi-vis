@@ -426,6 +426,15 @@ p {
   text-align: center;
 }
 
+.schemes__credits {
+  max-width: 1060px;
+  margin: 26px auto 0;
+  padding: 0 24px;
+  color: var(--text-faint);
+  font-size: 13.5px;
+  text-align: center;
+}
+
 @media (max-width: 800px) {
   .schemes__grid {
     grid-template-columns: 1fr;

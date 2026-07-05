@@ -4,6 +4,14 @@
    layout scale fluidly when the user changes the root font size.
    ───────────────────────────────────────────────────────────────────── */
 
+/* ── Text selection ────────────────────────────────────────────────────
+   Use the active theme's accent plane instead of Chromium's OS-default
+   selection color, so copy/paste highlights stay visually integrated. */
+::selection {
+  color: var(--on-accent);
+  background: var(--accent-fill);
+}
+
 /* ── Headings ──────────────────────────────────────────────────────────
    Display weight, optically tightened tracking, flush-left. */
 h1,
