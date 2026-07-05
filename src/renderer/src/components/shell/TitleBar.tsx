@@ -7,13 +7,20 @@ import "./TitleBar.css";
 interface TitleBarProps {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  onSidebarToggleMouseEnter?: () => void;
+  onSidebarToggleMouseLeave?: () => void;
 }
 
 // Title bar — a fixed-height chrome strip spanning the full width of the
 // window. Holds the OS drag region, the sidebar toggle, and (when a session is
 // active) the SessionHeader. The height is a constant 38px regardless of
 // content; see TitleBar.css and App.css for the enforcing rules.
-export function TitleBar({ sidebarCollapsed, onToggleSidebar }: TitleBarProps): React.ReactElement {
+export function TitleBar({
+  sidebarCollapsed,
+  onToggleSidebar,
+  onSidebarToggleMouseEnter,
+  onSidebarToggleMouseLeave,
+}: TitleBarProps): React.ReactElement {
   const activeSessionId = useSessionsStore((s) => s.activeSessionId);
   return (
     <div className="titlebar">
@@ -21,6 +28,8 @@ export function TitleBar({ sidebarCollapsed, onToggleSidebar }: TitleBarProps): 
         type="button"
         className="titlebar__sidebar-toggle"
         onClick={onToggleSidebar}
+        onMouseEnter={sidebarCollapsed ? onSidebarToggleMouseEnter : undefined}
+        onMouseLeave={sidebarCollapsed ? onSidebarToggleMouseLeave : undefined}
         title={`${sidebarCollapsed ? "Show" : "Hide"} sidebar (⌘B)`}
         aria-label={`${sidebarCollapsed ? "Show" : "Hide"} sidebar`}
         aria-pressed={!sidebarCollapsed}

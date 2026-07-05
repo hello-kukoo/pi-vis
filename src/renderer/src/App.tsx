@@ -464,7 +464,12 @@ export function App(): React.ReactElement {
         } as React.CSSProperties
       }
     >
-      <TitleBar sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
+      <TitleBar
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={toggleSidebar}
+        onSidebarToggleMouseEnter={peekSidebar}
+        onSidebarToggleMouseLeave={scheduleHideSidebar}
+      />
       {sidebarCollapsed && (
         <div className="sidebar-trigger" onMouseEnter={peekSidebar} aria-hidden="true" />
       )}

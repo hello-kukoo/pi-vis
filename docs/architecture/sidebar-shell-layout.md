@@ -61,8 +61,10 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
 `main/index.ts`) up to any size. Three independent mechanisms:
 
 - **Collapsible sidebar**: a toggle in the title bar (`TitleBar.tsx`) and `Cmd/Ctrl+B`
-  flip `settings.sidebarCollapsed` (persisted). Collapsed → the grid's sidebar column
-  becomes `0` and `.sidebar` is `display: none`. The grid track is
+  flip `settings.sidebarCollapsed` (persisted). When collapsed, hovering either the
+  far-left edge reveal strip or the title-bar toggle temporarily peeks the sidebar as
+  an overlay. Collapsed → the grid's sidebar column becomes `0` and `.sidebar` is
+  removed from layout. The grid track is
   `min(var(--sidebar-width), 38%)` so even expanded the sidebar can never eat more than
   ~⅓ of a narrow window (a no-op on normal windows). `sidebarWidth` is persisted too;
   App keeps a live local copy for smooth dragging and writes to settings on drag-end.
