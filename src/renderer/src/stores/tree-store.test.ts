@@ -96,7 +96,7 @@ describe("tree-store — open / refresh", () => {
     // Mark the session as a real (non-pending) session, then clear the visible
     // branch to mirror `/tree` selecting the root before any messages.
     useSessionsStore.getState().addUserMessage(SESSION_A, "real session");
-    useSessionsStore.getState().seedHistory(SESSION_A, []);
+    useSessionsStore.getState().seedHistory(SESSION_A, { blocks: [], startIndex: 0, total: 0 });
 
     await useTreeStore.getState().openTreeForSession(SESSION_A);
 

@@ -41,7 +41,7 @@ export function App(): React.ReactElement {
   useGlobalEscapeInterrupt();
   const activeSessionId = useSessionsStore((s) => s.activeSessionId);
   const setSessionStatus = useSessionsStore((s) => s.setSessionStatus);
-  const applyEvent = useSessionsStore((s) => s.applyEvent);
+  const applyEvents = useSessionsStore((s) => s.applyEvents);
   const addUiRequest = useSessionsStore((s) => s.addUiRequest);
   const compact = useSessionsStore((s) => s.headerCompact);
   const handlePanelEvent = useSessionsStore((s) => s.handlePanelEvent);
@@ -366,8 +366,8 @@ export function App(): React.ReactElement {
 
   // Subscribe to IPC events
   useEffect(() => {
-    const unsubEvent = window.pivis.on("session.event", ({ sessionId, event }) => {
-      applyEvent(sessionId as SessionId, event);
+    const unsubEvent = window.pivis.on("session.events", ({ sessionId, events }) => {
+      applyEvents(sessionId as SessionId, events);
     });
 
     const unsubUiReq = window.pivis.on("session.uiRequest", ({ sessionId, request }) => {
@@ -481,7 +481,7 @@ export function App(): React.ReactElement {
       unsubFullscreen();
     };
   }, [
-    applyEvent,
+    applyEvents,
     addUiRequest,
     setSessionStatus,
     setActiveSession,

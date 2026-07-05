@@ -385,38 +385,44 @@ const UserBlock = memo(function UserBlock({ data }: { data: UserBlockData }): Re
 
 const ThinkingSegment = memo(function ThinkingSegment({
   content,
+  streaming,
 }: {
   content: string;
+  streaming: boolean;
 }): React.ReactElement {
   return (
     <div className="thinking-block markdown-body">
-      <Markdown>{content}</Markdown>
+      <Markdown streaming={streaming}>{content}</Markdown>
     </div>
   );
 });
 
 const TextSegment = memo(function TextSegment({
   content,
+  streaming,
 }: {
   content: string;
+  streaming: boolean;
 }): React.ReactElement {
   return (
     <div className="transcript-block__content markdown-body">
-      <Markdown>{content}</Markdown>
+      <Markdown streaming={streaming}>{content}</Markdown>
     </div>
   );
 });
 
 const AssistantSegmentView = memo(function AssistantSegmentView({
   segment,
+  streaming,
 }: {
   segment: AssistantSegment;
+  streaming: boolean;
 }): React.ReactElement | null {
   if (!segment.content) return null;
   return segment.kind === "thinking" ? (
-    <ThinkingSegment content={segment.content} />
+    <ThinkingSegment content={segment.content} streaming={streaming} />
   ) : (
-    <TextSegment content={segment.content} />
+    <TextSegment content={segment.content} streaming={streaming} />
   );
 });
 
@@ -428,7 +434,7 @@ const AssistantBlock = memo(function AssistantBlock({
   return (
     <div className="transcript-block transcript-block--assistant">
       {data.segments.map((seg, i) => (
-        <AssistantSegmentView key={`${seg.kind}-${i}`} segment={seg} />
+        <AssistantSegmentView key={`${seg.kind}-${i}`} segment={seg} streaming={data.isStreaming} />
       ))}
     </div>
   );
@@ -843,6 +849,7 @@ interface TranscriptViewProps {
 
 export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactElement {
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
+  const loadEarlierHistory = useSessionsStore((s) => s.loadEarlierHistory);
   const [showAll, setShowAll] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -860,6 +867,14 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   const prevClientHeightRef = useRef(0);
   const prevScrollTopRef = useRef(0);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
+  const prependedRef = useRef<{
+    sessionId: SessionId;
+    beforeStartIndex: number;
+    prevHeight: number;
+    prevTop: number;
+  } | null>(null);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const updateScrollFades = useCallback(() => {
     const el = scrollRef.current;
@@ -920,6 +935,25 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     showAll || allBlocks.length <= MAX_VISIBLE_BLOCKS
       ? allBlocks
       : allBlocks.slice(allBlocks.length - MAX_VISIBLE_BLOCKS);
+  const earlierUnloaded = session?.historyCursor?.startIndex ?? 0;
+
+  const handleShowEarlier = useCallback(() => {
+    const el = scrollRef.current;
+    if (earlierUnloaded > 0 && el) {
+      const targetSessionId = sessionId;
+      prependedRef.current = {
+        sessionId: targetSessionId,
+        beforeStartIndex: earlierUnloaded,
+        prevHeight: el.scrollHeight,
+        prevTop: el.scrollTop,
+      };
+      void loadEarlierHistory(targetSessionId).finally(() => {
+        if (sessionIdRef.current === targetSessionId) setShowAll(true);
+      });
+      return;
+    }
+    setShowAll(true);
+  }, [earlierUnloaded, loadEarlierHistory, sessionId]);
 
   // Sticky bottom via distance-from-bottom detection. Robust against:
   //   • content *shrink* (async highlight replacing tall raw text, image
@@ -1007,6 +1041,24 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     pinnedRef.current = true;
     pinToBottom();
   }, [sessionId, pinToBottom]);
+
+  useLayoutEffect(() => {
+    const snap = prependedRef.current;
+    const el = scrollRef.current;
+    if (!snap || !el) return;
+    if (snap.sessionId !== sessionId) {
+      prependedRef.current = null;
+      return;
+    }
+    const currentStartIndex = session?.historyCursor?.startIndex ?? 0;
+    if (!showAll || currentStartIndex >= snap.beforeStartIndex) return;
+    prependedRef.current = null;
+    el.scrollTop = snap.prevTop + (el.scrollHeight - snap.prevHeight);
+    prevScrollHeightRef.current = el.scrollHeight;
+    prevClientHeightRef.current = el.clientHeight;
+    prevScrollTopRef.current = el.scrollTop;
+    updateScrollFades();
+  });
 
   // Follow the bottom across content growth — the whole "tool call added and
   // then expanding" sequence. New blocks (a tool call appearing) AND in-place
@@ -1125,9 +1177,10 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
       onCopy={handleClipboard}
     >
       <div className="transcript-blocks" ref={contentRef}>
-        {!showAll && allBlocks.length > MAX_VISIBLE_BLOCKS && (
-          <button type="button" className="show-earlier-btn" onClick={() => setShowAll(true)}>
-            Show {allBlocks.length - MAX_VISIBLE_BLOCKS} earlier messages
+        {(earlierUnloaded > 0 || (!showAll && allBlocks.length > MAX_VISIBLE_BLOCKS)) && (
+          <button type="button" className="show-earlier-btn" onClick={handleShowEarlier}>
+            Show {earlierUnloaded > 0 ? earlierUnloaded : allBlocks.length - MAX_VISIBLE_BLOCKS}{" "}
+            earlier messages
           </button>
         )}
         {visibleBlocks.map((block) => {

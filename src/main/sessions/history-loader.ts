@@ -1,5 +1,7 @@
 import fs from "node:fs";
-import type { TranscriptBlock } from "@shared/ipc-contract.js";
+import { createReadStream } from "node:fs";
+import { setImmediate as yieldImmediate } from "node:timers/promises";
+import type { HistoryPage, TranscriptBlock } from "@shared/ipc-contract.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { SessionEntrySchema, SessionHeaderSchema } from "@shared/session-file/entries.js";
 
@@ -265,27 +267,49 @@ function entryTime(e: Record<string, unknown>): number {
   return 0;
 }
 
-function parseEntries(filePath: string): {
+async function parseEntries(filePath: string): Promise<{
   header: Record<string, unknown> | null;
   entries: EntryMap;
-} {
+}> {
   const entries: EntryMap = new Map();
   let header: Record<string, unknown> | null = null;
   let firstLine = true;
+  let pending = "";
+  let lines = 0;
 
-  const content = fs.readFileSync(filePath, "utf8");
-  for (const line of content.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const obj = JSON.parse(line) as Record<string, unknown>;
-      if (firstLine) {
-        header = obj;
-        firstLine = false;
-        continue;
+  for await (const chunk of createReadStream(filePath, { encoding: "utf8" })) {
+    pending += chunk;
+    let newline = pending.indexOf("\n");
+    while (newline !== -1) {
+      const line = pending.slice(0, newline);
+      pending = pending.slice(newline + 1);
+      if (line.trim()) {
+        try {
+          const obj = JSON.parse(line) as Record<string, unknown>;
+          if (firstLine) {
+            header = obj;
+            firstLine = false;
+          } else {
+            const id = obj["id"];
+            if (typeof id === "string") entries.set(id, obj);
+          }
+        } catch {
+          /* skip */
+        }
       }
-      const id = obj["id"];
-      if (typeof id === "string") {
-        entries.set(id, obj);
+      lines++;
+      if (lines % 2000 === 0) await yieldImmediate();
+      newline = pending.indexOf("\n");
+    }
+  }
+
+  if (pending.trim()) {
+    try {
+      const obj = JSON.parse(pending) as Record<string, unknown>;
+      if (firstLine) header = obj;
+      else {
+        const id = obj["id"];
+        if (typeof id === "string") entries.set(id, obj);
       }
     } catch {
       /* skip */
@@ -358,15 +382,46 @@ function trimPreCompaction(chain: Array<Record<string, unknown>>): Array<Record<
   return keepFrom > 0 ? chain.slice(keepFrom) : chain;
 }
 
-export function loadHistory(filePath: string): TranscriptBlock[] {
-  if (!fs.existsSync(filePath)) return [];
+const DEFAULT_HISTORY_LIMIT = 500;
+let pageCache: {
+  filePath: string;
+  mtimeMs: number;
+  size: number;
+  blocks: TranscriptBlock[];
+} | null = null;
 
-  const { header, entries } = parseEntries(filePath);
+async function loadAllHistoryBlocks(filePath: string): Promise<TranscriptBlock[]> {
+  const stat = await fs.promises.stat(filePath);
+  if (
+    pageCache &&
+    pageCache.filePath === filePath &&
+    pageCache.mtimeMs === stat.mtimeMs &&
+    pageCache.size === stat.size
+  ) {
+    return pageCache.blocks;
+  }
+
+  const { header, entries } = await parseEntries(filePath);
   if (!header) return [];
 
   const headerResult = SessionHeaderSchema.safeParse(header);
   if (!headerResult.success) return [];
 
   const chain = walkActiveChain(entries);
-  return entriesToTranscript(trimPreCompaction(chain));
+  const blocks = entriesToTranscript(trimPreCompaction(chain));
+  pageCache = { filePath, mtimeMs: stat.mtimeMs, size: stat.size, blocks };
+  return blocks;
+}
+
+export async function loadHistoryPage(
+  filePath: string,
+  opts: { limit?: number | undefined; before?: number | undefined } = {},
+): Promise<HistoryPage> {
+  if (!fs.existsSync(filePath)) return { blocks: [], startIndex: 0, total: 0 };
+  const blocks = await loadAllHistoryBlocks(filePath);
+  const total = blocks.length;
+  const limit = Math.max(1, Math.floor(opts.limit ?? DEFAULT_HISTORY_LIMIT));
+  const end = Math.max(0, Math.min(opts.before ?? total, total));
+  const startIndex = Math.max(0, end - limit);
+  return { blocks: blocks.slice(startIndex, end), startIndex, total };
 }

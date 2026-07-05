@@ -38,6 +38,29 @@ describe("JsonlStream", () => {
     expect(lines).toHaveLength(1);
   });
 
+  it("handles \\r\\n split across chunks", () => {
+    const lines: unknown[] = [];
+    const stream = new JsonlStream(
+      (p) => lines.push(p),
+      () => {},
+    );
+    stream.feed(Buffer.from('{"type":"agent_start"}\r'));
+    stream.feed(Buffer.from("\n"));
+    expect(lines).toHaveLength(1);
+  });
+
+  it("parses a ~1 MiB line fed in tiny chunks", () => {
+    const lines: unknown[] = [];
+    const stream = new JsonlStream(
+      (p) => lines.push(p),
+      () => {},
+    );
+    const json = `${JSON.stringify({ type: "agent_start", text: "x".repeat(1024 * 1024) })}\n`;
+    const buf = Buffer.from(json);
+    for (let i = 0; i < buf.length; i += 7) stream.feed(buf.subarray(i, i + 7));
+    expect(lines).toHaveLength(1);
+  });
+
   it("does NOT split on U+2028 inside a JSON string", () => {
     const lines: unknown[] = [];
     const stream = new JsonlStream(

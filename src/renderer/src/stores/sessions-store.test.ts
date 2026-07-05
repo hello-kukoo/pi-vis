@@ -132,6 +132,80 @@ describe("sessions store - session name from pi", () => {
   });
 });
 
+describe("sessions store - batched session events", () => {
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      newSessionDrafts: new Map(),
+      newSessionSetupDrafts: new Map(),
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+  });
+
+  it("applyEvents is equivalent to sequential applyEvent for mixed session fields", () => {
+    const events = [
+      { type: "agent_start" as const },
+      { type: "session_info_changed" as const, name: "Batch name" },
+      { type: "thinking_level_changed" as const, level: "high" as const },
+      { type: "agent_end" as const },
+    ];
+
+    for (const event of events) useSessionsStore.getState().applyEvent(SESSION_A, event);
+    const sequential = useSessionsStore.getState().sessions.get(SESSION_A);
+
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+    });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    useSessionsStore.getState().applyEvents(SESSION_A, events);
+    const batched = useSessionsStore.getState().sessions.get(SESSION_A);
+
+    expect({
+      isStreaming: batched?.isStreaming,
+      unreadStatus: batched?.unreadStatus,
+      sessionName: batched?.sessionName,
+      thinkingLevel: batched?.thinkingLevel,
+      turnErrored: batched?.turnErrored,
+    }).toEqual({
+      isStreaming: sequential?.isStreaming,
+      unreadStatus: sequential?.unreadStatus,
+      sessionName: sequential?.sessionName,
+      thinkingLevel: sequential?.thinkingLevel,
+      turnErrored: sequential?.turnErrored,
+    });
+  });
+
+  it("keeps streaming across an agent_end willRetry inside a batch", () => {
+    useSessionsStore
+      .getState()
+      .applyEvents(SESSION_A, [{ type: "agent_start" }, { type: "agent_end", willRetry: true }]);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.isStreaming).toBe(true);
+    expect(session?.runningSince).toBeDefined();
+    expect(session?.unreadStatus).toBeUndefined();
+    expect(session?.turnErrored).toBe(false);
+  });
+
+  it("promotes a pending new session when a user echo arrives in a batch", () => {
+    const store = useSessionsStore.getState();
+    store.setNewSessionDraft(WORKSPACE, "hello");
+    store.applyEvents(SESSION_A, [
+      { type: "message_start", message: { role: "user", content: "hello" } },
+    ]);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.isNewPending).toBe(false);
+    expect(session?.transcript.blocks.map((b) => b.type)).toEqual(["user"]);
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+});
+
 describe("createSession(name) and tab lifecycle", () => {
   beforeEach(() => {
     useSessionsStore.setState({
@@ -1964,6 +2038,105 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(true);
   });
 
+  it("openSessionTab seeds history from the paged loadHistory contract", async () => {
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === "session.open") {
+        return {
+          outcome: "opened",
+          sessionId: SESSION_A,
+          name: null,
+          preview: null,
+          sessionStatus: "ready",
+        };
+      }
+      if (channel === "session.loadHistory") {
+        return {
+          blocks: [{ id: "h1", type: "user", data: { content: "resumed" } }],
+          startIndex: 0,
+          total: 1,
+        };
+      }
+      return [];
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+
+    await expect(useSessionsStore.getState().openSessionTab(WORKSPACE, "/f/a.jsonl")).resolves.toBe(
+      SESSION_A,
+    );
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.transcript.blocks.map((b) => b.id)).toEqual(["h1"]);
+    expect(session?.historyCursor).toEqual({ startIndex: 0, total: 1 });
+  });
+
+  it("adoptSessionFile clears stale history pagination state", async () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.seedHistory(SESSION_A, {
+      blocks: [{ id: "tail", type: "user", data: { content: "tail" } }],
+      startIndex: 10,
+      total: 11,
+    });
+
+    await store.adoptSessionFile(SESSION_A, undefined);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.transcript.blocks).toEqual([]);
+    expect(session?.historyCursor).toBeUndefined();
+    expect(session?.historyLoadingEarlier).toBeUndefined();
+  });
+
+  it("loadEarlierHistory prepends the previous page and updates the cursor", async () => {
+    const invoke = vi.fn(async () => ({
+      blocks: [{ id: "earlier", type: "user", data: { content: "earlier" } }],
+      startIndex: 0,
+      total: 2,
+    }));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.seedHistory(SESSION_A, {
+      blocks: [{ id: "tail", type: "user", data: { content: "tail" } }],
+      startIndex: 1,
+      total: 2,
+    });
+
+    await store.loadEarlierHistory(SESSION_A);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(invoke).toHaveBeenCalledWith("session.loadHistory", { sessionId: SESSION_A, before: 1 });
+    expect(session?.transcript.blocks.map((b) => b.id)).toEqual(["earlier", "tail"]);
+    expect(session?.historyCursor).toEqual({ startIndex: 0, total: 2 });
+    expect(session?.historyLoadingEarlier).toBeUndefined();
+  });
+
+  it("loadEarlierHistory is single-flight for a cursor to avoid duplicate prepends", async () => {
+    let resolvePage!: (page: { blocks: never[]; startIndex: number; total: number }) => void;
+    const invoke = vi.fn(
+      () =>
+        new Promise<{ blocks: never[]; startIndex: number; total: number }>((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
+    store.seedHistory(SESSION_A, {
+      blocks: [{ id: "tail", type: "user", data: { content: "tail" } }],
+      startIndex: 1,
+      total: 2,
+    });
+
+    const first = store.loadEarlierHistory(SESSION_A);
+    const second = store.loadEarlierHistory(SESSION_A);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    resolvePage({ blocks: [], startIndex: 0, total: 2 });
+    await Promise.all([first, second]);
+    expect(
+      useSessionsStore.getState().sessions.get(SESSION_A)?.historyLoadingEarlier,
+    ).toBeUndefined();
+  });
+
   it("tree history makes an empty visible branch count as real session history", () => {
     const store = useSessionsStore.getState();
     store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
@@ -2414,7 +2587,9 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
     invokeMock.mockReset();
     invokeMock.mockImplementation((channel: string) => {
-      if (channel === "session.loadHistory") return Promise.resolve([]);
+      if (channel === "session.loadHistory") {
+        return Promise.resolve({ blocks: [], startIndex: 0, total: 0 });
+      }
       return Promise.resolve({ success: true });
     });
     (globalThis as { window: unknown }).window = {

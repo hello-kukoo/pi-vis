@@ -40,6 +40,7 @@ export interface FileState {
   oldText?: string;
   newText?: string;
   collapsed: boolean;
+  renderCap?: number | undefined;
   error?: string;
 }
 
@@ -128,6 +129,7 @@ export interface DiffStore {
   setSearchQuery: (q: string) => void;
   toggleSearchCaseSensitive: () => void;
   setActiveMatch: (m: SearchMatch | null) => void;
+  bumpRenderCap: (path: string, cap: number) => void;
 }
 
 const EMPTY_SEARCH = {
@@ -562,6 +564,15 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     setActiveMatch: (m) => {
       set({ search: { ...get().search, activeMatch: m } });
+    },
+
+    bumpRenderCap: (path, cap) => {
+      const m = new Map(get().fileState);
+      const cur = m.get(path);
+      if (!cur) return;
+      if ((cur.renderCap ?? 0) >= cap) return;
+      m.set(path, { ...cur, renderCap: cap });
+      set({ fileState: m });
     },
   };
 

@@ -177,11 +177,8 @@ export function finalizeActiveBlocks(state: TranscriptState): TranscriptState {
   };
 }
 
-export function seedFromHistory(
-  state: TranscriptState,
-  history: TranscriptBlock[],
-): TranscriptState {
-  const blocks: TypedTranscriptBlock[] = history
+export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlock[] {
+  return history
     .map((b): TypedTranscriptBlock | null => {
       const d = b.data as Record<string, unknown>;
       if (b.type === "user") {
@@ -288,7 +285,22 @@ export function seedFromHistory(
       return null;
     })
     .filter((b): b is TypedTranscriptBlock => b !== null);
-  return { ...state, blocks };
+}
+
+export function seedFromHistory(
+  state: TranscriptState,
+  history: TranscriptBlock[],
+): TranscriptState {
+  return { ...state, blocks: mapHistoryBlocks(history) };
+}
+
+export function prependHistory(
+  state: TranscriptState,
+  history: TranscriptBlock[],
+): TranscriptState {
+  const blocks = mapHistoryBlocks(history);
+  if (blocks.length === 0) return state;
+  return { ...state, blocks: [...blocks, ...state.blocks] };
 }
 
 // tool_execution_end carries the final output in result.content[].text on the

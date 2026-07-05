@@ -522,6 +522,22 @@ describe("getChanges fingerprint", () => {
     expect(await fp(workDir)).not.toBe(before);
   });
 
+  it("is deterministic with many untracked files read concurrently", async () => {
+    for (let i = 0; i < 20; i++) {
+      write(path.join(workDir, `untracked-${String(i).padStart(2, "0")}.ts`), `const n = ${i};\n`);
+    }
+
+    const first = await getChanges(workDir);
+    const second = await getChanges(workDir);
+    if (first.kind !== "ok" || second.kind !== "ok") throw new Error("not ok");
+
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.files.map((f) => f.path)).toEqual(first.files.map((f) => f.path));
+    expect(first.files.map((f) => f.path)).toEqual(
+      [...first.files.map((f) => f.path)].sort((a, b) => a.localeCompare(b)),
+    );
+  });
+
   it("is base-independent: same working tree → same fingerprint with or without a base", async () => {
     // Diverge a feature branch from main, then dirty the working tree.
     git(workDir, ["checkout", "-b", "feature"]);

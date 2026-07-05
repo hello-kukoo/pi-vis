@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveSettings } from "../settings-store.js";
 import {
   extractSessionMeta,
@@ -35,6 +36,7 @@ afterEach(() => {
   } else {
     process.env["PIVIS_SETTINGS_DIR"] = settingsEnvBackup;
   }
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -106,6 +108,33 @@ describe("listSessionsForWorkspace", () => {
     expect(summaries).toHaveLength(1);
     expect(summaries[0]?.preview).toBe("head-preview");
     expect(summaries[0]?.name).toBe("Tail Name");
+  });
+
+  it("keeps the first tail line when the large-file tail starts on a JSONL boundary", async () => {
+    const cwd = path.join(root, "workspace-A");
+    const dir = path.join(root, "workspace-A");
+    const filePath = path.join(dir, "tail-boundary.jsonl");
+    const header = `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "boundary",
+      timestamp: "2024-01-01T00:00:00Z",
+      cwd,
+    })}\n`;
+    const chunkBytes = 1024 * 1024;
+    const fillerBytes = chunkBytes - Buffer.byteLength(header);
+    expect(fillerBytes).toBeGreaterThan(0);
+    fs.writeFileSync(filePath, header);
+    fs.appendFileSync(filePath, `${"x".repeat(fillerBytes - 1)}\n`);
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify(sessionInfo("tail", "boundary", "Boundary Name"))}\n`,
+    );
+
+    const summaries = await listSessionsForWorkspace(cwd);
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.name).toBe("Boundary Name");
   });
 
   it("invalidates the cache when the file is rewritten with a new name", async () => {
@@ -259,6 +288,38 @@ describe("listSessionsForWorkspace", () => {
     ]);
     const meta = extractSessionMeta(filePath);
     expect(meta.lastActiveAt).toBeNull();
+  });
+
+  it("orders equal-activity sessions deterministically by file path", async () => {
+    const cwd = path.join(root, "workspace-A");
+    const firstPath = writeSession("workspace-A", "a.jsonl", [
+      { type: "session", version: 3, id: "A", timestamp: "2024-01-01T00:00:00Z", cwd },
+    ]);
+    const secondPath = writeSession("workspace-A", "b.jsonl", [
+      { type: "session", version: 3, id: "B", timestamp: "2024-01-01T00:00:00Z", cwd },
+    ]);
+    const sameTime = new Date("2024-01-01T00:00:00Z");
+    fs.utimesSync(firstPath, sameTime, sameTime);
+    fs.utimesSync(secondPath, sameTime, sameTime);
+
+    const summaries = await listSessionsForWorkspace(cwd);
+
+    expect(summaries.map((s) => s.filePath)).toEqual([firstPath, secondPath]);
+  });
+
+  it("short-circuits header and metadata reads on mtime cache hits", async () => {
+    const cwd = path.join(root, "workspace-A");
+    writeSession("workspace-A", "cached.jsonl", [
+      { type: "session", version: 3, id: "cached", timestamp: "2024-01-01T00:00:00Z", cwd },
+      userEntry("e1", "cached", "hello"),
+    ]);
+
+    await listSessionsForWorkspace(cwd);
+    const openSpy = vi.spyOn(fsp, "open");
+    const second = await listSessionsForWorkspace(cwd);
+
+    expect(second.map((s) => s.id)).toEqual(["cached"]);
+    expect(openSpy).not.toHaveBeenCalled();
   });
 
   it("orders sessions by last user activity, not file mtime (passive open must not promote)", async () => {

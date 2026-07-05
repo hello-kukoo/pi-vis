@@ -59,7 +59,7 @@
 - `pi.locate` — find pi binary
 - `workspace.pick` / `workspace.list` / `workspace.remove` / `workspace.listSessions`
 - `session.open` → `{ outcome: "opened"|"existing"|"missing", sessionId, ... }`
-- `session.activate` / `session.reload` / `session.close` / `session.loadHistory`
+- `session.activate` / `session.reload` / `session.close` / `session.loadHistory` — history is loaded as tail-first pages: request `{ sessionId, limit?, before? }`, response `{ blocks, startIndex, total }`. The default page is 500 transcript blocks; `before` is the prior page's `startIndex`.
 - `session.sendCommand` — sends PiRpcCommand, returns PiRpcResponse
 - `session.transcriptForEntries` — converts a raw `SessionTreeEntry[]` (root→leaf) to `TranscriptBlock[]` via the shared `entriesToTranscript` helper; used by the tree viewer after `navigate_tree` to rebuild the transcript from pi's in-memory branch without re-reading the session file
 - `session.respondToUiRequest` — sends ExtensionUiResponse back to pi
@@ -81,7 +81,7 @@
 - `appUpdate.status` / `appUpdate.check` / `appUpdate.install` — packaged Pi-Vis app updates via Electron's built-in autoUpdater
 
 **Event channels** (main → renderer push):
-- `session.event` — PiEvent (streaming transcript events)
+- `session.events` — batches of PiEvent (`{ sessionId, events }`). The main process sends the first event in a burst immediately, then coalesces trailing events for ~16ms per session. Non-event session channels flush the batcher before sending so UI requests, status changes, panel events, unified submits, and file-change notifications preserve ordering relative to transcript events.
 - `session.uiRequest` — Extension UI requests (dialogs, notifications, status bar, widgets)
 - `session.statusChanged` — SessionStatus transitions
 - `session.fileChanged` — session file association updated

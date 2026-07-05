@@ -1,14 +1,31 @@
 import type React from "react";
-import { Children, cloneElement, isValidElement, useEffect, useState } from "react";
+import {
+  Children,
+  cloneElement,
+  createContext,
+  isValidElement,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useImageViewerStore } from "../stores/image-viewer-store.js";
 import { useSettingsStore } from "../stores/settings-store.js";
-import { getHighlighter, getShikiTheme } from "./shiki.js";
+import {
+  getCachedHighlightedHtml,
+  getHighlighter,
+  getShikiTheme,
+  setCachedHighlightedHtml,
+} from "./shiki.js";
 
 // Kick off highlighter init immediately so it's ready when needed
 void getHighlighter();
+
+const HIGHLIGHT_MAX_CHARS = 50_000;
+const STREAMING_HIGHLIGHT_DELAY_MS = 150;
+const MarkdownStreamingContext = createContext(false);
 
 interface CodeBlockProps {
   lang: string;
@@ -16,6 +33,7 @@ interface CodeBlockProps {
 }
 
 function CodeBlock({ lang, code }: CodeBlockProps): React.ReactElement {
+  const streaming = useContext(MarkdownStreamingContext);
   const [html, setHtml] = useState<string | null>(null);
   // Re-run when the active scheme changes; the actual Shiki theme name is
   // resolved from the highlighter (set by settings-store on scheme change),
@@ -24,26 +42,52 @@ function CodeBlock({ lang, code }: CodeBlockProps): React.ReactElement {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: activeColorScheme is the re-tokenize trigger — the theme name is read via getShikiTheme() (set by settings-store before this re-runs), so the dep is the scheme change itself, not a value read in the body.
   useEffect(() => {
+    if (code.length > HIGHLIGHT_MAX_CHARS) {
+      setHtml(null);
+      return;
+    }
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const theme = getShikiTheme();
-    getHighlighter().then((h) => {
-      if (cancelled) return;
-      try {
-        const result = h.codeToHtml(code, { lang, theme });
-        if (!cancelled) setHtml(result);
-      } catch {
+    const cached =
+      getCachedHighlightedHtml(theme, lang, code) ?? getCachedHighlightedHtml(theme, "text", code);
+    if (cached) {
+      setHtml(cached);
+      return;
+    }
+    // Do not keep showing highlighted HTML for an older version of a streaming
+    // code block while the new highlight is debounce-delayed. Render the plain
+    // fallback with the latest text until Shiki catches up.
+    setHtml(null);
+    const run = () => {
+      getHighlighter().then((h) => {
+        if (cancelled) return;
         try {
-          const result = h.codeToHtml(code, { lang: "text", theme });
-          if (!cancelled) setHtml(result);
+          const result = h.codeToHtml(code, { lang, theme });
+          if (!cancelled) {
+            setHtml(result);
+            if (!streaming) setCachedHighlightedHtml(theme, lang, code, result);
+          }
         } catch {
-          /* ignore */
+          try {
+            const result = h.codeToHtml(code, { lang: "text", theme });
+            if (!cancelled) {
+              setHtml(result);
+              if (!streaming) setCachedHighlightedHtml(theme, "text", code, result);
+            }
+          } catch {
+            /* ignore */
+          }
         }
-      }
-    });
+      });
+    };
+    if (streaming) timer = setTimeout(run, STREAMING_HIGHLIGHT_DELAY_MS);
+    else run();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-  }, [code, lang, activeColorScheme]);
+  }, [code, lang, activeColorScheme, streaming]);
 
   if (html) {
     return (
@@ -180,14 +224,22 @@ const components: Components = {
   img: ({ node: _node, ...props }) => <MarkdownImagePreview {...props} />,
 };
 
-export function Markdown({ children }: { children: string }): React.ReactElement {
+export function Markdown({
+  children,
+  streaming = false,
+}: {
+  children: string;
+  streaming?: boolean;
+}): React.ReactElement {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={components}
-      urlTransform={markdownUrlTransform}
-    >
-      {children}
-    </ReactMarkdown>
+    <MarkdownStreamingContext.Provider value={streaming}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
+        urlTransform={markdownUrlTransform}
+      >
+        {children}
+      </ReactMarkdown>
+    </MarkdownStreamingContext.Provider>
   );
 }

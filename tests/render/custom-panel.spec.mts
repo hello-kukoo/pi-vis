@@ -132,8 +132,8 @@ test.describe("Custom() panel — manual resize handle", () => {
     // so the resize affordance is visible.
     const bg = await handle.evaluate((el) => window.getComputedStyle(el).backgroundColor);
     expect(bg).toBe("rgba(0, 0, 0, 0)");
-    const affordanceBg = await handle.evaluate((el) =>
-      window.getComputedStyle(el, "::before").backgroundColor,
+    const affordanceBg = await handle.evaluate(
+      (el) => window.getComputedStyle(el, "::before").backgroundColor,
     );
     expect(affordanceBg).not.toBe("rgba(0, 0, 0, 0)");
     const cursor = await handle.evaluate((el) => window.getComputedStyle(el).cursor);

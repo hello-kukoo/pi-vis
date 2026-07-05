@@ -14,7 +14,7 @@
 //   - `ENOENT` on the git binary is special-cased to `git-missing` so the
 //     renderer can show a specific empty state.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs, type Stats } from "node:fs";
 import path from "node:path";
@@ -29,6 +29,7 @@ import type {
   GitWorktreeResult,
 } from "@shared/git.js";
 import { getSubprocessEnv } from "../auth.js";
+import { mapLimit } from "../util/concurrency.js";
 
 // ── Tunables (kept in one place so they're easy to find) ──────────────
 
@@ -189,6 +190,101 @@ function execGitCapture(
   });
 }
 
+function execGitDigest(
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<{ ok: true; digest: string } | { ok: false; error: string }> {
+  return new Promise((resolve) => {
+    const hash = createHash("sha1");
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
+    let settled = false;
+    const child = spawn("git", args, {
+      cwd,
+      env: env ?? process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+
+    const finish = (result: { ok: true; digest: string } | { ok: false; error: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => hash.update(chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+      while (stderrBytes > 8192 && stderrChunks.length > 1) {
+        const removed = stderrChunks.shift();
+        if (removed) stderrBytes -= removed.length;
+      }
+    });
+    child.on("error", (err) => finish({ ok: false, error: errorMessage(err) }));
+    child.on("close", (code, signal) => {
+      if (code === 0) finish({ ok: true, digest: hash.digest("hex") });
+      else {
+        const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+        finish({
+          ok: false,
+          error: stderr || `git exited with code ${code ?? "null"}${signal ? ` (${signal})` : ""}`,
+        });
+      }
+    });
+  });
+}
+
+interface UntrackedMeta {
+  file: GitChangedFile;
+  fingerprint: string;
+}
+
+async function readUntrackedMeta(
+  repoRoot: string,
+  p: string,
+  counted: boolean,
+): Promise<UntrackedMeta> {
+  let insertions = 0;
+  let binary = false;
+  let fileFp = "uncounted";
+  if (counted) {
+    const filePath = path.join(repoRoot, p);
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.isFile() && stat.size <= UNTRACKED_SKIP_SIZE) {
+        const fd = await fs.open(filePath, "r");
+        try {
+          const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
+          const { bytesRead } = await fd.read(buf, 0, BINARY_SNIFF_BYTES, 0);
+          if (hasNulByte(buf.subarray(0, bytesRead))) {
+            binary = true;
+            fileFp = `bin:${stat.size}`;
+          } else {
+            const content = await fs.readFile(filePath);
+            insertions = countLines(content.toString("utf8"));
+            fileFp = createHash("sha1").update(content).digest("hex");
+          }
+        } finally {
+          await fd.close();
+        }
+      } else {
+        fileFp = `skip:${stat.size}`;
+      }
+    } catch (err) {
+      fileFp = "err";
+      console.warn("untracked read failed:", p, err);
+    }
+  }
+  return {
+    fingerprint: fileFp,
+    file: { path: p, status: "A", untracked: true, insertions, deletions: 0, binary },
+  };
+}
+
 // ── Public: getChanges ─────────────────────────────────────────────────
 
 /** Resolve the comparison base for GitHub-style branch diffs.
@@ -252,16 +348,7 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
   // independent of all of them. (Untracked files never appear in `git
   // diff`, so they're folded into the hash separately, in the read loop.)
   const fpRef = hasHead ? "HEAD" : EMPTY_TREE_SHA;
-  const fpDiffPromise: Promise<string> = execGitText(
-    ["diff", "-M", "--no-color", fpRef],
-    repoRoot,
-    env,
-  )
-    .then((r) => r.stdout)
-    // Non-fatal (e.g. a pathologically large diff exceeding maxBuffer): fold
-    // the error in so the fingerprint is stable for an unchanged failing
-    // state rather than silently masking real edits.
-    .catch((err) => `__diff_error__:${errorMessage(err)}`);
+  const fpDiffPromise = execGitDigest(["diff", "-M", "--no-color", fpRef], repoRoot, env);
 
   // Untracked listing is independent of the tracked-file work below — kick
   // it off now so it overlaps with merge-base resolution and the diffs.
@@ -329,80 +416,33 @@ export async function getChanges(root: string, base?: string): Promise<GitChange
     }
   }
 
-  // Fold the working-tree patch (launched concurrently above) into the
-  // fingerprint. Hashing the full patch text — not just numstat — closes the
-  // line-count-collision case (an edit that preserves insertions/deletions
-  // but changes content). Untracked files never appear in `git diff`, so
-  // their contents are folded in separately during the read loop below.
+  // Fold the working-tree patch digest (launched concurrently above) into the
+  // fingerprint. On failure, fold a stable sentinel preserving the old
+  // "error participates in fingerprint" semantics without buffering stdout.
   const fpHash = createHash("sha1");
-  fpHash.update(await fpDiffPromise);
+  const diffDigest = await fpDiffPromise;
+  fpHash.update(diffDigest.ok ? diffDigest.digest : `__diff_error__:${diffDigest.error}`);
   fpHash.update("\0untracked\0");
 
   // Step 5: untracked files (listing launched concurrently above).
-  const untracked: GitChangedFile[] = [];
   const untrackedListed = await untrackedListPromise;
   if (!untrackedListed.ok) {
     return { kind: "error", message: errorMessage(untrackedListed.err) };
   }
   const untrackedPaths = splitNul(untrackedListed.out).filter((p) => p.length > 0);
+  const untrackedMeta = await mapLimit(untrackedPaths, 8, (p, i) =>
+    readUntrackedMeta(repoRoot, p, i < UNTRACKED_COUNT_LIMIT),
+  );
+  const untracked: GitChangedFile[] = [];
   for (let i = 0; i < untrackedPaths.length; i++) {
     const p = untrackedPaths[i];
-    if (p === undefined) continue;
-    const counted = i < UNTRACKED_COUNT_LIMIT;
-    let insertions = 0;
-    let binary = false;
-    // Per-file fingerprint descriptor. The path is always hashed (so a
-    // new/removed untracked file moves the fingerprint); content is hashed
-    // for files we read anyway, falling back to size for binary/large ones.
-    // Files past UNTRACKED_COUNT_LIMIT contribute only their path (no stat,
-    // matching the line-counter's cap) — a content-only edit to one of those
-    // won't move the fingerprint, which the `fingerprint` doc notes.
-    // Reuses the read the line-counter already does — no extra I/O.
-    let fileFp = "uncounted";
-    if (counted) {
-      const filePath = path.join(repoRoot, p);
-      try {
-        const stat = await fs.stat(filePath);
-        if (stat.isFile() && stat.size <= UNTRACKED_SKIP_SIZE) {
-          const fd = await fs.open(filePath, "r");
-          try {
-            const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
-            const { bytesRead } = await fd.read(buf, 0, BINARY_SNIFF_BYTES, 0);
-            if (hasNulByte(buf.subarray(0, bytesRead))) {
-              binary = true;
-              fileFp = `bin:${stat.size}`;
-            } else {
-              const full = await fs.readFile(filePath, "utf8");
-              insertions = countLines(full);
-              fileFp = full;
-            }
-          } finally {
-            await fd.close();
-          }
-        } else {
-          // Directory, non-file, or over the read cap — size is the only
-          // cheap content proxy.
-          fileFp = `skip:${stat.size}`;
-        }
-      } catch (err) {
-        // Skip-on-error: a file may have been deleted between ls-files
-        // and our read. Drop counts rather than fail the whole call.
-        fileFp = "err";
-        console.warn("untracked read failed:", p, err);
-      }
-    }
+    const meta = untrackedMeta[i];
+    if (p === undefined || meta === undefined) continue;
     fpHash.update(p);
     fpHash.update("\0");
-    fpHash.update(fileFp);
+    fpHash.update(meta.fingerprint);
     fpHash.update("\0");
-    untracked.push({
-      path: p,
-      status: "A",
-      untracked: true,
-      insertions,
-      deletions: 0,
-      binary,
-    });
+    untracked.push(meta.file);
   }
 
   // Stitch counts onto tracked entries by destination path.

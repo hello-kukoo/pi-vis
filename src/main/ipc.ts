@@ -36,7 +36,8 @@ import { mergeUserPiEnv } from "./pi-env.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
 import { isSessionHost } from "./pi/session-host.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
-import { entriesToTranscript, loadHistory } from "./sessions/history-loader.js";
+import { createEventBatcher } from "./sessions/event-batcher.js";
+import { entriesToTranscript, loadHistoryPage } from "./sessions/history-loader.js";
 import {
   extractSessionMeta,
   listSessionsForWorkspace,
@@ -62,6 +63,7 @@ import {
 let registry: SessionRegistry | null = null;
 let mainWindow: BrowserWindow | null = null;
 let handlersRegistered = false;
+let eventBatcher: ReturnType<typeof createEventBatcher> | null = null;
 
 // Build the env for spawning a pi process/host. Adds the pi theme signals so
 // every host-rendered terminal/ANSI surface resolves colors consistent with
@@ -108,20 +110,25 @@ export function initIpc(win: BrowserWindow): void {
   if (handlersRegistered) return;
   handlersRegistered = true;
 
+  eventBatcher = createEventBatcher((payload) => safeSend("session.events", payload));
   registry = new SessionRegistry(
     (sessionId: SessionId, event: PiEvent) => {
-      safeSend("session.event", { sessionId, event });
+      eventBatcher?.push(sessionId, event);
     },
     (sessionId: SessionId, req: ExtensionUiRequest) => {
+      eventBatcher?.flush(sessionId);
       safeSend("session.uiRequest", { sessionId, request: req });
     },
     (sessionId: SessionId, status: SessionStatus, error?: string, piVersion?: string) => {
+      eventBatcher?.flush(sessionId);
       safeSend("session.statusChanged", { sessionId, status, error, piVersion });
     },
     (sessionId: SessionId, event: PanelEvent) => {
+      eventBatcher?.flush(sessionId);
       safeSend("session.panelEvent", { sessionId, event });
     },
     (sessionId: SessionId, req: { id: string; text: string }) => {
+      eventBatcher?.flush(sessionId);
       safeSend("session.unifiedSubmitRequest", { sessionId, ...req });
     },
   );
@@ -380,11 +387,17 @@ export function initIpc(win: BrowserWindow): void {
     registry?.closeSession(args.sessionId);
   });
 
-  ipcMain.handle("session.loadHistory", async (_evt, args: { sessionId: SessionId }) => {
-    const rec = registry?.getSession(args.sessionId);
-    if (!rec?.sessionFile) return [];
-    return loadHistory(rec.sessionFile);
-  });
+  ipcMain.handle(
+    "session.loadHistory",
+    async (
+      _evt,
+      args: { sessionId: SessionId; limit?: number | undefined; before?: number | undefined },
+    ) => {
+      const rec = registry?.getSession(args.sessionId);
+      if (!rec?.sessionFile) return { blocks: [], startIndex: 0, total: 0 };
+      return loadHistoryPage(rec.sessionFile, { limit: args.limit, before: args.before });
+    },
+  );
 
   // Convert an in-memory branch (root→leaf, as returned by the host's
   // getBranch() and shipped in navigate_tree's response data) into the
@@ -455,6 +468,7 @@ export function initIpc(win: BrowserWindow): void {
             const sessionName =
               typeof data["sessionName"] === "string" ? (data["sessionName"] as string) : undefined;
             reg.updateSessionFile(args.sessionId, sessionFile);
+            eventBatcher?.flush(args.sessionId);
             safeSend("session.fileChanged", {
               sessionId: args.sessionId,
               sessionFile,
@@ -727,6 +741,7 @@ export function stopAllSessions(): void {
   } catch {
     /* best effort */
   }
+  eventBatcher?.dispose();
   registry?.stopAll();
 }
 

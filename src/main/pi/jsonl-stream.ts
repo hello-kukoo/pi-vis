@@ -37,7 +37,8 @@ function parseOutbound(raw: unknown): PiOutbound {
 }
 
 export class JsonlStream {
-  private buffer = Buffer.alloc(0);
+  private pending: Buffer[] = [];
+  private pendingBytes = 0;
   private onLine: (parsed: PiOutbound) => void;
   private onError: (err: Error) => void;
 
@@ -48,43 +49,55 @@ export class JsonlStream {
     this.onError = onError;
   }
 
-  // Byte-level splitter — split ONLY on 0x0A (\n), never on Unicode separators
+  // Byte-level splitter — split ONLY on 0x0A (\n), never on Unicode separators.
+  // Scans each incoming chunk exactly once; partial lines are retained as a
+  // list of slices so a multi-MB line fed in tiny chunks does not repeatedly
+  // concatenate and rescan old bytes.
   feed(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-
     let start = 0;
-    for (let i = 0; i < this.buffer.length; i++) {
-      if (this.buffer[i] === 0x0a) {
-        // Strip trailing \r if present
-        const end = i > 0 && this.buffer[i - 1] === 0x0d ? i - 1 : i;
-        const line = this.buffer.slice(start, end);
-        start = i + 1;
 
-        if (line.length === 0) continue;
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk[i] !== 0x0a) continue;
 
-        const lineStr = line.toString("utf8");
-        try {
-          const raw = JSON.parse(lineStr) as unknown;
-          this.onLine(parseOutbound(raw));
-        } catch (e) {
-          this.onError(
-            new Error(
-              `JSONL parse error: ${e instanceof Error ? e.message : String(e)} on line: ${lineStr.slice(0, 200)}`,
-            ),
-          );
-        }
+      const segment = chunk.subarray(start, i);
+      const line =
+        this.pending.length === 0
+          ? segment
+          : Buffer.concat([...this.pending, segment], this.pendingBytes + segment.length);
+      this.pending = [];
+      this.pendingBytes = 0;
+      start = i + 1;
+
+      const stripped =
+        line.length > 0 && line[line.length - 1] === 0x0d ? line.subarray(0, -1) : line;
+      if (stripped.length === 0) continue;
+
+      const lineStr = stripped.toString("utf8");
+      try {
+        const raw = JSON.parse(lineStr) as unknown;
+        this.onLine(parseOutbound(raw));
+      } catch (e) {
+        this.onError(
+          new Error(
+            `JSONL parse error: ${e instanceof Error ? e.message : String(e)} on line: ${lineStr.slice(0, 200)}`,
+          ),
+        );
       }
     }
 
-    this.buffer = this.buffer.slice(start);
-
-    if (this.buffer.length > JsonlStream.MAX_BUFFER_BYTES) {
-      this.onError(
-        new Error(
-          `JSONL line exceeded ${JsonlStream.MAX_BUFFER_BYTES} bytes; dropping partial buffer`,
-        ),
-      );
-      this.buffer = Buffer.alloc(0);
+    if (start < chunk.length) {
+      const tail = chunk.subarray(start);
+      this.pending.push(tail);
+      this.pendingBytes += tail.length;
+      if (this.pendingBytes > JsonlStream.MAX_BUFFER_BYTES) {
+        this.onError(
+          new Error(
+            `JSONL line exceeded ${JsonlStream.MAX_BUFFER_BYTES} bytes; dropping partial buffer`,
+          ),
+        );
+        this.pending = [];
+        this.pendingBytes = 0;
+      }
     }
   }
 }

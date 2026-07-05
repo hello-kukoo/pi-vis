@@ -73,6 +73,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const setSearchQuery = useDiffStore((s) => s.setSearchQuery);
   const toggleSearchCaseSensitive = useDiffStore((s) => s.toggleSearchCaseSensitive);
   const setActiveMatch = useDiffStore((s) => s.setActiveMatch);
+  const bumpRenderCap = useDiffStore((s) => s.bumpRenderCap);
 
   // The full ordered match list, derived from every loaded file's visible
   // rows. Recomputed when the query, case-sensitivity, file list, or any
@@ -154,9 +155,9 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const refreshing = useDiffStore((s) => s.refreshing);
   useEffect(() => {
     if (!visible) return;
-    const unsubEvent = window.pivis.on("session.event", ({ sessionId: sid, event }) => {
+    const unsubEvent = window.pivis.on("session.events", ({ sessionId: sid, events }) => {
       if (sid !== sessionId) return;
-      if (event.type === "agent_end") {
+      if (events.some((event) => event.type === "agent_end")) {
         void refresh();
       }
     });
@@ -229,6 +230,9 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     }
     const st = useDiffStore.getState().fileState.get(activeMatch.path);
     if (st?.collapsed) toggleCollapsed(activeMatch.path);
+    if (activeMatch.lineIdx + 1 > (st?.renderCap ?? 5_000)) {
+      bumpRenderCap(activeMatch.path, activeMatch.lineIdx + 1);
+    }
     void ensureFileLoaded(activeMatch.path);
     if (scrolledIdRef.current === activeMatch.id) return;
     suppressSpyUntilRef.current = performance.now() + SCROLL_SPY_SUPPRESS_MS;
@@ -237,7 +241,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       el.scrollIntoView({ block: "center", behavior: "auto" });
       scrolledIdRef.current = activeMatch.id;
     }
-  }, [visible, activeMatch, fileState, toggleCollapsed, ensureFileLoaded]);
+  }, [visible, activeMatch, fileState, toggleCollapsed, ensureFileLoaded, bumpRenderCap]);
 
   const jumpTo = useCallback(
     (path: string) => {

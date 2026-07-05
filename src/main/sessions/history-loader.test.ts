@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { entriesToTranscript, loadHistory } from "./history-loader.js";
+import { entriesToTranscript, loadHistoryPage } from "./history-loader.js";
 
 let dir: string;
 let file: string;
@@ -22,7 +22,7 @@ function writeEntries(entries: object[]): void {
 }
 
 describe("loadHistory (real pi v3 nested message format)", () => {
-  it("walks the active chain and returns blocks in order", () => {
+  it("walks the active chain and returns blocks in order", async () => {
     const cwd = "/test/ws";
     writeEntries([
       { type: "session", version: 3, id: "00000000", timestamp: "2024-01-01T00:00:00.000Z", cwd },
@@ -83,7 +83,7 @@ describe("loadHistory (real pi v3 nested message format)", () => {
       },
     ]);
 
-    const blocks = loadHistory(file);
+    const blocks = (await loadHistoryPage(file)).blocks;
     expect(blocks).toHaveLength(4);
 
     // user block
@@ -118,7 +118,7 @@ describe("loadHistory (real pi v3 nested message format)", () => {
     expect(fSegments.map((s) => s.content).join("")).toBe("Done.");
   });
 
-  it("picks the leaf with the later ISO timestamp (pins the entryTime fix)", () => {
+  it("picks the leaf with the later ISO timestamp (pins the entryTime fix)", async () => {
     // Two leaves after the header — one forked from a mid-chain entry.
     // The chain from e2 (timestamp 02:00Z) is the older fork; the chain
     // from e3 (timestamp 03:00Z) is the newer fork. The newer one wins.
@@ -162,7 +162,7 @@ describe("loadHistory (real pi v3 nested message format)", () => {
       },
     ]);
 
-    const blocks = loadHistory(file);
+    const blocks = (await loadHistoryPage(file)).blocks;
     const text = (b: TranscriptBlock) =>
       ((b.data as Record<string, unknown>)["segments"] as Array<{ content: string }>)
         .map((s) => s.content)
@@ -172,7 +172,7 @@ describe("loadHistory (real pi v3 nested message format)", () => {
     expect(assistantTexts).not.toContain("OLD-FORK");
   });
 
-  it("preserves interleaved thinking→text→thinking order from the session file", () => {
+  it("preserves interleaved thinking→text→thinking order from the session file", async () => {
     const cwd = "/test/ws";
     writeEntries([
       { type: "session", version: 3, id: "00000000", timestamp: "2024-01-01T00:00:00.000Z", cwd },
@@ -204,7 +204,7 @@ describe("loadHistory (real pi v3 nested message format)", () => {
       },
     ]);
 
-    const blocks = loadHistory(file);
+    const blocks = (await loadHistoryPage(file)).blocks;
     expect(blocks[1]?.type).toBe("assistant");
     const segs = (blocks[1]?.data as Record<string, unknown>)["segments"] as Array<{
       kind: string;
@@ -215,6 +215,131 @@ describe("loadHistory (real pi v3 nested message format)", () => {
       { kind: "text", content: "Answer" },
       { kind: "thinking", content: "more" },
     ]);
+  });
+});
+
+describe("loadHistoryPage pagination", () => {
+  function linearUserEntries(count: number): object[] {
+    const entries: object[] = [
+      {
+        type: "session",
+        version: 3,
+        id: "root",
+        timestamp: "2024-01-01T00:00:00.000Z",
+        cwd: "/test/ws",
+      },
+    ];
+    let parentId = "root";
+    for (let i = 1; i <= count; i++) {
+      const id = `u${i}`;
+      entries.push({
+        id,
+        parentId,
+        timestamp: `2024-01-01T00:00:${String(i).padStart(2, "0")}.000Z`,
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: `msg-${i}` }] },
+      });
+      parentId = id;
+    }
+    return entries;
+  }
+
+  function blockTexts(blocks: TranscriptBlock[]): string[] {
+    return blocks.map((b) => (b.data as { content?: string }).content ?? "");
+  }
+
+  it("returns the tail page by default for the requested limit", async () => {
+    writeEntries(linearUserEntries(10));
+
+    const page = await loadHistoryPage(file, { limit: 3 });
+
+    expect(page.startIndex).toBe(7);
+    expect(page.total).toBe(10);
+    expect(blockTexts(page.blocks)).toEqual(["msg-8", "msg-9", "msg-10"]);
+  });
+
+  it("uses before as the previous page cursor", async () => {
+    writeEntries(linearUserEntries(10));
+
+    const page = await loadHistoryPage(file, { limit: 3, before: 7 });
+
+    expect(page.startIndex).toBe(4);
+    expect(page.total).toBe(10);
+    expect(blockTexts(page.blocks)).toEqual(["msg-5", "msg-6", "msg-7"]);
+  });
+
+  it("clamps empty and zero-limit page requests safely", async () => {
+    writeEntries(linearUserEntries(2));
+
+    const page = await loadHistoryPage(file, { limit: 0, before: -10 });
+
+    expect(page).toEqual({ blocks: [], startIndex: 0, total: 2 });
+  });
+
+  it("reuses the single-file page cache when file identity is unchanged", async () => {
+    writeEntries(linearUserEntries(1));
+    const stat = fs.statSync(file);
+
+    expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["msg-1"]);
+    writeEntries([
+      {
+        type: "session",
+        version: 3,
+        id: "root",
+        timestamp: "2024-01-01T00:00:00.000Z",
+        cwd: "/test/ws",
+      },
+      {
+        id: "u1",
+        parentId: "root",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "MSG-1" }] },
+      },
+    ]);
+    fs.utimesSync(file, stat.atime, stat.mtime);
+
+    expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["msg-1"]);
+  });
+
+  it("trims pre-compaction entries before slicing pages", async () => {
+    writeEntries([
+      { type: "session", version: 3, id: "root", timestamp: "2024-01-01T00:00:00Z", cwd: "/ws" },
+      {
+        id: "u1",
+        parentId: "root",
+        timestamp: "2024-01-01T00:00:01Z",
+        type: "message",
+        message: { role: "user", content: "before-compaction" },
+      },
+      {
+        id: "u2",
+        parentId: "u1",
+        timestamp: "2024-01-01T00:00:02Z",
+        type: "message",
+        message: { role: "user", content: "kept" },
+      },
+      {
+        id: "c1",
+        parentId: "u2",
+        timestamp: "2024-01-01T00:00:03Z",
+        type: "compaction",
+        summary: "summary",
+        firstKeptEntryId: "u2",
+      },
+      {
+        id: "u3",
+        parentId: "c1",
+        timestamp: "2024-01-01T00:00:04Z",
+        type: "message",
+        message: { role: "user", content: "after" },
+      },
+    ]);
+
+    const page = await loadHistoryPage(file, { limit: 10 });
+
+    expect(page.total).toBe(3);
+    expect(page.blocks.map((b) => b.id)).toEqual(["u2", "c1", "u3"]);
   });
 });
 

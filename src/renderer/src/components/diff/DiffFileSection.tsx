@@ -26,6 +26,8 @@ import { FadeText } from "../common/FadeText.js";
 import { IconChevronDown, IconChevronRight, IconChevronUp } from "../common/icons.js";
 import "./DiffFileSection.css";
 
+const ROW_RENDER_CAP = 5_000;
+
 /**
  * In-diff find context for one file. `query` is "" when search is closed or
  * empty (the no-op fast path). `active` is the currently-focused occurrence —
@@ -228,6 +230,8 @@ function FileBody({
       newTokens={state.newTokens}
       viewMode={useSplit ? "split" : "unified"}
       search={search}
+      renderCap={state.renderCap ?? ROW_RENDER_CAP}
+      filePath={file.path}
       onExpandGap={onExpandGap}
     />
   );
@@ -242,6 +246,8 @@ function RowsView({
   newTokens,
   viewMode,
   search,
+  renderCap,
+  filePath,
   onExpandGap,
 }: {
   model: DiffModel;
@@ -250,6 +256,8 @@ function RowsView({
   newTokens: ThemedToken[][] | null | undefined;
   viewMode: "unified" | "split";
   search: SearchHighlight;
+  renderCap: number;
+  filePath: string;
   onExpandGap: (idx: number, dir: "up" | "down" | "all") => void;
 }): React.ReactElement {
   // Compute the gutter width from the max line number so the gutters
@@ -265,6 +273,11 @@ function RowsView({
     () => (viewMode === "split" ? buildSplitRows(rows) : null),
     [rows, viewMode],
   );
+  const effectiveRows = viewMode === "split" && splitRows ? splitRows : rows;
+  const shownCount = Math.min(renderCap, effectiveRows.length);
+  const remainingRows = Math.max(0, effectiveRows.length - shownCount);
+  const bumpRenderCap = useDiffStore((s) => s.bumpRenderCap);
+  const showNextRows = () => bumpRenderCap(filePath, shownCount + ROW_RENDER_CAP);
 
   // Build old/new line index → token-line map for split view. Each
   // entry is the (1-based) line number. We index by line number into
@@ -284,7 +297,7 @@ function RowsView({
         className="diff-file__body diff-file__body--open"
         style={{ ["--gutter-w" as string]: gutterW }}
       >
-        {splitRows.map((row, idx) => {
+        {splitRows.slice(0, shownCount).map((row, idx) => {
           if (row.type === "split-gap") {
             return (
               <GapRow
@@ -383,6 +396,12 @@ function RowsView({
             </div>
           );
         })}
+        {remainingRows > 0 && (
+          <button type="button" className="diff-row diff-row--reveal" onClick={showNextRows}>
+            Show next {Math.min(ROW_RENDER_CAP, remainingRows).toLocaleString()} rows (
+            {remainingRows.toLocaleString()} remaining)
+          </button>
+        )}
       </div>
     );
   }
@@ -393,7 +412,7 @@ function RowsView({
       className="diff-file__body diff-file__body--open"
       style={{ ["--gutter-w" as string]: gutterW }}
     >
-      {rows.map((row, idx) => {
+      {rows.slice(0, shownCount).map((row, idx) => {
         if (row.type === "gap") {
           return (
             <GapRow
@@ -472,6 +491,12 @@ function RowsView({
           </div>
         );
       })}
+      {remainingRows > 0 && (
+        <button type="button" className="diff-row diff-row--reveal" onClick={showNextRows}>
+          Show next {Math.min(ROW_RENDER_CAP, remainingRows).toLocaleString()} rows (
+          {remainingRows.toLocaleString()} remaining)
+        </button>
+      )}
     </div>
   );
 }

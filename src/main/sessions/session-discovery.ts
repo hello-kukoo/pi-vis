@@ -5,6 +5,7 @@ import path from "node:path";
 import type { SessionSummary, WorktreeIdentity } from "@shared/ipc-contract.js";
 import { SessionHeaderSchema } from "@shared/session-file/entries.js";
 import { getSettings } from "../settings-store.js";
+import { mapLimit } from "../util/concurrency.js";
 
 // Read per call so tests can override PIVIS_SESSIONS_DIR.
 function getSessionsDir(): string {
@@ -129,7 +130,11 @@ function parseSessionMetaLines(lines: string[]): ExtractedSessionMeta {
   return { preview, messageCount, name, lastActiveAt };
 }
 
-function linesFromBoundedChunks(head: string, tail?: string): string[] {
+function linesFromBoundedChunks(
+  head: string,
+  tail?: string,
+  tailStartsAtLineBoundary = false,
+): string[] {
   const lines: string[] = [];
   const headParts = head.split("\n");
   const headComplete = head.endsWith("\n");
@@ -138,18 +143,26 @@ function linesFromBoundedChunks(head: string, tail?: string): string[] {
   if (tail !== undefined) {
     const tailParts = tail.split("\n");
     // The tail chunk usually starts in the middle of a JSONL row; drop that
-    // partial first line. If the file fit in the head chunk, no tail is passed.
-    lines.push(...tailParts.slice(1));
+    // partial first line. If it starts immediately after a newline, keep it —
+    // otherwise a complete boundary-aligned entry (often the newest metadata)
+    // is lost from the sidebar sample.
+    lines.push(...(tailStartsAtLineBoundary ? tailParts : tailParts.slice(1)));
   }
 
   return lines;
 }
 
-function extractSessionMetaFromSample(head: string, tail?: string): ExtractedSessionMeta {
-  return parseSessionMetaLines(linesFromBoundedChunks(head, tail));
+function extractSessionMetaFromSample(
+  head: string,
+  tail?: string,
+  tailStartsAtLineBoundary = false,
+): ExtractedSessionMeta {
+  return parseSessionMetaLines(linesFromBoundedChunks(head, tail, tailStartsAtLineBoundary));
 }
 
-async function readSessionMetaSample(filePath: string): Promise<{ head: string; tail?: string }> {
+async function readSessionMetaSample(
+  filePath: string,
+): Promise<{ head: string; tail?: string; tailStartsAtLineBoundary?: boolean }> {
   const stat = await fsp.stat(filePath);
   if (stat.size <= SESSION_META_CHUNK_BYTES) {
     return { head: await fsp.readFile(filePath, "utf8") };
@@ -162,17 +175,25 @@ async function readSessionMetaSample(filePath: string): Promise<{ head: string; 
     const tailSize = Math.min(SESSION_META_CHUNK_BYTES, stat.size - headBytes);
     const tailBuffer = Buffer.alloc(tailSize);
     const tailStart = Math.max(headBytes, stat.size - tailSize);
+    const prevByte = Buffer.alloc(1);
+    const { bytesRead: prevBytes } = await handle.read(prevByte, 0, 1, tailStart - 1);
+    const tailStartsAtLineBoundary = prevBytes === 1 && prevByte[0] === 0x0a;
     const { bytesRead: tailBytes } = await handle.read(tailBuffer, 0, tailSize, tailStart);
     return {
       head: headBuffer.slice(0, headBytes).toString("utf8"),
       tail: tailBuffer.slice(0, tailBytes).toString("utf8"),
+      tailStartsAtLineBoundary,
     };
   } finally {
     await handle.close().catch(() => {});
   }
 }
 
-function readSessionMetaSampleSync(filePath: string): { head: string; tail?: string } {
+function readSessionMetaSampleSync(filePath: string): {
+  head: string;
+  tail?: string;
+  tailStartsAtLineBoundary?: boolean;
+} {
   const stat = fs.statSync(filePath);
   if (stat.size <= SESSION_META_CHUNK_BYTES) {
     return { head: fs.readFileSync(filePath, "utf8") };
@@ -185,10 +206,14 @@ function readSessionMetaSampleSync(filePath: string): { head: string; tail?: str
     const tailSize = Math.min(SESSION_META_CHUNK_BYTES, stat.size - headBytes);
     const tailBuffer = Buffer.alloc(tailSize);
     const tailStart = Math.max(headBytes, stat.size - tailSize);
+    const prevByte = Buffer.alloc(1);
+    const prevBytes = fs.readSync(fd, prevByte, 0, 1, tailStart - 1);
+    const tailStartsAtLineBoundary = prevBytes === 1 && prevByte[0] === 0x0a;
     const tailBytes = fs.readSync(fd, tailBuffer, 0, tailSize, tailStart);
     return {
       head: headBuffer.slice(0, headBytes).toString("utf8"),
       tail: tailBuffer.slice(0, tailBytes).toString("utf8"),
+      tailStartsAtLineBoundary,
     };
   } finally {
     fs.closeSync(fd);
@@ -197,8 +222,8 @@ function readSessionMetaSampleSync(filePath: string): { head: string; tail?: str
 
 export async function extractSessionMetaAsync(filePath: string): Promise<ExtractedSessionMeta> {
   try {
-    const { head, tail } = await readSessionMetaSample(filePath);
-    return extractSessionMetaFromSample(head, tail);
+    const { head, tail, tailStartsAtLineBoundary } = await readSessionMetaSample(filePath);
+    return extractSessionMetaFromSample(head, tail, tailStartsAtLineBoundary);
   } catch {
     return { preview: "", messageCount: 0, name: null, lastActiveAt: null };
   }
@@ -206,8 +231,8 @@ export async function extractSessionMetaAsync(filePath: string): Promise<Extract
 
 export function extractSessionMeta(filePath: string): ExtractedSessionMeta {
   try {
-    const { head, tail } = readSessionMetaSampleSync(filePath);
-    return extractSessionMetaFromSample(head, tail);
+    const { head, tail, tailStartsAtLineBoundary } = readSessionMetaSampleSync(filePath);
+    return extractSessionMetaFromSample(head, tail, tailStartsAtLineBoundary);
   } catch {
     return { preview: "", messageCount: 0, name: null, lastActiveAt: null };
   }
@@ -264,53 +289,57 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
     if (wt.workspacePath === workspacePath) worktreeCwds.add(wtPath);
   }
 
-  let subdirs: string[];
+  let sessionDirEntries: fs.Dirent[];
   try {
-    subdirs = await fsp.readdir(SESSIONS_DIR);
+    sessionDirEntries = await fsp.readdir(SESSIONS_DIR, { withFileTypes: true });
   } catch {
     return results;
   }
 
-  for (const subdir of subdirs) {
-    const subdirPath = path.join(SESSIONS_DIR, subdir);
-    let files: string[];
+  const filePaths: string[] = [];
+  for (const subdir of sessionDirEntries) {
+    if (!subdir.isDirectory()) continue;
+    const subdirPath = path.join(SESSIONS_DIR, subdir.name);
     try {
-      const stat = await fsp.stat(subdirPath);
-      if (!stat.isDirectory()) continue;
-      files = (await fsp.readdir(subdirPath)).filter((f) => f.endsWith(".jsonl"));
-    } catch {
-      continue;
-    }
+      const files = await fsp.readdir(subdirPath, { withFileTypes: true });
+      for (const file of files) {
+        if (file.isFile() && file.name.endsWith(".jsonl")) {
+          filePaths.push(path.join(subdirPath, file.name));
+        }
+      }
+    } catch {}
+  }
 
-    for (const file of files) {
-      const filePath = path.join(subdirPath, file);
+  const summaries = await mapLimit(
+    filePaths,
+    16,
+    async (filePath): Promise<SessionSummary | null> => {
       let mtime: number;
       try {
         mtime = (await fsp.stat(filePath)).mtimeMs;
       } catch {
-        continue;
+        return null;
       }
 
       // Check cache
       const cached = cache.get(filePath);
       if (cached && cached.mtime === mtime) {
-        if (cached.summary.cwd === workspacePath || worktreeCwds.has(cached.summary.cwd)) {
-          results.push(cached.summary);
-        }
-        continue;
+        return cached.summary.cwd === workspacePath || worktreeCwds.has(cached.summary.cwd)
+          ? cached.summary
+          : null;
       }
 
       const headerLine = await readFirstLineAsync(filePath);
-      if (!headerLine) continue;
+      if (!headerLine) return null;
 
       let header: ReturnType<typeof SessionHeaderSchema.safeParse>;
       try {
         header = SessionHeaderSchema.safeParse(JSON.parse(headerLine));
       } catch {
-        continue;
+        return null;
       }
 
-      if (!header.success) continue;
+      if (!header.success) return null;
 
       const { preview, messageCount, name, lastActiveAt } = await extractSessionMetaAsync(filePath);
 
@@ -329,16 +358,22 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
       // enumerating. Without this, switching workspaces re-parses every
       // file from disk on each call.
       cache.set(filePath, { mtime, summary });
-      if (header.data.cwd !== workspacePath && !worktreeCwds.has(header.data.cwd)) continue;
-      results.push(summary);
-    }
-  }
+      return header.data.cwd === workspacePath || worktreeCwds.has(header.data.cwd)
+        ? summary
+        : null;
+    },
+  );
+  results.push(...summaries.filter((s): s is SessionSummary => s !== null));
 
   // Sort by most recent *user activity* first (prompts / `!bash`), falling
   // back to file mtime for sessions with no user messages (e.g. brand-new or
   // externally-created sessions). This is the persistent ordering the sidebar
   // relies on: unlike mtime it isn't bumped by merely opening a session.
-  results.sort((a, b) => (b.lastActiveAt ?? b.mtime) - (a.lastActiveAt ?? a.mtime));
+  results.sort(
+    (a, b) =>
+      (b.lastActiveAt ?? b.mtime) - (a.lastActiveAt ?? a.mtime) ||
+      a.filePath.localeCompare(b.filePath),
+  );
 
   // Filter out archived sessions
   const archived = new Set(getSettings().archivedSessions);

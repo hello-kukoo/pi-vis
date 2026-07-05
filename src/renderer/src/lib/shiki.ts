@@ -8,6 +8,45 @@ import { type Highlighter, createHighlighter } from "shiki";
 let highlighter: Highlighter | null = null;
 let initPromise: Promise<Highlighter> | null = null;
 
+const HTML_CACHE_MAX_ENTRIES = 100;
+const HTML_CACHE_MAX_TOTAL_CHARS = 2_000_000;
+const htmlCache = new Map<string, { html: string; chars: number }>();
+let htmlCacheChars = 0;
+
+function cacheKey(theme: string, lang: string, code: string): string {
+  return `${theme}\0${lang}\0${code}`;
+}
+
+export function getCachedHighlightedHtml(theme: string, lang: string, code: string): string | null {
+  const key = cacheKey(theme, lang, code);
+  const hit = htmlCache.get(key);
+  if (!hit) return null;
+  htmlCache.delete(key);
+  htmlCache.set(key, hit);
+  return hit.html;
+}
+
+export function setCachedHighlightedHtml(
+  theme: string,
+  lang: string,
+  code: string,
+  html: string,
+): void {
+  const key = cacheKey(theme, lang, code);
+  const existing = htmlCache.get(key);
+  if (existing) htmlCacheChars -= existing.chars;
+  htmlCache.delete(key);
+  const chars = code.length;
+  htmlCache.set(key, { html, chars });
+  htmlCacheChars += chars;
+  while (htmlCache.size > HTML_CACHE_MAX_ENTRIES || htmlCacheChars > HTML_CACHE_MAX_TOTAL_CHARS) {
+    const first = htmlCache.entries().next().value as [string, { chars: number }] | undefined;
+    if (!first) break;
+    htmlCache.delete(first[0]);
+    htmlCacheChars -= first[1].chars;
+  }
+}
+
 // Active Shiki theme NAME. Defaults to Mocha so SSR / preview-stub paths
 // (no settings store yet) still tokenize. settings-store calls
 // setShikiTheme on load + update.

@@ -91,8 +91,8 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
 
   // Listen for agent_end to refresh stats
   useEffect(() => {
-    return window.pivis.on("session.event", ({ sessionId: sid, event }) => {
-      if (sid === sessionId && event.type === "agent_end") {
+    return window.pivis.on("session.events", ({ sessionId: sid, events }) => {
+      if (sid === sessionId && events.some((event) => event.type === "agent_end")) {
         window.pivis
           .invoke("session.sendCommand", {
             sessionId,
@@ -669,9 +669,11 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
     if (!live || !root) return;
     void refreshBadge(root);
 
-    const unsubEvent = window.pivis.on("session.event", ({ sessionId: sid, event }) => {
+    const unsubEvent = window.pivis.on("session.events", ({ sessionId: sid, events }) => {
       if (sid !== sessionId) return;
-      if (event.type === "agent_end" || event.type === "tool_execution_end") {
+      if (
+        events.some((event) => event.type === "agent_end" || event.type === "tool_execution_end")
+      ) {
         void refreshBadge(root);
       }
     });

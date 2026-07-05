@@ -1,5 +1,5 @@
 import type { SessionId } from "@shared/ids.js";
-import type { SessionStatus, SessionSummary } from "@shared/ipc-contract.js";
+import type { HistoryPage, SessionStatus, SessionSummary } from "@shared/ipc-contract.js";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
@@ -27,6 +27,7 @@ import {
   createTranscriptState,
   finalizeActiveBlocks,
   finishBashBlock,
+  prependHistory,
   seedFromHistory,
 } from "./transcript.js";
 
@@ -156,6 +157,8 @@ export interface SessionViewState {
    *  messages, which legitimately leaves `transcript.blocks` empty; sidebar /
    *  first-send affordances must still treat that session as non-empty. */
   hasTreeHistory?: boolean | undefined;
+  historyCursor?: { startIndex: number; total: number } | undefined;
+  historyLoadingEarlier?: boolean | undefined;
   /** True for a brand-new session (created without a session file) that
    *  has not yet sent its first message. Such sessions are hidden from
    *  the sidebar (the "+ New session" button shows as selected instead)
@@ -450,7 +453,9 @@ interface SessionsStore {
     piVersion?: string,
   ) => void;
   applyEvent: (sessionId: SessionId, event: PiEvent) => void;
-  seedHistory: (sessionId: SessionId, history: TranscriptBlock[]) => void;
+  applyEvents: (sessionId: SessionId, events: PiEvent[]) => void;
+  seedHistory: (sessionId: SessionId, history: HistoryPage | TranscriptBlock[]) => void;
+  loadEarlierHistory: (sessionId: SessionId) => Promise<void>;
   addUserMessage: (
     sessionId: SessionId,
     content: string,
@@ -874,125 +879,92 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   },
 
   applyEvent: (sessionId, rawEvent) => {
-    // Only apply known events to the transcript
-    if ("__unknown" in rawEvent) {
-      return;
-    }
-    const event = rawEvent as KnownPiEvent;
+    get().applyEvents(sessionId, [rawEvent]);
+  },
+
+  applyEvents: (sessionId, rawEvents) => {
+    const events = rawEvents.filter(
+      (rawEvent): rawEvent is KnownPiEvent => !("__unknown" in rawEvent),
+    );
+    if (events.length === 0) return;
 
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
 
-      let isStreaming = s.isStreaming;
-      let unreadStatus = s.unreadStatus;
-      let turnErrored = s.turnErrored;
-      let runningSince = s.runningSince;
-      // Pi (and its extensions) drive the session name; it gets reported as
-      // a `session_info_changed` event. Pi rejects empty names server-side,
-      // so `name` is always a non-empty string.
-      const sessionName = event.type === "session_info_changed" ? event.name : s.sessionName;
+      let current = s;
+      let newSessionDrafts = state.newSessionDrafts;
+      let newSessionSetupDrafts = state.newSessionSetupDrafts;
+      let anyPromoted = false;
 
-      if (event.type === "agent_start") {
-        isStreaming = true;
-        // Starting a new turn acknowledges any prior unread dot — the user is
-        // actively engaging with the session again.
-        turnErrored = false;
-        unreadStatus = undefined;
-        // Stamp the timer on a genuinely new turn. A retrying turn keeps
-        // `isStreaming` true across its willRetry agent_end, so the retry's
-        // agent_start finds `isStreaming` already true and skips this —
-        // the timer keeps counting from the original start.
-        if (!s.isStreaming) runningSince = Date.now();
-      }
-      // Track provider/model failures within the turn so agent_end can decide
-      // the dot color.
-      if (event.type === "message_end" && event.message?.role === "assistant") {
-        if (detectTurnError(event.message).isError) turnErrored = true;
-      }
-      if (event.type === "agent_end") {
-        if (event.willRetry) {
-          // Not a real turn end — pi will auto-retry. Stay "working" (the
-          // agent is still going) and wipe the error flag so the next attempt
-          // starts clean. The terminal dot is decided only by the final
-          // (non-retrying) agent_end below, regardless of whether the retry
-          // re-emits agent_start. The working timer also keeps counting.
+      for (const event of events) {
+        let isStreaming = current.isStreaming;
+        let unreadStatus = current.unreadStatus;
+        let turnErrored = current.turnErrored;
+        let runningSince = current.runningSince;
+        const sessionName =
+          event.type === "session_info_changed" ? event.name : current.sessionName;
+
+        if (event.type === "agent_start") {
+          isStreaming = true;
           turnErrored = false;
-        } else {
+          unreadStatus = undefined;
+          if (!current.isStreaming) runningSince = Date.now();
+        }
+        if (event.type === "message_end" && event.message?.role === "assistant") {
+          if (detectTurnError(event.message).isError) turnErrored = true;
+        }
+        if (event.type === "agent_end") {
+          if (event.willRetry) {
+            turnErrored = false;
+          } else {
+            isStreaming = false;
+            runningSince = undefined;
+            unreadStatus = turnErrored ? "error" : "done";
+            turnErrored = false;
+          }
+        }
+        if (event.type === "auto_retry_end" && event.success === false && isStreaming) {
           isStreaming = false;
-          // The turn truly finished — stop the working timer.
           runningSince = undefined;
-          // A finished turn surfaces an unread "done"/"error" marker. For a
-          // background session this is a notification that persists until the
-          // user clicks in and then leaves (setActiveSession) or starts a new
-          // turn (agent_start above).
-          unreadStatus = turnErrored ? "error" : "done";
+          unreadStatus = "error";
           turnErrored = false;
         }
-      }
-      // A FAILED `auto_retry_end` is terminal in the abort-during-backoff
-      // case: when pi is sleeping between retry attempts and the user aborts,
-      // pi cancels the backoff (`abortRetry`) and emits
-      // `auto_retry_end{success:false}` — but, because the agent loop already
-      // emitted its `agent_end{willRetry:true}` *before* the backoff began, NO
-      // further (non-retrying) `agent_end` ever follows. Without this branch
-      // `isStreaming` + the "Running for …" timer stick on forever after the
-      // abort. The guard on `isStreaming` makes this a no-op in the normal
-      // retry-exhaustion path, where this event arrives AFTER the final
-      // `agent_end{willRetry:false}` already cleared streaming.
-      if (event.type === "auto_retry_end" && event.success === false && isStreaming) {
-        isStreaming = false;
-        runningSince = undefined;
-        // A failed retry end is never a clean success — the turn ended in a
-        // provider error (exhausted) or was cancelled mid-backoff — so mark
-        // it "error". (`turnErrored` was already wiped by the preceding
-        // `willRetry` agent_end, so it can't decide the color here.)
-        unreadStatus = "error";
-        turnErrored = false;
+
+        const thinkingLevel =
+          event.type === "thinking_level_changed" ? event.level : current.thinkingLevel;
+        const transcript = applyPiEvent(current.transcript, event);
+        const userEchoed =
+          event.type === "message_start" &&
+          event.message?.role === "user" &&
+          transcript.blocks.length > current.transcript.blocks.length;
+        const promoted = !!current.isNewPending && userEchoed;
+        if (promoted) {
+          newSessionDrafts = clearNewSessionDraftFor(newSessionDrafts, current.workspacePath, true);
+          newSessionSetupDrafts = clearNewSessionSetupFor(
+            newSessionSetupDrafts,
+            current.workspacePath,
+            true,
+          );
+          anyPromoted = true;
+        }
+        current = {
+          ...current,
+          transcript,
+          isStreaming,
+          unreadStatus,
+          turnErrored,
+          runningSince,
+          sessionName,
+          thinkingLevel,
+          isNewPending: promoted ? false : current.isNewPending,
+          editorInjection: promoted ? undefined : current.editorInjection,
+        };
       }
 
-      const thinkingLevel = event.type === "thinking_level_changed" ? event.level : s.thinkingLevel;
-      const transcript = applyPiEvent(s.transcript, event);
-      // When pi echoes the first user message — which is the authoritative
-      // path for prompt-template / skill / unknown `/foo` sends that bypass
-      // `addUserMessage` (they don't optimistically seed a bubble) — promote
-      // the pending new session to a real tab and clear its draft. This is
-      // idempotent: once `isNewPending` is false (set by addUserMessage for
-      // plain prompts) this branch is a no-op, so it only acts as a backstop.
-      //
-      // Gate on a *user* echo that actually added a block — NOT raw block
-      // growth. A spontaneous server-/extension-originated block (e.g. a
-      // `custom` message with `display:true`, or an assistant block) must not
-      // prematurely un-hide a still-empty pending session and drop its draft
-      // (which would also wipe the in-progress composer text on the resulting
-      // pending→real transition).
-      const userEchoed =
-        event.type === "message_start" &&
-        event.message?.role === "user" &&
-        transcript.blocks.length > s.transcript.blocks.length;
-      const promoted = !!s.isNewPending && userEchoed;
-      const drafts = clearNewSessionDraftFor(state.newSessionDrafts, s.workspacePath, promoted);
-      const setupDrafts = clearNewSessionSetupFor(
-        state.newSessionSetupDrafts,
-        s.workspacePath,
-        promoted,
-      );
-      sessions.set(sessionId, {
-        ...s,
-        transcript,
-        isStreaming,
-        unreadStatus,
-        turnErrored,
-        runningSince,
-        sessionName,
-        thinkingLevel,
-        isNewPending: promoted ? false : s.isNewPending,
-        editorInjection: promoted ? undefined : s.editorInjection,
-      });
-      return promoted
-        ? { sessions, newSessionDrafts: drafts, newSessionSetupDrafts: setupDrafts }
-        : { sessions };
+      sessions.set(sessionId, current);
+      return anyPromoted ? { sessions, newSessionDrafts, newSessionSetupDrafts } : { sessions };
     });
   },
 
@@ -1001,14 +973,68 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      const transcript = seedFromHistory(s.transcript, history);
+      const page = Array.isArray(history)
+        ? { blocks: history, startIndex: 0, total: history.length }
+        : history;
+      const transcript = seedFromHistory(s.transcript, page.blocks);
       sessions.set(sessionId, {
         ...s,
         transcript,
-        hasTreeHistory: s.hasTreeHistory || history.length > 0,
+        historyCursor: { startIndex: page.startIndex, total: page.total },
+        hasTreeHistory: s.hasTreeHistory || page.total > 0,
       });
       return { sessions };
     });
+  },
+
+  loadEarlierHistory: async (sessionId) => {
+    const s = get().sessions.get(sessionId);
+    const cursor = s?.historyCursor;
+    if (!s?.sessionFile || !cursor || cursor.startIndex <= 0 || s.historyLoadingEarlier) return;
+    const requestedStartIndex = cursor.startIndex;
+    const requestedFile = s.sessionFile;
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const cur = sessions.get(sessionId);
+      if (!cur || cur.historyCursor?.startIndex !== requestedStartIndex) return {};
+      sessions.set(sessionId, { ...cur, historyLoadingEarlier: true });
+      return { sessions };
+    });
+    try {
+      const page = await window.pivis.invoke("session.loadHistory", {
+        sessionId,
+        before: requestedStartIndex,
+      });
+      set((state) => {
+        const sessions = new Map(state.sessions);
+        const cur = sessions.get(sessionId);
+        if (!cur) return {};
+        if (
+          cur.sessionFile !== requestedFile ||
+          cur.historyCursor?.startIndex !== requestedStartIndex
+        ) {
+          sessions.set(sessionId, { ...cur, historyLoadingEarlier: undefined });
+          return { sessions };
+        }
+        sessions.set(sessionId, {
+          ...cur,
+          transcript: prependHistory(cur.transcript, page.blocks),
+          historyCursor: { startIndex: page.startIndex, total: page.total },
+          historyLoadingEarlier: undefined,
+          hasTreeHistory: cur.hasTreeHistory || page.total > 0,
+        });
+        return { sessions };
+      });
+    } catch (err) {
+      set((state) => {
+        const sessions = new Map(state.sessions);
+        const cur = sessions.get(sessionId);
+        if (!cur) return {};
+        sessions.set(sessionId, { ...cur, historyLoadingEarlier: undefined });
+        return { sessions };
+      });
+      console.error("Failed to load earlier history:", err);
+    }
   },
 
   addUserMessage: (sessionId, content, images, opts) => {
@@ -2088,6 +2114,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionFile,
         transcript: createTranscriptState(),
         hasTreeHistory: false,
+        historyCursor: undefined,
+        historyLoadingEarlier: undefined,
         isStreaming: false,
         runningSince: undefined,
         unreadStatus: undefined,
@@ -2109,7 +2137,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     await get().adoptSessionFile(sessionId, sessionFile, sessionName);
     if (!sessionFile) return;
     const history = await window.pivis.invoke("session.loadHistory", { sessionId });
-    get().seedHistory(sessionId, history ?? []);
+    get().seedHistory(sessionId, history ?? { blocks: [], startIndex: 0, total: 0 });
     const workspacePath = get().sessions.get(sessionId)?.workspacePath;
     if (workspacePath) void get().refreshWorkspaceSessions(workspacePath);
   },
@@ -2287,9 +2315,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       if (sessionFile) {
         try {
           const history = await window.pivis.invoke("session.loadHistory", { sessionId });
-          if (Array.isArray(history) && history.length > 0) {
-            get().seedHistory(sessionId, history);
-          }
+          get().seedHistory(sessionId, history ?? { blocks: [], startIndex: 0, total: 0 });
         } catch {
           /* no history — fine */
         }

@@ -405,3 +405,28 @@
     opacity: 0.45;
   }
 }
+
+.diff-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 1.43em;
+}
+
+.diff-row--reveal {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.857rem;
+  background: var(--surface-inset);
+  border: 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: var(--font-size-small);
+  line-height: var(--leading-label);
+  text-align: center;
+}
+
+.diff-row--reveal:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}

@@ -53,6 +53,12 @@ export interface TranscriptBlock {
   data: unknown;
 }
 
+export interface HistoryPage {
+  blocks: TranscriptBlock[];
+  startIndex: number;
+  total: number;
+}
+
 // Every invoke channel: request type → response type
 export interface IpcInvokeContract {
   "pi.locate": { req: undefined; res: { path: string; version: string } | null };
@@ -134,7 +140,10 @@ export interface IpcInvokeContract {
   // Returns the chosen path or `null` if the user cancelled.
   "worktree.pickDirectory": { req: { workspacePath: string }; res: string | null };
   "session.close": { req: { sessionId: SessionId }; res: undefined };
-  "session.loadHistory": { req: { sessionId: SessionId }; res: TranscriptBlock[] };
+  "session.loadHistory": {
+    req: { sessionId: SessionId; limit?: number | undefined; before?: number | undefined };
+    res: HistoryPage;
+  };
   // Replay a branch (an ordered array of SessionTreeEntry) from the host's
   // in-memory state into the same TranscriptBlock[] shape the renderer
   // already consumes via session.loadHistory. The renderer calls this after
@@ -251,7 +260,7 @@ export interface IpcInvokeContract {
 
 // Every event channel: payload type (main → renderer)
 export interface IpcEventContract {
-  "session.event": { sessionId: SessionId; event: PiEvent };
+  "session.events": { sessionId: SessionId; events: PiEvent[] };
   "session.uiRequest": { sessionId: SessionId; request: ExtensionUiRequest };
   "session.statusChanged": {
     sessionId: SessionId;
