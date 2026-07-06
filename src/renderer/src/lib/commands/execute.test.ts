@@ -24,7 +24,12 @@ function makeDeps(overrides: Partial<ExecuteDeps> = {}): {
       (calls["invoke"] ??= []).push([payload]);
       return { success: true, data: {} };
     }) as ExecuteDeps["invoke"],
-    setStreaming: make("setStreaming") as ExecuteDeps["setStreaming"],
+    beginPromptInFlight: make("beginPromptInFlight") as ExecuteDeps["beginPromptInFlight"],
+    endPromptInFlight: make("endPromptInFlight") as ExecuteDeps["endPromptInFlight"],
+    enqueueOptimisticSteer: vi.fn(() => "opt-1") as ExecuteDeps["enqueueOptimisticSteer"],
+    removeOptimisticQueuedMessage: make(
+      "removeOptimisticQueuedMessage",
+    ) as ExecuteDeps["removeOptimisticQueuedMessage"],
     addToast: make("addToast") as ExecuteDeps["addToast"],
     addUserMessage: make("addUserMessage") as ExecuteDeps["addUserMessage"],
     clearPendingUserEcho: make("clearPendingUserEcho") as ExecuteDeps["clearPendingUserEcho"],
@@ -55,8 +60,9 @@ function makeDeps(overrides: Partial<ExecuteDeps> = {}): {
         { id: "claude-haiku", provider: "anthropic", name: "Claude Haiku" },
       ] as never,
     getSessionName: () => "Existing Name",
+    setSessionName: make("setSessionName") as ExecuteDeps["setSessionName"],
     getCurrentModel: () => "claude-sonnet-4",
-    isStreaming: () => false,
+    isWorking: () => false,
     getSessionWorkspacePath: () => "/tmp/ws",
     listSessions: vi.fn(async () => []) as ExecuteDeps["listSessions"],
     ...overrides,
@@ -123,6 +129,7 @@ describe("executeAction — name", () => {
     expect(calls["invoke"]).toEqual([
       [{ sessionId: SID, command: { type: "set_session_name", name: "Hello" } }],
     ]);
+    expect(calls["setSessionName"]).toEqual([[SID, "Hello"]]);
     expect(calls["addToast"]).toEqual([[SID, "Session name set: Hello"]]);
   });
 
@@ -207,7 +214,7 @@ describe("executeAction — reload", () => {
   });
 
   it("/reload warns and does not invoke while streaming", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    const { deps, calls } = makeDeps({ isWorking: () => true });
     await executeAction(SID, { kind: "reload" }, deps);
     expect(calls["invoke"]).toBeUndefined();
     expect(calls["addToast"]).toEqual([
@@ -244,34 +251,33 @@ describe("executeAction — send-prompt vs steer", () => {
     expect(send).toBeDefined();
     expect(send![1].command.type).toBe("prompt");
     expect(calls["addUserMessage"]).toEqual([[SID, "hello", undefined, { registerEcho: true }]]);
-    expect(calls["setStreaming"]).toEqual([[SID, true]]);
+    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
+    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
   });
 
-  it("toasts and clears streaming when an idle prompt is rejected", async () => {
+  it("toasts and ends in-flight tracking when an idle prompt is rejected", async () => {
     const { deps, calls } = makeDeps();
     (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: "provider unavailable",
     });
-    await executeAction(SID, { kind: "send-prompt", text: "hello" }, deps);
-    expect(calls["setStreaming"]).toEqual([
-      [SID, true],
-      [SID, false],
-    ]);
+    await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
+      /provider unavailable/,
+    );
+    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
+    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
     expect(calls["clearPendingUserEcho"]).toEqual([[SID, "hello"]]);
     expect(calls["addToast"]).toEqual([[SID, "provider unavailable", "error"]]);
   });
 
-  it("toasts and clears streaming when an idle prompt send throws", async () => {
+  it("toasts and ends in-flight tracking when an idle prompt send throws", async () => {
     const { deps, calls } = makeDeps();
     (deps.invoke as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("IPC channel closed"));
-    await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).resolves.toBe(
-      undefined,
+    await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
+      /IPC channel closed/,
     );
-    expect(calls["setStreaming"]).toEqual([
-      [SID, true],
-      [SID, false],
-    ]);
+    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
+    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
     expect(calls["clearPendingUserEcho"]).toEqual([[SID, "hello"]]);
     expect(calls["addToast"]).toEqual([[SID, "IPC channel closed", "error"]]);
   });
@@ -285,11 +291,11 @@ describe("executeAction — send-prompt vs steer", () => {
     expect(send).toBeDefined();
     expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
     expect(calls["addUserMessage"]).toBeUndefined();
-    expect(calls["setStreaming"]).toBeUndefined();
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
   });
 
   it("does not convert unknown slash passthrough into steer while streaming", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    const { deps, calls } = makeDeps({ isWorking: () => true });
     await executeAction(SID, { kind: "send-prompt", text: "/custom-ui" }, deps);
 
     const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
@@ -297,7 +303,7 @@ describe("executeAction — send-prompt vs steer", () => {
     expect(send).toBeDefined();
     expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
     expect(calls["addUserMessage"]).toBeUndefined();
-    expect(calls["setStreaming"]).toBeUndefined();
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
   });
 
   it("throws after toast on unified prompt failure so the host restores editor text", async () => {
@@ -310,42 +316,41 @@ describe("executeAction — send-prompt vs steer", () => {
     await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
       /provider unavailable/,
     );
-    expect(calls["setStreaming"]).toEqual([
-      [SID, true],
-      [SID, false],
-    ]);
+    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
+    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
     expect(calls["addToast"]).toEqual([[SID, "provider unavailable", "error"]]);
   });
 
   it("sends a `steer` command (and does not set streaming) when already streaming", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    const { deps, calls } = makeDeps({ isWorking: () => true });
     await executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps);
     const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
     const send = invocations.find((c) => c[0] === "session.sendCommand");
     expect(send).toBeDefined();
     expect(send![1].command.type).toBe("steer");
     expect(send![1].command.message).toBe("actually do X");
-    expect(calls["addUserMessage"]).toEqual([
-      [SID, "actually do X", undefined, { registerEcho: false }],
-    ]);
+    expect(calls["addUserMessage"]).toBeUndefined();
+    expect(deps.enqueueOptimisticSteer).toHaveBeenCalledWith(SID, "actually do X");
     // Streaming state must not be re-toggled mid-turn.
-    expect(calls["setStreaming"]).toBeUndefined();
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
   });
 
   it("toasts when a steer command is rejected", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    const { deps, calls } = makeDeps({ isWorking: () => true });
     (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: "cannot steer now",
     });
-    await executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps);
-    expect(calls["setStreaming"]).toBeUndefined();
-    expect(calls["clearPendingUserEcho"]).toEqual([[SID, "actually do X"]]);
+    await expect(
+      executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
+    ).rejects.toThrow(/cannot steer now/);
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
+    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
     expect(calls["addToast"]).toEqual([[SID, "cannot steer now", "error"]]);
   });
 
   it("throws after toast on unified steer failure so the host restores editor text", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true, uiSurface: "unified" });
+    const { deps, calls } = makeDeps({ isWorking: () => true, uiSurface: "unified" });
     (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: "cannot steer now",
@@ -354,19 +359,19 @@ describe("executeAction — send-prompt vs steer", () => {
     await expect(
       executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
     ).rejects.toThrow(/cannot steer now/);
-    expect(calls["setStreaming"]).toBeUndefined();
-    expect(calls["clearPendingUserEcho"]).toEqual([[SID, "actually do X"]]);
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
+    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
     expect(calls["addToast"]).toEqual([[SID, "cannot steer now", "error"]]);
   });
 
   it("toasts when a steer command throws", async () => {
-    const { deps, calls } = makeDeps({ isStreaming: () => true });
+    const { deps, calls } = makeDeps({ isWorking: () => true });
     (deps.invoke as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("session exited"));
     await expect(
       executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
-    ).resolves.toBe(undefined);
-    expect(calls["setStreaming"]).toBeUndefined();
-    expect(calls["clearPendingUserEcho"]).toEqual([[SID, "actually do X"]]);
+    ).rejects.toThrow(/session exited/);
+    expect(calls["beginPromptInFlight"]).toBeUndefined();
+    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
     expect(calls["addToast"]).toEqual([[SID, "session exited", "error"]]);
   });
 });

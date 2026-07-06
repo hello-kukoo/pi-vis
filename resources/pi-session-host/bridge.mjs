@@ -46,6 +46,8 @@ export function assertHostCapabilities(session, runtime) {
     "subscribe",
     "bindExtensions",
     "reload",
+    "getSteeringMessages",
+    "getFollowUpMessages",
   ]) {
     fn(session, m, `session.${m}`);
   }
@@ -129,16 +131,47 @@ export function setupCommandBridge({
 }) {
   let _session = session;
   let _unsubscribe = null;
+  let retryPending = false;
+  let lastStreamingState;
+
+  function logicalStreamingState() {
+    return !!(_session?.isStreaming || retryPending);
+  }
+
+  function updateRetryPending(event) {
+    if (event?.type === "agent_start") retryPending = false;
+    else if (event?.type === "agent_end") retryPending = !!event.willRetry;
+    else if (event?.type === "auto_retry_start") retryPending = true;
+    else if (event?.type === "auto_retry_end" && event.success === false) retryPending = false;
+  }
+
+  function emitStreamingIfChanged() {
+    const value = logicalStreamingState();
+    if (value === lastStreamingState) return;
+    lastStreamingState = value;
+    send({ type: "event", event: { type: "streaming_state", isStreaming: value } });
+  }
 
   // ─── Event forwarding ──────────────────────────────────────────────────
 
   function subscribeSession(s) {
     _unsubscribe?.();
+    retryPending = false;
+    lastStreamingState = undefined;
     _unsubscribe = s.subscribe((event) => {
       // Forward raw event to main process (structured clone over process.send).
       // AgentSessionEvent is a plain serializable object.
       send({ type: "event", event });
+      updateRetryPending(event);
+      emitStreamingIfChanged();
+      if (event?.type === "agent_end" || event?.type === "auto_retry_end") {
+        const bound = s;
+        setImmediate(() => {
+          if (_session === bound) emitStreamingIfChanged();
+        });
+      }
     });
+    emitStreamingIfChanged();
   }
 
   subscribeSession(_session);
@@ -208,7 +241,7 @@ export function setupCommandBridge({
       // structured-clone-safe over IPC. `?? null` matches the nullable schema.
       model: s.model ?? null,
       thinkingLevel: s.thinkingLevel,
-      isStreaming: s.isStreaming,
+      isStreaming: logicalStreamingState(),
       isCompacting: s.isCompacting,
       steeringMode: s.steeringMode,
       followUpMode: s.followUpMode,
@@ -218,6 +251,10 @@ export function setupCommandBridge({
       autoCompactionEnabled: s.autoCompactionEnabled,
       messageCount: s.messages.length,
       pendingMessageCount: s.pendingMessageCount,
+      steering:
+        typeof s.getSteeringMessages === "function" ? [...s.getSteeringMessages()] : undefined,
+      followUp:
+        typeof s.getFollowUpMessages === "function" ? [...s.getFollowUpMessages()] : undefined,
     };
   }
 

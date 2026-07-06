@@ -428,6 +428,19 @@ rl.on("line", async (line) => {
       const text = String(msg.message ?? msg.content ?? "");
       const lowered = text.toLowerCase();
 
+      if (lowered.startsWith("/name ")) {
+        const nextName = text.slice(6).trim();
+        if (nextName) {
+          ensureFile();
+          appendEntry({ type: "session_info", name: nextName });
+          pendingName = nextName;
+          sessionName = nextName;
+          send({ type: "response", command: "prompt", success: true, id });
+          send({ type: "session_info_changed", name: nextName });
+          break;
+        }
+      }
+
       // Persist the user turn BEFORE dispatching.
       ensureFile();
       const userEntryId = appendEntry({
@@ -551,17 +564,7 @@ rl.on("line", async (line) => {
           statusKey: "plan",
           statusText: "plan active",
         });
-        // Then a normal assistant turn so the test can also assert the
-        // transcript keeps going.
-        await handleEcho(id, text);
-        appendEntry({
-          type: "message",
-          message: {
-            role: "assistant",
-            content: [{ type: "text", text: `Echo: ${text}` }],
-            timestamp: Date.now(),
-          },
-        });
+        send({ type: "response", command: "prompt", success: true, id });
         break;
       }
 
@@ -585,15 +588,7 @@ rl.on("line", async (line) => {
           statusKey: "plan",
           statusText: undefined,
         });
-        await handleEcho(id, text);
-        appendEntry({
-          type: "message",
-          message: {
-            role: "assistant",
-            content: [{ type: "text", text: `Echo: ${text}` }],
-            timestamp: Date.now(),
-          },
-        });
+        send({ type: "response", command: "prompt", success: true, id });
         break;
       }
 

@@ -145,6 +145,11 @@ export const QueueUpdateEventSchema = z.object({
   followUp: z.array(z.string()),
 });
 
+export const StreamingStateEventSchema = z.object({
+  type: z.literal("streaming_state"),
+  isStreaming: z.boolean(),
+});
+
 export const CompactionStartEventSchema = z.object({
   type: z.literal("compaction_start"),
   reason: z.enum(["manual", "threshold", "overflow"]).optional(),
@@ -214,6 +219,7 @@ const KnownPiEventSchema = z.discriminatedUnion("type", [
   ToolExecutionUpdateEventSchema,
   ToolExecutionEndEventSchema,
   QueueUpdateEventSchema,
+  StreamingStateEventSchema,
   CompactionStartEventSchema,
   CompactionEndEventSchema,
   AutoRetryStartEventSchema,

@@ -213,7 +213,8 @@ export function initIpc(win: BrowserWindow): void {
     if (!piInfo)
       throw new Error("pi binary not found. Please install pi or set the path in settings.");
     const loginShellEnv = await getHostEnv();
-    await registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv, true);
+    const useHost = !(process.env.FAKE_PI_SESSIONS_DIR && !process.env.PIVIS_TEST_HOST_SCRIPT);
+    await registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv, useHost);
   });
 
   // ── Worktree ───────────────────────────────────────────────────────

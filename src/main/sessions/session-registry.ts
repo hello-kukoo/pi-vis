@@ -29,6 +29,7 @@ export interface SessionRecord {
   lastActiveAt: number;
   /** True while the agent is actively processing a command (busy = ineligible for idle kill). */
   busy: boolean;
+  retryPending: boolean;
   /** Whether we hold the proper-lockfile advisory lock on the session file. */
   _hasLock?: boolean;
   /** True while activateSession() is mid-flight — guards re-entrant double-spawn. */
@@ -156,6 +157,7 @@ export class SessionRegistry {
       status: "cold",
       lastActiveAt: Date.now(),
       busy: false,
+      retryPending: false,
     };
     this.sessions.set(sessionId, record);
 
@@ -404,8 +406,24 @@ export class SessionRegistry {
       proc.on("event", (event) => {
         if (record.proc !== proc) return;
         record.lastActiveAt = Date.now();
-        if (event.type === "agent_start") record.busy = true;
-        else if (event.type === "agent_end") record.busy = false;
+        if ("__unknown" in event) {
+          // no-op
+        } else if (event.type === "agent_start") {
+          record.busy = true;
+          record.retryPending = false;
+        } else if (event.type === "agent_end") {
+          record.retryPending = !!event.willRetry;
+          record.busy = !!event.willRetry;
+        } else if (event.type === "auto_retry_start") {
+          record.retryPending = true;
+          record.busy = true;
+        } else if (event.type === "auto_retry_end" && event.success === false) {
+          record.retryPending = false;
+          record.busy = false;
+        } else if (event.type === "streaming_state") {
+          if (event.isStreaming) record.busy = true;
+          else if (!record.retryPending) record.busy = false;
+        }
         if (record.status === "starting") {
           record.status = "ready";
           this.onStatusChanged(sessionId, "ready");
@@ -424,6 +442,7 @@ export class SessionRegistry {
         record.proc = undefined;
         record._procReady = false;
         record.busy = false;
+        record.retryPending = false;
         if (code !== 0 && code !== null) {
           const tail = proc.stderrLog.slice(-5).join("").trim();
           record.error = tail
@@ -450,6 +469,7 @@ export class SessionRegistry {
         record.proc = undefined;
         record._procReady = false;
         record.busy = false;
+        record.retryPending = false;
         record.error = err.message;
         // P1-f: same as exit — async failure must release the lock.
         this._releaseLockIfHeld(sessionId);
@@ -870,6 +890,7 @@ export class SessionRegistry {
     rec.status = "cold";
     rec.error = undefined;
     rec.busy = false;
+    rec.retryPending = false;
     this.onStatusChanged(sessionId, "cold");
   }
 
@@ -910,6 +931,7 @@ export class SessionRegistry {
       rec.proc = undefined;
       rec._procReady = false;
       rec.busy = false;
+      rec.retryPending = false;
       proc?.stop();
       this._releaseLockIfHeld(rec.sessionId);
     }

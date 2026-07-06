@@ -278,7 +278,8 @@ describe("loadHistoryPage pagination", () => {
 
   it("reuses the single-file page cache when file identity is unchanged", async () => {
     writeEntries(linearUserEntries(1));
-    const stat = fs.statSync(file);
+    const fixedTime = new Date("2024-02-02T00:00:00.000Z");
+    fs.utimesSync(file, fixedTime, fixedTime);
 
     expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["msg-1"]);
     writeEntries([
@@ -297,9 +298,39 @@ describe("loadHistoryPage pagination", () => {
         message: { role: "user", content: [{ type: "text", text: "MSG-1" }] },
       },
     ]);
-    fs.utimesSync(file, stat.atime, stat.mtime);
+    fs.utimesSync(file, fixedTime, fixedTime);
 
     expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["msg-1"]);
+  });
+
+  it("invalidates the page cache when mtime changes even if size is unchanged", async () => {
+    writeEntries(linearUserEntries(1));
+    const firstTime = new Date("2024-02-02T00:00:00.000Z");
+    const secondTime = new Date("2024-02-02T00:00:02.000Z");
+    fs.utimesSync(file, firstTime, firstTime);
+    const stat = fs.statSync(file);
+    expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["msg-1"]);
+
+    writeEntries([
+      {
+        type: "session",
+        version: 3,
+        id: "root",
+        timestamp: "2024-01-01T00:00:00.000Z",
+        cwd: "/test/ws",
+      },
+      {
+        id: "u1",
+        parentId: "root",
+        timestamp: "2024-01-01T00:00:01.000Z",
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "MSG-1" }] },
+      },
+    ]);
+    fs.utimesSync(file, secondTime, secondTime);
+    expect(fs.statSync(file).size).toBe(stat.size);
+
+    expect(blockTexts((await loadHistoryPage(file, { limit: 1 })).blocks)).toEqual(["MSG-1"]);
   });
 
   it("trims pre-compaction entries before slicing pages", async () => {

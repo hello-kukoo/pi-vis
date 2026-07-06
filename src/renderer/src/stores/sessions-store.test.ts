@@ -6,6 +6,7 @@ import {
   isNewSessionPending,
   isPendingNewSessionActiveFor,
   isSessionAbortable,
+  isSessionWorking,
   sessionHasHistory,
   shouldShowWorkingIndicator,
   useSessionsStore,
@@ -203,6 +204,118 @@ describe("sessions store - batched session events", () => {
     expect(session?.isNewPending).toBe(false);
     expect(session?.transcript.blocks.map((b) => b.type)).toEqual(["user"]);
     expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+  });
+
+  it("keeps queued messages separate from transcript and replaces them authoritatively", () => {
+    const store = useSessionsStore.getState();
+    const id = store.enqueueOptimisticSteer(SESSION_A, "first");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering).toEqual([
+      { id, text: "first", source: "optimistic" },
+    ]);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks).toEqual([]);
+
+    store.applyEvent(SESSION_A, { type: "queue_update", steering: ["first"], followUp: ["later"] });
+    const queued = useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages;
+    expect(queued?.steering.map((m) => ({ text: m.text, source: m.source }))).toEqual([
+      { text: "first", source: "authoritative" },
+    ]);
+    expect(queued?.followUp.map((m) => ({ text: m.text, source: m.source }))).toEqual([
+      { text: "later", source: "authoritative" },
+    ]);
+  });
+
+  it("does not let stale optimistic failure cleanup remove authoritative queue", () => {
+    const store = useSessionsStore.getState();
+    const id = store.enqueueOptimisticSteer(SESSION_A, "dup");
+    store.applyEvent(SESSION_A, { type: "queue_update", steering: ["dup", "dup"], followUp: [] });
+    store.removeOptimisticQueuedMessage(SESSION_A, id);
+    expect(
+      useSessionsStore
+        .getState()
+        .sessions.get(SESSION_A)
+        ?.queuedMessages?.steering.map((m) => m.text),
+    ).toEqual(["dup", "dup"]);
+  });
+
+  it("tracks prompt in-flight as working and gates streaming false during retry", () => {
+    const store = useSessionsStore.getState();
+    store.beginPromptInFlight(SESSION_A);
+    const runningSince = useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince;
+    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(true);
+    expect(runningSince).toBeDefined();
+
+    store.applyEvents(SESSION_A, [
+      { type: "agent_end", willRetry: true },
+      { type: "streaming_state", isStreaming: false },
+    ]);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince).toBe(runningSince);
+
+    store.endPromptInFlight(SESSION_A);
+    store.applyEvent(SESSION_A, { type: "auto_retry_end", success: false });
+    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(false);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince).toBeUndefined();
+  });
+
+  it("reconciles get_state by identity and field epochs", () => {
+    const store = useSessionsStore.getState();
+    const initial = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    const captured = {
+      identityEpoch: initial.identityEpoch,
+      streamingEpoch: initial.streamingEpoch,
+      queueEpoch: initial.queueEpoch,
+    };
+
+    store.reconcileSessionState(
+      SESSION_A,
+      {
+        sessionId: "wire",
+        thinkingLevel: "medium",
+        isStreaming: true,
+        steering: ["a"],
+        followUp: [],
+      },
+      captured,
+    );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(true);
+    expect(
+      useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering[0]?.text,
+    ).toBe("a");
+
+    const stale = captured;
+    store.enqueueOptimisticSteer(SESSION_A, "newer");
+    store.reconcileSessionState(
+      SESSION_A,
+      { sessionId: "wire", thinkingLevel: "medium", isStreaming: false, pendingMessageCount: 0 },
+      stale,
+    );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(true);
+    expect(
+      useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering.length,
+    ).toBe(2);
+  });
+
+  it("does not let get_state raw isStreaming false break logical retry liveness", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
+    const retrying = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    const captured = {
+      identityEpoch: retrying.identityEpoch,
+      streamingEpoch: retrying.streamingEpoch,
+      queueEpoch: retrying.queueEpoch,
+    };
+
+    store.reconcileSessionState(
+      SESSION_A,
+      { sessionId: "wire", thinkingLevel: "medium", isStreaming: false, pendingMessageCount: 0 },
+      captured,
+    );
+
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.retryPending).toBe(true);
+    expect(s?.isStreaming).toBe(true);
+    expect(isSessionWorking(s)).toBe(true);
   });
 });
 
@@ -590,6 +703,19 @@ describe("sessions store - unread turn-result status dot", () => {
     // Retry attempt arrives WITHOUT a fresh agent_start, just new messages.
     store.applyEvent(SESSION_A, { type: "message_end", message: okMsg }); // attempt 2 ok
     store.applyEvent(SESSION_A, { type: "agent_end" });
+    const s = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(s?.unreadStatus).toBe("done");
+    expect(s?.isStreaming).toBe(false);
+  });
+
+  it("a late failed auto_retry_end does not overwrite a completed final agent_end", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
+    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
+    store.applyEvent(SESSION_A, { type: "message_end", message: okMsg });
+    store.applyEvent(SESSION_A, { type: "agent_end" });
+    store.applyEvent(SESSION_A, { type: "auto_retry_end", success: false });
     const s = useSessionsStore.getState().sessions.get(SESSION_A);
     expect(s?.unreadStatus).toBe("done");
     expect(s?.isStreaming).toBe(false);
@@ -2761,6 +2887,18 @@ describe("sessions store - isStreaming turn-end truth (S1, S2) + abortSession (S
 
   it("abortSession: streaming -> invoke called with {type:'abort'}", () => {
     useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
+    invokeMock.mockClear();
+    useSessionsStore.getState().abortSession(SESSION_A);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    const [, payload] = invokeMock.mock.calls[0] as [
+      string,
+      { sessionId: SessionId; command: { type: string } },
+    ];
+    expect(payload).toEqual({ sessionId: SESSION_A, command: { type: "abort" } });
+  });
+
+  it("abortSession: prompt in flight before agent_start is abortable", () => {
+    useSessionsStore.getState().beginPromptInFlight(SESSION_A);
     invokeMock.mockClear();
     useSessionsStore.getState().abortSession(SESSION_A);
     expect(invokeMock).toHaveBeenCalledTimes(1);

@@ -6,7 +6,11 @@ import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
-import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
+import {
+  ModelInfoSchema,
+  SessionStateSchema,
+  SessionStatsSchema,
+} from "@shared/pi-protocol/responses.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
@@ -34,6 +38,12 @@ import {
 let nextThinkingRequestId = 1;
 const pendingThinkingRequests = new Map<SessionId, number>();
 
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  source: "optimistic" | "authoritative";
+}
+
 export interface SessionViewState {
   sessionId: SessionId;
   workspacePath: string;
@@ -42,13 +52,16 @@ export interface SessionViewState {
   error?: string | undefined;
   transcript: TranscriptState;
   isStreaming: boolean;
-  /** Wall-clock timestamp (ms) when the current turn started running —
-   *  set on the *first* agent_start of a turn (when we weren't already
-   *  streaming) and cleared only on a final (non-retrying) agent_end. Auto
-   *  retries (agent_end with willRetry, and the agent_start pi re-emits for
-   *  the retry attempt) deliberately do NOT reset this, so the working
-   *  timer keeps counting across retries and stops only when the turn truly
-   *  finishes. */
+  queuedMessages?: { steering: QueuedMessage[]; followUp: QueuedMessage[] } | undefined;
+  promptsInFlight: number;
+  retryPending: boolean;
+  streamingEpoch: number;
+  queueEpoch: number;
+  identityEpoch: number;
+  /** Wall-clock timestamp (ms) when the session became logically working
+   *  (`isStreaming || promptsInFlight > 0`). It is set on the false→true
+   *  working transition and cleared on the true→false transition, so prompt
+   *  preflight, streaming, and retry backoff share one continuous timer. */
   runningSince?: number | undefined;
   /**
    * Unread turn-result marker for the sidebar status dot. Set to "done" or
@@ -249,7 +262,7 @@ export function isPendingNewSessionActiveFor(
 function shouldReapPendingNewSession(s: SessionViewState | undefined | null): boolean {
   if (!s || !isNewSessionPending(s)) return false;
   return (
-    !s.isStreaming &&
+    !isSessionWorking(s) &&
     !hasActiveBash(s) &&
     s.pendingDialogs.length === 0 &&
     !s.pendingPicker &&
@@ -344,8 +357,12 @@ function hasActiveAgentWork(session: SessionViewState | undefined): boolean {
  * command waiting on the user, not model/tool work, so suppress that idle wait
  * until the transcript proves actual assistant/tool work is active.
  */
+export function isSessionWorking(session: SessionViewState | undefined): boolean {
+  return !!session && (session.isStreaming || session.promptsInFlight > 0);
+}
+
 export function shouldShowWorkingIndicator(session: SessionViewState | undefined): boolean {
-  if (!session?.isStreaming) return false;
+  if (!session || !isSessionWorking(session)) return false;
   const extensionUiActive = session.pendingDialogs.length > 0 || session.panel != null;
   return !extensionUiActive || hasActiveAgentWork(session);
 }
@@ -354,9 +371,68 @@ function hasActiveBash(session: SessionViewState | undefined): boolean {
   return session?.transcript.activeBashId != null;
 }
 
+let queuedMessageCounter = 0;
+
+function queuedFromSnapshot(kind: "steering" | "followUp", texts: string[]): QueuedMessage[] {
+  return texts.map((text, index) => ({
+    id: `auth-${kind}-${index}-${text}`,
+    text,
+    source: "authoritative" as const,
+  }));
+}
+
+function queuedMessagesFromSnapshot(
+  steering: string[],
+  followUp: string[],
+): SessionViewState["queuedMessages"] {
+  if (steering.length === 0 && followUp.length === 0) return undefined;
+  return {
+    steering: queuedFromSnapshot("steering", steering),
+    followUp: queuedFromSnapshot("followUp", followUp),
+  };
+}
+
+function applyLivenessPatch(
+  session: SessionViewState,
+  patch: Partial<Pick<SessionViewState, "isStreaming" | "promptsInFlight" | "retryPending">>,
+): SessionViewState {
+  const wasWorking = isSessionWorking(session);
+  const next: SessionViewState = { ...session, ...patch };
+  const nowWorking = isSessionWorking(next);
+  let runningSince = session.runningSince;
+  if (!wasWorking && nowWorking) runningSince = Date.now();
+  if (wasWorking && !nowWorking) runningSince = undefined;
+  const livenessChanged =
+    session.isStreaming !== next.isStreaming ||
+    session.promptsInFlight !== next.promptsInFlight ||
+    session.retryPending !== next.retryPending;
+  return {
+    ...next,
+    runningSince,
+    streamingEpoch: livenessChanged ? session.streamingEpoch + 1 : session.streamingEpoch,
+  };
+}
+
+function resetRuntimeState(
+  session: SessionViewState,
+  opts?: { bumpIdentity?: boolean },
+): SessionViewState {
+  return {
+    ...session,
+    isStreaming: false,
+    promptsInFlight: 0,
+    retryPending: false,
+    runningSince: undefined,
+    queuedMessages: undefined,
+    streamingEpoch: session.streamingEpoch + 1,
+    queueEpoch: session.queueEpoch + 1,
+    identityEpoch: opts?.bumpIdentity ? session.identityEpoch + 1 : session.identityEpoch,
+  };
+}
+
 export function isSessionAbortable(session: SessionViewState | undefined): boolean {
   if (!session || session.status === "exited" || session.status === "failed") return false;
-  return session.isStreaming === true || hasActiveAgentWork(session) || hasActiveBash(session);
+  return isSessionWorking(session) || hasActiveAgentWork(session) || hasActiveBash(session);
 }
 
 interface SessionsStore {
@@ -466,6 +542,21 @@ interface SessionsStore {
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
   setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
+  beginPromptInFlight: (sessionId: SessionId) => void;
+  endPromptInFlight: (sessionId: SessionId) => void;
+  enqueueOptimisticSteer: (sessionId: SessionId, text: string) => string;
+  removeOptimisticQueuedMessage: (sessionId: SessionId, id: string) => void;
+  replaceQueueFromAuthoritativeSnapshot: (
+    sessionId: SessionId,
+    steering: string[],
+    followUp: string[],
+  ) => void;
+  clearQueue: (sessionId: SessionId) => void;
+  reconcileSessionState: (
+    sessionId: SessionId,
+    snapshot: unknown,
+    captured: { identityEpoch: number; streamingEpoch: number; queueEpoch: number },
+  ) => void;
   /** Interrupt the active turn or standalone bash command. No-op (no IPC)
    *  when the session has nothing abortable; rejection-safe when it does send
    *  (host-fallback transition can reject). S3. */
@@ -741,6 +832,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionName: name,
         transcript: createTranscriptState(),
         isStreaming: false,
+        queuedMessages: undefined,
+        promptsInFlight: 0,
+        retryPending: false,
+        streamingEpoch: 0,
+        queueEpoch: 0,
+        identityEpoch: 0,
         unreadStatus: undefined,
         turnErrored: false,
         pendingDialogs: [],
@@ -864,13 +961,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // or a status change without version info mustn't clobber a prior
         // value). See P1-c.
         const transcript = becomingTerminal ? finalizeActiveBlocks(s.transcript) : s.transcript;
+        const runtime =
+          becomingTerminal || status === "starting"
+            ? resetRuntimeState(s, { bumpIdentity: true })
+            : s;
         sessions.set(sessionId, {
-          ...s,
+          ...runtime,
           status,
           error,
           transcript,
-          isStreaming: becomingTerminal ? false : s.isStreaming,
-          runningSince: becomingTerminal ? undefined : s.runningSince,
           ...(piVersion !== undefined ? { piVersion } : {}),
         });
       }
@@ -899,37 +998,51 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       let anyPromoted = false;
 
       for (const event of events) {
-        let isStreaming = current.isStreaming;
         let unreadStatus = current.unreadStatus;
         let turnErrored = current.turnErrored;
-        let runningSince = current.runningSince;
+        let livenessPatch: Partial<Pick<SessionViewState, "isStreaming" | "retryPending">> = {};
+        let queuePatch: Pick<SessionViewState, "queuedMessages" | "queueEpoch"> | null = null;
         const sessionName =
           event.type === "session_info_changed" ? event.name : current.sessionName;
 
         if (event.type === "agent_start") {
-          isStreaming = true;
+          livenessPatch = { retryPending: false, isStreaming: true };
           turnErrored = false;
           unreadStatus = undefined;
-          if (!current.isStreaming) runningSince = Date.now();
         }
         if (event.type === "message_end" && event.message?.role === "assistant") {
           if (detectTurnError(event.message).isError) turnErrored = true;
         }
         if (event.type === "agent_end") {
           if (event.willRetry) {
+            livenessPatch = { retryPending: true, isStreaming: true };
             turnErrored = false;
           } else {
-            isStreaming = false;
-            runningSince = undefined;
+            livenessPatch = { retryPending: false, isStreaming: false };
             unreadStatus = turnErrored ? "error" : "done";
             turnErrored = false;
           }
         }
-        if (event.type === "auto_retry_end" && event.success === false && isStreaming) {
-          isStreaming = false;
-          runningSince = undefined;
+        if (event.type === "auto_retry_start") {
+          livenessPatch = { retryPending: true, isStreaming: true };
+        }
+        if (event.type === "auto_retry_end" && event.success === false && current.isStreaming) {
+          livenessPatch = { retryPending: false, isStreaming: false };
           unreadStatus = "error";
           turnErrored = false;
+        }
+        if (event.type === "streaming_state") {
+          livenessPatch = event.isStreaming
+            ? { isStreaming: true }
+            : current.retryPending
+              ? {}
+              : { isStreaming: false };
+        }
+        if (event.type === "queue_update") {
+          queuePatch = {
+            queuedMessages: queuedMessagesFromSnapshot(event.steering, event.followUp),
+            queueEpoch: current.queueEpoch + 1,
+          };
         }
 
         const thinkingLevel =
@@ -949,15 +1062,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           );
           anyPromoted = true;
         }
+        const live = applyLivenessPatch(current, livenessPatch);
         current = {
-          ...current,
+          ...live,
           transcript,
-          isStreaming,
           unreadStatus,
           turnErrored,
-          runningSince,
           sessionName,
           thinkingLevel,
+          ...(queuePatch ?? {}),
           isNewPending: promoted ? false : current.isNewPending,
           editorInjection: promoted ? undefined : current.editorInjection,
         };
@@ -1167,18 +1280,138 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      // Keep the working timer in lockstep with the optimistic streaming
-      // flag the composer sets at send time (ahead of the real agent_start):
-      // start it on the first send of a turn, stop it when streaming ends.
-      // The applyEvent path does the authoritative bookkeeping for retries;
-      // here we only stamp/clear when not already done so.
-      const runningSince =
-        isStreaming && s.runningSince == null
-          ? Date.now()
-          : !isStreaming
-            ? undefined
-            : s.runningSince;
-      sessions.set(sessionId, { ...s, isStreaming, runningSince });
+      sessions.set(sessionId, applyLivenessPatch(s, { isStreaming }));
+      return { sessions };
+    });
+  },
+
+  beginPromptInFlight: (sessionId) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, applyLivenessPatch(s, { promptsInFlight: s.promptsInFlight + 1 }));
+      return { sessions };
+    });
+  },
+
+  endPromptInFlight: (sessionId) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(
+        sessionId,
+        applyLivenessPatch(s, { promptsInFlight: Math.max(0, s.promptsInFlight - 1) }),
+      );
+      return { sessions };
+    });
+  },
+
+  enqueueOptimisticSteer: (sessionId, text) => {
+    const id = `optimistic-${++queuedMessageCounter}`;
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      const queued = s.queuedMessages ?? { steering: [], followUp: [] };
+      sessions.set(sessionId, {
+        ...s,
+        queuedMessages: {
+          ...queued,
+          steering: [...queued.steering, { id, text, source: "optimistic" }],
+        },
+        queueEpoch: s.queueEpoch + 1,
+      });
+      return { sessions };
+    });
+    return id;
+  },
+
+  removeOptimisticQueuedMessage: (sessionId, id) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s?.queuedMessages) return {};
+      const steering = s.queuedMessages.steering.filter(
+        (m) => !(m.id === id && m.source === "optimistic"),
+      );
+      const followUp = s.queuedMessages.followUp.filter(
+        (m) => !(m.id === id && m.source === "optimistic"),
+      );
+      if (
+        steering.length === s.queuedMessages.steering.length &&
+        followUp.length === s.queuedMessages.followUp.length
+      )
+        return {};
+      sessions.set(sessionId, {
+        ...s,
+        queuedMessages: steering.length || followUp.length ? { steering, followUp } : undefined,
+        queueEpoch: s.queueEpoch + 1,
+      });
+      return { sessions };
+    });
+  },
+
+  replaceQueueFromAuthoritativeSnapshot: (sessionId, steering, followUp) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, {
+        ...s,
+        queuedMessages: queuedMessagesFromSnapshot(steering, followUp),
+        queueEpoch: s.queueEpoch + 1,
+      });
+      return { sessions };
+    });
+  },
+
+  clearQueue: (sessionId) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, { ...s, queuedMessages: undefined, queueEpoch: s.queueEpoch + 1 });
+      return { sessions };
+    });
+  },
+
+  reconcileSessionState: (sessionId, snapshot, captured) => {
+    const parsed = SessionStateSchema.safeParse(snapshot);
+    if (!parsed.success) return;
+    const snap = parsed.data;
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s || s.identityEpoch !== captured.identityEpoch) return {};
+
+      let next = s;
+      if (
+        next.streamingEpoch === captured.streamingEpoch &&
+        typeof snap.isStreaming === "boolean"
+      ) {
+        if (snap.isStreaming) {
+          next = applyLivenessPatch(next, { isStreaming: true, retryPending: false });
+        } else if (!next.retryPending) {
+          next = applyLivenessPatch(next, { isStreaming: false, retryPending: false });
+        }
+      }
+
+      if (next.queueEpoch === captured.queueEpoch) {
+        if (snap.steering || snap.followUp) {
+          next = {
+            ...next,
+            queuedMessages: queuedMessagesFromSnapshot(snap.steering ?? [], snap.followUp ?? []),
+            queueEpoch: next.queueEpoch + 1,
+          };
+        } else if (snap.pendingMessageCount === 0) {
+          next = { ...next, queuedMessages: undefined, queueEpoch: next.queueEpoch + 1 };
+        }
+      }
+
+      if (next === s) return {};
+      sessions.set(sessionId, next);
       return { sessions };
     });
   },
@@ -1187,7 +1420,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     const s = get().sessions.get(sessionId);
     if (!s || s.status === "exited" || s.status === "failed") return;
     const command =
-      s.isStreaming || hasActiveAgentWork(s)
+      isSessionWorking(s) || hasActiveAgentWork(s)
         ? { type: "abort" as const }
         : hasActiveBash(s)
           ? { type: "abort_bash" as const }
@@ -1445,7 +1678,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           payload as Parameters<typeof window.pivis.invoke>[1],
         ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
       uiSurface: "unified" as const,
-      setStreaming: get().setStreaming,
+      beginPromptInFlight: get().beginPromptInFlight,
+      endPromptInFlight: get().endPromptInFlight,
+      enqueueOptimisticSteer: get().enqueueOptimisticSteer,
+      removeOptimisticQueuedMessage: get().removeOptimisticQueuedMessage,
       addToast: get().addToast,
       addUserMessage: get().addUserMessage,
       clearPendingUserEcho: get().clearPendingUserEcho,
@@ -1474,8 +1710,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       getAvailableModels: (sid: SessionId): ModelInfo[] =>
         get().sessions.get(sid)?.availableModels ?? [],
       getSessionName: (sid: SessionId) => get().sessions.get(sid)?.sessionName,
+      setSessionName: get().setSessionName,
       getCurrentModel: (sid: SessionId) => get().sessions.get(sid)?.currentModel,
-      isStreaming: (sid: SessionId) => get().sessions.get(sid)?.isStreaming ?? false,
+      isWorking: (sid: SessionId) => isSessionWorking(get().sessions.get(sid)),
       getSessionWorkspacePath: (sid: SessionId) => get().sessions.get(sid)?.workspacePath,
       listSessions: (p: string) =>
         window.pivis.invoke("workspace.listSessions", { workspacePath: p }),
@@ -1832,10 +2069,22 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
     // 2. Thinking level + session name/file (get_state).
     try {
+      const capturedSession = get().sessions.get(sessionId);
+      const captured = capturedSession
+        ? {
+            identityEpoch: capturedSession.identityEpoch,
+            streamingEpoch: capturedSession.streamingEpoch,
+            queueEpoch: capturedSession.queueEpoch,
+          }
+        : null;
       const res = await window.pivis.invoke("session.sendCommand", {
         sessionId,
         command: { type: "get_state" },
       });
+      if (!captured) return;
+      const currentAfterState = get().sessions.get(sessionId);
+      if (!currentAfterState || currentAfterState.identityEpoch !== captured.identityEpoch) return;
+      get().reconcileSessionState(sessionId, res?.data, captured);
       const raw = res?.data as
         | {
             thinkingLevel?: unknown;
@@ -2110,14 +2359,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const s = sessions.get(sessionId);
       if (!s) return {};
       const next: SessionViewState = {
-        ...s,
+        ...resetRuntimeState(s, { bumpIdentity: true }),
         sessionFile,
         transcript: createTranscriptState(),
         hasTreeHistory: false,
         historyCursor: undefined,
         historyLoadingEarlier: undefined,
-        isStreaming: false,
-        runningSince: undefined,
         unreadStatus: undefined,
         turnErrored: false,
         ...(sessionName !== undefined ? { sessionName } : {}),

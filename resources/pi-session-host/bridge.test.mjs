@@ -40,6 +40,8 @@ function makeSession(overrides = {}) {
     getLastAssistantText: vi.fn(() => "hi"),
     exportToHtml: vi.fn(async () => "/out.html"),
     getUserMessagesForForking: vi.fn(() => [{ entryId: "e1", text: "t" }]),
+    getSteeringMessages: vi.fn(() => []),
+    getFollowUpMessages: vi.fn(() => []),
     setSessionName: vi.fn(() => {}),
     bindExtensions: vi.fn(async () => {}),
     reload: vi.fn(async () => {}),
@@ -106,11 +108,47 @@ describe("setupCommandBridge — wiring", () => {
     expect(runtime.setBeforeSessionInvalidate).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards session events to main as {type:'event'}", () => {
+  it("forwards session events and synthetic streaming_state in-band", () => {
     const { session, send } = setup();
     const subscriber = session.subscribe.mock.calls[0][0];
+    session.isStreaming = true;
     subscriber({ type: "agent_start" });
     expect(send).toHaveBeenCalledWith({ type: "event", event: { type: "agent_start" } });
+    expect(send).toHaveBeenCalledWith({
+      type: "event",
+      event: { type: "streaming_state", isStreaming: true },
+    });
+  });
+
+  it("re-announces streaming state on rebind even when the value is unchanged", async () => {
+    const { runtime, send } = setup();
+    send.mockClear();
+    const rebind = runtime.setRebindSession.mock.calls[0][0];
+    const nextSession = makeSession({ isStreaming: false });
+    await rebind(nextSession);
+    expect(send).toHaveBeenCalledWith({
+      type: "event",
+      event: { type: "streaming_state", isStreaming: false },
+    });
+  });
+
+  it("keeps synthetic streaming true across retry backoff", async () => {
+    const { session, send, run } = setup();
+    const subscriber = session.subscribe.mock.calls[0][0];
+    session.isStreaming = true;
+    subscriber({ type: "agent_start" });
+    send.mockClear();
+
+    subscriber({ type: "agent_end", willRetry: true });
+    session.isStreaming = false;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(send).not.toHaveBeenCalledWith({
+      type: "event",
+      event: { type: "streaming_state", isStreaming: false },
+    });
+    const res = await run({ type: "get_state" });
+    expect(res.data.isStreaming).toBe(true);
   });
 
   it("before-invalidate only emits panel_clear_all when a panel was open", () => {
@@ -125,8 +163,11 @@ describe("setupCommandBridge — wiring", () => {
 // ─── Command mapping ─────────────────────────────────────────────────────────
 
 describe("setupCommandBridge — command mapping", () => {
-  it("get_state mirrors RpcSessionState (messageCount from messages.length)", async () => {
-    const { run } = setup();
+  it("get_state mirrors RpcSessionState (messageCount from messages.length) and queue arrays", async () => {
+    const { run } = setup({
+      getSteeringMessages: vi.fn(() => ["s1"]),
+      getFollowUpMessages: vi.fn(() => ["f1"]),
+    });
     const res = await run({ type: "get_state" });
     expect(res.success).toBe(true);
     expect(res.data).toMatchObject({
@@ -134,6 +175,8 @@ describe("setupCommandBridge — command mapping", () => {
       sessionId: "sid-1",
       messageCount: 2,
       pendingMessageCount: 0,
+      steering: ["s1"],
+      followUp: ["f1"],
     });
   });
 

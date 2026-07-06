@@ -228,9 +228,9 @@ function formatDuration(ms: number): string {
 }
 
 /** The working indicator row. Shows a spinner plus a live "Running for …"
- *  countdown driven by `runningSince`. The timer is started on the first
- *  agent_start of a turn and stopped only on a final agent_end; retries do
- *  not reset it, so the elapsed time reflects the full wait across retries. */
+ *  countdown driven by `runningSince`. The store starts/stops that timestamp
+ *  from logical working transitions (`isStreaming || promptsInFlight > 0`),
+ *  so prompt preflight and retries stay on one continuous timer. */
 function WorkingRow({ sessionId }: { sessionId: SessionId }): React.ReactElement {
   const runningSince = useSessionsStore((s) => s.sessions.get(sessionId)?.runningSince);
   const [, setTick] = useState(0);
@@ -335,6 +335,25 @@ function ToolCardShell({
 // memo bails out (new `data` ref) and re-renders; the ~150 other visible
 // blocks keep a stable `data` ref and skip. Without this, the parent
 // re-renders all visible blocks on every token (O(150) reconcile per delta).
+const QueuedBubble = memo(function QueuedBubble({
+  text,
+  kind,
+}: {
+  text: string;
+  kind: "steering" | "followUp";
+}): React.ReactElement {
+  return (
+    <div className="transcript-block transcript-block--queued-user">
+      <div className="transcript-block__bubble transcript-block__bubble--queued user-content">
+        <div className="queued-bubble__caption">
+          {kind === "steering" ? "Steering — queued" : "Follow-up — queued"}
+        </div>
+        <div className="transcript-block__content queued-bubble__content">{text}</div>
+      </div>
+    </div>
+  );
+});
+
 const UserBlock = memo(function UserBlock({ data }: { data: UserBlockData }): React.ReactElement {
   const openImages = useImageViewerStore((s) => s.openImages);
   const validImages = useMemo(
@@ -926,6 +945,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   }, []);
 
   const allBlocks: TypedTranscriptBlock[] = session?.transcript.blocks ?? [];
+  const queuedMessages = session?.queuedMessages;
   // Show the "Running for …" indicator for real agent work. Prompt-backed
   // extension UI can set isStreaming while merely waiting on the user, so the
   // store helper applies the UI-vs-tool-work distinction.
@@ -1216,6 +1236,12 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
               return null;
           }
         })}
+        {queuedMessages?.steering.map((message) => (
+          <QueuedBubble key={message.id} text={message.text} kind="steering" />
+        ))}
+        {queuedMessages?.followUp.map((message) => (
+          <QueuedBubble key={message.id} text={message.text} kind="followUp" />
+        ))}
         {showWorking && <WorkingRow sessionId={sessionId} />}
       </div>
     </div>

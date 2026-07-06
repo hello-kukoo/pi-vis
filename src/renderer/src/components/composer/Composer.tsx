@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import {
   BUILTIN_COMMANDS,
+  InputNotConsumedError,
   type PickerRequest,
   executeAction,
   parseComposerInput,
@@ -190,7 +191,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const addUserMessage = useSessionsStore((s) => s.addUserMessage);
   const addBashCommand = useSessionsStore((s) => s.addBashCommand);
   const finishBashCommand = useSessionsStore((s) => s.finishBashCommand);
-  const setStreaming = useSessionsStore((s) => s.setStreaming);
+  const beginPromptInFlight = useSessionsStore((s) => s.beginPromptInFlight);
+  const endPromptInFlight = useSessionsStore((s) => s.endPromptInFlight);
+  const enqueueOptimisticSteer = useSessionsStore((s) => s.enqueueOptimisticSteer);
+  const removeOptimisticQueuedMessage = useSessionsStore((s) => s.removeOptimisticQueuedMessage);
   const addToast = useSessionsStore((s) => s.addToast);
   const applyModelChange = useSessionsStore((s) => s.applyModelChange);
   const addCustomMessage = useSessionsStore((s) => s.addCustomMessage);
@@ -679,7 +683,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
               payload as Parameters<typeof window.pivis.invoke>[1],
             ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
           uiSurface: "composer" as const,
-          setStreaming,
+          beginPromptInFlight,
+          endPromptInFlight,
+          enqueueOptimisticSteer,
+          removeOptimisticQueuedMessage,
           addToast,
           addUserMessage,
           clearPendingUserEcho: useSessionsStore.getState().clearPendingUserEcho,
@@ -727,10 +734,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           },
           getSessionName: (sid: SessionId) =>
             useSessionsStore.getState().sessions.get(sid)?.sessionName,
+          setSessionName: useSessionsStore.getState().setSessionName,
           getCurrentModel: (sid: SessionId) =>
             useSessionsStore.getState().sessions.get(sid)?.currentModel,
-          isStreaming: (sid: SessionId) =>
-            useSessionsStore.getState().sessions.get(sid)?.isStreaming ?? false,
+          isWorking: (sid: SessionId) => {
+            const sess = useSessionsStore.getState().sessions.get(sid);
+            return !!sess && (sess.isStreaming || sess.promptsInFlight > 0);
+          },
           getSessionWorkspacePath: (sid: SessionId) =>
             useSessionsStore.getState().sessions.get(sid)?.workspacePath,
           listSessions: (p: string) =>
@@ -766,6 +776,19 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         // A send also consumes any editor injection — otherwise the stale
         // injection would re-fire on the next remount and pollute the draft.
         useSessionsStore.getState().clearEditorInjection(sessionId);
+      } catch (err) {
+        if (err instanceof InputNotConsumedError) {
+          setText(content);
+          setAttachments(attachments);
+          setFileAttachments(fileAttachments);
+          if (pendingRef.current && workspacePathRef.current) {
+            useSessionsStore.getState().setNewSessionDraft(workspacePathRef.current, content);
+          } else {
+            useSessionsStore.getState().setSessionDraft(sessionId, content);
+          }
+          return;
+        }
+        throw err;
       } finally {
         submittingRef.current = false;
       }
@@ -776,7 +799,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       session,
       sessionId,
       addToast,
-      setStreaming,
+      beginPromptInFlight,
+      endPromptInFlight,
+      enqueueOptimisticSteer,
+      removeOptimisticQueuedMessage,
       addUserMessage,
       addBashCommand,
       finishBashCommand,

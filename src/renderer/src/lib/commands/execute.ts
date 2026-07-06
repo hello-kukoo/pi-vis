@@ -62,8 +62,10 @@ export interface ExecuteDeps {
   ) => Promise<{ success: boolean; data?: T; error?: string }>;
   /** Surface that submitted this command; host-side extension UI follows it. */
   uiSurface?: "composer" | "unified" | undefined;
-  /** Add a working "..." indicator while a prompt is in flight. */
-  setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
+  beginPromptInFlight: (sessionId: SessionId) => void;
+  endPromptInFlight: (sessionId: SessionId) => void;
+  enqueueOptimisticSteer: (sessionId: SessionId, text: string) => string;
+  removeOptimisticQueuedMessage: (sessionId: SessionId, id: string) => void;
   /** Add a transient toast notification in the active session. */
   addToast: (
     sessionId: SessionId,
@@ -116,17 +118,25 @@ export interface ExecuteDeps {
   copyToClipboard: (text: string) => Promise<void>;
   /** Look up the session's available models (for the /model picker / exact match). */
   getAvailableModels: (sessionId: SessionId) => ModelInfo[];
-  /** Look up the session's name (for /name no-arg). */
+  /** Look up/update the session's name (for /name). */
   getSessionName: (sessionId: SessionId) => string | undefined;
+  setSessionName: (sessionId: SessionId, name: string) => void;
   /** Look up the session's current model id (for last-used model echo). */
   getCurrentModel: (sessionId: SessionId) => string | undefined;
   /** Whether the session is mid-turn (agent running). Used to send a
    *  `steer` instead of queuing a new `prompt` while the model works. */
-  isStreaming: (sessionId: SessionId) => boolean;
+  isWorking: (sessionId: SessionId) => boolean;
   /** Look up the active session's workspace path (for /resume). */
   getSessionWorkspacePath: (sessionId: SessionId) => string | undefined;
   /** List sessions in a workspace (for /resume). */
   listSessions: (workspacePath: string) => Promise<SessionSummary[]>;
+}
+
+export class InputNotConsumedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InputNotConsumedError";
+  }
 }
 
 export type PickerRequest =
@@ -326,17 +336,17 @@ async function executeSendPrompt(
   // turn so the user's course correction takes effect immediately. Unknown
   // slash passthrough is excluded for the same reason as above: a stale
   // extension command should not be converted into a steer message.
-  const isSteer = !isUnknownSlashPassthrough && deps.isStreaming(sessionId);
+  const isSteer = !isUnknownSlashPassthrough && deps.isWorking(sessionId);
 
-  // Plain text: pi will deliver a user message via the wire (role: "user"
+  // Plain prompts: pi will deliver a user message via the wire (role: "user"
   // message_start) which renders the authoritative text — we still seed the
-  // bubble optimistically so the user sees their text instantly. Steer messages
-  // are optimistic too, but do not register a pending echo: pi does not echo
-  // steer as a normal user message_start, and a stale token would suppress the
-  // next real echo. Prompt-template / skill / unknown slash sends rely on the
-  // wire echo (if any) instead of optimistic local text.
+  // bubble optimistically so the user sees their text instantly. Steers are
+  // different: they render as pending queued bubbles until pi's queue_update
+  // removes the pending entry and the subsequent user echo appends the single
+  // delivered transcript block. Prompt-template / skill / unknown slash sends
+  // rely on the wire echo (if any) instead of optimistic transcript text.
   const registeredOptimisticEcho = action.commandSource === undefined && !isUnknownSlashPassthrough;
-  if (registeredOptimisticEcho) {
+  if (registeredOptimisticEcho && !isSteer) {
     deps.addUserMessage(
       sessionId,
       action.text,
@@ -361,6 +371,7 @@ async function executeSendPrompt(
         mimeType: i.mimeType,
       }));
     }
+    const optimisticId = deps.enqueueOptimisticSteer(sessionId, action.text);
     let res: { success: boolean; data?: unknown; error?: string };
     try {
       res = await deps.invoke("session.sendCommand", {
@@ -369,24 +380,23 @@ async function executeSendPrompt(
         uiSurface: deps.uiSurface,
       });
     } catch (err) {
-      if (action.commandSource === undefined) deps.clearPendingUserEcho(sessionId, action.text);
+      deps.removeOptimisticQueuedMessage(sessionId, optimisticId);
       const message =
         err instanceof Error ? err.message : `Failed to steer current turn: ${String(err)}`;
       deps.addToast(sessionId, message, "error");
-      if (deps.uiSurface === "unified") throw new Error(message);
-      return;
+      throw new InputNotConsumedError(message);
     }
     if (!res.success) {
-      if (action.commandSource === undefined) deps.clearPendingUserEcho(sessionId, action.text);
+      deps.removeOptimisticQueuedMessage(sessionId, optimisticId);
       const message = res.error ?? "Failed to steer current turn";
       deps.addToast(sessionId, message, "error");
-      if (deps.uiSurface === "unified") throw new Error(message);
+      throw new InputNotConsumedError(message);
     }
     return;
   }
 
-  const setOptimisticStreaming = !isUnknownSlashPassthrough;
-  if (setOptimisticStreaming) deps.setStreaming(sessionId, true);
+  const trackPromptInFlight = !isUnknownSlashPassthrough;
+  if (trackPromptInFlight) deps.beginPromptInFlight(sessionId);
   const promptCommand: {
     type: "prompt";
     message: string;
@@ -415,19 +425,18 @@ async function executeSendPrompt(
       uiSurface: deps.uiSurface,
     });
   } catch (err) {
-    if (setOptimisticStreaming) deps.setStreaming(sessionId, false);
     if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
     const message = err instanceof Error ? err.message : `Failed to send prompt: ${String(err)}`;
     deps.addToast(sessionId, message, "error");
-    if (deps.uiSurface === "unified") throw new Error(message);
-    return;
+    throw new InputNotConsumedError(message);
+  } finally {
+    if (trackPromptInFlight) deps.endPromptInFlight(sessionId);
   }
   if (!res.success) {
-    if (setOptimisticStreaming) deps.setStreaming(sessionId, false);
     if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
     const message = res.error ?? "Failed to send prompt";
     deps.addToast(sessionId, message, "error");
-    if (deps.uiSurface === "unified") throw new Error(message);
+    throw new InputNotConsumedError(message);
   }
 }
 
@@ -535,7 +544,10 @@ async function executeName(
     deps.addToast(sessionId, res.error ?? "Failed to set session name", "error");
     return;
   }
-  // Store updates via session_info_changed event (SessionHeader subscribes).
+  // Pi also emits session_info_changed; this optimistic write keeps the GUI
+  // responsive and covers RPC fallback timing where the event can arrive after
+  // the response.
+  deps.setSessionName(sessionId, action.name);
   deps.addToast(sessionId, `Session name set: ${action.name}`);
 }
 
@@ -702,7 +714,7 @@ async function executeQuit(sessionId: SessionId, deps: ExecuteDeps): Promise<voi
 }
 
 async function executeReload(sessionId: SessionId, deps: ExecuteDeps): Promise<void> {
-  if (deps.isStreaming(sessionId)) {
+  if (deps.isWorking(sessionId)) {
     deps.addToast(
       sessionId,
       "Wait for the current response to finish before reloading.",

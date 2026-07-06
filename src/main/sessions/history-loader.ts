@@ -383,22 +383,21 @@ function trimPreCompaction(chain: Array<Record<string, unknown>>): Array<Record<
 }
 
 const DEFAULT_HISTORY_LIMIT = 500;
-let pageCache: {
-  filePath: string;
-  mtimeMs: number;
-  size: number;
-  blocks: TranscriptBlock[];
-} | null = null;
+const pageCache = new Map<
+  string,
+  {
+    mtimeMs: number;
+    size: number;
+    blocks: TranscriptBlock[];
+  }
+>();
 
 async function loadAllHistoryBlocks(filePath: string): Promise<TranscriptBlock[]> {
   const stat = await fs.promises.stat(filePath);
-  if (
-    pageCache &&
-    pageCache.filePath === filePath &&
-    pageCache.mtimeMs === stat.mtimeMs &&
-    pageCache.size === stat.size
-  ) {
-    return pageCache.blocks;
+  const mtimeMs = stat.mtimeMs;
+  const cached = pageCache.get(filePath);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === stat.size) {
+    return cached.blocks;
   }
 
   const { header, entries } = await parseEntries(filePath);
@@ -409,7 +408,7 @@ async function loadAllHistoryBlocks(filePath: string): Promise<TranscriptBlock[]
 
   const chain = walkActiveChain(entries);
   const blocks = entriesToTranscript(trimPreCompaction(chain));
-  pageCache = { filePath, mtimeMs: stat.mtimeMs, size: stat.size, blocks };
+  pageCache.set(filePath, { mtimeMs, size: stat.size, blocks });
   return blocks;
 }
 

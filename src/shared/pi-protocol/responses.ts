@@ -38,6 +38,8 @@ export const SessionStateSchema = z
     autoCompactionEnabled: z.boolean().optional(),
     messageCount: z.number().optional(),
     pendingMessageCount: z.number().optional(),
+    steering: z.array(z.string()).optional(),
+    followUp: z.array(z.string()).optional(),
   })
   .passthrough();
 
