@@ -66,25 +66,29 @@ available (unless `CSC_LINK` supplies the certificate).
 
 ```bash
 # Defaults to a patch bump, e.g. 0.3.3 -> 0.3.4
-npm run release -- --yes
+npm run release -- --notes-file docs/releases/v0.4.2.md --yes
 
 # Other supported bumps
-npm run release -- --minor --yes
-npm run release -- --major --yes
-npm run release -- --version 0.4.0 --yes
+npm run release -- --minor --notes-file docs/releases/v0.5.0.md --yes
+npm run release -- --major --notes-file docs/releases/v1.0.0.md --yes
+npm run release -- --version 0.4.0 --notes-file docs/releases/v0.4.0.md --yes
 
 # Inspect the planned commands without mutating files
-npm run release -- --patch --dry-run
+npm run release -- --patch --generate-notes --dry-run
 ```
 
 The command bumps `package.json`/`package-lock.json`, runs typecheck, lint, unit
 tests, and E2E tests, builds signed/notarized artifacts, verifies codesigning,
 Gatekeeper acceptance, and notarization stapling, commits the version bump, tags
 `vX.Y.Z`, pushes the tag, and creates the GitHub Release with the zip and dmg
-assets. Useful options: `--draft` creates a draft GitHub Release, `--no-push`
-stops after creating the local release commit/tag (skipping both git push and
-GitHub Release creation), and `--skip-tests` is available only for emergency
-reruns after the exact same commit has already passed verification.
+assets. Public GitHub Releases require release notes: create and commit a curated notes
+file under `docs/releases/vX.Y.Z.md`, then pass `--notes-file <path>`
+(preferred), or pass `--generate-notes` to use GitHub's auto-generated notes. If
+both are passed, the curated notes file is used. Useful options: `--draft`
+creates a draft GitHub Release, `--no-push` stops after creating the local
+release commit/tag (skipping both git push and GitHub Release creation), and
+`--skip-tests` is available only for emergency reruns after the exact same commit
+has already passed verification.
 
 ### Architecture
 
@@ -116,7 +120,7 @@ gh release create "v${VERSION}" \
   "release/${VERSION}/Pi-Vis-${VERSION}-arm64.dmg" \
   "release/${VERSION}/Pi-Vis-arm64.dmg" \
   --title "v${VERSION}" \
-  --notes "Pi-Vis v${VERSION}"
+  --notes-file "docs/releases/v${VERSION}.md"
 ```
 
 `install.sh` resolves the asset via the GitHub API (`releases/latest`), so it

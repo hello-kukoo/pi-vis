@@ -11,6 +11,8 @@ const dryRun = args.has("dry-run");
 const noPush = args.has("no-push");
 const draft = args.has("draft");
 const skipTests = args.has("skip-tests");
+const notesFile = args.get("notes-file");
+const generateNotes = args.has("generate-notes");
 const yes = args.has("yes");
 const notaryProfile = resolveNotaryProfile({ explicit: args.get("notary-profile") });
 if (notaryProfile) {
@@ -26,6 +28,7 @@ function main() {
   const currentVersion = readPackage().version;
   const nextVersion = resolveNextVersion(currentVersion, bump);
   const tag = `v${nextVersion}`;
+  validateReleaseNotesOptions();
 
   log(`Releasing Pi-Vis ${tag}${dryRun ? " (dry run)" : ""}`);
   if (notaryProfile) {
@@ -70,16 +73,12 @@ function main() {
     `release/${nextVersion}/Pi-Vis-arm64.dmg`,
   ];
 
-  const releaseArgs = [
-    "release",
-    "create",
-    tag,
-    ...assets,
-    "--title",
-    tag,
-    "--notes",
-    `Pi-Vis ${tag}`,
-  ];
+  const releaseArgs = ["release", "create", tag, ...assets, "--title", tag];
+  if (notesFile) {
+    releaseArgs.push("--notes-file", notesFile);
+  } else {
+    releaseArgs.push("--generate-notes");
+  }
   if (draft) releaseArgs.push("--draft");
   run("gh", releaseArgs);
 
@@ -132,6 +131,21 @@ function createStableReleaseAliases(version) {
   if (!dryRun) fs.copyFileSync(versionedDmg, stableDmg);
 }
 
+function validateReleaseNotesOptions() {
+  if (noPush) return;
+  if (!notesFile && !generateNotes) {
+    fail("Public releases require release notes. Pass --notes-file <path> or --generate-notes.");
+  }
+  if (!notesFile) return;
+
+  const resolved = path.resolve(root, notesFile);
+  if (!dryRun && !fs.existsSync(resolved)) fail(`Release notes file not found: ${notesFile}`);
+  if (!dryRun && !fs.statSync(resolved).isFile())
+    fail(`Release notes path is not a file: ${notesFile}`);
+  if (!dryRun && !fs.readFileSync(resolved, "utf8").trim())
+    fail(`Release notes file is empty: ${notesFile}`);
+}
+
 function getBump(parsed) {
   const explicit = parsed.get("version");
   const bumps = ["patch", "minor", "major"].filter((name) => parsed.has(name));
@@ -180,7 +194,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith("--")) fail(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === "version" || key === "notary-profile") {
+    if (key === "version" || key === "notary-profile" || key === "notes-file") {
       const value = argv[++i];
       if (!value) fail(`--${key} requires a value.`);
       parsed.set(key, value);

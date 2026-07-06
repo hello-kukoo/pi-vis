@@ -6,19 +6,20 @@ release-command, and build instructions.
 ## Release command
 
 `npm run release` is the preferred release path. It performs release preflight,
-bumps the package version, runs verification, builds signed/notarized macOS
-artifacts, verifies the resulting `.app`, commits/tags the release, pushes the
-tag, and creates the GitHub Release with the zip and dmg assets.
+requires release notes for public GitHub Releases, bumps the package version,
+runs verification, builds signed/notarized macOS artifacts, verifies the
+resulting `.app`, commits/tags the release, pushes the tag, and creates the
+GitHub Release with the zip and dmg assets.
 
 Common forms:
 
 ```bash
 npm run dist:signed                   # signed/notarized local build, no tag/release
 npm run dist:signed -- --skip-notarize # signed-only local smoke-test build
-npm run release -- --yes              # patch release
-npm run release -- --minor --yes
-npm run release -- --version 0.4.0 --yes
-npm run release -- --patch --dry-run
+npm run release -- --notes-file docs/releases/v0.4.2.md --yes              # patch release
+npm run release -- --minor --notes-file docs/releases/v0.5.0.md --yes
+npm run release -- --version 0.4.0 --notes-file docs/releases/v0.4.0.md --yes
+npm run release -- --patch --generate-notes --dry-run
 ```
 
 Local releases default to the notarytool keychain profile `pivis-notary`, so no
