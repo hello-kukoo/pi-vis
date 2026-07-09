@@ -99,6 +99,8 @@ export interface DiffBadge {
   fileCount: number;
   insertions: number;
   deletions: number;
+  /** True when fileCount is a cap rather than the exact total. */
+  truncated: boolean;
 }
 
 export interface DiffStore {
@@ -266,6 +268,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
   // scan runs when the in-flight one finishes.
   let badgeInFlight = false;
   let badgePendingRoot: string | null = null;
+  const selectedBaseBySession = new Map<SessionId, string | null>();
 
   return {
     // ── viewer state ────────────────────────────────────────────────
@@ -325,8 +328,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         fileState: new Map(),
         editSession: null,
         editCancelNonce: 0,
-        // Reset branch selection on open.
-        selectedBase: null,
+        // Restore the branch selected for this session during the current app run.
+        selectedBase: selectedBaseBySession.get(sessionId) ?? null,
         includeRemoteBranches: includeRemote,
         stale: false,
         baselineFingerprint: null,
@@ -610,14 +613,30 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     loadBranches: async () => {
       const root = get().root;
-      if (!root) return;
+      const requestSessionId = get().sessionId;
+      if (!root || !requestSessionId) return;
       try {
         const res: GitBranchesResult = await window.pivis.invoke("git.branches", { root });
+        if (get().root !== root || get().sessionId !== requestSessionId) return;
         if (res.kind === "ok") {
+          const selectedBase = get().selectedBase;
+          const selectedBaseValid =
+            selectedBase === null || res.branches.some((branch) => branch.name === selectedBase);
+          const sessionId = get().sessionId;
           set({
             branches: res.branches,
             currentBranch: res.current,
+            ...(selectedBaseValid
+              ? {}
+              : {
+                  selectedBase: null,
+                  fileState: new Map(),
+                }),
           });
+          if (!selectedBaseValid) {
+            if (sessionId) selectedBaseBySession.set(sessionId, null);
+            void get().refresh();
+          }
         }
       } catch {
         // Silently ignore; branch dropdown just stays empty.
@@ -625,6 +644,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     },
 
     setBase: (base) => {
+      const sessionId = get().sessionId;
+      if (sessionId) selectedBaseBySession.set(sessionId, base);
       set({
         selectedBase: base,
         // Clear file state so diffs reload against the new base.
@@ -997,7 +1018,13 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       // insertions/deletions aren't rendered on the badge; the count is all
       // the closed-viewer path needs.
       set({
-        badge: { root, fileCount: res.fileCount, insertions: 0, deletions: 0 },
+        badge: {
+          root,
+          fileCount: res.fileCount,
+          insertions: 0,
+          deletions: 0,
+          truncated: res.truncated,
+        },
         badgeKind: "ready",
       });
       return;
@@ -1027,6 +1054,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         fileCount: res.files.length,
         insertions: t.insertions,
         deletions: t.deletions,
+        truncated: res.truncated,
       },
       badgeKind: "ready",
     });

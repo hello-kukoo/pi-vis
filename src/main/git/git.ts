@@ -511,7 +511,8 @@ export async function getChangesCount(root: string): Promise<GitChangesCountResu
   } catch (err) {
     return mapSpawnError(err);
   }
-  return { kind: "ok", fileCount: Math.min(countPorcelainV2(out), MAX_FILES) };
+  const count = countPorcelainV2(out);
+  return { kind: "ok", fileCount: Math.min(count, MAX_FILES), truncated: count > MAX_FILES };
 }
 
 /**

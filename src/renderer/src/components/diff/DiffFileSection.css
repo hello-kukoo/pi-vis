@@ -11,7 +11,7 @@
   background: var(--surface-raised);
   border: 1px solid var(--border-faint);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow: visible;
   scroll-margin-top: 0.571rem;
   transition: border-color 0.15s ease;
 }
@@ -35,8 +35,31 @@
     itself is a label, not a control — only the chevron toggles, so there's
     no button chrome (border / bevel) here. */
   background: var(--surface-raised);
+  border-radius: var(--diff-file-header-radius, calc(var(--radius-lg) - 1px))
+    var(--diff-file-header-radius, calc(var(--radius-lg) - 1px)) 0 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.diff-file__header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -0.571rem;
+  height: 0.571rem;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--shadow) 28%, transparent),
+    transparent
+  );
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.diff-file--open .diff-file__header::after {
+  opacity: 1;
 }
 
 /* The horizontal divider between header and body — only when the body is
@@ -46,6 +69,10 @@
    not a boxed subsection. */
 .diff-file--open .diff-file__header {
   border-bottom: 1px solid var(--border-strong);
+}
+
+.diff-file:not(.diff-file--open) .diff-file__header {
+  border-radius: calc(var(--radius-lg) - 1px);
 }
 
 /* The collapse/expand affordance — the only clickable part of the header.
@@ -141,6 +168,8 @@
   tab-size: 4;
   /* gutter-w set inline based on max line count. */
   --gutter-w: 3.571rem;
+  border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
+  overflow: hidden;
 }
 
 .diff-file__body--collapsed {
@@ -349,7 +378,7 @@
 .diff-comment-thread {
   display: grid;
   grid-template-columns: 1.571rem var(--gutter-w) var(--gutter-w) 1.143rem 1fr;
-  background: color-mix(in srgb, var(--surface-2) 20%, transparent);
+  background: var(--bg);
   font-family: var(--font-display);
   font-size: var(--font-size-base);
   line-height: var(--leading-normal);

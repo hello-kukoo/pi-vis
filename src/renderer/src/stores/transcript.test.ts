@@ -684,6 +684,33 @@ describe("transcript reducer — provider errors", () => {
     expect(state.blocks[0]?.type).toBe("error");
   });
 
+  it("marks an automatically retried provider error as retryable", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ERR_MSG }));
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+    state = applyPiEvent(state, e({ type: "agent_end", willRetry: true }));
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("error");
+    if (state.blocks[0]?.type === "error") {
+      expect(state.blocks[0].data.retryable).toBe(true);
+    }
+  });
+
+  it("does not relabel an older final error when a retry event has no current error", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(state, e({ type: "message_start", message: ERR_MSG }));
+    state = applyPiEvent(state, e({ type: "message_end", message: ERR_MSG }));
+    state = applyPiEvent(state, e({ type: "agent_end", willRetry: false }));
+    state = applyPiEvent(state, e({ type: "agent_end", willRetry: true }));
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]?.type).toBe("error");
+    if (state.blocks[0]?.type === "error") {
+      expect(state.blocks[0].data.retryable).toBeUndefined();
+    }
+  });
+
   it("a normal stop does not produce an error block", () => {
     let state = createTranscriptState();
     state = applyPiEvent(state, e({ type: "message_start", message: ASST_MSG }));

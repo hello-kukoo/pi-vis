@@ -8,7 +8,15 @@
 import type { GitChangedFile } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ThemedToken } from "shiki";
 import { type CodeComment, codeCommentKey } from "../../lib/diff-comments.js";
 import {
@@ -126,15 +134,59 @@ export function DiffFileSection({
   }, [state.status, state.collapsed, file.path, ensureFileLoaded]);
 
   const open = !state.collapsed;
+  const sectionElRef = useRef<HTMLElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const setSectionEl = useCallback(
+    (el: HTMLElement | null) => {
+      sectionElRef.current = el;
+      sectionRef(el);
+    },
+    [sectionRef],
+  );
+
+  useLayoutEffect(() => {
+    const section = sectionElRef.current;
+    const header = headerRef.current;
+    if (!section || !header || !open) {
+      header?.style.removeProperty("--diff-file-header-radius");
+      return;
+    }
+    const scroller = section.closest<HTMLElement>(".diff-content");
+    if (!scroller) return;
+
+    let raf: number | null = null;
+    const update = (): void => {
+      raf = null;
+      const rootTop = scroller.getBoundingClientRect().top;
+      const sectionRect = section.getBoundingClientRect();
+      const radius = Number.parseFloat(getComputedStyle(section).borderTopLeftRadius) || 0;
+      const scrollPastFileTop = Math.max(0, rootTop - sectionRect.top);
+      const currentRadius = Math.max(0, radius - scrollPastFileTop);
+      header.style.setProperty("--diff-file-header-radius", `${currentRadius}px`);
+    };
+    const schedule = (): void => {
+      if (raf !== null) return;
+      raf = requestAnimationFrame(update);
+    };
+
+    update();
+    scroller.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    return () => {
+      scroller.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [open]);
 
   return (
     <section
-      ref={sectionRef}
+      ref={setSectionEl}
       className={`diff-file${open ? " diff-file--open" : ""}${active ? " diff-file--active" : ""}`}
       data-path={file.path}
       data-testid={`diff-section-${file.path}`}
     >
-      <div className="diff-file__header" title={file.path}>
+      <div ref={headerRef} className="diff-file__header" title={file.path}>
         <button
           type="button"
           className="diff-file__chevron-btn"

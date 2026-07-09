@@ -85,6 +85,8 @@ export interface CustomMessageBlockData {
  */
 export interface ErrorBlockData {
   message: string;
+  /** Transient provider failure followed by an automatic retry. */
+  retryable?: boolean | undefined;
 }
 
 export type TypedTranscriptBlock =
@@ -119,6 +121,11 @@ export interface TranscriptState {
   activeAssistantId: string | null;
   activeToolCallIds: Map<string, string>; // toolCallId → blockId
   activeBashId: string | null;
+  /** Error block created by the current failed assistant turn, awaiting the
+   * following agent_end to tell us whether it will be retried. This scopes
+   * retryable marking to the current turn and prevents relabeling older final
+   * errors when a retry event arrives without a fresh message_end error. */
+  pendingRetryErrorBlockId: string | null;
   /**
    * FIFO of optimistic user-prompt texts the Composer added via
    * `addUserBlock(registerEcho: true)`. When a `message_start` with
@@ -137,6 +144,7 @@ export function createTranscriptState(): TranscriptState {
     activeAssistantId: null,
     activeToolCallIds: new Map(),
     activeBashId: null,
+    pendingRetryErrorBlockId: null,
     pendingEchoes: [],
   };
 }
@@ -278,7 +286,14 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
         return { id: b.id, type: "custom_message", data: { content: (d.content as string) ?? "" } };
       }
       if (b.type === "error") {
-        return { id: b.id, type: "error", data: { message: (d.message as string) ?? "" } };
+        return {
+          id: b.id,
+          type: "error",
+          data: {
+            message: (d.message as string) ?? "",
+            retryable: d.retryable as boolean | undefined,
+          },
+        };
       }
       // Unknown block type — drop it instead of synthesising an empty
       // user bubble, which would be confusing to the user.
@@ -291,7 +306,7 @@ export function seedFromHistory(
   state: TranscriptState,
   history: TranscriptBlock[],
 ): TranscriptState {
-  return { ...state, blocks: mapHistoryBlocks(history) };
+  return { ...state, blocks: mapHistoryBlocks(history), pendingRetryErrorBlockId: null };
 }
 
 export function prependHistory(
@@ -458,7 +473,14 @@ function endSegment(
 }
 
 export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): TranscriptState {
-  const { blocks, activeAssistantId, activeToolCallIds, activeBashId, pendingEchoes } = state;
+  const {
+    blocks,
+    activeAssistantId,
+    activeToolCallIds,
+    activeBashId,
+    pendingRetryErrorBlockId,
+    pendingEchoes,
+  } = state;
 
   // Helper: immutably update a block by id. Pure O(n) copy — used for the
   // *lifecycle* events (message_end, tool_execution_end, text_end, …) that
@@ -511,9 +533,27 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
   }
 
   switch (event.type) {
+    case "agent_end": {
+      if (!event.willRetry) return { ...state, pendingRetryErrorBlockId: null };
+      if (!pendingRetryErrorBlockId) return state;
+      let idx = -1;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        if (blocks[i]?.id === pendingRetryErrorBlockId) {
+          idx = i;
+          break;
+        }
+      }
+      const block = idx >= 0 ? blocks[idx] : undefined;
+      if (!block || block.type !== "error" || block.data.retryable) {
+        return { ...state, pendingRetryErrorBlockId: null };
+      }
+      const next = blocks.slice();
+      next[idx] = { ...block, data: { ...block.data, retryable: true } };
+      return { ...state, blocks: next, pendingRetryErrorBlockId: null };
+    }
     case "agent_start":
+      return { ...state, pendingRetryErrorBlockId: null };
     case "turn_start":
-    case "agent_end":
     case "turn_end":
     case "queue_update":
     case "streaming_state":
@@ -708,7 +748,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
 
       // Normal close — just stop streaming on the active assistant block.
       if (!isError) {
-        if (!activeAssistantId) return state;
+        if (!activeAssistantId) return { ...state, pendingRetryErrorBlockId: null };
         return {
           ...state,
           blocks: updateBlock(activeAssistantId, (b) => {
@@ -716,6 +756,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
             return { ...b, data: { ...b.data, isStreaming: false } };
           }),
           activeAssistantId: null,
+          pendingRetryErrorBlockId: null,
         };
       }
 
@@ -731,7 +772,12 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       };
 
       if (!activeAssistantId) {
-        return { ...state, blocks: [...blocks, errorBlock], activeAssistantId: null };
+        return {
+          ...state,
+          blocks: [...blocks, errorBlock],
+          activeAssistantId: null,
+          pendingRetryErrorBlockId: errorBlock.id,
+        };
       }
 
       const activeIndex = blocks.findIndex((b) => b.id === activeAssistantId);
@@ -747,13 +793,23 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
           b.type === "assistant" ? { ...b, data: { ...b.data, isStreaming: false } } : b,
         );
         next.splice(activeIndex + 1, 0, errorBlock);
-        return { ...state, blocks: next, activeAssistantId: null };
+        return {
+          ...state,
+          blocks: next,
+          activeAssistantId: null,
+          pendingRetryErrorBlockId: errorBlock.id,
+        };
       }
 
       // Drop the empty assistant block; the error block replaces it in place.
       const next = blocks.filter((b) => b.id !== activeAssistantId);
       next.splice(activeIndex, 0, errorBlock);
-      return { ...state, blocks: next, activeAssistantId: null };
+      return {
+        ...state,
+        blocks: next,
+        activeAssistantId: null,
+        pendingRetryErrorBlockId: errorBlock.id,
+      };
     }
 
     case "tool_execution_start": {

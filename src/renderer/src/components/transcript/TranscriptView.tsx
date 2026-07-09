@@ -933,7 +933,7 @@ function buildCompactRenderItems(
     const first = group[0];
     if (!first) return;
     const firstKey = renderItemKey(first);
-    const streaming = group.some(renderItemStreaming) || (final && showWorking);
+    const streaming = final && (group.some(renderItemStreaming) || showWorking);
     rendered.push({
       kind: "compact_group",
       key: `compact-${firstKey}`,
@@ -966,7 +966,7 @@ function buildCompactRenderItems(
     }
 
     const item: TranscriptRenderItem = { kind: "block", block };
-    if (block.type === "user" || block.type === "error") {
+    if (block.type === "user" || (block.type === "error" && !block.data.retryable)) {
       flushGroup();
       rendered.push({ kind: "item", item });
     } else {

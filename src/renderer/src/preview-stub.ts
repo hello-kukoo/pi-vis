@@ -850,7 +850,7 @@ const stub = {
           ],
         };
       case "git.changesCount":
-        return { kind: "ok", fileCount: 2 };
+        return { kind: "ok", fileCount: 2, truncated: false };
       case "git.fileDiff":
         return {
           kind: "ok",

@@ -123,6 +123,121 @@ describe("diff-store render caps", () => {
   });
 });
 
+describe("diff-store base branch selection", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invoke = vi.fn(async (channel: string) => {
+      if (channel === "git.changes") {
+        return {
+          kind: "ok",
+          repoRoot: "/repo",
+          files: [],
+          truncated: false,
+          fingerprint: "clean",
+        };
+      }
+      if (channel === "git.branches") {
+        return {
+          kind: "ok",
+          current: "feature",
+          branches: [
+            { name: "feature", remote: false, current: true },
+            { name: "main", remote: false, current: false },
+          ],
+        };
+      }
+      return { kind: "ok" };
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("remembers the selected base branch for the same session", () => {
+    const store = useDiffStore.getState();
+    store.openViewer("s-base-1" as never, "/repo");
+    store.setBase("main");
+    expect(useDiffStore.getState().selectedBase).toBe("main");
+
+    store.closeViewer();
+    useDiffStore.getState().openViewer("s-base-1" as never, "/repo");
+    expect(useDiffStore.getState().selectedBase).toBe("main");
+
+    useDiffStore.getState().openViewer("s-base-2" as never, "/repo");
+    expect(useDiffStore.getState().selectedBase).toBeNull();
+  });
+
+  it("clears a remembered base branch that no longer exists", async () => {
+    const store = useDiffStore.getState();
+    store.openViewer("s-stale-base" as never, "/repo");
+    store.setBase("deleted-branch");
+    expect(useDiffStore.getState().selectedBase).toBe("deleted-branch");
+
+    store.closeViewer();
+    useDiffStore.getState().openViewer("s-stale-base" as never, "/repo");
+    await Promise.resolve();
+
+    expect(useDiffStore.getState().selectedBase).toBeNull();
+  });
+
+  it("ignores stale branch responses after switching viewers", async () => {
+    let resolveRepoA!: (value: unknown) => void;
+    const repoABranches = new Promise((resolve) => {
+      resolveRepoA = resolve;
+    });
+    invoke.mockImplementation(async (channel: string, args: { root?: string } = {}) => {
+      if (channel === "git.branches" && args.root === "/repo-a") return repoABranches;
+      if (channel === "git.branches") {
+        return {
+          kind: "ok",
+          current: "feature",
+          branches: [
+            { name: "feature", remote: false, current: true },
+            { name: "keep", remote: false, current: false },
+          ],
+        };
+      }
+      if (channel === "git.changes") {
+        return {
+          kind: "ok",
+          repoRoot: args.root ?? "/repo-b",
+          files: [],
+          truncated: false,
+          fingerprint: "clean",
+        };
+      }
+      return { kind: "ok" };
+    });
+
+    useDiffStore.setState({
+      root: "/repo-a",
+      sessionId: "session-a" as never,
+      selectedBase: "main",
+    });
+    const staleLoad = useDiffStore.getState().loadBranches();
+    useDiffStore.setState({
+      root: "/repo-b",
+      sessionId: "session-b" as never,
+      selectedBase: "keep",
+    });
+
+    resolveRepoA({
+      kind: "ok",
+      current: "main",
+      branches: [{ name: "main", remote: false, current: true }],
+    });
+    await staleLoad;
+
+    expect(useDiffStore.getState().root).toBe("/repo-b");
+    expect(useDiffStore.getState().sessionId).toBe("session-b");
+    expect(useDiffStore.getState().selectedBase).toBe("keep");
+  });
+});
+
 describe("diff-store edit session", () => {
   beforeAll(async () => {
     // Warm the Shiki singleton under real timers so commitSave's tokenizeLines

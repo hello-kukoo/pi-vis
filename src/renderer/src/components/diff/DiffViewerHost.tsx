@@ -288,6 +288,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       scrolledIdRef.current = null;
       return;
     }
+    select(activeMatch.path);
     const st = useDiffStore.getState().fileState.get(activeMatch.path);
     if (st?.collapsed) toggleCollapsed(activeMatch.path);
     if (activeMatch.lineIdx + 1 > (st?.renderCap ?? 5_000)) {
@@ -301,7 +302,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       el.scrollIntoView({ block: "center", behavior: "auto" });
       scrolledIdRef.current = activeMatch.id;
     }
-  }, [visible, activeMatch, fileState, toggleCollapsed, ensureFileLoaded, bumpRenderCap]);
+  }, [visible, activeMatch, fileState, select, toggleCollapsed, ensureFileLoaded, bumpRenderCap]);
 
   const jumpTo = useCallback(
     (path: string) => {
@@ -563,6 +564,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           narrow={narrow}
           stale={stale}
           refreshing={refreshing}
+          truncated={truncated}
           searchOpen={searchOpen}
           railVisible={railVisible}
           onToggleRail={toggleRail}
@@ -580,7 +582,9 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
           onRefresh={() => void refresh()}
           onSetViewMode={setViewMode}
         />
-        {truncated && <div className="diff-viewer__truncated">Showing first 500 changed files</div>}
+        {truncated && (
+          <div className="diff-viewer__truncated">Showing first &gt;499 changed files</div>
+        )}
         <div className="diff-viewer__body">
           {phase === "ready" && searchOpen && (
             <DiffSearchBar
@@ -653,6 +657,7 @@ function ViewerHeader({
   narrow,
   stale,
   refreshing,
+  truncated,
   searchOpen,
   railVisible,
   onToggleRail,
@@ -667,6 +672,7 @@ function ViewerHeader({
   narrow: boolean;
   stale: boolean;
   refreshing: boolean;
+  truncated: boolean;
   searchOpen: boolean;
   railVisible: boolean;
   onToggleRail: () => void;
@@ -703,7 +709,8 @@ function ViewerHeader({
         <BaseBranchDropdown />
         <span className="diff-viewer__summary">
           <span>
-            {totals.count.toLocaleString()} {totals.count === 1 ? "file" : "files"}
+            {truncated ? `>${(totals.count - 1).toLocaleString()}` : totals.count.toLocaleString()}{" "}
+            {totals.count === 1 ? "file" : "files"}
           </span>
           {totals.ins > 0 && (
             <span className="diff-viewer__summary-add">+{totals.ins.toLocaleString()}</span>

@@ -42,7 +42,7 @@ export type GitChangesResult =
  *  (capped at the same limit as `GitChangesResult.files`). No line counts,
  *  no fingerprint — see `getChangesCount`. */
 export type GitChangesCountResult =
-  | { kind: "ok"; fileCount: number }
+  | { kind: "ok"; fileCount: number; truncated: boolean }
   | { kind: "not-a-repo" }
   | { kind: "git-missing" }
   | { kind: "error"; message: string };

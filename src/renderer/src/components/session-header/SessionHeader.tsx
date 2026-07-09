@@ -926,6 +926,9 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
   if (badge === null) return null;
 
   const hasChanges = badge.fileCount > 0;
+  const countLabel = badge.truncated
+    ? `>${(badge.fileCount - 1).toLocaleString()}`
+    : badge.fileCount.toLocaleString();
   return (
     <button
       type="button"
@@ -936,7 +939,7 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
       data-testid="changes-button"
     >
       <span aria-hidden>±</span>
-      {hasChanges && <span className="session-header__changes-count">{badge.fileCount}</span>}
+      {hasChanges && <span className="session-header__changes-count">{countLabel}</span>}
     </button>
   );
 }
