@@ -10,7 +10,7 @@
 .diff-edit-card {
   position: relative;
   border-radius: var(--radius-md);
-  background: var(--input-bg);
+  background: var(--bg);
   /* Layout-neutral chrome: an inset ring, no border/padding that would shift
      surrounding rows. */
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
@@ -137,7 +137,8 @@
 }
 
 .diff-edit-textarea::selection {
-  background: var(--selection, color-mix(in srgb, var(--accent) 30%, transparent));
+  background: color-mix(in srgb, var(--accent-fill, var(--accent)) 72%, transparent);
+  color: var(--on-accent);
 }
 
 .diff-edit-textarea:disabled {
@@ -218,37 +219,94 @@
   padding-bottom: 1.5rem;
 }
 
-/* ── Edit bubble (floating over a selection) ──────────────────────── */
+/* ── Edit bubble (selection range action rail) ───────────────────── */
 
 .diff-edit-bubble {
   /* Absolutely anchored in .diff-content coordinates (its positioning
-     context), so it scrolls with the text it points at — no scroll listener,
+     context), so it scrolls with the selected range — no scroll listener,
      no per-frame repositioning. */
   position: absolute;
   z-index: 4;
   display: inline-flex;
   align-items: center;
-  gap: 0.286rem;
+  justify-content: center;
+  width: 1.714rem;
   height: 1.714rem;
-  padding: 0 0.571rem;
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-pill);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--elevation-2);
-  color: var(--text-secondary);
+  background: transparent;
+  color: var(--accent);
   font-family: var(--font-display);
   font-size: var(--font-size-small);
   cursor: pointer;
+  transition: color 0.12s ease, transform 0.12s ease, filter 0.12s ease;
   /* Never selectable: a drag passing over the bubble must not be able to
      extend the text selection into it (its DOM position is after all file
      sections, so that would jump the highlight across the whole pane). */
   user-select: none;
+  overflow: visible;
+  filter: drop-shadow(0 0 0.286rem color-mix(in srgb, var(--accent) 45%, transparent));
   animation: diff-edit-bubble-in 100ms ease-out;
 }
 
-.diff-edit-bubble:hover {
-  background: var(--surface-2);
+.diff-edit-bubble::before,
+.diff-edit-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  pointer-events: none;
+}
+
+.diff-edit-bubble::before {
+  top: var(--diff-edit-range-offset-y, 0);
+  bottom: calc(50% + 0.9rem);
+}
+
+.diff-edit-bubble::after {
+  top: calc(50% + 0.9rem);
+  bottom: calc(
+    100% -
+    var(--diff-edit-range-offset-y, 0px) -
+    var(--diff-edit-range-height, 1.714rem)
+  );
+}
+
+.diff-edit-bubble > .icon {
+  position: relative;
+  z-index: 1;
+  filter: drop-shadow(0 0 0.25rem color-mix(in srgb, var(--accent) 70%, transparent));
+}
+
+.diff-edit-bubble:hover,
+.diff-edit-bubble:focus-visible {
   color: var(--text);
+  transform: scale(1.08);
+  filter: drop-shadow(0 0 0.429rem color-mix(in srgb, var(--accent) 62%, transparent));
+}
+
+.diff-content:has(.diff-edit-bubble)
+  .diff-row--edit-selection
+  .diff-row__comment-btn:not(.diff-row__comment-btn--has-comment) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.diff-edit-bubble__label,
+.diff-edit-bubble__kbd {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @keyframes diff-edit-bubble-in {

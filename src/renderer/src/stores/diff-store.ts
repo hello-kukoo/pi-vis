@@ -64,13 +64,15 @@ export interface FileState {
 export interface EditCursorPosition {
   /** Edit-block (textarea) index that should receive initial focus. */
   segmentIndex: number;
-  /** Cursor offset within that segment's initial text. */
+  /** Initial selection start within that segment's initial text. */
   offset: number;
+  /** Initial selection end within that segment's initial text. Omitted for a collapsed cursor. */
+  selectionEndOffset?: number | undefined;
 }
 
 export interface EditSession {
   path: string;
-  /** Initial cursor placement derived from the highlighted text. */
+  /** Initial textarea selection derived from the highlighted text. */
   initialCursor: EditCursorPosition | null;
   /** Frozen model line indices of the selected slice. */
   startLineIdx: number;

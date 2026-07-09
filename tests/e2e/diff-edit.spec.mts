@@ -243,9 +243,45 @@ test.describe("Diff inline edit", () => {
       );
 
       await selectRange(window, fromIdx, toIdx);
-      await expect(window.getByTestId("diff-edit-bubble")).toBeVisible({ timeout: 5_000 });
+      const bubble = window.getByTestId("diff-edit-bubble");
+      await expect(bubble).toBeVisible({ timeout: 5_000 });
+      await expect(bubble).toContainText("Edit selection");
+      const placement = await bubble.evaluate((el, targetIdx) => {
+        const b = el.getBoundingClientRect();
+        const cell = document
+          .querySelector(`.diff-row--add[data-line-idx="${targetIdx}"] .diff-row__code`)
+          ?.getBoundingClientRect();
+        const pane = document.querySelector(".diff-content")?.getBoundingClientRect();
+        if (!cell || !pane) throw new Error("missing placement reference");
+        return {
+          bubbleCenterX: b.left + b.width / 2,
+          bubbleRight: b.right,
+          codeLeft: cell.left,
+          codeWidth: cell.width,
+          paneRight: pane.right,
+        };
+      }, toIdx);
+      expect(placement.bubbleCenterX).toBeLessThan(
+        placement.codeLeft + Math.min(placement.codeWidth * 0.65, 520),
+      );
+      expect(placement.bubbleRight).toBeLessThan(placement.paneRight - 120);
+      expect(placement.bubbleRight).toBeLessThan(placement.codeLeft);
 
-      await window.getByTestId("diff-edit-bubble").click();
+      const selectedComment = window
+        .locator(`.diff-row--add[data-line-idx="${fromIdx}"] [data-testid="diff-comment-button"]`)
+        .first();
+      await expect(selectedComment).toHaveCSS("opacity", "0");
+      const outsideIdx = addIdxs[0]!;
+      await window.locator(`.diff-row--add[data-line-idx="${outsideIdx}"]`).first().hover();
+      await expect(
+        window
+          .locator(
+            `.diff-row--add[data-line-idx="${outsideIdx}"] [data-testid="diff-comment-button"]`,
+          )
+          .first(),
+      ).toHaveCSS("opacity", "1");
+
+      await bubble.click();
       await expect(window.getByTestId("diff-edit-card")).toBeVisible({ timeout: 5_000 });
 
       // Zero-shift: the probe row did not move when the card opened. A real
@@ -265,7 +301,7 @@ test.describe("Diff inline edit", () => {
     }
   });
 
-  test("opening edit places cursor after the highlighted text", async () => {
+  test("opening edit keeps the highlighted text selected", async () => {
     test.setTimeout(90_000);
     const folders = await makeFolders();
     setupRepoForEdit(folders.workspaceDir);
@@ -288,15 +324,17 @@ test.describe("Diff inline edit", () => {
       const end = start + "EDIT_2".length;
 
       await selectTextInCell(window, cellSelector, start, end);
-      await expect(window.getByTestId("diff-edit-bubble")).toBeVisible({ timeout: 5_000 });
-      await window.getByTestId("diff-edit-bubble").click();
+      const bubble = window.getByTestId("diff-edit-bubble");
+      await expect(bubble).toBeVisible({ timeout: 5_000 });
+      await expect(bubble).toContainText("Edit selection");
+      await bubble.click();
       const ta = window.locator(".diff-edit-textarea").first();
       await expect(ta).toBeFocused({ timeout: 5_000 });
       const cursor = await ta.evaluate((el) => ({
         start: el.selectionStart,
         end: el.selectionEnd,
       }));
-      expect(cursor).toEqual({ start: end, end });
+      expect(cursor).toEqual({ start, end });
     } finally {
       await app.close();
       rmrf(folders.settingsDir);

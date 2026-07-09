@@ -16,6 +16,7 @@ import type { DiffModel } from "../../lib/diff/diff-model.js";
 import { langForPath, tokenizeLinesSync } from "../../lib/diff/highlight.js";
 import type { EditSession } from "../../stores/diff-store.js";
 import { useDiffStore } from "../../stores/diff-store.js";
+import { useSettingsStore } from "../../stores/settings-store.js";
 import { ConfirmDialog } from "../shell/ConfirmDialog.js";
 import "./DiffEditCard.css";
 
@@ -194,7 +195,8 @@ export function DiffEditCard({
                 indentUnit={session.indentUnit}
                 disabled={saving}
                 autofocus={autofocus}
-                initialCursorOffset={cursorForSegment?.offset ?? null}
+                initialSelectionStart={cursorForSegment?.offset ?? null}
+                initialSelectionEnd={cursorForSegment?.selectionEndOffset ?? null}
                 registerRef={(el) => {
                   taRefs.current[idx] = el;
                 }}
@@ -264,7 +266,8 @@ interface SegmentEditorProps {
   indentUnit: string;
   disabled: boolean;
   autofocus: boolean;
-  initialCursorOffset: number | null;
+  initialSelectionStart: number | null;
+  initialSelectionEnd: number | null;
   registerRef: (el: HTMLTextAreaElement | null) => void;
   onDirty: () => void;
   onSave: () => void;
@@ -277,12 +280,14 @@ function SegmentEditor({
   indentUnit,
   disabled,
   autofocus,
-  initialCursorOffset,
+  initialSelectionStart,
+  initialSelectionEnd,
   registerRef,
   onDirty,
   onSave,
   onCancelRequest,
 }: SegmentEditorProps): React.ReactElement {
+  const activeColorScheme = useSettingsStore((s) => s.activeColorScheme);
   const [buffer, setBuffer] = useState(initialText);
   const [tokens, setTokens] = useState<ThemedToken[][] | null>(() =>
     tokenizeLinesSync(initialText, lang),
@@ -299,13 +304,27 @@ function SegmentEditor({
     const ta = taRef.current;
     if (!ta) return;
     ta.focus({ preventScroll: true });
-    const cursor = Math.max(0, Math.min(initialCursorOffset ?? 0, initialText.length));
-    ta.setSelectionRange(cursor, cursor);
-  }, [autofocus, initialCursorOffset, initialText.length]);
+    const start = Math.max(0, Math.min(initialSelectionStart ?? 0, initialText.length));
+    const end = Math.max(0, Math.min(initialSelectionEnd ?? start, initialText.length));
+    ta.setSelectionRange(start, end);
+  }, [autofocus, initialSelectionEnd, initialSelectionStart, initialText.length]);
 
   const retokenize = (text: string): void => {
     setTokens(tokenizeLinesSync(text, lang));
   };
+
+  // CSS variables re-theme immediately, but Shiki token colors are baked into
+  // inline spans. Keep the open editor's overlay in sync with the active syntax
+  // theme without touching the uncontrolled textarea or marking it dirty.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally re-tokenizes only when the active color scheme changes; input changes already re-tokenize through onInput.
+  useEffect(() => {
+    const text = taRef.current?.value ?? buffer;
+    retokenize(text);
+    // User-provided syntax refs can load asynchronously after the setting has
+    // changed; retry once so the editor catches up without requiring input.
+    const retry = window.setTimeout(() => retokenize(taRef.current?.value ?? text), 100);
+    return () => window.clearTimeout(retry);
+  }, [activeColorScheme]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     // IME composition: let the composition through; all custom handling waits.

@@ -1,12 +1,12 @@
 # Inline diff editing
 
 The diff viewer (`DiffViewerHost` / `DiffFileSection`) lets the user select one
-or more lines in a file section, click a floating **Edit** bubble, and edit
-those lines in place in a mini-editor card with syntax highlighting and
-auto-indent, then **Save** to write the working-tree file via a compare-and-swap
-IPC channel. The experience is *mentally invisible*: zero layout shift on open,
-zero async work on the critical open path, and visuals identical to the
-surrounding diff rows.
+or more lines in a file section, click the range-anchored **Edit selection**
+action in the left diff rail, and edit those lines in place in a mini-editor
+card with syntax highlighting and auto-indent, then **Save** to write the
+working-tree file via a compare-and-swap IPC channel. The experience is
+*mentally invisible*: zero layout shift on open, zero async work on the critical
+open path, and visuals identical to the surrounding diff rows.
 
 This doc is the routing target for any change touching the diff edit machinery.
 Read it before editing `components/diff/DiffEdit*`, `lib/diff/{splice,
@@ -124,13 +124,17 @@ Buffers seed from **model line text** (CR-free); the splice works on **raw
 `newText` offsets**. `splitAndNormalizeLines` is exported from `diff-model.ts`
 so conflict re-anchor splits fresh text with the exact same rule.
 
-## Cursor placement
+## Initial editor selection
 
 The only edit entry point is a highlighted selection. Opening the card focuses
-whichever edit segment contains the last highlighted editable character and
-places the cursor immediately after that character. If the DOM selection has no
-selected editable characters (for example a blank-line-only selection), the
-robust fallback is the end of the last editable segment.
+the edit segment containing the highlighted editable text and preserves that
+highlight as the textarea selection, so typing immediately replaces the text the
+user selected in the diff. If a browser selection spans multiple editable
+segments (comments/deletions split textareas), the robust fallback focuses the
+last highlighted editable character because a textarea selection cannot cross
+segment boundaries. If the DOM selection has no selected editable characters
+(for example a blank-line-only selection), the fallback is the end of the last
+editable segment.
 
 ## Editor (layered, invariant 14)
 
@@ -145,10 +149,13 @@ keeps height); the textarea overlays it. Textareas are uncontrolled
 never assigned after mount. All custom key handling early-returns during IME
 composition. Editor text uses the same Shiki token → inline-color span painting
 as the diff rows, so it is pixel-identical (semantic tokens only — no palette
-swatches).
+swatches). Because those token colors are baked into inline spans, each open
+segment subscribes to the active color scheme and re-tokenizes its current
+uncontrolled textarea value on scheme changes without marking the edit dirty.
 
-The card adds **no flow chrome**: the ring is an inset `box-shadow` and the
-footer is absolutely positioned. Opening it shifts no surrounding glyph.
+The card adds **no flow chrome**: the background matches the diff code canvas,
+the ring is an inset `box-shadow`, and the footer is absolutely positioned.
+Opening it shifts no surrounding glyph.
 
 ## Keyboard / ESC ownership (invariants 11–13)
 
@@ -188,8 +195,17 @@ Controller rules that keep it permissive and non-disruptive
   deliberately started there — the artifact is always on the focus side.
 - **The bubble rides with the content.** It is absolutely anchored in
   `.diff-content` coordinates (the pane is `position: relative`), so scrolling
-  moves it with the text natively — no scroll listener, no per-frame
-  repositioning, and scrolling never dismisses it.
+  moves it with the selected range natively — no scroll listener, no per-frame
+  repositioning, and scrolling never dismisses it. Its anchor is deterministic:
+  the selected range's left action rail, vertically centered on the selected row
+  span, with a subtle accent line spanning that range. It does not use
+  collision-based text-adjacent placement, so it never appears to wander around
+  the code and never covers highlighted text. The icon is an illuminated drawing
+  rather than a filled pill, and transient add-comment hover icons are suppressed
+  only on selected rows while it is visible so the selected rail has a single
+  primary action. The accessible label is explicit (`Edit selection`) and the
+  keyboard shortcut (`Cmd/Ctrl+I`)
+  opens the same edit session while the bubble is visible.
 - **Resilient to row re-renders under the selection.** If the selection's
   client rects come back degenerate mid-resolve (rows rebuilding underneath
   it), the bubble keeps its previous position instead of unmounting — tearing

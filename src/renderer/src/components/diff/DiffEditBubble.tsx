@@ -28,13 +28,21 @@ import { IconPencil } from "../common/icons.js";
 interface BubblePos {
   x: number;
   y: number;
+  rangeOffsetY: number;
+  rangeHeight: number;
+}
+
+interface SelectionAnchor {
+  railRect: DOMRect;
+  rangeRect: DOMRect;
+  rowEls: HTMLElement[];
 }
 
 interface Resolved {
   path: string;
   range: EditRange;
   cursor: EditCursorPosition | null;
-  rect: DOMRect;
+  anchor: SelectionAnchor;
 }
 
 /** Diagnostic trail: why the last resolve attempt produced no bubble. Logged
@@ -115,8 +123,9 @@ function resolveSelection(): Resolved | null {
   if (!editRange) return rejected("no editable (context/add) line in range", { path, lo, hi });
 
   const cursor = resolveCursorPosition(domRange, file, model, editRange);
+  const anchor = selectionAnchor(domRange, rows, sel);
   console.log(`[diff-edit] bubble eligible: ${path} rows ${lo}–${hi}`);
-  return { path, range: editRange, cursor, rect: selectionRect(domRange) };
+  return { path, range: editRange, cursor, anchor };
 }
 
 /** Place the edit cursor immediately after the last highlighted editable
@@ -128,7 +137,8 @@ function resolveCursorPosition(
   model: DiffModel,
   editRange: EditRange,
 ): EditCursorPosition | null {
-  let last: { lineIdx: number; endOffset: number } | null = null;
+  let first: EditCursorPosition | null = null;
+  let last: EditCursorPosition | null = null;
   for (const el of file.querySelectorAll<HTMLElement>("[data-line-idx]")) {
     if (!intersects(selectionRange, el)) continue;
     const lineIdx = Number(el.getAttribute("data-line-idx"));
@@ -138,13 +148,28 @@ function resolveCursorPosition(
     if (!ln || ln.type === "del" || ln.newNo === null) continue;
     const codeCell = codeCellForSelectable(el);
     if (!codeCell) continue;
-    const endOffset = selectedEndOffset(selectionRange, codeCell);
-    if (endOffset === null) continue;
-    last = { lineIdx, endOffset: Math.min(endOffset, ln.text.length) };
+    const offsets = selectedOffsets(selectionRange, codeCell);
+    if (offsets === null) continue;
+    const startOffset = Math.min(offsets.start, ln.text.length);
+    const endOffset = Math.min(offsets.end, ln.text.length);
+    const start = cursorForLine(editRange, model, lineIdx, startOffset);
+    const end = cursorForLine(editRange, model, lineIdx, endOffset);
+    if (!start || !end) continue;
+    first ??= start;
+    last = end;
   }
-  if (last) {
-    const cursor = cursorForLine(editRange, model, last.lineIdx, last.endOffset);
-    if (cursor) return cursor;
+  if (first && last) {
+    if (first.segmentIndex === last.segmentIndex) {
+      return {
+        segmentIndex: first.segmentIndex,
+        offset: Math.min(first.offset, last.offset),
+        selectionEndOffset: Math.max(first.offset, last.offset),
+      };
+    }
+    // A browser selection can span multiple editable textareas when comments or
+    // deleted lines split the range. Keep focus on the last highlighted editable
+    // character in that uncommon case; cross-textarea selection is impossible.
+    return last;
   }
   return fallbackCursor(editRange);
 }
@@ -154,7 +179,10 @@ function codeCellForSelectable(el: HTMLElement): HTMLElement | null {
   return el.querySelector<HTMLElement>(".diff-row__code:not(.diff-row__code--empty)");
 }
 
-function selectedEndOffset(selectionRange: Range, codeCell: HTMLElement): number | null {
+function selectedOffsets(
+  selectionRange: Range,
+  codeCell: HTMLElement,
+): { start: number; end: number } | null {
   if (!intersects(selectionRange, codeCell)) return null;
   try {
     const cellRange = document.createRange();
@@ -166,11 +194,13 @@ function selectedEndOffset(selectionRange: Range, codeCell: HTMLElement): number
     if (inter.comparePoint(cellRange.endContainer, cellRange.endOffset) === 0) {
       inter.setEnd(cellRange.endContainer, cellRange.endOffset);
     }
-    if (inter.toString() === "") return null;
-    const prefix = document.createRange();
-    prefix.selectNodeContents(codeCell);
-    prefix.setEnd(inter.endContainer, inter.endOffset);
-    return prefix.toString().length;
+    const selectedText = inter.toString();
+    if (selectedText === "") return null;
+    const endPrefix = document.createRange();
+    endPrefix.selectNodeContents(codeCell);
+    endPrefix.setEnd(inter.endContainer, inter.endOffset);
+    const end = endPrefix.toString().length;
+    return { start: Math.max(0, end - selectedText.length), end };
   } catch {
     return null;
   }
@@ -282,6 +312,46 @@ function selectionRect(range: Range): DOMRect {
   return new DOMRect(left, top, right - left, bottom - top);
 }
 
+/** Anchor the affordance to the selected range's action rail. Diff actions
+ *  should be deterministic and live in chrome, not float around selected code. */
+function selectionAnchor(_range: Range, rows: HTMLElement[], _sel: Selection): SelectionAnchor {
+  const rowEls = rows.map(rowElementForSelectable).filter((el): el is HTMLElement => el !== null);
+  const rangeRect =
+    unionRects(rowEls.map((el) => el.getBoundingClientRect())) ?? selectionRect(_range);
+  const firstRow = rowEls[0];
+  const railRect =
+    firstRow?.querySelector<HTMLElement>(".diff-row__comment-cell")?.getBoundingClientRect() ??
+    new DOMRect(rangeRect.left, rangeRect.top, 22, rangeRect.height);
+  return { railRect, rangeRect, rowEls };
+}
+
+function rowElementForSelectable(el: HTMLElement): HTMLElement | null {
+  if (el.classList.contains("diff-row")) return el;
+  return el.closest<HTMLElement>(".diff-row");
+}
+
+function unionRects(rects: DOMRect[]): DOMRect | null {
+  if (rects.length === 0) return null;
+  let left = Number.POSITIVE_INFINITY;
+  let top = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  for (const r of rects) {
+    left = Math.min(left, r.left);
+    top = Math.min(top, r.top);
+    right = Math.max(right, r.right);
+    bottom = Math.max(bottom, r.bottom);
+  }
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+
+function platformShortcut(): string {
+  if (typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform)) {
+    return "⌘I";
+  }
+  return "Ctrl I";
+}
+
 export function DiffEditBubble(): React.ReactElement | null {
   const editSession = useDiffStore((s) => s.editSession);
   const [pos, setPos] = useState<BubblePos | null>(null);
@@ -292,6 +362,7 @@ export function DiffEditBubble(): React.ReactElement | null {
   const resolvedRef = useRef<Resolved | null>(null);
   const mouseDownRef = useRef(false);
   const resolveRafRef = useRef(0);
+  const markedRowsRef = useRef<HTMLElement[]>([]);
   posRef.current = pos;
   resolvedRef.current = resolved;
 
@@ -302,43 +373,66 @@ export function DiffEditBubble(): React.ReactElement | null {
     bubbleRef.current = el;
   }, []);
 
-  const hide = useCallback((reason: string) => {
-    // Only narrate transitions that actually remove a visible/resolved bubble
-    // — hides from idle states are routine (every click) and would be noise.
-    if (posRef.current !== null || resolvedRef.current !== null) {
-      console.log(`[diff-edit] hidden (${reason})`);
-    }
-    setPos(null);
-    setResolved(null);
+  const clearMarkedRows = useCallback(() => {
+    for (const row of markedRowsRef.current) row.classList.remove("diff-row--edit-selection");
+    markedRowsRef.current = [];
   }, []);
 
-  /** Position for the bubble under `rect`, in .diff-content CONTENT
-   *  coordinates (the bubble is absolutely anchored inside the scroller, so
-   *  it rides with the text — no scroll listener, no per-frame reposition).
-   *  Null only when the pane is missing or the rect is degenerate. */
-  const place = useCallback((rect: DOMRect): BubblePos | null => {
+  const markRows = useCallback(
+    (rows: HTMLElement[]) => {
+      clearMarkedRows();
+      for (const row of rows) row.classList.add("diff-row--edit-selection");
+      markedRowsRef.current = rows;
+    },
+    [clearMarkedRows],
+  );
+
+  const hide = useCallback(
+    (reason: string) => {
+      // Only narrate transitions that actually remove a visible/resolved bubble
+      // — hides from idle states are routine (every click) and would be noise.
+      if (posRef.current !== null || resolvedRef.current !== null) {
+        console.log(`[diff-edit] hidden (${reason})`);
+      }
+      clearMarkedRows();
+      setPos(null);
+      setResolved(null);
+    },
+    [clearMarkedRows],
+  );
+
+  /** Position for the bubble in the selected range's left action rail. This is
+   *  intentionally deterministic: one stable rail slot, no collision-based
+   *  floating around the text. */
+  const place = useCallback((anchor: SelectionAnchor): BubblePos | null => {
     const content = document.querySelector<HTMLElement>(".diff-content");
     if (!content) return null;
-    // A zero rect means the selection's boxes were mid-rebuild this frame
-    // (rows re-rendering underneath it) — nothing to anchor to.
-    if (rect.width === 0 && rect.height === 0) return null;
+    const { railRect, rangeRect } = anchor;
+    if (railRect.width === 0 && railRect.height === 0) return null;
+    if (rangeRect.width === 0 && rangeRect.height === 0) return null;
     const c = content.getBoundingClientRect();
-    const bw = bubbleRef.current?.offsetWidth ?? 56;
-    const bh = bubbleRef.current?.offsetHeight ?? 28;
-    // Viewport → content space.
-    const relRight = rect.right - c.left + content.scrollLeft;
-    const relTop = rect.top - c.top + content.scrollTop;
-    const relBottom = rect.bottom - c.top + content.scrollTop;
-    const x = Math.max(
-      content.scrollLeft + 8,
-      Math.min(relRight - bw / 2, content.scrollLeft + content.clientWidth - bw - 8),
-    );
-    let y = relBottom + 6;
-    // Flip above the rect when the below-position would fall past the
-    // currently visible pane bottom.
-    if (rect.bottom + 6 + bh > c.bottom) y = Math.max(0, relTop - bh - 6);
-    return { x, y };
+    const bw = bubbleRef.current?.offsetWidth ?? 26;
+    const bh = bubbleRef.current?.offsetHeight ?? 26;
+    const railCenterX = railRect.left + railRect.width / 2;
+    const rangeCenterY = rangeRect.top + rangeRect.height / 2;
+    const x = railCenterX - c.left + content.scrollLeft - bw / 2;
+    const y = rangeCenterY - c.top + content.scrollTop - bh / 2;
+    const rangeTop = rangeRect.top - c.top + content.scrollTop;
+    return { x, y, rangeOffsetY: rangeTop - y, rangeHeight: rangeRect.height };
   }, []);
+
+  const openResolved = useCallback(
+    (reason: string) => {
+      // Re-resolve at activation time so keyboard adjustments after the last
+      // mouseup open exactly what's highlighted now.
+      const fresh = resolveSelection() ?? resolvedRef.current;
+      hide(reason);
+      if (!fresh) return;
+      useDiffStore.getState().openEditSession(fresh.path, fresh.range, fresh.cursor);
+      window.getSelection()?.removeAllRanges();
+    },
+    [hide],
+  );
 
   const scheduleResolve = useCallback(() => {
     if (resolveRafRef.current) cancelAnimationFrame(resolveRafRef.current);
@@ -349,7 +443,7 @@ export function DiffEditBubble(): React.ReactElement | null {
         hide("selection no longer eligible");
         return;
       }
-      const p = place(r.rect);
+      const p = place(r.anchor);
       if (p === null) {
         // Degenerate rect (rows re-rendering under the selection this frame).
         // Keep the bubble where it was rather than unmounting — tearing the
@@ -360,16 +454,17 @@ export function DiffEditBubble(): React.ReactElement | null {
           setResolved(r);
           return;
         }
-        console.log("[diff-edit] eligible but no anchor rect", contentBounds());
+        console.log("[diff-edit] eligible but no rail anchor", contentBounds());
         return;
       }
       if (posRef.current === null) {
         console.log(`[diff-edit] showing at ${Math.round(p.x)},${Math.round(p.y)} (content-space)`);
       }
+      markRows(r.anchor.rowEls);
       setResolved(r);
       setPos(p);
     });
-  }, [hide, place]);
+  }, [hide, markRows, place]);
 
   // Listeners are registered ONCE (state read through refs): stable window
   // registration order keeps this handler ahead of the viewer host's own
@@ -380,7 +475,14 @@ export function DiffEditBubble(): React.ReactElement | null {
     // absent from the console, a stale bundle / wrong directory is running.
     console.log("[diff-edit] selection controller mounted (build: permissive-v2)");
     const onMouseDown = (e: MouseEvent): void => {
-      if (bubbleRef.current?.contains(e.target as Node)) return;
+      const target = e.target as Element | null;
+      if (target && bubbleRef.current?.contains(target)) return;
+      // Keep the selected-range rail quiet during a gutter press on the active
+      // selection. Otherwise mousedown hides the edit affordance before mouseup
+      // re-resolves it, briefly flashing the comment icon underneath.
+      if (posRef.current && target?.closest(".diff-row--edit-selection .diff-row__comment-cell")) {
+        return;
+      }
       mouseDownRef.current = true;
       hide("mousedown outside bubble"); // a new drag starts: no stale bubble under the cursor
     };
@@ -408,11 +510,19 @@ export function DiffEditBubble(): React.ReactElement | null {
       scheduleResolve();
     };
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key !== "Escape" || !posRef.current) return;
-      // Dismiss the bubble and consume the key so the viewer stays open.
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      hide("escape");
+      if (!posRef.current) return;
+      if (e.key === "Escape") {
+        // Dismiss the bubble and consume the key so the viewer stays open.
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        hide("escape");
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        openResolved("shortcut");
+      }
     };
     // DIAGNOSTIC: detect continuous DOM churn in the diff content (rows
     // re-rendering under an active selection — the "shifting highlight"
@@ -458,8 +568,9 @@ export function DiffEditBubble(): React.ReactElement | null {
       if (resolveRafRef.current) cancelAnimationFrame(resolveRafRef.current);
       // Zero the id: a canceled rAF never runs to clear its own ref.
       resolveRafRef.current = 0;
+      clearMarkedRows();
     };
-  }, [hide, scheduleResolve]);
+  }, [clearMarkedRows, hide, openResolved, scheduleResolve]);
 
   // Clear on session open so a stale bubble can't reappear at the old
   // position after the card closes.
@@ -469,26 +580,29 @@ export function DiffEditBubble(): React.ReactElement | null {
 
   if (editSession || !pos || !resolved) return null;
 
+  const shortcut = platformShortcut();
+
   return (
     <button
       ref={attachBubble}
       type="button"
       className="diff-edit-bubble"
       data-testid="diff-edit-bubble"
-      style={{ left: pos.x, top: pos.y }}
-      onMouseDown={(e) => e.preventDefault()} // keep the selection
-      onClick={() => {
-        // Re-resolve at click time so keyboard adjustments after the last
-        // mouseup open exactly what's highlighted now.
-        const fresh = resolveSelection() ?? resolvedRef.current;
-        hide("bubble clicked");
-        if (!fresh) return;
-        useDiffStore.getState().openEditSession(fresh.path, fresh.range, fresh.cursor);
-        window.getSelection()?.removeAllRanges();
+      style={{
+        left: pos.x,
+        top: pos.y,
+        ["--diff-edit-range-offset-y" as string]: `${pos.rangeOffsetY}px`,
+        ["--diff-edit-range-height" as string]: `${pos.rangeHeight}px`,
       }}
+      aria-label="Edit selection"
+      aria-keyshortcuts="Meta+I Control+I"
+      title={`Edit selection (${shortcut})`}
+      onMouseDown={(e) => e.preventDefault()} // keep the selection
+      onClick={() => openResolved("bubble clicked")}
     >
-      <IconPencil size="0.9em" />
-      <span>Edit</span>
+      <IconPencil size="0.95em" />
+      <span className="diff-edit-bubble__label">Edit selection</span>
+      <kbd className="diff-edit-bubble__kbd">{shortcut}</kbd>
     </button>
   );
 }
