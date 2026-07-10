@@ -27,6 +27,20 @@ type GroupedModelHighlight =
 
 type GroupedModelKeyboardItem = GroupedModelHighlight & { model?: ModelInfo };
 
+/** Mirror pi-ai's getSupportedThinkingLevels without importing pi internals. */
+export function thinkingLevelsForModel(model?: ModelInfo): readonly ThinkingLevel[] {
+  if (model?.reasoning === false) return ["off"];
+  const levelMap = model?.thinkingLevelMap;
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = levelMap?.[level];
+    if (mapped === null) return false;
+    // Pi 0.80.6 makes the two highest levels opt-in per model. Older model
+    // records lack these keys and must not advertise a level pi will clamp.
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
 export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactElement {
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
   const setStats = useSessionsStore((s) => s.setStats);
@@ -476,12 +490,10 @@ export function SessionControls({
     : session?.currentModel
       ? `${session.currentModel}${session.currentProvider ? ` [${session.currentProvider}]` : ""}`
       : "model";
-  const thinkingOptions: readonly ThinkingLevel[] = useMemo(() => {
-    if (currentModelInfo?.reasoning === false) {
-      return ["off"];
-    }
-    return THINKING_LEVELS;
-  }, [currentModelInfo]);
+  const thinkingOptions = useMemo(
+    () => thinkingLevelsForModel(currentModelInfo),
+    [currentModelInfo],
+  );
   const thinkingDisabled = thinkingOptions.length <= 1;
 
   const handleThinkingLevel = useCallback(

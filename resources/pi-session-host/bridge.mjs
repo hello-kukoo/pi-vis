@@ -253,6 +253,11 @@ export function setupCommandBridge({
       // Forward raw event to main process (structured clone over process.send).
       // AgentSessionEvent is a plain serializable object.
       send({ type: "event", event });
+      // Pi 0.80.4's cache-miss notices normally live in InteractiveMode, which
+      // the SDK host does not instantiate. Re-derive the same opt-in notice
+      // from public session/message data so showCacheMissNotices still works.
+      const cacheMissNotice = buildCacheMissNotice(s, event);
+      if (cacheMissNotice) send({ type: "event", event: cacheMissNotice });
       updateRetryPending(event);
       // Pi invokes extension agent_settled handlers before publishing the
       // session event. A handler can start another run first, yielding
@@ -387,6 +392,47 @@ export function setupCommandBridge({
       });
     }
     return commands;
+  }
+
+  /**
+   * Render Pi 0.80.4's display-only custom session entry through the
+   * extension's public EntryRenderer. Rendering stays in the SDK host because
+   * the callback returns a pi-tui Component that cannot cross Electron IPC.
+   */
+  function renderEntry(entryId, cols, expanded) {
+    const manager = _session.sessionManager;
+    const runner = _session.extensionRunner;
+    if (typeof manager?.getEntry !== "function" || typeof runner?.getEntryRenderer !== "function") {
+      return { rendered: false };
+    }
+    const entry = manager.getEntry(entryId);
+    if (!entry || entry.type !== "custom" || typeof entry.customType !== "string") {
+      return { rendered: false };
+    }
+    const renderer = runner.getEntryRenderer(entry.customType);
+    if (typeof renderer !== "function") return { rendered: false };
+
+    let component;
+    try {
+      component = renderer(entry, { expanded: expanded === true }, uiContext?.theme);
+      if (!component || typeof component.render !== "function") return { rendered: false };
+      const lines = component.render(Math.max(20, Math.min(240, Math.floor(cols))));
+      if (!Array.isArray(lines)) return { rendered: false };
+      return { rendered: true, ansi: lines.map((line) => String(line)).join("\n") };
+    } catch (err) {
+      const message = `[${entry.customType}] renderer failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      const ansi =
+        typeof uiContext?.theme?.fg === "function" ? uiContext.theme.fg("error", message) : message;
+      return { rendered: true, ansi, error: true };
+    } finally {
+      try {
+        component?.dispose?.();
+      } catch {
+        /* ignore renderer teardown errors */
+      }
+    }
   }
 
   // ─── Command handler ───────────────────────────────────────────────────
@@ -665,6 +711,26 @@ export function setupCommandBridge({
           break;
         }
 
+        case "render_entry": {
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: renderEntry(command.entryId, command.cols, command.expanded),
+          });
+          break;
+        }
+
+        case "get_cache_miss_notices": {
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: { notices: buildHistoricalCacheMissNotices(_session) },
+          });
+          break;
+        }
+
         // ── Trust (pi-vis host-only /trust) ─────────────────────────────
         // get_trust_state returns the cwd, whether it has trust-requiring
         // project resources, and pi's full project-trust choice set (each
@@ -935,6 +1001,145 @@ export function setupCommandBridge({
   return { handleCommand, bindExtensions, interruptActiveOperation };
 }
 
+// ── Pi 0.80.4 cache-miss notice parity ──────────────────────────────────
+
+const CACHE_MISS_NOISE_FLOOR = 1024;
+const CACHE_NOTICE_TOKEN_THRESHOLD = 20_000;
+const CACHE_NOTICE_COST_THRESHOLD = 0.1;
+
+function usageNumber(usage, key) {
+  const value = usage?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function previousCacheRequest(message, reportedCache) {
+  const usage = message?.usage;
+  const promptTokens =
+    usageNumber(usage, "input") +
+    usageNumber(usage, "cacheRead") +
+    usageNumber(usage, "cacheWrite");
+  if (promptTokens <= 0) return undefined;
+  return {
+    promptTokens,
+    modelKey: `${message?.provider ?? ""}/${message?.model ?? ""}`,
+    timestamp: typeof message?.timestamp === "number" ? message.timestamp : 0,
+    reportedCache:
+      reportedCache || usageNumber(usage, "cacheRead") + usageNumber(usage, "cacheWrite") > 0,
+  };
+}
+
+function cacheMissNoticeId(message) {
+  const usage = message?.usage;
+  return [
+    "cache-miss",
+    typeof message?.timestamp === "number" ? message.timestamp : 0,
+    message?.provider ?? "",
+    message?.model ?? "",
+    usageNumber(usage, "input"),
+    usageNumber(usage, "cacheRead"),
+    usageNumber(usage, "cacheWrite"),
+    usageNumber(usage, "output"),
+  ].join(":");
+}
+
+function detectCacheMissNotice(session, message, previous) {
+  const usage = message?.usage;
+  const input = usageNumber(usage, "input");
+  const cacheRead = usageNumber(usage, "cacheRead");
+  const cacheWrite = usageNumber(usage, "cacheWrite");
+  const promptTokens = input + cacheRead + cacheWrite;
+  if (!previous || promptTokens <= 0 || (cacheRead + cacheWrite === 0 && !previous.reportedCache)) {
+    return undefined;
+  }
+
+  const missedTokens = Math.min(previous.promptTokens, promptTokens) - cacheRead;
+  if (missedTokens <= CACHE_MISS_NOISE_FLOOR) return undefined;
+
+  const paidTokens = input + cacheWrite;
+  const cost = usage?.cost;
+  const paidPerToken =
+    paidTokens > 0
+      ? (usageNumber(cost, "input") + usageNumber(cost, "cacheWrite")) / paidTokens
+      : 0;
+  const model = session.modelRegistry?.find?.(message.provider, message.model);
+  const readPerToken =
+    cacheRead > 0
+      ? usageNumber(cost, "cacheRead") / cacheRead
+      : (typeof model?.cost?.cacheRead === "number" ? model.cost.cacheRead : 0) / 1_000_000;
+  const missedCost = missedTokens * Math.max(0, paidPerToken - readPerToken);
+  if (missedTokens < CACHE_NOTICE_TOKEN_THRESHOLD && missedCost < CACHE_NOTICE_COST_THRESHOLD) {
+    return undefined;
+  }
+
+  return {
+    type: "cache_miss_notice",
+    noticeId: cacheMissNoticeId(message),
+    missedTokens,
+    missedCost,
+    idleMs: Math.max(
+      0,
+      (typeof message.timestamp === "number" ? message.timestamp : 0) - previous.timestamp,
+    ),
+    modelChanged: `${message.provider ?? ""}/${message.model ?? ""}` !== previous.modelKey,
+  };
+}
+
+function cacheEntries(session) {
+  // Cache continuity follows the active root→leaf branch, not append order
+  // across the full session tree. An abandoned fork's later file entry must
+  // never become the "previous request" for the active branch.
+  return session.sessionManager?.getBranch?.() ?? session.sessionManager?.getEntries?.() ?? [];
+}
+
+function buildCacheMissNotice(session, event) {
+  if (
+    event?.type !== "message_end" ||
+    event.message?.role !== "assistant" ||
+    event.message?.stopReason === "error" ||
+    event.message?.stopReason === "aborted" ||
+    session.settingsManager?.getShowCacheMissNotices?.() !== true
+  ) {
+    return undefined;
+  }
+
+  let previous;
+  for (const entry of cacheEntries(session)) {
+    if (entry?.type === "compaction" || entry?.type === "branch_summary") {
+      previous = undefined;
+      continue;
+    }
+    if (entry?.type === "message" && entry.message?.role === "assistant") {
+      previous = previousCacheRequest(entry.message, previous?.reportedCache ?? false) ?? previous;
+    }
+  }
+  return detectCacheMissNotice(session, event.message, previous);
+}
+
+function buildHistoricalCacheMissNotices(session) {
+  if (session.settingsManager?.getShowCacheMissNotices?.() !== true) return [];
+  const notices = [];
+  let previous;
+  for (const entry of cacheEntries(session)) {
+    if (entry?.type === "compaction" || entry?.type === "branch_summary") {
+      previous = undefined;
+      continue;
+    }
+    const message = entry?.type === "message" ? entry.message : undefined;
+    if (message?.role !== "assistant") continue;
+    const notice = detectCacheMissNotice(session, message, previous);
+    if (
+      notice &&
+      message.stopReason !== "error" &&
+      message.stopReason !== "aborted" &&
+      typeof entry.id === "string"
+    ) {
+      notices.push({ ...notice, afterEntryId: entry.id });
+    }
+    previous = previousCacheRequest(message, previous?.reportedCache ?? false) ?? previous;
+  }
+  return notices;
+}
+
 // ── Scoped-models helpers ────────────────────────────────────────────────
 
 /**
@@ -974,13 +1179,13 @@ function resolveEnabledModelIds(session, models) {
  *     against both `provider/id` and bare `id`.
  *
  * An optional `:thinkingLevel` suffix is stripped before matching
- * (valid levels: off, minimal, low, medium, high, xhigh).
+ * (valid levels: off, minimal, low, medium, high, xhigh, max).
  *
  * This is best-effort for the *initial checkbox state*; the authoritative
  * scope is what the user submits (set_scoped_models).
  */
 function resolveModelScopePatterns(patterns, models) {
-  const VALID_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+  const VALID_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   const matched = new Set();
   for (const raw of patterns) {
     if (typeof raw !== "string") continue;

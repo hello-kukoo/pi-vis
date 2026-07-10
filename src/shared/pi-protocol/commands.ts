@@ -236,6 +236,21 @@ export const SetLabelCommandSchema = BaseCommand.extend({
   label: z.string().optional(),
 });
 
+// Pi >= 0.80.4 SDK-host-only rendering for appendEntry() values paired with
+// registerEntryRenderer(). The renderer supplies its current text-column width
+// so the extension's public pi-tui Component can lay itself out responsively.
+export const RenderEntryCommandSchema = BaseCommand.extend({
+  type: z.literal("render_entry"),
+  entryId: z.string(),
+  cols: z.number().int().min(20).max(240),
+  expanded: z.boolean().optional(),
+});
+
+// SDK-host-only replay for Pi's non-persisted showCacheMissNotices cards.
+export const GetCacheMissNoticesCommandSchema = BaseCommand.extend({
+  type: z.literal("get_cache_miss_notices"),
+});
+
 export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   PromptCommandSchema,
   SteerCommandSchema,
@@ -276,6 +291,8 @@ export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   GetTreeCommandSchema,
   NavigateTreeCommandSchema,
   SetLabelCommandSchema,
+  RenderEntryCommandSchema,
+  GetCacheMissNoticesCommandSchema,
 ]);
 
 export type PiRpcCommand = z.infer<typeof PiRpcCommandSchema>;

@@ -54,6 +54,9 @@ export const ModelInfoSchema = z
     provider: z.string().optional(),
     baseUrl: z.string().optional(),
     reasoning: z.boolean().optional(),
+    // Per-level provider mapping. A null value explicitly disables that level;
+    // xhigh/max are opt-in and are supported only when their mapping exists.
+    thinkingLevelMap: z.record(z.string().nullable()).optional(),
     // Accepted input modalities. Pi's model registry defaults this to
     // ["text"]; vision-capable models also list "image". The composer
     // uses it to gate image attachment — sending an image to a text-only

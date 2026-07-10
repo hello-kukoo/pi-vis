@@ -12,6 +12,8 @@ Use this file to load only the project context needed for the task at hand. Star
 
 ## Main process, subprocesses, and protocols
 
+- Auditing or adapting to Pi releases after 0.80.3: read `docs/compatibility/pi-0.80.6.md` first, then the routed architecture docs below.
+
 Read `docs/architecture/processes-and-ipc.md` when touching:
 
 - `src/main/index.ts`

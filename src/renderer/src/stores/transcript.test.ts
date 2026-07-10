@@ -5,6 +5,7 @@ import {
   applyPiEvent,
   clearPendingUserEcho,
   createTranscriptState,
+  seedFromHistory,
 } from "./transcript.js";
 
 function e<T extends KnownPiEvent>(event: T): T {
@@ -546,6 +547,101 @@ describe("transcript reducer — role-based message_start", () => {
     expect(state.blocks).toHaveLength(1);
     if (state.blocks[0]?.type === "custom_message") {
       expect(state.blocks[0].data.content).toBe("line one\nline two");
+    }
+  });
+
+  it("renders Pi 0.80.4 opt-in cache-miss notices", () => {
+    const state = applyPiEvent(
+      createTranscriptState(),
+      e({
+        type: "cache_miss_notice",
+        noticeId: "cache-miss-1",
+        missedTokens: 25_000,
+        missedCost: 0.12,
+        idleMs: 6 * 60_000,
+        modelChanged: false,
+      }),
+    );
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0];
+    if (block?.type === "custom_message") {
+      expect(block.id).toBe("cache-miss-1");
+      expect(block.data.content).toBe("Cache miss after 6m idle: 25K tokens re-billed (~$0.12)");
+    }
+  });
+
+  it("anchors replayed cache notices in history and deduplicates live notices", () => {
+    const event = e({
+      type: "cache_miss_notice",
+      noticeId: "cache-miss-history",
+      afterEntryId: "assistant-1",
+      missedTokens: 25_000,
+      missedCost: 0.12,
+      idleMs: 0,
+      modelChanged: false,
+    });
+    const initial = seedFromHistory(createTranscriptState(), [
+      { id: "assistant-1", type: "assistant", data: { role: "assistant", content: "Done" } },
+      {
+        id: "assistant-1-tool-call-1",
+        type: "tool_call",
+        data: {
+          toolCallId: "call-1",
+          toolName: "read",
+          outputText: "ok",
+          isError: false,
+          isStreaming: false,
+        },
+      },
+      { id: "user-2", type: "user", data: { content: "Next" } },
+    ]);
+    const withNotice = applyPiEvent(initial, event);
+    expect(withNotice.blocks.map((block) => block.id)).toEqual([
+      "assistant-1",
+      "assistant-1-tool-call-1",
+      "cache-miss-history",
+      "user-2",
+    ]);
+    expect(applyPiEvent(withNotice, event)).toBe(withNotice);
+  });
+
+  it("ignores replayed cache notices until their history page is loaded", () => {
+    const initial = seedFromHistory(createTranscriptState(), [
+      { id: "user-2", type: "user", data: { content: "Next" } },
+    ]);
+    const next = applyPiEvent(
+      initial,
+      e({
+        type: "cache_miss_notice",
+        noticeId: "cache-miss-earlier",
+        afterEntryId: "assistant-earlier",
+        missedTokens: 25_000,
+        missedCost: 0.12,
+        idleMs: 0,
+        modelChanged: false,
+      }),
+    );
+    expect(next).toBe(initial);
+  });
+
+  it("renders Pi 0.80.4 custom entries before a live assistant block", () => {
+    let state = createTranscriptState();
+    state = applyPiEvent(
+      state,
+      e({ type: "message_start", message: { role: "assistant", content: [] } }),
+    );
+    state = applyPiEvent(
+      state,
+      e({
+        type: "entry_appended",
+        entry: { id: "entry-1", type: "custom", customType: "status-card", data: { count: 2 } },
+      }),
+    );
+
+    expect(state.blocks.map((block) => block.type)).toEqual(["custom_entry", "assistant"]);
+    const first = state.blocks[0];
+    if (first?.type === "custom_entry") {
+      expect(first.data).toEqual({ entryId: "entry-1", customType: "status-card" });
     }
   });
 

@@ -1,8 +1,11 @@
 import type { SessionId } from "@shared/ids.js";
 import type { HistoryPage, SessionStatus, SessionSummary } from "@shared/ipc-contract.js";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
-import type { PiEvent } from "@shared/pi-protocol/events.js";
-import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
+import {
+  CacheMissNoticeEventSchema,
+  type KnownPiEvent,
+  type PiEvent,
+} from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
@@ -617,6 +620,7 @@ interface SessionsStore {
   applyEvents: (sessionId: SessionId, events: PiEvent[]) => void;
   seedHistory: (sessionId: SessionId, history: HistoryPage | TranscriptBlock[]) => void;
   loadEarlierHistory: (sessionId: SessionId) => Promise<void>;
+  refreshHistoricalCacheMissNotices: (sessionId: SessionId) => Promise<void>;
   addUserMessage: (
     sessionId: SessionId,
     content: string,
@@ -1075,6 +1079,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       }
       return { sessions };
     });
+    if (status === "ready") void get().refreshHistoricalCacheMissNotices(sessionId);
   },
 
   applyEvent: (sessionId, rawEvent) => {
@@ -1223,6 +1228,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       });
       return { sessions };
     });
+    if (get().sessions.get(sessionId)?.status === "ready") {
+      void get().refreshHistoricalCacheMissNotices(sessionId);
+    }
   },
 
   loadEarlierHistory: async (sessionId) => {
@@ -1272,6 +1280,32 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         return { sessions };
       });
       console.error("Failed to load earlier history:", err);
+      return;
+    }
+    void get().refreshHistoricalCacheMissNotices(sessionId);
+  },
+
+  refreshHistoricalCacheMissNotices: async (sessionId) => {
+    const session = get().sessions.get(sessionId);
+    if (!session?.sessionFile || session.status !== "ready") return;
+    const identityEpoch = session.identityEpoch;
+    const sessionFile = session.sessionFile;
+    try {
+      const response = await window.pivis.invoke("session.sendCommand", {
+        sessionId,
+        command: { type: "get_cache_miss_notices" },
+      });
+      if (!response.success) return;
+      const parsed = CacheMissNoticeEventSchema.array().safeParse(
+        (response.data as { notices?: unknown } | undefined)?.notices,
+      );
+      if (!parsed.success) return;
+      const current = get().sessions.get(sessionId);
+      if (current?.identityEpoch !== identityEpoch || current.sessionFile !== sessionFile) return;
+      get().applyEvents(sessionId, parsed.data);
+    } catch {
+      // SDK-host-only progressive enhancement. RPC fallback and older hosts
+      // keep history usable without replaying Pi's display-only notices.
     }
   },
 

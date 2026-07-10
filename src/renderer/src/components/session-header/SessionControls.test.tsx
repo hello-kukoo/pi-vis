@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type SessionViewState, useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { createTranscriptState } from "../../stores/transcript.js";
-import { SessionControls } from "./SessionHeader.js";
+import { SessionControls, thinkingLevelsForModel } from "./SessionHeader.js";
 
 const sessionId = "s-controls" as SessionId;
 
@@ -79,6 +79,29 @@ function pointerClick(button: HTMLButtonElement): void {
     button.click();
   });
 }
+
+describe("thinkingLevelsForModel", () => {
+  it("exposes max only for models that opt in and filters null mappings", () => {
+    expect(
+      thinkingLevelsForModel({
+        id: "gpt-5.6",
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+      }),
+    ).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("keeps legacy model records compatible without advertising opt-in levels", () => {
+    expect(thinkingLevelsForModel({ id: "legacy", reasoning: true })).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(thinkingLevelsForModel({ id: "plain", reasoning: false })).toEqual(["off"]);
+  });
+});
 
 describe("SessionControls dropdown toggles", () => {
   afterEach(() => {

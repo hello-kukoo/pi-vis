@@ -114,6 +114,9 @@ export const PI_ROLES = [
   "thinkingXhigh",
   // ── Bash mode ────────────────────────────────────────────────────────
   "bashMode",
+  // Appended in Pi 0.80.6 rather than inserted beside thinkingXhigh so every
+  // pre-existing role keeps its stable host↔renderer ANSI index.
+  "thinkingMax",
 ] as const;
 
 /**
@@ -200,6 +203,7 @@ export const PI_THEME_DEFAULTS: Record<string, ColorToken> = {
   thinkingMedium: "info",
   thinkingHigh: "accent",
   thinkingXhigh: "magenta",
+  thinkingMax: "magenta",
   // Bash mode
   bashMode: "warning",
 };

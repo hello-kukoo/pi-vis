@@ -45,10 +45,10 @@ const PI_BIN = locatePiBin();
 const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
 const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
 
-// Current pi versions synthesize the optional thinkingMax role from
-// thinkingXhigh inside Theme's constructor, so even this focused fixture must
-// provide the fallback source role.
-const TEST_FG_COLORS = { text: 42, error: 43, thinkingXhigh: 44 };
+// Pi 0.80.6 accepts an explicit thinkingMax role (and still falls back to
+// thinkingXhigh for older custom themes). Give it a distinct index so this
+// host-level test proves we preserve max's role identity.
+const TEST_FG_COLORS = { text: 42, error: 43, thinkingXhigh: 44, thinkingMax: 45 };
 
 // Run/serialize helper: vitest's describe.skip is evaluated at collection time,
 // so gate the whole suite on the resolved PI_BIN.
@@ -83,6 +83,7 @@ suite("applyPiVisTheme (real pi)", () => {
     const theme = globalThis[THEME_KEY];
     expect(theme.fg("text", "X")).toContain("\x1b[38;5;42m");
     expect(theme.fg("error", "Y")).toContain("\x1b[38;5;43m");
+    expect(theme.fg("thinkingMax", "Z")).toContain("\x1b[38;5;45m");
     // And it must NOT bake truecolor for numeric inputs.
     expect(theme.fg("text", "X")).not.toContain("\x1b[38;2;");
   });

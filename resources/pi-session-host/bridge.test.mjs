@@ -128,6 +128,71 @@ describe("setupCommandBridge — wiring", () => {
     });
   });
 
+  it("honors Pi 0.80.4 showCacheMissNotices in SDK-host mode", () => {
+    const previous = {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-x",
+      timestamp: 0,
+      usage: { input: 10_000, cacheRead: 20_000, cacheWrite: 0 },
+    };
+    const { session, send } = setup({
+      settingsManager: {
+        setEnabledModels: vi.fn(),
+        getEnabledModels: vi.fn(() => undefined),
+        getShowCacheMissNotices: vi.fn(() => true),
+      },
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-9"),
+        getBranch: vi.fn(() => [{ type: "message", message: previous }]),
+        // A later abandoned-branch entry must not become the previous request.
+        getEntries: vi.fn(() => [
+          { type: "message", message: previous },
+          {
+            type: "message",
+            message: {
+              ...previous,
+              model: "abandoned-branch-model",
+              timestamp: 5 * 60_000,
+              usage: { input: 100, cacheRead: 0, cacheWrite: 0 },
+            },
+          },
+        ]),
+      },
+    });
+    const subscriber = session.subscribe.mock.calls[0][0];
+    subscriber({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "anthropic",
+        model: "claude-x",
+        timestamp: 6 * 60_000,
+        stopReason: "stop",
+        usage: {
+          input: 30_000,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0.3, cacheRead: 0, cacheWrite: 0 },
+        },
+      },
+    });
+
+    expect(send).toHaveBeenCalledWith({
+      type: "event",
+      event: {
+        type: "cache_miss_notice",
+        noticeId: "cache-miss:360000:anthropic:claude-x:30000:0:0:0",
+        missedTokens: 30_000,
+        missedCost: 0.3,
+        idleMs: 6 * 60_000,
+        modelChanged: false,
+      },
+    });
+    expect(session.sessionManager.getBranch).toHaveBeenCalledTimes(1);
+    expect(session.sessionManager.getEntries).not.toHaveBeenCalled();
+  });
+
   it("re-announces streaming state on rebind even when the value is unchanged", async () => {
     const { runtime, send } = setup();
     send.mockClear();
@@ -424,6 +489,25 @@ describe("setupCommandBridge — command mapping", () => {
     expect(res.data.models).toEqual([{ provider: "anthropic", id: "claude-x", name: "Claude X" }]);
   });
 
+  it("strips Pi 0.80.6's :max suffix from saved model-scope patterns", async () => {
+    const { run } = setup({
+      modelRegistry: {
+        getAvailable: vi.fn(async () => [
+          { provider: "openai", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+          { provider: "anthropic", id: "claude-x", name: "Claude X" },
+        ]),
+      },
+      settingsManager: {
+        setEnabledModels: vi.fn(),
+        getEnabledModels: vi.fn(() => ["openai/gpt-5.6-sol:max"]),
+      },
+    });
+    const res = await run({ type: "get_available_models" });
+    expect(res.data.models).toEqual([
+      { provider: "openai", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+    ]);
+  });
+
   it("get_available_models settings fallback is a no-op when patterns match everything", async () => {
     // resolveEnabledModelIds treats all-matching as "no scope" (null); the
     // dropdown fallback must do the same so saving "all" doesn't paradoxically
@@ -442,6 +526,117 @@ describe("setupCommandBridge — command mapping", () => {
     const res = await run({ type: "get_available_models" });
     expect(res.data.models).toEqual(all);
   });
+  it("renders Pi 0.80.4 custom entries through the registered entry renderer", async () => {
+    const dispose = vi.fn();
+    const render = vi.fn(() => ["\u001b[31mIndexed files: 17\u001b[0m"]);
+    const renderer = vi.fn(() => ({ render, dispose }));
+    const { run } = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getEntryRenderer: vi.fn(() => renderer),
+      },
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-9"),
+        getEntry: vi.fn(() => ({
+          id: "entry-1",
+          type: "custom",
+          customType: "status-card",
+          data: { count: 17 },
+        })),
+      },
+    });
+
+    const res = await run({
+      type: "render_entry",
+      entryId: "entry-1",
+      cols: 96,
+      expanded: true,
+    });
+
+    expect(res).toMatchObject({
+      success: true,
+      data: { rendered: true, ansi: "\u001b[31mIndexed files: 17\u001b[0m" },
+    });
+    expect(renderer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "entry-1" }),
+      { expanded: true },
+      undefined,
+    );
+    expect(render).toHaveBeenCalledWith(96);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides custom entries when no registered renderer exists", async () => {
+    const { run } = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getEntryRenderer: vi.fn(() => undefined),
+      },
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-9"),
+        getEntry: vi.fn(() => ({ id: "entry-1", type: "custom", customType: "state" })),
+      },
+    });
+    const res = await run({ type: "render_entry", entryId: "entry-1", cols: 80 });
+    expect(res).toMatchObject({ success: true, data: { rendered: false } });
+  });
+
+  it("replays non-persisted cache-miss notices with history anchors", async () => {
+    const previous = {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-x",
+      timestamp: 0,
+      stopReason: "stop",
+      usage: { input: 10_000, cacheRead: 20_000, cacheWrite: 0 },
+    };
+    const current = {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-x",
+      timestamp: 6 * 60_000,
+      stopReason: "stop",
+      usage: {
+        input: 30_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { input: 0.3, cacheRead: 0, cacheWrite: 0 },
+      },
+    };
+    const { run } = setup({
+      settingsManager: {
+        setEnabledModels: vi.fn(),
+        getEnabledModels: vi.fn(() => undefined),
+        getShowCacheMissNotices: vi.fn(() => true),
+      },
+      sessionManager: {
+        getLeafId: vi.fn(() => "entry-2"),
+        getBranch: vi.fn(() => [
+          { id: "entry-1", type: "message", message: previous },
+          { id: "entry-2", type: "message", message: current },
+        ]),
+      },
+    });
+
+    const res = await run({ type: "get_cache_miss_notices" });
+    expect(res).toMatchObject({
+      success: true,
+      data: {
+        notices: [
+          {
+            type: "cache_miss_notice",
+            noticeId: "cache-miss:360000:anthropic:claude-x:30000:0:0:0",
+            afterEntryId: "entry-2",
+            missedTokens: 30_000,
+            missedCost: 0.3,
+            idleMs: 6 * 60_000,
+            modelChanged: false,
+          },
+        ],
+      },
+    });
+  });
+
   it("compact passes the customInstructions STRING (not an object)", async () => {
     const { session, run } = setup();
     await run({ type: "compact", customInstructions: "be brief" });

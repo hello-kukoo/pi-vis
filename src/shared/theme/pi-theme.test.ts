@@ -96,6 +96,12 @@ describe("buildPiThemeColorIndices — stable index contract (live re-theming)",
     }
   });
 
+  it("appends thinkingMax without renumbering existing Pi roles", () => {
+    expect(PI_ROLE_INDEX.bashMode).toBe(66);
+    expect(PI_ROLE_INDEX.thinkingMax).toBe(67);
+    expect(PI_THEME_DEFAULTS.thinkingMax).toBe("magenta");
+  });
+
   it("index 16+i maps to PI_ROLES[i] (extendedAnsi[i] alignment with buildXtermTheme)", () => {
     // buildXtermTheme packs extendedAnsi in PI_ROLES order starting at index 16;
     // this invariant is what lets xterm resolve an emitted \u001b[38;5;N m to the

@@ -204,6 +204,34 @@ export const ThinkingLevelChangedEventSchema = z.object({
   level: ThinkingLevelSchema,
 });
 
+// Pi >= 0.80.4 emits this when an extension persists an appendEntry() value.
+// The entry remains out of model context; the SDK host can render it through
+// the extension's matching registerEntryRenderer() callback on demand.
+export const EntryAppendedEventSchema = z.object({
+  type: z.literal("entry_appended"),
+  entry: z
+    .object({
+      id: z.string(),
+      type: z.string(),
+      customType: z.string().optional(),
+    })
+    .passthrough(),
+});
+
+// SDK-host rendering parity for Pi 0.80.4's opt-in showCacheMissNotices.
+export const CacheMissNoticeEventSchema = z.object({
+  type: z.literal("cache_miss_notice"),
+  noticeId: z.string(),
+  missedTokens: z.number(),
+  missedCost: z.number(),
+  idleMs: z.number(),
+  modelChanged: z.boolean(),
+  // Historical replay anchors the synthetic notice after its persisted
+  // assistant entry. Live notices omit this because message_end precedes
+  // SessionManager persistence.
+  afterEntryId: z.string().optional(),
+});
+
 // extension_error uses extensionPath + error, not extensionName + message
 export const ExtensionErrorEventSchema = z.object({
   type: z.literal("extension_error"),
@@ -212,12 +240,12 @@ export const ExtensionErrorEventSchema = z.object({
   error: z.unknown().optional(),
 });
 
-// Emitted by pi (and its extensions) whenever the session name changes via
-// `set_session_name`. Pi's `set_session_name` rejects empty names, so the
-// `name` field is always a non-empty string — there is no "unset" path.
+// Emitted whenever session metadata changes. set_session_name uses a non-empty
+// string; a new-session reset emits the same event with no name to clear it.
 export const SessionInfoChangedEventSchema = z.object({
   type: z.literal("session_info_changed"),
-  name: z.string(),
+  // New-session resets clear the name and emit `undefined`.
+  name: z.string().optional(),
 });
 
 const KnownPiEventSchema = z.discriminatedUnion("type", [
@@ -240,6 +268,8 @@ const KnownPiEventSchema = z.discriminatedUnion("type", [
   AutoRetryStartEventSchema,
   AutoRetryEndEventSchema,
   ThinkingLevelChangedEventSchema,
+  EntryAppendedEventSchema,
+  CacheMissNoticeEventSchema,
   ExtensionErrorEventSchema,
   SessionInfoChangedEventSchema,
 ]);
@@ -270,4 +300,6 @@ export type ToolExecutionUpdateEvent = z.infer<typeof ToolExecutionUpdateEventSc
 export type ToolExecutionEndEvent = z.infer<typeof ToolExecutionEndEventSchema>;
 export type CompactionEndEvent = z.infer<typeof CompactionEndEventSchema>;
 export type ThinkingLevelChangedEvent = z.infer<typeof ThinkingLevelChangedEventSchema>;
+export type EntryAppendedEvent = z.infer<typeof EntryAppendedEventSchema>;
+export type CacheMissNoticeEvent = z.infer<typeof CacheMissNoticeEventSchema>;
 export type SessionInfoChangedEvent = z.infer<typeof SessionInfoChangedEventSchema>;

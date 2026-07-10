@@ -75,6 +75,11 @@ export interface CustomMessageBlockData {
   content: string;
 }
 
+export interface CustomEntryBlockData {
+  entryId: string;
+  customType: string;
+}
+
 /**
  * A model/provider failure surfaced into the transcript. pi records a
  * failed assistant turn as a `message_end` with `stopReason: "error"`
@@ -96,11 +101,18 @@ export type TypedTranscriptBlock =
   | { id: string; type: "bash"; data: BashBlockData }
   | { id: string; type: "compaction"; data: CompactionBlockData }
   | { id: string; type: "custom_message"; data: CustomMessageBlockData }
+  | { id: string; type: "custom_entry"; data: CustomEntryBlockData }
   | { id: string; type: "error"; data: ErrorBlockData };
 
 let blockCounter = 0;
 function newBlockId(): string {
   return `blk-${++blockCounter}`;
+}
+
+function formatCompactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return Math.round(tokens).toLocaleString();
 }
 
 /**
@@ -284,6 +296,11 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
       }
       if (b.type === "custom_message") {
         return { id: b.id, type: "custom_message", data: { content: (d.content as string) ?? "" } };
+      }
+      if (b.type === "custom_entry") {
+        const entryId = typeof d.entryId === "string" ? d.entryId : b.id;
+        if (typeof d.customType !== "string") return null;
+        return { id: b.id, type: "custom_entry", data: { entryId, customType: d.customType } };
       }
       if (b.type === "error") {
         return {
@@ -563,6 +580,61 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
     case "auto_retry_end":
     case "extension_error":
       return state;
+
+    case "cache_miss_notice": {
+      if (blocks.some((block) => block.id === event.noticeId)) return state;
+      let label = "Cache miss";
+      if (event.modelChanged) label = "Cache miss after model switch";
+      else if (event.idleMs >= 5 * 60_000) {
+        label = `Cache miss after ${Math.round(event.idleMs / 60_000)}m idle`;
+      }
+      const cost = event.missedCost >= 0.01 ? ` (~$${event.missedCost.toFixed(2)})` : "";
+      const content = `${label}: ${formatCompactTokens(event.missedTokens)} tokens re-billed${cost}`;
+      const block: TypedTranscriptBlock = {
+        id: event.noticeId,
+        type: "custom_message",
+        data: { content },
+      };
+      if (!event.afterEntryId) return { ...state, blocks: [...blocks, block] };
+
+      let anchorIndex = -1;
+      const toolPrefix = `${event.afterEntryId}-tool-`;
+      for (let index = 0; index < blocks.length; index += 1) {
+        const candidateId = blocks[index]?.id;
+        if (candidateId === event.afterEntryId || candidateId?.startsWith(toolPrefix)) {
+          anchorIndex = index;
+        }
+      }
+      // The notice belongs to a history page that is not loaded yet. A replay
+      // after the next prepend will place it once its assistant entry appears.
+      if (anchorIndex < 0) return state;
+      return {
+        ...state,
+        blocks: [...blocks.slice(0, anchorIndex + 1), block, ...blocks.slice(anchorIndex + 1)],
+      };
+    }
+
+    case "entry_appended": {
+      const entry = event.entry;
+      if (entry.type !== "custom" || typeof entry.customType !== "string") return state;
+      if (blocks.some((block) => block.id === entry.id)) return state;
+      const block: TypedTranscriptBlock = {
+        id: entry.id,
+        type: "custom_entry",
+        data: { entryId: entry.id, customType: entry.customType },
+      };
+      // Pi persists the assistant message only after message_end. If an
+      // extension appends an entry while that message is streaming, file order
+      // places the custom entry before the assistant; mirror Pi 0.80.4's TUI.
+      const assistantIndex = activeAssistantId
+        ? blocks.findIndex((candidate) => candidate.id === activeAssistantId)
+        : -1;
+      if (assistantIndex < 0) return { ...state, blocks: [...blocks, block] };
+      return {
+        ...state,
+        blocks: [...blocks.slice(0, assistantIndex), block, ...blocks.slice(assistantIndex)],
+      };
+    }
 
     case "message_start": {
       const role = event.message?.role;

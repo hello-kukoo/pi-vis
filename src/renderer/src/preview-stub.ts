@@ -19,7 +19,9 @@ const DEMO_NON_REASONING_MODEL = "claude-fable-5";
 // in the browser-only preview. Mirrors what the real `pi` binary does in
 // memory between `set_thinking_level` / `get_state` calls.
 let currentModelId = DEMO_MODEL;
-let currentThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" = "off";
+let currentThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" = "off";
+let customEntryRendererAvailable = true;
+let customEntryRendererVersion = 1;
 
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
@@ -51,6 +53,14 @@ const previewHooks = {
       sessionId: activeId,
       events: [{ type: "agent_end" }, { type: "interrupt_state", interruptible: false }],
     });
+  },
+  /** Replace the fake runtime so render tests can exercise `/reload` semantics. */
+  replaceCustomEntryRuntime(available: boolean, version = customEntryRendererVersion): void {
+    customEntryRendererAvailable = available;
+    customEntryRendererVersion = version;
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    useSessionsStore.getState().setSessionStatus(activeId, "starting");
+    useSessionsStore.getState().setSessionStatus(activeId, "ready");
   },
 };
 // Attach to window for render-test access (guarded for type safety).
@@ -431,6 +441,7 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
             name: "DeepSeek V4 Flash",
             provider: "deepseek",
             reasoning: true,
+            thinkingLevelMap: { xhigh: "xhigh", max: "max" },
             input: ["text"],
           },
           {
@@ -473,6 +484,20 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
         emitEvent({ type: "thinking_level_changed", level: "off" });
       }
       return response("set_model");
+    }
+    case "get_cache_miss_notices":
+      return response("get_cache_miss_notices", { notices: [] });
+    case "render_entry": {
+      if (!customEntryRendererAvailable) {
+        return { type: "response", command: "render_entry", success: false, error: "Unsupported" };
+      }
+      const expanded = command.expanded === true;
+      const cols = Number(command.cols ?? 80);
+      const detail = expanded ? `\n\u001b[2mRendered responsively at ${cols} columns\u001b[0m` : "";
+      return response("render_entry", {
+        rendered: true,
+        ansi: `\u001b[1;35mIndexed files\u001b[0m: 17 (renderer v${customEntryRendererVersion})${detail}`,
+      });
     }
     case "get_session_stats":
       return response("get_session_stats", {
@@ -977,6 +1002,25 @@ function seedToolOutputPreview(): void {
 
 if (new URLSearchParams(window.location.search).get("toolOutput") === "1") {
   seedToolOutputPreview();
+}
+
+function seedCustomEntryPreview(): void {
+  setTimeout(() => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(store.activeSessionId ?? DEMO_SESSION_ID, {
+      type: "entry_appended",
+      entry: {
+        id: "preview-custom-entry",
+        type: "custom",
+        customType: "status-card",
+        data: { title: "Indexed files", count: 17 },
+      },
+    });
+  }, 600);
+}
+
+if (new URLSearchParams(window.location.search).get("customEntry") === "1") {
+  seedCustomEntryPreview();
 }
 
 // ── Unified-TUI panel preview (factory setWidget) ────────────────────────

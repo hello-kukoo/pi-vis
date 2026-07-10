@@ -354,6 +354,12 @@ describe("sessions store - session name from pi", () => {
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionName).toBe("New name");
   });
 
+  it("clears the name when a new-session reset omits it", () => {
+    useSessionsStore.getState().setSessionName(SESSION_A, "Old name");
+    useSessionsStore.getState().applyEvent(SESSION_A, { type: "session_info_changed" });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.sessionName).toBeUndefined();
+  });
+
   it("scopes session name changes to a single session", () => {
     useSessionsStore.getState().createSession(SESSION_B, WORKSPACE);
     useSessionsStore.getState().applyEvent(SESSION_A, {
@@ -2924,6 +2930,129 @@ describe("sessions store - unified TUI panel reducer", () => {
     });
     // fresh panel starts visible regardless of the prior toggle
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanelHidden).toBe(false);
+  });
+});
+
+describe("sessions store - historical cache notices", () => {
+  const invokeMock = vi.fn();
+  const originalWindow = (globalThis as { window?: unknown }).window;
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      diffComments: new Map(),
+    });
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({
+      success: true,
+      data: {
+        notices: [
+          {
+            type: "cache_miss_notice",
+            noticeId: "cache-miss-history",
+            afterEntryId: "assistant-1",
+            missedTokens: 25_000,
+            missedCost: 0.12,
+            idleMs: 0,
+            modelChanged: false,
+          },
+        ],
+      },
+    });
+    (globalThis as { window: unknown }).window = {
+      pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
+    };
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window: unknown }).window = originalWindow;
+    }
+  });
+
+  it("replays notices after a cold history reaches ready", async () => {
+    useSessionsStore
+      .getState()
+      .createSession(SESSION_A, WORKSPACE, "/tmp/session.jsonl", undefined, undefined, "cold");
+    useSessionsStore.getState().seedHistory(SESSION_A, [
+      { id: "assistant-1", type: "assistant", data: { role: "assistant", content: "Done" } },
+      { id: "user-2", type: "user", data: { content: "Next" } },
+    ]);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+
+    await vi.waitFor(() => {
+      expect(
+        useSessionsStore
+          .getState()
+          .sessions.get(SESSION_A)
+          ?.transcript.blocks.map((block) => block.id),
+      ).toEqual(["assistant-1", "cache-miss-history", "user-2"]);
+    });
+    expect(invokeMock).toHaveBeenCalledWith("session.sendCommand", {
+      sessionId: SESSION_A,
+      command: { type: "get_cache_miss_notices" },
+    });
+  });
+
+  it("replays notices again after an earlier-history page is prepended", async () => {
+    invokeMock.mockImplementation(async (channel: string) => {
+      if (channel === "session.loadHistory") {
+        return {
+          blocks: [
+            {
+              id: "assistant-1",
+              type: "assistant",
+              data: { role: "assistant", content: "Done" },
+            },
+          ],
+          startIndex: 0,
+          total: 2,
+        };
+      }
+      return {
+        success: true,
+        data: {
+          notices: [
+            {
+              type: "cache_miss_notice",
+              noticeId: "cache-miss-history",
+              afterEntryId: "assistant-1",
+              missedTokens: 25_000,
+              missedCost: 0.12,
+              idleMs: 0,
+              modelChanged: false,
+            },
+          ],
+        },
+      };
+    });
+    useSessionsStore
+      .getState()
+      .createSession(SESSION_A, WORKSPACE, "/tmp/session.jsonl", undefined, undefined, "ready");
+    useSessionsStore.getState().seedHistory(SESSION_A, {
+      blocks: [{ id: "user-2", type: "user", data: { content: "Next" } }],
+      startIndex: 1,
+      total: 2,
+    });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalled());
+
+    await useSessionsStore.getState().loadEarlierHistory(SESSION_A);
+
+    await vi.waitFor(() => {
+      expect(
+        useSessionsStore
+          .getState()
+          .sessions.get(SESSION_A)
+          ?.transcript.blocks.map((block) => block.id),
+      ).toEqual(["assistant-1", "cache-miss-history", "user-2"]);
+    });
   });
 });
 

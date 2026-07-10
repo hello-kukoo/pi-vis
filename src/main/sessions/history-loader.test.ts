@@ -412,7 +412,7 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
     expect((blocks[0]?.data as { summary: string }).summary).toMatch(/empty branch summary/i);
   });
 
-  it("skips meta entries (label/model_change/thinking_level_change/session_info/custom)", () => {
+  it("skips non-rendering meta entries (label/model_change/thinking_level_change/session_info)", () => {
     const branch = [
       {
         type: "message",
@@ -445,6 +445,25 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
     ];
     const blocks = entriesToTranscript(branch);
     expect(blocks.map((b) => b.type)).toEqual(["user", "assistant"]);
+  });
+
+  it("preserves Pi 0.80.4 custom entries for SDK-host rendering", () => {
+    const blocks = entriesToTranscript([
+      {
+        type: "custom",
+        id: "custom-1",
+        timestamp: "t1",
+        customType: "status-card",
+        data: { count: 17 },
+      },
+    ]);
+    expect(blocks).toEqual([
+      {
+        id: "custom-1",
+        type: "custom_entry",
+        data: { entryId: "custom-1", customType: "status-card" },
+      },
+    ]);
   });
 
   it("preserves details.diff for standalone tool results with no preceding tool call", () => {

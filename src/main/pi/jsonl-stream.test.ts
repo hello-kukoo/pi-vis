@@ -93,6 +93,22 @@ describe("JsonlStream", () => {
     expect(lines).toEqual([{ kind: "event", data: { type: "agent_settled" } }]);
   });
 
+  it("recognizes Pi 0.80.4 entry_appended and name-reset events", () => {
+    const lines: Array<{ kind: string; data?: { type?: string; __unknown?: boolean } }> = [];
+    const stream = new JsonlStream(
+      (parsed) => lines.push(parsed as (typeof lines)[number]),
+      () => {},
+    );
+    stream.feed(
+      Buffer.from(
+        '{"type":"entry_appended","entry":{"id":"e1","type":"custom","customType":"card"}}\n{"type":"session_info_changed"}\n',
+      ),
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ kind: "event", data: { type: "entry_appended" } });
+    expect(lines[1]).toEqual({ kind: "event", data: { type: "session_info_changed" } });
+  });
+
   it("classifies response messages", () => {
     const lines: Array<{ kind: string }> = [];
     const stream = new JsonlStream(

@@ -245,7 +245,20 @@ export function entriesToTranscript(
         }
         break;
       }
-      case "custom":
+      case "custom": {
+        // Pi >= 0.80.4 extensions can pair appendEntry(customType, data) with
+        // registerEntryRenderer(). Preserve the entry in transcript history;
+        // the renderer asks the live SDK host to run that pi-tui renderer at
+        // the current column width. Entries with no renderer resolve hidden.
+        if (typeof entry.customType === "string") {
+          blocks.push({
+            id: entry.id,
+            type: "custom_entry",
+            data: { entryId: entry.id, customType: entry.customType },
+          });
+        }
+        break;
+      }
       case "label":
       case "model_change":
       case "thinking_level_change":

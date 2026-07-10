@@ -1,6 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import type React from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AnsiText } from "../../lib/ansi.js";
 import { Markdown } from "../../lib/markdown.js";
 import { htmlToMarkdown } from "../../lib/turndown.js";
 import { useImageViewerStore } from "../../stores/image-viewer-store.js";
@@ -11,6 +12,7 @@ import {
   type AssistantSegment,
   type BashBlockData,
   type CompactionBlockData,
+  type CustomEntryBlockData,
   type CustomMessageBlockData,
   type ErrorBlockData,
   type ToolCallBlockData,
@@ -861,6 +863,116 @@ const CustomMessageBlock = memo(function CustomMessageBlock({
   );
 });
 
+type RenderedEntry = { rendered: boolean; ansi?: string; error?: boolean };
+
+const CustomEntryBlock = memo(function CustomEntryBlock({
+  sessionId,
+  data,
+  preserveScroll,
+}: {
+  sessionId: SessionId;
+  data: CustomEntryBlockData;
+  preserveScroll: (mutate: () => void) => void;
+}): React.ReactElement {
+  const identityEpoch = useSessionsStore(
+    (state) => state.sessions.get(sessionId)?.identityEpoch ?? 0,
+  );
+  const renderedEpochRef = useRef(identityEpoch);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLPreElement>(null);
+  const measureRef = useRef<HTMLSpanElement>(null);
+  const [cols, setCols] = useState(80);
+  const [expanded, setExpanded] = useState(false);
+  const [rendered, setRendered] = useState<RenderedEntry>();
+
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    const probe = measureRef.current;
+    if (!host || !probe || typeof ResizeObserver === "undefined") return;
+    const measure = (): void => {
+      const content = contentRef.current;
+      const contentStyle = content ? getComputedStyle(content) : undefined;
+      const contentWidth = content?.clientWidth ?? host.getBoundingClientRect().width;
+      const horizontalPadding = contentStyle
+        ? (Number.parseFloat(contentStyle.paddingLeft) || 0) +
+          (Number.parseFloat(contentStyle.paddingRight) || 0)
+        : 0;
+      const glyphWidth = probe.getBoundingClientRect().width / 10;
+      const availableWidth = Math.max(0, contentWidth - horizontalPadding);
+      if (availableWidth <= 0 || glyphWidth <= 0) return;
+      const next = Math.max(20, Math.min(240, Math.floor(availableWidth / glyphWidth)));
+      setCols((current) => (current === next ? current : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    observer.observe(probe);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    renderedEpochRef.current = identityEpoch;
+    setRendered(undefined);
+  }, [identityEpoch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.pivis
+      .invoke("session.sendCommand", {
+        sessionId,
+        command: {
+          type: "render_entry",
+          entryId: data.entryId,
+          cols,
+          expanded,
+        },
+      })
+      .then((response) => {
+        if (cancelled || renderedEpochRef.current !== identityEpoch) return;
+        const result = response.success ? (response.data as RenderedEntry | undefined) : undefined;
+        setRendered(result && typeof result.rendered === "boolean" ? result : undefined);
+      })
+      .catch(() => {
+        if (cancelled || renderedEpochRef.current !== identityEpoch) return;
+        // RPC fallback and an older SDK host do not support entry renderers.
+        // Pi hides custom entries without a renderer, so the compatible
+        // degradation is an invisible block rather than stale extension data.
+        setRendered(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, data.entryId, cols, expanded, identityEpoch]);
+
+  const visible = rendered?.rendered === true;
+  return (
+    <div
+      ref={hostRef}
+      className={`custom-entry${visible ? " custom-entry--visible" : ""}${rendered?.error ? " custom-entry--error" : ""}`}
+    >
+      <span ref={measureRef} className="custom-entry__measure" aria-hidden="true">
+        0000000000
+      </span>
+      {visible && (
+        <>
+          <button
+            type="button"
+            className="custom-entry__toggle icon-btn"
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${data.customType} extension entry`}
+            title={expanded ? "Collapse extension entry" : "Expand extension entry"}
+            onClick={() => preserveScroll(() => setExpanded((value) => !value))}
+          >
+            <IconChevronRight className="custom-entry__chevron" />
+          </button>
+          <pre ref={contentRef} className="custom-entry__content">
+            <AnsiText text={rendered.ansi ?? ""} />
+          </pre>
+        </>
+      )}
+    </div>
+  );
+});
+
 type TranscriptRenderItem =
   | { kind: "block"; block: TypedTranscriptBlock }
   | {
@@ -910,7 +1022,11 @@ function summarizeCompactGroup(items: readonly TranscriptRenderItem[]): string {
     }
     if (item.block.type === "tool_call" || item.block.type === "bash") {
       toolCalls += 1;
-    } else if (item.block.type === "compaction" || item.block.type === "custom_message") {
+    } else if (
+      item.block.type === "compaction" ||
+      item.block.type === "custom_message" ||
+      item.block.type === "custom_entry"
+    ) {
       notices += 1;
     }
   }
@@ -979,9 +1095,11 @@ function buildCompactRenderItems(
 }
 
 function TranscriptItemView({
+  sessionId,
   item,
   preserveScroll,
 }: {
+  sessionId: SessionId;
   item: TranscriptRenderItem;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement | null {
@@ -1008,6 +1126,10 @@ function TranscriptItemView({
       return <CompactionBlock data={block.data} preserveScroll={preserveScroll} />;
     case "custom_message":
       return <CustomMessageBlock data={block.data} preserveScroll={preserveScroll} />;
+    case "custom_entry":
+      return (
+        <CustomEntryBlock sessionId={sessionId} data={block.data} preserveScroll={preserveScroll} />
+      );
     case "error":
       return <ErrorBlock data={block.data} />;
     default:
@@ -1016,11 +1138,13 @@ function TranscriptItemView({
 }
 
 const CompactTranscriptGroup = memo(function CompactTranscriptGroup({
+  sessionId,
   items,
   summary,
   streaming,
   preserveScroll,
 }: {
+  sessionId: SessionId;
   items: TranscriptRenderItem[];
   summary: string;
   streaming: boolean;
@@ -1046,6 +1170,7 @@ const CompactTranscriptGroup = memo(function CompactTranscriptGroup({
           {items.map((item) => (
             <TranscriptItemView
               key={renderItemKey(item)}
+              sessionId={sessionId}
               item={item}
               preserveScroll={preserveScroll}
             />
@@ -1409,12 +1534,14 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
               item.kind === "item" ? (
                 <TranscriptItemView
                   key={renderItemKey(item.item)}
+                  sessionId={sessionId}
                   item={item.item}
                   preserveScroll={preserveScroll}
                 />
               ) : (
                 <CompactTranscriptGroup
                   key={item.key}
+                  sessionId={sessionId}
                   items={item.items}
                   summary={item.summary}
                   streaming={item.streaming}
@@ -1425,6 +1552,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
           : visibleBlocks.map((block) => (
               <TranscriptItemView
                 key={block.id}
+                sessionId={sessionId}
                 item={{ kind: "block", block }}
                 preserveScroll={preserveScroll}
               />
