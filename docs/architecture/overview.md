@@ -17,7 +17,7 @@
 | `npm run build` | Typecheck + electron-vite build |
 | `npm run dist` | Build + electron-builder (mac dmg/zip) |
 | `npm test` | Unit tests (vitest) |
-| `npm run test:e2e` | E2E smoke tests (playwright) |
+| `npm run test:e2e` | Fresh production build + Electron E2E tests (Playwright) |
 | `npm run typecheck` | `tsc -b --noEmit` |
 | `npm run lint` | Biome linter |
 | `npm run format` | Biome formatter |

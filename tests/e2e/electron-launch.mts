@@ -1,8 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import type { Browser, Page } from "@playwright/test";
 import { chromium } from "@playwright/test";
-import { registerElectronPid, unregisterElectronPid } from "./electron-process-registry.mjs";
+import { registerElectronPid, terminateElectronProcessTree } from "./electron-process-registry.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -21,12 +22,19 @@ export interface LaunchedElectronApplication {
 function waitForLine(child: ChildProcess, pattern: RegExp, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let buffer = "";
+    let outputTail = "";
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Timed out waiting for ${pattern}`));
+      reject(
+        new Error(
+          `Timed out waiting for ${pattern}${outputTail ? `\nElectron output:\n${outputTail}` : ""}`,
+        ),
+      );
     }, timeoutMs);
     const onData = (data: Buffer) => {
-      buffer += data.toString();
+      const text = data.toString();
+      outputTail = `${outputTail}${text}`.slice(-8_000);
+      buffer += text;
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {
@@ -40,21 +48,38 @@ function waitForLine(child: ChildProcess, pattern: RegExp, timeoutMs: number): P
     };
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
-      reject(new Error(`Electron exited before ${pattern} (code=${code}, signal=${signal})`));
+      reject(
+        new Error(
+          `Electron exited before ${pattern} (code=${code}, signal=${signal})${outputTail ? `\nElectron output:\n${outputTail}` : ""}`,
+        ),
+      );
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
     };
     const cleanup = () => {
       clearTimeout(timer);
       child.stderr?.off("data", onData);
       child.stdout?.off("data", onData);
       child.off("exit", onExit);
+      child.off("error", onError);
     };
     child.stderr?.on("data", onData);
     child.stdout?.on("data", onData);
     child.once("exit", onExit);
+    child.once("error", onError);
   });
 }
 
 export async function launchElectron(options: LaunchOptions): Promise<LaunchedElectronApplication> {
+  const appEntry = options.args?.[0];
+  if (appEntry && !appEntry.startsWith("-") && !fs.existsSync(appEntry)) {
+    throw new Error(
+      `Electron app entry does not exist: ${appEntry}. Run \`npm run build\` before launching E2E.`,
+    );
+  }
+
   const electronPath = String(require("electron"));
   const env = {
     ...process.env,
@@ -73,14 +98,27 @@ export async function launchElectron(options: LaunchOptions): Promise<LaunchedEl
     cwd: options.cwd ?? process.cwd(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    // A dedicated process group lets cleanup terminate Electron helpers and
+    // app-owned subprocesses instead of only the browser process.
+    detached: process.platform !== "win32",
   });
-  if (child.pid) {
-    registerElectronPid(child.pid);
-    child.once("exit", () => unregisterElectronPid(child.pid!));
-  }
+  const pid = child.pid;
+  if (pid) registerElectronPid(pid);
 
-  const cdpUrl = await waitForLine(child, /^DevTools listening on (ws:\/\/.*)$/, 15_000);
-  const browser = await chromium.connectOverCDP(cdpUrl);
+  let browser: Browser;
+  try {
+    const cdpUrl = await waitForLine(child, /^DevTools listening on (ws:\/\/.*)$/, 15_000);
+    // Keep draining both pipes after finding the CDP URL. An unread full pipe
+    // can block Electron and make an otherwise healthy test appear hung.
+    child.stdout?.resume();
+    child.stderr?.resume();
+    browser = await chromium.connectOverCDP(cdpUrl);
+  } catch (error) {
+    child.stdout?.resume();
+    child.stderr?.resume();
+    if (pid) await terminateElectronProcessTree(pid);
+    throw error;
+  }
 
   const app: LaunchedElectronApplication = {
     async firstWindow() {
@@ -91,18 +129,7 @@ export async function launchElectron(options: LaunchOptions): Promise<LaunchedEl
     },
     async close() {
       await browser.close().catch(() => undefined);
-      if (!child.killed) child.kill();
-      await new Promise<void>((resolve) => {
-        if (child.exitCode !== null || child.signalCode !== null) {
-          resolve();
-          return;
-        }
-        child.once("exit", () => resolve());
-        setTimeout(() => {
-          if (!child.killed) child.kill("SIGKILL");
-          resolve();
-        }, 2_000).unref();
-      });
+      if (pid) await terminateElectronProcessTree(pid);
     },
     process() {
       return child;

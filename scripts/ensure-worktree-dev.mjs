@@ -35,6 +35,32 @@ function hasUsableNodeModules(root) {
   );
 }
 
+function dependencyManifest(root) {
+  try {
+    return fs.readFileSync(path.join(root, "package-lock.json"), "utf8");
+  } catch {
+    try {
+      return fs.readFileSync(path.join(root, "package.json"), "utf8");
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function dependenciesMatch(leftRoot, rightRoot) {
+  return dependencyManifest(leftRoot) === dependencyManifest(rightRoot);
+}
+
+function linkedDependencyRoot(root) {
+  const nodeModules = path.join(root, "node_modules");
+  try {
+    if (!fs.lstatSync(nodeModules).isSymbolicLink()) return undefined;
+    return path.dirname(fs.realpathSync(nodeModules));
+  } catch {
+    return undefined;
+  }
+}
+
 function worktreeRoots(root) {
   try {
     const out = execGit(["worktree", "list", "--porcelain"], root);
@@ -52,22 +78,30 @@ function main() {
   const root = repoRoot();
   const nodeModules = path.join(root, "node_modules");
 
-  if (hasUsableNodeModules(root)) return;
-
-  try {
-    const stat = fs.lstatSync(nodeModules);
-    if (stat.isSymbolicLink()) fs.rmSync(nodeModules, { force: true });
-  } catch {
-    // Missing is expected in fresh git worktrees.
+  if (hasUsableNodeModules(root)) {
+    const linkedRoot = linkedDependencyRoot(root);
+    // A branch can change package-lock.json after this symlink was created.
+    // Never silently run it against a sibling's incompatible dependency tree.
+    if (!linkedRoot || dependenciesMatch(root, linkedRoot)) return;
+    fs.rmSync(nodeModules, { force: true });
+    console.error("[ensure-worktree-dev] removed an incompatible node_modules worktree link");
+  } else {
+    try {
+      const stat = fs.lstatSync(nodeModules);
+      if (stat.isSymbolicLink()) fs.rmSync(nodeModules, { force: true });
+    } catch {
+      // Missing is expected in fresh git worktrees.
+    }
   }
 
   const sourceRoot = worktreeRoots(root).find(
-    (candidate) => candidate !== root && hasUsableNodeModules(candidate),
+    (candidate) =>
+      candidate !== root && hasUsableNodeModules(candidate) && dependenciesMatch(root, candidate),
   );
   if (!sourceRoot) {
     console.error(
       "[ensure-worktree-dev] node_modules is missing and no sibling worktree with installed dependencies was found.\n" +
-        "Run `npm install` once in any pi-vis worktree, then retry this command.",
+        "Run `npm install` once in this worktree (or in a sibling with the same package-lock.json), then retry this command.",
     );
     process.exit(1);
   }

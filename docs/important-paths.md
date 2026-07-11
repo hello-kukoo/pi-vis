@@ -11,7 +11,7 @@
 | `~/Library/Application Support/pi-vis/settings.json` | App settings |
 | `build/entitlements.mac.plist` | macOS hardened runtime entitlements for signing (allow-jit, allow-unsigned-executable-memory, disable-library-validation) |
 | `.github/workflows/ci.yml` | CI workflow (typecheck, lint, test, build on push/PR) |
-| `tests/e2e/electron-launch.mts` | Electron 43-compatible e2e launcher: spawns the Electron binary directly, strips `ELECTRON_RUN_AS_NODE`, enables CDP through `PIVIS_TEST_REMOTE_DEBUGGING_PORT`, tracks pids for teardown, and returns the minimal app handle used by the Playwright suites |
+| `tests/e2e/electron-launch.mts` | Electron 43-compatible E2E launcher: spawns the binary in a dedicated process group, strips `ELECTRON_RUN_AS_NODE`, enables CDP through `PIVIS_TEST_REMOTE_DEBUGGING_PORT`, drains output pipes, and guarantees group cleanup on close or failed launch; `electron-process-registry.mts` provides failure-safe global teardown |
 | `src/main/index.ts` | Main entry: BrowserWindow creation, IPC init, CSP, navigation hardening (external links open in OS browser, no in-app navigation); owns the `PIVIS_TEST_REMOTE_DEBUGGING_PORT` e2e seam used by `tests/e2e/electron-launch.mts` for Electron 43-compatible CDP launch |
 | `src/renderer/src/components/ErrorBoundary.tsx` | React error boundary — catches render crashes without white-screening the app |
 | `src/shared/ipc-contract.ts` | The typed IPC boundary — start here when adding new main↔renderer communication |

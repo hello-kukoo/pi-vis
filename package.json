@@ -22,9 +22,9 @@
     "lint": "node scripts/ensure-worktree-dev.mjs && biome check .",
     "format": "node scripts/ensure-worktree-dev.mjs && biome format --write .",
     "test": "node scripts/ensure-worktree-dev.mjs && vitest run",
-    "test:e2e": "node scripts/ensure-worktree-dev.mjs && playwright test -c tests/e2e/playwright.config.mts",
+    "test:e2e": "npm run build && playwright test -c tests/e2e/playwright.config.mts",
     "test:render": "node scripts/ensure-worktree-dev.mjs && playwright test -c tests/render/playwright.config.mts",
-    "test:full": "npm run typecheck && npm run lint && npm test && npm run build && npm run test:render && npm run test:e2e",
+    "test:full": "npm run typecheck && npm run lint && npm test && npm run test:render && npm run test:e2e",
     "preview": "node scripts/ensure-worktree-dev.mjs && electron-vite preview",
     "make-icon": "bash scripts/make-icon.sh",
     "site:screenshots": "node scripts/site-screenshots.mjs"

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { resolve } from "node:path";
 import { scopedTmpPath } from "../isolation.mjs";
@@ -13,22 +13,6 @@ export function electronPidRegistryPath(): string {
 
 export function registerElectronPid(pid: number): void {
   fs.appendFileSync(REGISTRY_PATH, `${pid}\n`);
-}
-
-export function unregisterElectronPid(pid: number): void {
-  try {
-    const remaining = fs
-      .readFileSync(REGISTRY_PATH, "utf8")
-      .split(/\r?\n/)
-      .filter((line) => line && Number.parseInt(line, 10) !== pid);
-    if (remaining.length > 0) {
-      fs.writeFileSync(REGISTRY_PATH, `${remaining.join("\n")}\n`);
-    } else {
-      fs.rmSync(REGISTRY_PATH, { force: true });
-    }
-  } catch {
-    // Best effort. Global teardown validates command lines before killing.
-  }
 }
 
 function commandForPid(pid: number): string | null {
@@ -47,6 +31,56 @@ function isRegisteredPiVisElectron(pid: number): boolean {
   return !!command && command.includes(APP_ENTRY);
 }
 
+function signalProcessTree(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  if (process.platform === "win32") {
+    if (signal === "SIGKILL") {
+      spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+      return;
+    }
+    process.kill(pid, signal);
+    return;
+  }
+
+  // E2E Electron is spawned as a process-group leader. Signalling the group
+  // also reaches renderer/GPU helpers and app-owned subprocesses.
+  process.kill(-pid, signal);
+}
+
+function processTreeIsAlive(pid: number): boolean {
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function terminateElectronProcessTree(pid: number, graceMs = 2_000): Promise<void> {
+  try {
+    signalProcessTree(pid, "SIGTERM");
+  } catch {
+    // It may already have exited.
+  }
+
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && processTreeIsAlive(pid)) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  if (processTreeIsAlive(pid)) {
+    try {
+      signalProcessTree(pid, "SIGKILL");
+    } catch {
+      // It exited between the liveness check and signal.
+    }
+
+    const killDeadline = Date.now() + 1_000;
+    while (Date.now() < killDeadline && processTreeIsAlive(pid)) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
 export async function killRegisteredElectronProcesses(): Promise<void> {
   let pids: number[] = [];
   try {
@@ -60,30 +94,11 @@ export async function killRegisteredElectronProcesses(): Promise<void> {
   }
 
   const uniquePids = [...new Set(pids)];
-  for (const pid of uniquePids) {
-    if (!isRegisteredPiVisElectron(pid)) continue;
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // Already gone.
-    }
-  }
-
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    const alive = uniquePids.some((pid) => isRegisteredPiVisElectron(pid));
-    if (!alive) break;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-
-  for (const pid of uniquePids) {
-    if (!isRegisteredPiVisElectron(pid)) continue;
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
+  await Promise.all(
+    uniquePids.map(async (pid) => {
+      if (isRegisteredPiVisElectron(pid)) await terminateElectronProcessTree(pid);
+    }),
+  );
 
   fs.rmSync(REGISTRY_PATH, { force: true });
 }
