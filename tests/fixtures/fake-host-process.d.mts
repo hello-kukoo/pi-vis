@@ -15,6 +15,44 @@ export class FakeHostProcess extends EventEmitter {
   stderr: EventEmitter;
   stdin: EventEmitter;
   connected: boolean;
+  initialized: boolean;
+  hostInstanceId: string;
+  transportSequence: number;
+  sessionEpoch: number;
+  snapshotSequence: number;
+  beforeEditorPatch:
+    | ((patch: {
+        baseRevision: number;
+        revision: number;
+        text: string;
+        attachments: unknown[];
+        alternateConflictText?: string;
+        alternateConflictAttachments?: unknown[];
+        additionalConflictCandidates?: Array<{ text: string; attachments: unknown[] }>;
+      }) => void)
+    | undefined;
+  autoRespondToStateRequests: boolean;
+  editor: {
+    revision: number;
+    text: string;
+    attachments: unknown[];
+    conflictText?: string;
+    conflictAttachments?: unknown[];
+    alternateConflictText?: string;
+    alternateConflictAttachments?: unknown[];
+    additionalConflictCandidates?: Array<{ text: string; attachments: unknown[] }>;
+  };
+  runtime: {
+    isStreaming: boolean;
+    isIdle: boolean;
+    isCompacting: boolean;
+    isRetrying: boolean;
+    retryAttempt: number;
+    isBashRunning: boolean;
+  };
+  snapshot(): Record<string, unknown>;
+  emitWire(msg: HostWireMessage): void;
+  emitControl(payload: HostWireMessage): void;
   send(msg: HostWireMessage, _cb?: (err: Error | null) => void): boolean;
   emitMessage(msg: HostWireMessage): void;
   emitStderr(text: string): void;

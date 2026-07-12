@@ -182,8 +182,8 @@ export const ExportHtmlCommandSchema = BaseCommand.extend({
 // get_trust_state returns the cwd, whether the cwd has trust-requiring
 // project resources, and pi's full project-trust choice set (each with a
 // label, the `trusted` answer, and the `updates` to persist). Used by the
-// /trust picker. NOT part of pi's RPC protocol — host-only; the pi --mode
-// rpc fallback surfaces these as errors (handled gracefully by the renderer).
+// /trust picker. NOT part of pi's RPC protocol — it is implemented only by
+// the direct SDK host.
 export const ProjectTrustUpdateSchema = z.object({
   path: z.string(),
   // null = clear the entry so a broader (parent) grant takes over —
@@ -214,10 +214,9 @@ export const SetTrustCommandSchema = BaseCommand.extend({
 
 // Conversation-tree navigation — SDK-host-only feature. The bridge in
 // resources/pi-session-host/bridge.mjs implements these against the public
-// session.sessionManager / session.navigateTree surface. In RPC-fallback
-// mode these commands are unrecognized and the bridge returns
-// `success:false` (the renderer maps that to a friendly "unsupported"
-// state — see tree-store.openTreeForSession).
+// session.sessionManager / session.navigateTree surface. A host capability
+// gap returns `success:false` (the renderer maps that to a friendly
+// "unsupported" state — see tree-store.openTreeForSession).
 export const GetTreeCommandSchema = BaseCommand.extend({
   type: z.literal("get_tree"),
 });
@@ -296,6 +295,92 @@ export const PiRpcCommandSchema = z.discriminatedUnion("type", [
 ]);
 
 export type PiRpcCommand = z.infer<typeof PiRpcCommandSchema>;
+
+/**
+ * Renderer-command policy. This table is deliberately exhaustive: adding a
+ * PiRpcCommand discriminant without classifying its admission/replay semantics
+ * is a compile-time error.
+ */
+export type PiCommandClass = "read_only" | "idempotent" | "effectful" | "replacement";
+export interface PiCommandPolicy {
+  class: PiCommandClass;
+  /** Text work is admitted exclusively through session.submit. */
+  submissionOnly?: true;
+}
+
+export const PI_COMMAND_POLICY = {
+  prompt: { class: "effectful", submissionOnly: true },
+  steer: { class: "effectful", submissionOnly: true },
+  follow_up: { class: "effectful", submissionOnly: true },
+  abort: { class: "effectful" },
+  bash: { class: "effectful" },
+  abort_bash: { class: "effectful" },
+  set_model: { class: "idempotent" },
+  cycle_model: { class: "effectful" },
+  get_available_models: { class: "read_only" },
+  get_scoped_models: { class: "read_only" },
+  set_scoped_models: { class: "idempotent" },
+  save_scoped_models: { class: "idempotent" },
+  get_logout_providers: { class: "read_only" },
+  logout_provider: { class: "idempotent" },
+  set_thinking_level: { class: "idempotent" },
+  cycle_thinking_level: { class: "effectful" },
+  new_session: { class: "replacement" },
+  switch_session: { class: "replacement" },
+  fork: { class: "replacement" },
+  clone: { class: "replacement" },
+  set_session_name: { class: "idempotent" },
+  get_commands: { class: "read_only" },
+  get_state: { class: "read_only" },
+  get_session_stats: { class: "read_only" },
+  get_messages: { class: "read_only" },
+  get_fork_messages: { class: "read_only" },
+  get_last_assistant_text: { class: "read_only" },
+  compact: { class: "effectful" },
+  set_auto_compaction: { class: "idempotent" },
+  set_auto_retry: { class: "idempotent" },
+  abort_retry: { class: "effectful" },
+  set_steering_mode: { class: "idempotent" },
+  set_follow_up_mode: { class: "idempotent" },
+  export_html: { class: "effectful" },
+  get_trust_state: { class: "read_only" },
+  set_trust: { class: "idempotent" },
+  get_tree: { class: "read_only" },
+  navigate_tree: { class: "effectful" },
+  set_label: { class: "idempotent" },
+  render_entry: { class: "read_only" },
+  get_cache_miss_notices: { class: "read_only" },
+} as const satisfies Record<PiRpcCommand["type"], PiCommandPolicy>;
+
+type CommandTypeForClass<Class extends PiCommandClass> = {
+  [Type in PiRpcCommand["type"]]: (typeof PI_COMMAND_POLICY)[Type]["class"] extends Class
+    ? Type
+    : never;
+}[PiRpcCommand["type"]];
+
+type CommandForClass<Class extends PiCommandClass> = Extract<
+  PiRpcCommand,
+  { type: CommandTypeForClass<Class> }
+>;
+
+export type PiReadOnlyCommand = CommandForClass<"read_only">;
+export type PiIdempotentCommand = CommandForClass<"idempotent">;
+export type PiEffectfulCommand = CommandForClass<"effectful">;
+export type PiReplacementCommand = CommandForClass<"replacement">;
+export type PiSubmissionOnlyCommand = Extract<
+  PiRpcCommand,
+  { type: "prompt" | "steer" | "follow_up" }
+>;
+
+export function commandPolicy(command: PiRpcCommand): PiCommandPolicy {
+  return PI_COMMAND_POLICY[command.type];
+}
+
+export function commandNeedsIntent(command: PiRpcCommand): boolean {
+  const policy = commandPolicy(command);
+  return !policy.submissionOnly && (policy.class === "effectful" || policy.class === "replacement");
+}
+
 export type PromptCommand = z.infer<typeof PromptCommandSchema>;
 export type BashCommand = z.infer<typeof BashCommandSchema>;
 export type SetModelCommand = z.infer<typeof SetModelCommandSchema>;

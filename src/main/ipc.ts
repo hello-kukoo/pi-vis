@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus, WorktreeIdentity } from "@shared/ipc-contract.js";
-import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
-import type { PiRpcResponse, SessionTreeEntry } from "@shared/pi-protocol/responses.js";
+import type { SessionTreeEntry } from "@shared/pi-protocol/responses.js";
+import type {
+  CommandSettlement,
+  ReloadRequest,
+  RendererCommandRequest,
+  SessionSubmission,
+} from "@shared/pi-protocol/runtime-state.js";
 import { resolveActiveColorScheme } from "@shared/settings.js";
 import { app, clipboard, ipcMain, nativeTheme } from "electron";
 import type { BrowserWindow } from "electron";
@@ -35,8 +40,8 @@ import {
 import { readPiChangelog } from "./pi-changelog.js";
 import { mergeUserPiEnv } from "./pi-env.js";
 import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
-import { isSessionHost } from "./pi/session-host.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
+import { loadBoundHistory } from "./sessions/bound-history.js";
 import { createEventBatcher } from "./sessions/event-batcher.js";
 import { entriesToTranscript, loadHistoryPage } from "./sessions/history-loader.js";
 import {
@@ -69,9 +74,8 @@ let eventBatcher: ReturnType<typeof createEventBatcher> | null = null;
 // Build the env for spawning a pi process/host. Adds the pi theme signals so
 // every host-rendered terminal/ANSI surface resolves colors consistent with
 // the active UI scheme:
-//   - PIVIS_PI_THEME        — pi's built-in "dark"|"light", the base theme the
-//                             host loads first (and the fallback if the custom
-//                             install below fails / on the RPC path).
+//   - PIVIS_PI_THEME        — pi's built-in "dark"|"light" base theme. The
+//                             host keeps it if indexed-theme installation fails.
 //   - PIVIS_PI_THEME_COLORS — STABLE per-role ANSI palette INDICES (role →
 //                             16–255), scheme-independent. The host installs
 //                             these so pi emits role-identity bytes
@@ -112,6 +116,10 @@ export function initIpc(win: BrowserWindow): void {
   handlersRegistered = true;
 
   eventBatcher = createEventBatcher((payload) => safeSend("session.events", payload));
+  const testUnifiedClaimTimeoutMs = Number.parseInt(
+    process.env["PIVIS_TEST_UNIFIED_CLAIM_TIMEOUT_MS"] ?? "",
+    10,
+  );
   registry = new SessionRegistry(
     (sessionId: SessionId, event: PiEvent) => {
       eventBatcher?.push(sessionId, event);
@@ -128,9 +136,43 @@ export function initIpc(win: BrowserWindow): void {
       eventBatcher?.flush(sessionId);
       safeSend("session.panelEvent", { sessionId, event });
     },
-    (sessionId: SessionId, req: { id: string; text: string }) => {
+    (
+      sessionId: SessionId,
+      req: {
+        id: string;
+        text: string;
+        editorRevision: number;
+        submissionIntentId: string;
+        hostInstanceId: string;
+        sessionEpoch: number;
+      },
+    ) => {
       eventBatcher?.flush(sessionId);
       safeSend("session.unifiedSubmitRequest", { sessionId, ...req });
+    },
+    (sessionId, state) => {
+      eventBatcher?.flush(sessionId);
+      safeSend("session.runtimeState", { sessionId, state });
+    },
+    (sessionId, result) => {
+      eventBatcher?.flush(sessionId);
+      safeSend("session.submissionDisposition", { sessionId, result });
+    },
+    (sessionId, payload) => {
+      eventBatcher?.flush(sessionId);
+      safeSend("session.queueRestoration", { sessionId, ...(payload as object) });
+    },
+    (sessionId, operationId) => {
+      safeSend("session.uiAcknowledged", { sessionId, operationId });
+    },
+    (sessionId, records, state) => {
+      eventBatcher?.flush(sessionId);
+      safeSend("session.transitionBatch", { sessionId, records, state });
+    },
+    {
+      ...(Number.isFinite(testUnifiedClaimTimeoutMs) && testUnifiedClaimTimeoutMs > 0
+        ? { unifiedClaimTimeoutMs: testUnifiedClaimTimeoutMs }
+        : {}),
     },
   );
 
@@ -214,8 +256,7 @@ export function initIpc(win: BrowserWindow): void {
     if (!piInfo)
       throw new Error("pi binary not found. Please install pi or set the path in settings.");
     const loginShellEnv = await getHostEnv();
-    const useHost = !(process.env.FAKE_PI_SESSIONS_DIR && !process.env.PIVIS_TEST_HOST_SCRIPT);
-    await registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv, useHost);
+    await registry?.activateSession(args.sessionId, piInfo.path, loginShellEnv);
   });
 
   // ── Worktree ───────────────────────────────────────────────────────
@@ -347,32 +388,46 @@ export function initIpc(win: BrowserWindow): void {
     return pickWorktreeDirectory(args.workspacePath);
   });
 
-  ipcMain.handle("session.reload", async (_evt, args: { sessionId: SessionId }) => {
-    const settings = getSettings();
-    const piInfo = await locatePi(settings.piBinaryPath);
-    if (!piInfo) return { success: false, error: "pi binary not found" };
-    const loginShellEnv = await getHostEnv();
-    try {
-      await registry?.reloadSession(args.sessionId, piInfo.path, loginShellEnv);
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  });
+  ipcMain.handle(
+    "session.reload",
+    async (_evt, args: { sessionId: SessionId; request: ReloadRequest }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.executeReload(args.sessionId, args.request);
+    },
+  );
 
   // ── /share: export session to a secret GitHub gist ─────────────────
   // Implemented in main (see share.ts) because it shells out to `gh` and
   // writes a temp file; the HTML content comes from the host's export_html
   // bridge command, routed through the registry. Error strings match pi's
   // TUI verbatim for the gh-missing / gh-not-logged-in cases.
-  ipcMain.handle("session.share", async (_evt, args: { sessionId: SessionId }) => {
-    if (!registry) return { ok: false, error: "Session registry not initialized" };
-    try {
-      return await createGistForSession(args.sessionId, registry);
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  });
+  ipcMain.handle(
+    "session.share",
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        exportIntentId: string;
+      },
+    ) => {
+      if (!registry) return { ok: false, error: "Session registry not initialized" };
+      try {
+        return await createGistForSession(
+          args.sessionId,
+          registry,
+          {
+            hostInstanceId: args.expectedHostInstanceId,
+            sessionEpoch: args.expectedSessionEpoch,
+          },
+          args.exportIntentId,
+        );
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
 
   // ── /changelog: read pi's shipped CHANGELOG.md ──────────────────────
   // Locates the pi package dir from the cached pi binary path and reads
@@ -385,19 +440,76 @@ export function initIpc(win: BrowserWindow): void {
     return readPiChangelog(piInfo.path);
   });
 
-  ipcMain.handle("session.close", async (_evt, args: { sessionId: SessionId }) => {
-    registry?.closeSession(args.sessionId);
-  });
+  ipcMain.handle(
+    "session.prepareClose",
+    async (_evt, args: { sessionId: SessionId; force?: boolean }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.prepareClose(args.sessionId, args.force === true);
+    },
+  );
+
+  ipcMain.handle(
+    "session.cancelClose",
+    async (_evt, args: { sessionId: SessionId; reviewToken: string }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.cancelClose(args.sessionId, args.reviewToken);
+    },
+  );
+
+  ipcMain.handle(
+    "session.confirmClose",
+    async (_evt, args: { sessionId: SessionId; reviewToken: string }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.confirmClose(args.sessionId, args.reviewToken);
+    },
+  );
 
   ipcMain.handle(
     "session.loadHistory",
     async (
       _evt,
-      args: { sessionId: SessionId; limit?: number | undefined; before?: number | undefined },
+      args: {
+        sessionId: SessionId;
+        expectedSessionFile: string;
+        historyGeneration: number;
+        expectedHostInstanceId: string | null;
+        expectedSessionEpoch: number | null;
+        limit?: number | undefined;
+        before?: number | undefined;
+      },
     ) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (!rec?.sessionFile) return { blocks: [], startIndex: 0, total: 0 };
-      return loadHistoryPage(rec.sessionFile, { limit: args.limit, before: args.before });
+      if (!registry) {
+        return { status: "stale" as const, historyGeneration: args.historyGeneration };
+      }
+      const testDelayMs = Number.parseInt(process.env["PIVIS_TEST_HISTORY_DELAY_MS"] ?? "", 10);
+      const load = async (
+        filePath: string,
+        opts: { limit?: number | undefined; before?: number | undefined },
+      ) => {
+        if (Number.isFinite(testDelayMs) && testDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, testDelayMs));
+        }
+        return loadHistoryPage(filePath, opts);
+      };
+      const result = await loadBoundHistory(
+        args,
+        (sessionId) => registry?.getSession(sessionId),
+        load,
+      );
+      const historyLog = process.env["PIVIS_TEST_HISTORY_LOG"];
+      if (historyLog) {
+        fs.appendFileSync(
+          historyLog,
+          `${JSON.stringify({
+            status: result.status,
+            historyGeneration: args.historyGeneration,
+            expectedSessionFile: args.expectedSessionFile,
+            expectedHostInstanceId: args.expectedHostInstanceId,
+            expectedSessionEpoch: args.expectedSessionEpoch,
+          })}\n`,
+        );
+      }
+      return result;
     },
   );
 
@@ -418,15 +530,19 @@ export function initIpc(win: BrowserWindow): void {
     "session.sendCommand",
     async (
       _evt,
-      args: { sessionId: SessionId; command: PiRpcCommand; uiSurface?: "composer" | "unified" },
-    ): Promise<PiRpcResponse> => {
+      args: { sessionId: SessionId } & RendererCommandRequest,
+    ): Promise<CommandSettlement> => {
       const reg = registry;
       if (!reg) throw new Error("Session registry not initialized");
-      // Route through the registry so a command that arrives mid-activation
-      // (status "starting", proc not yet assigned) is queued and flushed once
-      // the proc is live, instead of failing with "No active process".
-      const res = await reg.sendCommand(args.sessionId, args.command, {
-        uiSurface: args.uiSurface,
+      const res = await reg.executeRendererCommand(args.sessionId, {
+        requestId: args.requestId,
+        command: args.command,
+        expectedHostInstanceId: args.expectedHostInstanceId,
+        expectedSessionEpoch: args.expectedSessionEpoch,
+        ...(args.intentId ? { intentId: args.intentId } : {}),
+        ...(args.uiSurface ? { uiSurface: args.uiSurface } : {}),
+        ...(args.sourceText !== undefined ? { sourceText: args.sourceText } : {}),
+        ...(args.editorRevision !== undefined ? { editorRevision: args.editorRevision } : {}),
       });
 
       // Harvest the session file from responses that carry it, so a brand-new
@@ -462,7 +578,13 @@ export function initIpc(win: BrowserWindow): void {
           args.command.type === "clone")
       ) {
         try {
-          const stateRes = await reg.sendCommand(args.sessionId, { type: "get_state" });
+          const successor = res.successorIdentity;
+          if (!successor) throw new Error("Replacement completed without successor identity");
+          const stateRes = await reg.readInternalProbe(
+            args.sessionId,
+            { type: "get_state" },
+            successor,
+          );
           if (stateRes.success && stateRes.data && typeof stateRes.data === "object") {
             const data = stateRes.data as Record<string, unknown>;
             const sessionFile =
@@ -473,6 +595,8 @@ export function initIpc(win: BrowserWindow): void {
             eventBatcher?.flush(args.sessionId);
             safeSend("session.fileChanged", {
               sessionId: args.sessionId,
+              hostInstanceId: successor.hostInstanceId,
+              sessionEpoch: successor.sessionEpoch,
               sessionFile,
               sessionName,
             });
@@ -487,33 +611,140 @@ export function initIpc(win: BrowserWindow): void {
     },
   );
 
-  ipcMain.handle("session.interrupt", async (_evt, args: { sessionId: SessionId }) => {
-    await registry?.interruptSession(args.sessionId);
-  });
-
   ipcMain.handle(
-    "session.respondToUiRequest",
-    async (_evt, args: { sessionId: SessionId; response: ExtensionUiResponse }) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (!rec?.proc) return;
-      rec.proc.sendUiResponse(JSON.stringify(args.response));
+    "session.submit",
+    async (_evt, args: { sessionId: SessionId; submission: SessionSubmission }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.submit(args.sessionId, args.submission);
     },
   );
 
-  // ── Panel I/O (SDK-host only) ───────────────────────────────────────
-  // panelInput/panelResize are meaningful only for SessionHost (which has a
-  // live TUI/panel bridge). For the pi --mode rpc fallback there are no
-  // panels, so these are no-ops. `isSessionHost` (exported from session-host
-  // and unit-tested there) duck-types the proc and silently skips PiProcess,
-  // keeping the fallback a clean no-op.
+  ipcMain.handle(
+    "session.acknowledgeRestoration",
+    async (_evt, args: { sessionId: SessionId; restorationId: string }) => {
+      return {
+        acknowledged: registry?.acknowledgeRestoration(args.sessionId, args.restorationId) ?? false,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    "session.escape",
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        requestId: string;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+      },
+    ) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.escapeSession(args.sessionId, args.requestId, {
+        hostInstanceId: args.expectedHostInstanceId,
+        sessionEpoch: args.expectedSessionEpoch,
+      });
+    },
+  );
+
+  ipcMain.handle("session.runtimeResync", async (_evt, args: { sessionId: SessionId }) => {
+    if (!registry) throw new Error("Session registry not initialized");
+    return registry.resyncSession(args.sessionId);
+  });
+
+  ipcMain.handle(
+    "session.rendererAttach",
+    async (_evt, args: { sessionId: SessionId; rendererGeneration: number }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.rendererAttach(args.sessionId, args.rendererGeneration);
+    },
+  );
+
+  ipcMain.handle(
+    "session.editorPatch",
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        baseRevision: number;
+        revision: number;
+        text: string;
+        attachments: unknown[];
+      },
+    ) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.applyEditorPatch(
+        args.sessionId,
+        args.expectedHostInstanceId,
+        args.expectedSessionEpoch,
+        {
+          baseRevision: args.baseRevision,
+          revision: args.revision,
+          text: args.text,
+          attachments: args.attachments,
+        },
+      );
+    },
+  );
+
+  ipcMain.handle(
+    "session.respondToUiRequest",
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        rendererGeneration: number;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        operationId: string;
+        response: ExtensionUiResponse;
+      },
+    ) => {
+      const acknowledged =
+        (await registry?.respondToUiRequest(
+          args.sessionId,
+          args.rendererGeneration,
+          args.expectedHostInstanceId,
+          args.expectedSessionEpoch,
+          args.operationId,
+          args.response,
+        )) ?? false;
+      return { acknowledged };
+    },
+  );
+
+  // ── Panel I/O ────────────────────────────────────────────────────────
+  // Panel input and resize are sequenced renderer-to-host transport records.
+  // The registry reports acknowledgement/gaps and forwards accepted input to
+  // the active SDK host.
 
   ipcMain.handle(
     "session.panelInput",
-    async (_evt, args: { sessionId: SessionId; panelId: number; data: string }) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (rec?.proc && isSessionHost(rec.proc)) {
-        rec.proc.sendPanelInput(args.panelId, args.data);
-      }
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        panelId: number;
+        sequence: number;
+        data: string;
+      },
+    ) => {
+      return (
+        registry?.sendPanelInput(
+          args.sessionId,
+          args.expectedHostInstanceId,
+          args.expectedSessionEpoch,
+          args.panelId,
+          args.sequence,
+          args.data,
+        ) ?? {
+          acknowledgedThrough: 0,
+        }
+      );
     },
   );
 
@@ -521,22 +752,49 @@ export function initIpc(win: BrowserWindow): void {
     "session.panelResize",
     async (
       _evt,
-      args: { sessionId: SessionId; panelId: number; cols: number; rows: number; force?: boolean },
+      args: {
+        sessionId: SessionId;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        panelId: number;
+        cols: number;
+        rows: number;
+        force?: boolean;
+      },
     ) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (rec?.proc && isSessionHost(rec.proc)) {
-        rec.proc.sendPanelResize(args.panelId, args.cols, args.rows, args.force === true);
-      }
+      registry?.resizePanel(
+        args.sessionId,
+        args.expectedHostInstanceId,
+        args.expectedSessionEpoch,
+        args.panelId,
+        args.cols,
+        args.rows,
+        args.force === true,
+      );
     },
   );
 
   ipcMain.handle(
     "session.panelClose",
-    async (_evt, args: { sessionId: SessionId; panelId: number }) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (rec?.proc && isSessionHost(rec.proc)) {
-        rec.proc.sendPanelClose(args.panelId);
-      }
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        panelId: number;
+        operationId: string;
+      },
+    ) => {
+      const acknowledged =
+        (await registry?.closePanel(
+          args.sessionId,
+          args.expectedHostInstanceId,
+          args.expectedSessionEpoch,
+          args.panelId,
+          args.operationId,
+        )) ?? false;
+      return { acknowledged };
     },
   );
 
@@ -587,16 +845,54 @@ export function initIpc(win: BrowserWindow): void {
 
   // ── Unified TUI panel responses ───────────────────────────────────────
   ipcMain.handle(
+    "session.claimUnifiedSubmit",
+    async (
+      _evt,
+      args: {
+        sessionId: SessionId;
+        id: string;
+        rendererGeneration: number;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+      },
+    ) =>
+      registry?.claimUnifiedSubmit(args.sessionId, args.id, args.rendererGeneration, {
+        hostInstanceId: args.expectedHostInstanceId,
+        sessionEpoch: args.expectedSessionEpoch,
+      }) ?? { claimed: false },
+  );
+
+  ipcMain.handle(
     "session.unifiedSubmitResponse",
     async (
       _evt,
-      args: { sessionId: SessionId; id: string; ok: boolean; bailed?: boolean; error?: string },
+      args: {
+        sessionId: SessionId;
+        id: string;
+        rendererGeneration: number;
+        claimId: string;
+        expectedHostInstanceId: string;
+        expectedSessionEpoch: number;
+        ok: boolean;
+        bailed?: boolean;
+        error?: string;
+      },
     ) => {
-      const rec = registry?.getSession(args.sessionId);
-      if (rec?.proc && isSessionHost(rec.proc)) {
-        rec.proc.sendUnifiedSubmitResponse(args.id, args.ok, args.bailed, args.error);
-      }
-      return { ok: true as const };
+      const result = registry?.respondToUnifiedSubmit(
+        args.sessionId,
+        args.id,
+        { rendererGeneration: args.rendererGeneration, claimId: args.claimId },
+        {
+          hostInstanceId: args.expectedHostInstanceId,
+          sessionEpoch: args.expectedSessionEpoch,
+        },
+        {
+          ok: args.ok,
+          ...(args.bailed !== undefined ? { bailed: args.bailed } : {}),
+          ...(args.error !== undefined ? { error: args.error } : {}),
+        },
+      );
+      return { ok: result?.accepted ?? false };
     },
   );
 

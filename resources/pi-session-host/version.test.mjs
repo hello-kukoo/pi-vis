@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { compareVersions } from "./version.mjs";
 
-// The version gate (host.mjs) uses compareVersions(installed, MIN) < 0 to decide
-// whether to fall back to `pi --mode rpc`. The bug it replaced (P3-a) was
+// The version gate (host.mjs) uses compareVersions(installed, MIN) < 0 to
+// reject an incompatible SDK host. The bug it replaced (P3-a) was
 // `a.split(".").map(Number)` turning "0-beta" into NaN→0, so a pre-release
 // "0.80.0-beta" wrongly satisfied the >= 0.80.0 gate. These guard that.
 describe("compareVersions", () => {

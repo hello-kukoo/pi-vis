@@ -74,7 +74,7 @@ export const AssistantMessageEventSchema = z.discriminatedUnion("type", [
 
 export type AssistantMessageEvent = z.infer<typeof AssistantMessageEventSchema>;
 
-// Top-level session events emitted by pi --mode rpc on stdout
+// Top-level session events forwarded by the SDK host
 
 export const AgentStartEventSchema = z.object({
   type: z.literal("agent_start"),
@@ -87,8 +87,8 @@ export const AgentEndEventSchema = z.object({
 });
 
 // Pi >= 0.80.4 emits this after the full session-level run has settled and no
-// automatic retry, compaction, or queued continuation remains. Older supported
-// versions stop at agent_end, so consumers retain agent_end as a fallback.
+// automatic retry, compaction, or queued continuation remains. Transcript
+// consumers retain agent_end for historical event compatibility.
 export const AgentSettledEventSchema = z.object({
   type: z.literal("agent_settled"),
 });
@@ -150,17 +150,6 @@ export const QueueUpdateEventSchema = z.object({
   type: z.literal("queue_update"),
   steering: z.array(z.string()),
   followUp: z.array(z.string()),
-});
-
-export const StreamingStateEventSchema = z.object({
-  type: z.literal("streaming_state"),
-  isStreaming: z.boolean(),
-});
-
-export const InterruptStateEventSchema = z.object({
-  type: z.literal("interrupt_state"),
-  interruptible: z.boolean(),
-  operation: z.enum(["agent", "bash", "compact"]).optional(),
 });
 
 export const CompactionStartEventSchema = z.object({
@@ -261,8 +250,6 @@ const KnownPiEventSchema = z.discriminatedUnion("type", [
   ToolExecutionUpdateEventSchema,
   ToolExecutionEndEventSchema,
   QueueUpdateEventSchema,
-  StreamingStateEventSchema,
-  InterruptStateEventSchema,
   CompactionStartEventSchema,
   CompactionEndEventSchema,
   AutoRetryStartEventSchema,

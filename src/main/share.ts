@@ -18,6 +18,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -69,6 +70,8 @@ export interface ShareError {
 export async function createGistForSession(
   sessionId: SessionId,
   registry: SessionRegistry,
+  expectedRuntime: { hostInstanceId: string; sessionEpoch: number },
+  exportIntentId: string,
 ): Promise<ShareResult | ShareError> {
   const env = await getSubprocessEnv();
 
@@ -99,9 +102,13 @@ export async function createGistForSession(
   try {
     let exportRes: { success: boolean; data?: { path?: string }; error?: string };
     try {
-      exportRes = (await registry.sendCommand(sessionId, {
-        type: "export_html",
-        outputPath: tmpFile,
+      exportRes = (await registry.executeRendererCommand(sessionId, {
+        requestId: crypto.randomUUID(),
+        intentId: exportIntentId,
+        command: { type: "export_html", outputPath: tmpFile },
+        expectedHostInstanceId: expectedRuntime.hostInstanceId,
+        expectedSessionEpoch: expectedRuntime.sessionEpoch,
+        sourceText: "/share",
       })) as { success: boolean; data?: { path?: string }; error?: string };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

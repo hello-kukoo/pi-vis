@@ -77,13 +77,11 @@ describe("PanelEventSchema (discriminated union)", () => {
     expect(evt.type).not.toBe("panel_clear_all");
   });
 
-  it("accepts host_fallback + session_warning", () => {
-    expect(PanelEventSchema.parse({ type: "host_fallback", reason: "pi too old" }).type).toBe(
-      "host_fallback",
-    );
+  it("accepts session warnings and rejects the deleted host event", () => {
     expect(PanelEventSchema.parse({ type: "session_warning", message: "locked" }).type).toBe(
       "session_warning",
     );
+    expect(() => PanelEventSchema.parse({ type: "host_fallback", reason: "deleted" })).toThrow();
   });
 
   it("rejects an unknown event type", () => {

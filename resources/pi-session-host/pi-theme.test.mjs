@@ -1,5 +1,5 @@
 /**
- * Host-side pi-theme install — the regression gate for "the host emits
+ * Host-side pi-theme capability — the regression gate for "the host emits
  * role-identity ANSI indices, not baked RGB" (the foundation of live
  * re-theming: the renderer resolves these indices against the active palette
  * at paint time, so a scheme swap recolors every cell with no re-emit).
@@ -7,7 +7,7 @@
  * The index assignment + index→token maps are unit-tested in TS
  * (src/shared/theme/pi-theme.test.ts) without pi. THIS test is the layer that
  * TS can't reach: it drives the REAL public `new pi.Theme(...)` constructor and
- * the symbol-global install (`applyPiVisTheme`), then asserts the installed
+ * the capability-gated `applyPiVisTheme`, then asserts the returned local
  * theme's `fg(role)` emits a STABLE INDEXED escape (`\x1b[38;5;N m`) for the
  * numeric value we passed — i.e. pi's `fgAnsi` takes its numeric branch and
  * never bakes RGB. It needs a real pi install and SKIPS (like the PI_E2E gate)
@@ -42,9 +42,6 @@ function locatePiBin() {
 
 const PI_BIN = locatePiBin();
 
-const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
-const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
-
 // Pi 0.80.6 accepts an explicit thinkingMax role (and still falls back to
 // thinkingXhigh for older custom themes). Give it a distinct index so this
 // host-level test proves we preserve max's role identity.
@@ -61,14 +58,17 @@ suite("applyPiVisTheme (real pi)", () => {
     expect(typeof pi.Theme).toBe("function");
   });
 
-  it("installs a pi-vis-index Theme as the active singleton", async () => {
+  it("reports the public global-install capability honestly", async () => {
     pi = pi ?? (await importPi(PI_BIN));
-    // Populate the global with a valid base theme first (as host.mjs does).
     initHostTheme(pi, "dark");
 
-    const installed = applyPiVisTheme(pi, TEST_FG_COLORS, {});
-    expect(installed).toBe(globalThis[THEME_KEY]);
-    expect(globalThis[THEME_KEY_OLD]).toBe(installed);
+    const result = applyPiVisTheme(pi, TEST_FG_COLORS, {});
+    if (typeof pi.setThemeInstance === "function") {
+      expect(result.success).toBe(true);
+    } else {
+      expect(result).toMatchObject({ success: false, error: expect.stringMatching(/public API/i) });
+    }
+    expect(result.theme).toBeInstanceOf(pi.Theme);
   });
 
   it("emits a STABLE INDEXED escape (not baked RGB) for numeric role values", async () => {
@@ -78,9 +78,8 @@ suite("applyPiVisTheme (real pi)", () => {
     // `\x1b[38;5;N m`, independent of color mode — the byte stream carries
     // role identity, never RGB. This is what makes the renderer's palette swap
     // recolor buffered cells live.
-    applyPiVisTheme(pi, TEST_FG_COLORS, {});
+    const { theme } = applyPiVisTheme(pi, TEST_FG_COLORS, {});
 
-    const theme = globalThis[THEME_KEY];
     expect(theme.fg("text", "X")).toContain("\x1b[38;5;42m");
     expect(theme.fg("error", "Y")).toContain("\x1b[38;5;43m");
     expect(theme.fg("thinkingMax", "Z")).toContain("\x1b[38;5;45m");

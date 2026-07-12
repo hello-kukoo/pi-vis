@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   isNewSessionPending,
   isPendingNewSessionActiveFor,
+  isSessionWorking,
   sessionHasHistory,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
@@ -227,7 +228,15 @@ export function Sidebar({
       // before any messages, leaving the visible transcript empty; `hasTreeHistory`
       // keeps that session visible when it is no longer active.
       const liveSessions = activeSessionsForWs.filter((s) => {
-        if (isNewSessionPending(s)) return false;
+        if (isNewSessionPending(s)) {
+          // Attachment-only pending composers are retention roots. Keep the
+          // active one represented by the selected "+ New session" control,
+          // but expose it as a row after switching away so it is recoverable.
+          return (
+            s.sessionId !== activeSessionId &&
+            (s.editorAttachments.length > 0 || s.editorAttachmentReads > 0)
+          );
+        }
         if (s.sessionId === activeSessionId) return true;
         return sessionHasHistory(s);
       });
@@ -675,7 +684,7 @@ export function Sidebar({
                                   }
                                 }}
                               >
-                                {liveSession?.isStreaming ? (
+                                {isSessionWorking(liveSession) ? (
                                   <StreamingIndicator isStreaming />
                                 ) : (
                                   <StatusDot

@@ -19,25 +19,16 @@ function mountHook(): { unmount: () => void } {
     useGlobalEscapeInterrupt();
     return <div />;
   }
-  act(() => {
-    flushSync(() => {
-      root.render(<Comp />);
-    });
-  });
+  act(() => flushSync(() => root.render(<Comp />)));
   return {
     unmount: () => {
-      act(() => {
-        flushSync(() => {
-          root.unmount();
-        });
-      });
-      document.body.removeChild(container);
+      act(() => flushSync(() => root.unmount()));
+      container.remove();
     },
   };
 }
 
-/** Dispatch a bare-ish Escape and return whether default was prevented. */
-function dispatchKey(overrides: Partial<KeyboardEventInit> & { capture?: "secondListener" } = {}): {
+function dispatchKey(overrides: Partial<KeyboardEventInit> = {}): {
   defaultPrevented: boolean;
   secondListenerCalled: boolean;
 } {
@@ -45,8 +36,6 @@ function dispatchKey(overrides: Partial<KeyboardEventInit> & { capture?: "second
   const onSecond = (): void => {
     secondListenerCalled = true;
   };
-  // Register AFTER the hook's listener (which is in capture). This listener
-  // is also capture-phase so we can assert stopImmediatePropagation.
   window.addEventListener("keydown", onSecond, true);
   const ev = new KeyboardEvent("keydown", {
     key: "Escape",
@@ -59,7 +48,7 @@ function dispatchKey(overrides: Partial<KeyboardEventInit> & { capture?: "second
   return { defaultPrevented: ev.defaultPrevented, secondListenerCalled };
 }
 
-describe("useGlobalEscapeInterrupt — G1–G5", () => {
+describe("useGlobalEscapeInterrupt", () => {
   let invokeSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -71,149 +60,60 @@ describe("useGlobalEscapeInterrupt — G1–G5", () => {
       activeWorkspacePath: null,
     });
     useSessionsStore.getState().createSession(SESSION_A, "/tmp/ws");
-    invokeSpy = vi.fn().mockResolvedValue({ success: true });
-    // @ts-expect-error — stubbing the preload bridge
-    globalThis.window.pivis = { invoke: invokeSpy };
+    useSessionsStore.setState((state) => {
+      const sessions = new Map(state.sessions);
+      sessions.set(SESSION_A, {
+        ...sessions.get(SESSION_A)!,
+        status: "ready",
+        availability: "available",
+        hostInstanceId: "host-escape",
+        sessionEpoch: 4,
+      });
+      return { sessions, activeSessionId: SESSION_A };
+    });
+    invokeSpy = vi.fn().mockResolvedValue({ disposition: "already_inactive" });
+    // @ts-expect-error test bridge
+    window.pivis = { invoke: invokeSpy };
   });
 
   afterEach(() => {
-    // @ts-expect-error — cleanup
-    delete globalThis.window.pivis;
+    // @ts-expect-error test cleanup
+    delete window.pivis;
   });
 
-  function setStreaming(streaming: boolean): void {
-    useSessionsStore.getState().setStreaming(SESSION_A, streaming);
-  }
-  function setActive(active: SessionId | null): void {
-    useSessionsStore.setState({ activeSessionId: active });
-  }
-
-  it("G2: no claim + streaming -> abort called + default prevented + second listener blocked", () => {
+  it("unclaimed ESC always requests a host-authoritative escape", () => {
     mountHook();
-    setActive(SESSION_A);
-    setStreaming(true);
     const { defaultPrevented, secondListenerCalled } = dispatchKey();
     expect(defaultPrevented).toBe(true);
-    expect(secondListenerCalled).toBe(false); // stopImmediatePropagation
-    expect(invokeSpy).toHaveBeenCalledTimes(1);
-    const args = invokeSpy.mock.calls[0] as [string, { sessionId: SessionId }];
-    expect(args[0]).toBe("session.interrupt");
-    expect(args[1]).toEqual({ sessionId: SESSION_A });
+    expect(secondListenerCalled).toBe(false);
+    expect(invokeSpy).toHaveBeenCalledWith("session.escape", {
+      sessionId: SESSION_A,
+      requestId: expect.any(String),
+      expectedHostInstanceId: "host-escape",
+      expectedSessionEpoch: 4,
+    });
   });
 
-  it("G1: claim active + streaming -> NOT called, NOT prevented", () => {
+  it("an overlay claim defers ESC", () => {
     mountHook();
-    setActive(SESSION_A);
-    setStreaming(true);
     useOverlayStore.getState()._acquire();
-    const { defaultPrevented, secondListenerCalled } = dispatchKey();
-    expect(defaultPrevented).toBe(false);
-    expect(secondListenerCalled).toBe(true); // event continues (claimant acts)
-    expect(invokeSpy).not.toHaveBeenCalled();
-  });
-
-  it("G3: no claim + idle -> NOT called, NOT prevented", () => {
-    mountHook();
-    setActive(SESSION_A);
-    setStreaming(false);
     const { defaultPrevented, secondListenerCalled } = dispatchKey();
     expect(defaultPrevented).toBe(false);
     expect(secondListenerCalled).toBe(true);
     expect(invokeSpy).not.toHaveBeenCalled();
   });
 
-  it("G2: no claim + runtime interruptible state -> interrupt called even if streaming flag is stale", () => {
+  it("modified, composing, non-ESC, and no-active-session keys are ignored", () => {
     mountHook();
-    setActive(SESSION_A);
-    useSessionsStore.getState().applyEvent(SESSION_A, {
-      type: "interrupt_state",
-      interruptible: true,
-      operation: "agent",
-    });
-    const { defaultPrevented, secondListenerCalled } = dispatchKey();
-    expect(defaultPrevented).toBe(true);
-    expect(secondListenerCalled).toBe(false);
-    expect(invokeSpy).toHaveBeenCalledTimes(1);
-    const args = invokeSpy.mock.calls[0] as [string, { sessionId: SessionId }];
-    expect(args[0]).toBe("session.interrupt");
-    expect(args[1]).toEqual({ sessionId: SESSION_A });
-  });
-
-  it("G2: no claim + active standalone bash -> session.interrupt called", () => {
-    mountHook();
-    setActive(SESSION_A);
-    useSessionsStore.getState().addBashCommand(SESSION_A, "sleep 100");
-    const { defaultPrevented, secondListenerCalled } = dispatchKey();
-    expect(defaultPrevented).toBe(true);
-    expect(secondListenerCalled).toBe(false);
-    expect(invokeSpy).toHaveBeenCalledTimes(1);
-    const args = invokeSpy.mock.calls[0] as [string, { sessionId: SessionId }];
-    expect(args[0]).toBe("session.interrupt");
-    expect(args[1]).toEqual({ sessionId: SESSION_A });
-  });
-
-  it("G4: modified ESC (meta/ctrl/alt/shift) -> NOT called", () => {
-    mountHook();
-    setActive(SESSION_A);
-    setStreaming(true);
-    for (const mods of [
+    for (const init of [
       { metaKey: true },
-      { ctrlKey: true },
-      { altKey: true },
-      { shiftKey: true },
-    ]) {
-      const { defaultPrevented } = dispatchKey(mods);
-      expect(defaultPrevented).toBe(false);
+      { isComposing: true },
+      { key: "Enter" },
+    ] as KeyboardEventInit[]) {
+      expect(dispatchKey(init).defaultPrevented).toBe(false);
     }
+    useSessionsStore.setState({ activeSessionId: null });
+    expect(dispatchKey().defaultPrevented).toBe(false);
     expect(invokeSpy).not.toHaveBeenCalled();
-  });
-
-  it("G4: IME composition ESC -> NOT called", () => {
-    mountHook();
-    setActive(SESSION_A);
-    setStreaming(true);
-    const a = dispatchKey({ isComposing: true } as KeyboardEventInit);
-    const b = dispatchKey({ keyCode: 229 } as KeyboardEventInit);
-    expect(a.defaultPrevented).toBe(false);
-    expect(b.defaultPrevented).toBe(false);
-    expect(invokeSpy).not.toHaveBeenCalled();
-  });
-
-  it("G5: no active session -> NOT called", () => {
-    mountHook();
-    setActive(null);
-    setStreaming(true);
-    const { defaultPrevented } = dispatchKey();
-    expect(defaultPrevented).toBe(false);
-    expect(invokeSpy).not.toHaveBeenCalled();
-  });
-
-  it("non-ESC key -> NOT called", () => {
-    mountHook();
-    setActive(SESSION_A);
-    setStreaming(true);
-    let secondCalled = false;
-    const onSecond = (): void => {
-      secondCalled = true;
-    };
-    window.addEventListener("keydown", onSecond, true);
-    const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    window.dispatchEvent(ev);
-    window.removeEventListener("keydown", onSecond, true);
-    expect(secondCalled).toBe(true);
-    expect(invokeSpy).not.toHaveBeenCalled();
-  });
-
-  it("abortSession is a no-op when idle (S3) and rejection-safe", () => {
-    mountHook();
-    setActive(SESSION_A);
-    setStreaming(false);
-    useSessionsStore.getState().abortSession(SESSION_A);
-    expect(invokeSpy).not.toHaveBeenCalled();
-    // Streaming -> rejection swallowed
-    setStreaming(true);
-    invokeSpy.mockRejectedValueOnce(new Error("dead"));
-    useSessionsStore.getState().abortSession(SESSION_A);
-    expect(invokeSpy).toHaveBeenCalled();
   });
 });

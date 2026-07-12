@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 /**
  * FakeHostProcess — a test double for the ChildProcess that
  * `SessionHost` (via child_process.fork) creates. Drives the host wire protocol
@@ -58,6 +59,65 @@ export class FakeHostProcess extends EventEmitter {
   stderr = new EventEmitter();
   stdin = new EventEmitter();
   connected = true;
+  hostInstanceId = crypto.randomUUID();
+  transportSequence = 0;
+  sessionEpoch = 0;
+  snapshotSequence = 0;
+  editor = { revision: 0, text: "", attachments: [] };
+  beforeEditorPatch = undefined;
+  autoRespondToStateRequests = true;
+  runtime = {
+    isStreaming: false,
+    isIdle: true,
+    isCompacting: false,
+    isRetrying: false,
+    retryAttempt: 0,
+    isBashRunning: false,
+  };
+
+  snapshot() {
+    return {
+      hostInstanceId: this.hostInstanceId,
+      sessionEpoch: this.sessionEpoch,
+      snapshotSequence: ++this.snapshotSequence,
+      capturedAt: Date.now(),
+      ...this.runtime,
+      model: { id: "fake-model", provider: "fake" },
+      thinkingLevel: "off",
+      sessionId: "fake-session",
+      pendingMessageCount: 0,
+      steering: [],
+      followUp: [],
+      hostFacts: {
+        submitting: false,
+        actualCompaction: false,
+        navigation: false,
+        pendingDialogs: 0,
+        custodyCount: 0,
+      },
+      catalog: {
+        notifications: [],
+        statuses: {},
+        widgets: {},
+        toolsExpanded: false,
+        capabilityDiagnostics: [],
+      },
+      editor: structuredClone(this.editor),
+    };
+  }
+
+  emitWire(msg) {
+    this.emitMessage({
+      ...msg,
+      hostInstanceId: this.hostInstanceId,
+      sessionEpoch: this.sessionEpoch,
+      transportSequence: ++this.transportSequence,
+    });
+  }
+
+  emitControl(payload) {
+    this.emitWire({ type: "control", payload });
+  }
 
   /** Main → host message. Records it (tests assert on `.sent`) and emits "message". */
   send(msg, cb) {
@@ -79,11 +139,134 @@ export class FakeHostProcess extends EventEmitter {
     // regression into a visible test failure instead of a silent buffer.
     if (msg?.type === "command" && !this.initialized) {
       queueMicrotask(() => {
-        this.emitMessage({
+        this.emitWire({ type: "response", id: msg.id, success: false, error: "Not initialized" });
+      });
+    } else if (
+      msg?.type === "state_request" &&
+      this.initialized &&
+      this.autoRespondToStateRequests
+    ) {
+      queueMicrotask(() => {
+        this.emitControl({ type: "snapshot", snapshot: this.snapshot(), full: true });
+        this.emitWire({ type: "response", id: msg.id, success: true, data: this.snapshot() });
+      });
+    } else if (msg?.type === "submit" && this.initialized) {
+      queueMicrotask(() => {
+        this.emitWire({
           type: "response",
           id: msg.id,
-          success: false,
-          error: "Not initialized",
+          success: true,
+          data: {
+            intentId: msg.submission.intentId,
+            hostInstanceId: this.hostInstanceId,
+            sessionEpoch: this.sessionEpoch,
+            editorRevision: msg.submission.editorRevision,
+            disposition: "consumed",
+            queued: this.runtime.isStreaming,
+          },
+        });
+      });
+    } else if (msg?.type === "prepare_close" && this.initialized) {
+      this.closeToken = `fake-close-${this.transportSequence}`;
+      queueMicrotask(() => {
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: {
+            token: this.closeToken,
+            mutationSequence: 0,
+            snapshot: this.snapshot(),
+            custody: [],
+            activeIntents: [],
+            restorations: [],
+            ui: {},
+          },
+        });
+      });
+    } else if (msg?.type === "confirm_close" && this.initialized) {
+      queueMicrotask(() => {
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: { valid: msg.token === this.closeToken, mutationSequence: 0 },
+        });
+      });
+    } else if (msg?.type === "cancel_close" && this.initialized) {
+      const cancelled = msg.token === this.closeToken;
+      if (cancelled) this.closeToken = undefined;
+      queueMicrotask(() => {
+        this.emitWire({ type: "response", id: msg.id, success: true, data: { cancelled } });
+      });
+    } else if (msg?.type === "panel_input" && this.initialized) {
+      queueMicrotask(() => {
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: { acknowledgedThrough: msg.sequence },
+        });
+      });
+    } else if (msg?.type === "escape" && this.initialized) {
+      queueMicrotask(() => {
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: {
+            requestId: msg.requestId,
+            hostInstanceId: this.hostInstanceId,
+            sessionEpoch: this.sessionEpoch,
+            disposition: this.runtime.isIdle ? "already_inactive" : "abort_requested",
+          },
+        });
+      });
+    } else if ((msg?.type === "reload" || msg?.type === "editor_patch") && this.initialized) {
+      queueMicrotask(() => {
+        let data;
+        if (msg.type === "editor_patch") {
+          this.beforeEditorPatch?.(msg.patch);
+          const accepted =
+            msg.patch.baseRevision === this.editor.revision &&
+            msg.patch.revision > this.editor.revision;
+          if (accepted) {
+            this.editor = {
+              revision: msg.patch.revision,
+              text: msg.patch.text,
+              attachments: structuredClone(msg.patch.attachments ?? []),
+            };
+          } else {
+            this.editor = {
+              ...this.editor,
+              conflictText: msg.patch.text,
+              conflictAttachments: structuredClone(msg.patch.attachments ?? []),
+              ...(msg.patch.alternateConflictText !== undefined
+                ? {
+                    alternateConflictText: msg.patch.alternateConflictText,
+                    alternateConflictAttachments: structuredClone(
+                      msg.patch.alternateConflictAttachments ?? [],
+                    ),
+                  }
+                : {}),
+              ...(msg.patch.additionalConflictCandidates?.length
+                ? {
+                    additionalConflictCandidates: structuredClone(
+                      msg.patch.additionalConflictCandidates,
+                    ),
+                  }
+                : {}),
+            };
+          }
+          const snapshot = this.snapshot();
+          this.emitControl({ type: "snapshot", snapshot });
+          data = { accepted, ...structuredClone(this.editor) };
+        }
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          ...(data ? { data } : {}),
         });
       });
     }
@@ -111,7 +294,7 @@ export class FakeHostProcess extends EventEmitter {
   /** Emit `{type:"ready", piVersion}` — resolves waitForReady. */
   emitReady(piVersion) {
     this.initialized = true;
-    this.emitMessage({ type: "ready", piVersion });
+    this.emitControl({ type: "ready", piVersion, snapshot: this.snapshot() });
   }
 
   /** Emit `{type:"error", message, versionTooLow?}` — rejects waitForReady. */

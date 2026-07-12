@@ -1,6 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import type { HistoryPage, SessionStatus, SessionSummary } from "@shared/ipc-contract.js";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
+import { type PiRpcCommand, commandNeedsIntent } from "@shared/pi-protocol/commands.js";
 import {
   CacheMissNoticeEventSchema,
   type KnownPiEvent,
@@ -9,17 +10,19 @@ import {
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
-import {
-  ModelInfoSchema,
-  SessionStateSchema,
-  SessionStatsSchema,
-} from "@shared/pi-protocol/responses.js";
+import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
+import type {
+  AgentSessionSnapshot,
+  RuntimeRecord,
+  RuntimeStateUpdate,
+  SubmissionResult,
+} from "@shared/pi-protocol/runtime-state.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
-import { create } from "zustand";
+import { type StateCreator, create } from "zustand";
 import type { PickerRequest } from "../lib/commands/execute.js";
-import { executeAction } from "../lib/commands/execute.js";
+import { InputNotConsumedError, executeAction } from "../lib/commands/execute.js";
 import { parseComposerInput } from "../lib/commands/parse.js";
 import {
   type CodeComment,
@@ -31,6 +34,9 @@ import {
 } from "../lib/diff-comments.js";
 import type { DiffModel } from "../lib/diff/diff-model.js";
 import { reanchorCommentsForEdit } from "../lib/diff/edit-anchor.js";
+import { forgetPanelInputSequence } from "../lib/panel-input-sequence.js";
+import { RENDERER_GENERATION } from "../lib/renderer-generation.js";
+import { invokeSessionCommand } from "../lib/session-command.js";
 import { useChangelogStore } from "./changelog-store.js";
 import { openDiffForSession } from "./diff-store.js";
 import { useSettingsStore } from "./settings-store.js";
@@ -50,6 +56,8 @@ import {
 
 let nextThinkingRequestId = 1;
 const pendingThinkingRequests = new Map<SessionId, number>();
+const LOCAL_THEME_FALLBACK_DIAGNOSTIC =
+  "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.";
 
 export interface QueuedMessage {
   id: string;
@@ -64,28 +72,41 @@ export interface SessionViewState {
   status: SessionStatus;
   error?: string | undefined;
   transcript: TranscriptState;
-  isStreaming: boolean;
+  /** Runtime booleans are valid only while availability is available. */
+  availability: RuntimeStateUpdate["availability"];
+  runtimeSnapshot?: AgentSessionSnapshot | undefined;
+  hostInstanceId?: string | undefined;
+  sessionEpoch: number;
+  editorRevision: number;
+  editorAttachments: unknown[];
+  editorAttachmentReads: number;
+  editorPatchPending: number;
+  editorConflict?:
+    | {
+        authoritativeText: string;
+        authoritativeAttachments: unknown[];
+        localText: string;
+        localAttachments: unknown[];
+        alternateText?: string | undefined;
+        alternateAttachments?: unknown[] | undefined;
+        additionalCandidates?: Array<{ text: string; attachments: unknown[] }> | undefined;
+      }
+    | undefined;
   queuedMessages?: { steering: QueuedMessage[]; followUp: QueuedMessage[] } | undefined;
-  promptsInFlight: number;
-  bashInFlight: number;
-  interruptible: boolean;
-  interruptKind?: "agent" | "bash" | "compact" | undefined;
-  retryPending: boolean;
-  /** Monotonic agent_start generation used to reject a stale agent_settled. */
-  agentGeneration: number;
-  /** Generation most recently closed by agent_end. */
-  lastEndedAgentGeneration: number;
-  streamingEpoch: number;
-  queueEpoch: number;
-  identityEpoch: number;
-  /** Wall-clock timestamp (ms) when the session became logically working
-   *  (`isStreaming || promptsInFlight > 0`). It is set on the false→true
-   *  working transition and cleared on the true→false transition, so prompt
-   *  preflight, streaming, and retry backoff share one continuous timer. */
+  queueRestorations?:
+    | Array<{
+        restorationId: string;
+        steering: string[];
+        followUp: string[];
+        originalAttachments: Array<{ intentId: string; images: unknown[] }>;
+        commandDescription?: string | undefined;
+      }>
+    | undefined;
+  /** Start time derived from the last authoritative streaming snapshot. */
   runningSince?: number | undefined;
   /**
    * Unread turn-result marker for the sidebar status dot. Set to "done" or
-   * "error" when a turn finishes (agent_end fallback / agent_settled). It
+   * "error" when a turn finishes. It
    * acts as a notification for background sessions: it persists until the
    * user views the session and moves on (setActiveSession clears the
    * previously-active session) or starts a new turn there (agent_start).
@@ -114,7 +135,7 @@ export interface SessionViewState {
   sessionTitle?: string | undefined;
   sessionName?: string | undefined;
   commands: SlashCommandInfo[];
-  editorInjection?: { text: string; nonce: number } | undefined;
+  editorInjection?: { text: string; nonce: number; revision?: number } | undefined;
   pendingPicker?: PickerRequest | undefined;
   /**
    * Pre-send worktree intent mode (drives the WorktreeBar segmented
@@ -161,7 +182,14 @@ export interface SessionViewState {
    *  (the sizer's resize-storm breaker damps any unsignaled grid coupling); a host
    *  `panel_mode` event is honored if one is sent. */
   panel?:
-    | { id: number; overlay: boolean; buffer: string[]; mode?: "content" | "viewport" }
+    | {
+        id: number;
+        overlay: boolean;
+        hostInstanceId: string;
+        sessionEpoch: number;
+        buffer: string[];
+        mode?: "content" | "viewport";
+      }
     | undefined;
   /** Persistent unified-TUI panel from a factory `setWidget` — rendered via
    *  `UnifiedTuiHost` (a real pi-tui Editor + widget components). Distinct
@@ -174,7 +202,15 @@ export interface SessionViewState {
    *  a fixed grid while a pi-tui overlay is up, whose geometry would otherwise
    *  feed a resize loop. Set by the `panel_mode` event from the host (overlay
    *  show/hide). */
-  unifiedPanel?: { id: number; buffer: string[]; mode?: "content" | "viewport" } | undefined;
+  unifiedPanel?:
+    | {
+        id: number;
+        hostInstanceId: string;
+        sessionEpoch: number;
+        buffer: string[];
+        mode?: "content" | "viewport";
+      }
+    | undefined;
   /** When a `unifiedPanel` is live, the user can toggle between the
    *  extension's TUI surface and the native Composer (both stay mounted-
    *  ready, only the visible one renders). `false` (default) shows the
@@ -182,7 +218,7 @@ export interface SessionViewState {
    *  live; `true` shows the Composer instead. Reset to `false` whenever a
    *  panel opens/closes/resets so a fresh panel always starts visible. */
   unifiedPanelHidden?: boolean | undefined;
-  /** pi version reported by the SDK-host on ready (undefined for pi --mode rpc).
+  /** pi version reported by the SDK host on ready.
    *  Surfaced in the SessionHeader tooltip. See P1-c. */
   piVersion?: string | undefined;
   /** True once we know the session has conversation-tree history outside the
@@ -191,6 +227,9 @@ export interface SessionViewState {
    *  first-send affordances must still treat that session as non-empty. */
   hasTreeHistory?: boolean | undefined;
   historyCursor?: { startIndex: number; total: number } | undefined;
+  /** Renderer-local transcript ownership generation. Delayed history reads may
+   *  apply only while this generation, file, and runtime identity still match. */
+  historyGeneration: number;
   historyLoadingEarlier?: boolean | undefined;
   /** True for a brand-new session (created without a session file) that
    *  has not yet sent its first message. Such sessions are hidden from
@@ -257,7 +296,10 @@ interface PendingNewSessionSetup {
  * that was once real.
  */
 export function sessionHasHistory(s: SessionViewState | undefined | null): boolean {
-  return !!s && (s.transcript.blocks.length > 0 || !!s.hasTreeHistory);
+  return (
+    !!s &&
+    (s.transcript.blocks.length > 0 || !!s.hasTreeHistory || (s.queueRestorations?.length ?? 0) > 0)
+  );
 }
 
 export function isNewSessionPending(s: SessionViewState | undefined | null): boolean {
@@ -288,7 +330,9 @@ function shouldReapPendingNewSession(s: SessionViewState | undefined | null): bo
     !s.pendingPicker &&
     !s.worktreeCreating &&
     !s.panel &&
-    !s.unifiedPanel
+    !s.unifiedPanel &&
+    s.editorAttachments.length === 0 &&
+    s.editorAttachmentReads === 0
   );
 }
 
@@ -405,7 +449,125 @@ function hasActiveAgentWork(session: SessionViewState | undefined): boolean {
  * until the transcript proves actual assistant/tool work is active.
  */
 export function isSessionWorking(session: SessionViewState | undefined): boolean {
-  return !!session && (session.isStreaming || session.promptsInFlight > 0);
+  return (
+    !!session &&
+    session.availability === "available" &&
+    session.runtimeSnapshot?.isStreaming === true
+  );
+}
+
+export function sessionMatchesRuntime(
+  session: SessionViewState | undefined,
+  runtime: { hostInstanceId: string; sessionEpoch: number },
+): session is SessionViewState {
+  return (
+    session?.availability === "available" &&
+    session.status === "ready" &&
+    session.hostInstanceId === runtime.hostInstanceId &&
+    session.sessionEpoch === runtime.sessionEpoch
+  );
+}
+
+interface HistoryReadCapture {
+  sessionFile: string;
+  historyGeneration: number;
+  expectedRuntime?: { hostInstanceId: string; sessionEpoch: number } | undefined;
+}
+
+function captureHistoryRead(
+  session: SessionViewState | undefined,
+  expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
+): HistoryReadCapture | undefined {
+  if (!session?.sessionFile) return undefined;
+  const runtime =
+    expectedRuntime ??
+    (session.availability === "available" && session.status === "ready" && session.hostInstanceId
+      ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
+      : undefined);
+  return {
+    sessionFile: session.sessionFile,
+    historyGeneration: session.historyGeneration,
+    ...(runtime ? { expectedRuntime: runtime } : {}),
+  };
+}
+
+function historyCaptureMatches(
+  session: SessionViewState | undefined,
+  capture: HistoryReadCapture,
+): boolean {
+  return (
+    !!session &&
+    session.sessionFile === capture.sessionFile &&
+    session.historyGeneration === capture.historyGeneration &&
+    (!capture.expectedRuntime || sessionMatchesRuntime(session, capture.expectedRuntime))
+  );
+}
+
+async function waitForHistoryOwnershipChange(
+  sessionId: SessionId,
+  prior: HistoryReadCapture,
+  timeoutMs = 120_000,
+): Promise<HistoryReadCapture | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const finish = (capture: HistoryReadCapture | undefined) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      unsubscribe();
+      resolve(capture);
+    };
+    const inspect = () => {
+      const session = useSessionsStore.getState().sessions.get(sessionId);
+      if (!session || session.status === "failed" || session.status === "exited") {
+        finish(undefined);
+        return;
+      }
+      const next = captureHistoryRead(session);
+      if (!next) return;
+      const ownershipChanged =
+        next.sessionFile !== prior.sessionFile ||
+        next.historyGeneration !== prior.historyGeneration ||
+        next.expectedRuntime?.hostInstanceId !== prior.expectedRuntime?.hostInstanceId ||
+        next.expectedRuntime?.sessionEpoch !== prior.expectedRuntime?.sessionEpoch;
+      if (!ownershipChanged) return;
+      // A retry is valid only against a concrete live runtime, or against a
+      // genuinely new cold/file generation. Never retry the unchanged
+      // identity-less request merely because an arbitrary timer elapsed.
+      if (
+        next.expectedRuntime ||
+        (session.status === "cold" && session.availability === "unavailable")
+      ) {
+        finish(next);
+      }
+    };
+    const timer = window.setTimeout(() => finish(undefined), timeoutMs);
+    unsubscribe = useSessionsStore.subscribe(inspect);
+    inspect();
+  });
+}
+
+async function requestBoundHistoryPage(
+  sessionId: SessionId,
+  capture: HistoryReadCapture,
+  opts: { limit?: number | undefined; before?: number | undefined } = {},
+): Promise<HistoryPage | undefined> {
+  const result = await window.pivis.invoke("session.loadHistory", {
+    sessionId,
+    expectedSessionFile: capture.sessionFile,
+    historyGeneration: capture.historyGeneration,
+    expectedHostInstanceId: capture.expectedRuntime?.hostInstanceId ?? null,
+    expectedSessionEpoch: capture.expectedRuntime?.sessionEpoch ?? null,
+    ...opts,
+  });
+  if (result.status !== "loaded" || result.historyGeneration !== capture.historyGeneration) {
+    return undefined;
+  }
+  if (!historyCaptureMatches(useSessionsStore.getState().sessions.get(sessionId), capture)) {
+    return undefined;
+  }
+  return result.page;
 }
 
 export function shouldShowWorkingIndicator(session: SessionViewState | undefined): boolean {
@@ -418,7 +580,7 @@ function hasActiveBash(session: SessionViewState | undefined): boolean {
   return session?.transcript.activeBashId != null;
 }
 
-let queuedMessageCounter = 0;
+const queuedMessageCounter = 0;
 
 function queuedFromSnapshot(kind: "steering" | "followUp", texts: string[]): QueuedMessage[] {
   return texts.map((text, index) => ({
@@ -426,6 +588,86 @@ function queuedFromSnapshot(kind: "steering" | "followUp", texts: string[]): Que
     text,
     source: "authoritative" as const,
   }));
+}
+
+function closeCheckpointPreview(
+  checkpoint: unknown,
+  localDraft: string,
+  localEditor: { attachments: unknown[]; pendingAttachmentReads: number },
+): string {
+  const truncate = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return value.length > 400 ? `${value.slice(0, 400)}… (${value.length} chars)` : value;
+    }
+    if (Array.isArray(value)) return value.slice(0, 12).map(truncate);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .filter(([key]) => !["data", "bytes"].includes(key))
+          .slice(0, 20)
+          .map(([key, entry]) => [key, truncate(entry)]),
+      );
+    }
+    return value;
+  };
+  const details = truncate({
+    ...(localDraft.trim() ? { rendererDraft: localDraft } : {}),
+    ...(localEditor.attachments.length > 0 || localEditor.pendingAttachmentReads > 0
+      ? { rendererEditor: localEditor }
+      : {}),
+    checkpoint,
+  });
+  const rendered = JSON.stringify(details, null, 2);
+  return rendered.length > 8_000 ? `${rendered.slice(0, 8_000)}\n… checkpoint truncated` : rendered;
+}
+
+interface EditorCandidate {
+  text: string;
+  attachments: unknown[];
+}
+
+function sameEditorCandidate(a: EditorCandidate, b: EditorCandidate): boolean {
+  return a.text === b.text && JSON.stringify(a.attachments) === JSON.stringify(b.attachments);
+}
+
+function editorConflictFromCandidates(
+  editor: AgentSessionSnapshot["editor"],
+  rendererCandidate?: EditorCandidate,
+): SessionViewState["editorConflict"] {
+  const candidates: EditorCandidate[] = [];
+  const add = (candidate: EditorCandidate | undefined) => {
+    if (!candidate || candidates.some((existing) => sameEditorCandidate(existing, candidate))) {
+      return;
+    }
+    candidates.push(candidate);
+  };
+  add({ text: editor.text, attachments: editor.attachments });
+  add(rendererCandidate);
+  if (editor.conflictText !== undefined) {
+    add({ text: editor.conflictText, attachments: editor.conflictAttachments ?? [] });
+  }
+  if (editor.alternateConflictText !== undefined) {
+    add({
+      text: editor.alternateConflictText,
+      attachments: editor.alternateConflictAttachments ?? [],
+    });
+  }
+  for (const candidate of editor.additionalConflictCandidates ?? []) add(candidate);
+  if (candidates.length < 2) return undefined;
+  const authoritative = candidates[0]!;
+  const local = candidates[1]!;
+  const alternate = candidates[2];
+  const additional = candidates.slice(3);
+  return {
+    authoritativeText: authoritative.text,
+    authoritativeAttachments: authoritative.attachments,
+    localText: local.text,
+    localAttachments: local.attachments,
+    ...(alternate
+      ? { alternateText: alternate.text, alternateAttachments: alternate.attachments }
+      : {}),
+    ...(additional.length > 0 ? { additionalCandidates: additional } : {}),
+  };
 }
 
 function queuedMessagesFromSnapshot(
@@ -439,57 +681,18 @@ function queuedMessagesFromSnapshot(
   };
 }
 
-function applyLivenessPatch(
-  session: SessionViewState,
-  patch: Partial<Pick<SessionViewState, "isStreaming" | "promptsInFlight" | "retryPending">>,
-): SessionViewState {
-  const wasWorking = isSessionWorking(session);
-  const next: SessionViewState = { ...session, ...patch };
-  const nowWorking = isSessionWorking(next);
-  let runningSince = session.runningSince;
-  if (!wasWorking && nowWorking) runningSince = Date.now();
-  if (wasWorking && !nowWorking) runningSince = undefined;
-  const livenessChanged =
-    session.isStreaming !== next.isStreaming ||
-    session.promptsInFlight !== next.promptsInFlight ||
-    session.retryPending !== next.retryPending;
-  return {
-    ...next,
-    runningSince,
-    streamingEpoch: livenessChanged ? session.streamingEpoch + 1 : session.streamingEpoch,
-  };
-}
-
-function resetRuntimeState(
-  session: SessionViewState,
-  opts?: { bumpIdentity?: boolean },
-): SessionViewState {
+function resetRuntimeState(session: SessionViewState): SessionViewState {
   return {
     ...session,
-    isStreaming: false,
-    promptsInFlight: 0,
-    bashInFlight: 0,
-    interruptible: false,
-    interruptKind: undefined,
-    retryPending: false,
-    agentGeneration: 0,
-    lastEndedAgentGeneration: 0,
+    availability: "unavailable",
+    runtimeSnapshot: undefined,
     runningSince: undefined,
     queuedMessages: undefined,
-    streamingEpoch: session.streamingEpoch + 1,
-    queueEpoch: session.queueEpoch + 1,
-    identityEpoch: opts?.bumpIdentity ? session.identityEpoch + 1 : session.identityEpoch,
   };
 }
 
 export function isSessionAbortable(session: SessionViewState | undefined): boolean {
-  if (!session || session.status === "exited" || session.status === "failed") return false;
-  return (
-    session.interruptible ||
-    session.promptsInFlight > 0 ||
-    session.bashInFlight > 0 ||
-    session.isStreaming
-  );
+  return !!session && session.status !== "exited" && session.status !== "failed";
 }
 
 interface SessionsStore {
@@ -625,30 +828,32 @@ interface SessionsStore {
     sessionId: SessionId,
     content: string,
     images?: string[],
-    opts?: { registerEcho?: boolean },
+    opts?: { registerEcho?: boolean; clearDraft?: boolean },
   ) => void;
   clearPendingUserEcho: (sessionId: SessionId, content: string) => void;
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
-  setStreaming: (sessionId: SessionId, isStreaming: boolean) => void;
-  beginPromptInFlight: (sessionId: SessionId) => void;
-  endPromptInFlight: (sessionId: SessionId) => void;
-  enqueueOptimisticSteer: (sessionId: SessionId, text: string) => string;
-  removeOptimisticQueuedMessage: (sessionId: SessionId, id: string) => void;
-  replaceQueueFromAuthoritativeSnapshot: (
+  applyRuntimeState: (sessionId: SessionId, state: RuntimeStateUpdate) => void;
+  applyTransitionBatch: (
     sessionId: SessionId,
-    steering: string[],
-    followUp: string[],
+    records: RuntimeRecord[],
+    state: RuntimeStateUpdate,
   ) => void;
-  clearQueue: (sessionId: SessionId) => void;
-  reconcileSessionState: (
+  applySubmissionDisposition: (sessionId: SessionId, result: SubmissionResult) => void;
+  applyQueueRestoration: (
     sessionId: SessionId,
-    snapshot: unknown,
-    captured: { identityEpoch: number; streamingEpoch: number; queueEpoch: number },
+    restoration: {
+      restorationId: string;
+      steering: string[];
+      followUp: string[];
+      originalAttachments: Array<{ intentId: string; images: unknown[] }>;
+      commandDescription?: string | undefined;
+    },
   ) => void;
-  /** Interrupt the active runtime operation. Main/host choose the concrete
-   *  abort primitive; no-op (no IPC) when the session has nothing abortable;
-   *  rejection-safe when it does send (host-fallback transition can reject). S3. */
+  dismissQueueRestoration: (sessionId: SessionId, restorationId: string) => Promise<void>;
+  restoreQueueRestorationText: (sessionId: SessionId, restorationId: string) => void;
+  /** Request that the host escape the active runtime operation. The host
+   *  chooses the concrete action and returns its authoritative disposition. */
   abortSession: (sessionId: SessionId) => void;
   addUiRequest: (sessionId: SessionId, request: ExtensionUiRequest) => void;
   handlePanelEvent: (sessionId: SessionId, event: PanelEvent) => void;
@@ -658,12 +863,18 @@ interface SessionsStore {
    *  a guard bail (e.g. no model). Deps mirror the React Composer's exactly —
    *  including `adoptSessionFileAndHydrate` (adopt + load history + refresh the
    *  sidebar), so /fork, /clone, /switch_session, /resume work identically to
-   *  the native Composer. No re-entrancy guard is needed: pi clears the editor
-   *  synchronously in submitValue, so a second Enter before the first resolves
-   *  is an empty submit (caught by the !trimmed bail), and a second DISTINCT
-   *  prompt during an active turn is routed to a `steer` by executeAction
-   *  (the intended course-correction path — a dropping guard would suppress it). */
-  handleUnifiedSubmitRequest: (sessionId: SessionId, id: string, text: string) => Promise<void>;
+   *  the native Composer. Main assigns one stable submission intent to the
+   *  unified request and reuses it across renderer reattachment, so replay can
+   *  join the original admission but cannot submit the text a second time. */
+  handleUnifiedSubmitRequest: (
+    sessionId: SessionId,
+    id: string,
+    text: string,
+    editorRevision: number,
+    submissionIntentId: string,
+    hostInstanceId: string,
+    sessionEpoch: number,
+  ) => Promise<void>;
   dismissUiRequest: (sessionId: SessionId, requestId: string) => void;
   addToast: (sessionId: SessionId, message: string, type?: string) => void;
   dismissToast: (sessionId: SessionId, toastId: string) => void;
@@ -713,7 +924,10 @@ interface SessionsStore {
    *  models so the bootstrap caller can reuse them for its last-used match
    *  without a second fetch. Best-effort: swallows fetch errors (the
    *  dropdown keeps whatever it had) and returns []. */
-  refreshAvailableModels: (sessionId: SessionId) => Promise<ModelInfo[]>;
+  refreshAvailableModels: (
+    sessionId: SessionId,
+    expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
+  ) => Promise<ModelInfo[]>;
   setCurrentModel: (sessionId: SessionId, model: string, provider?: string) => void;
   setThinkingLevel: (sessionId: SessionId, level: ThinkingLevel) => void;
   /**
@@ -738,6 +952,7 @@ interface SessionsStore {
   applyModelChange: (
     sessionId: SessionId,
     model: ModelInfo,
+    expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
   ) => Promise<{ ok: boolean; error?: string }>;
   /**
    * Switch a session's thinking level: optimistic update, send
@@ -765,11 +980,23 @@ interface SessionsStore {
     sessionId: SessionId,
     sessionFile?: string,
     sessionName?: string,
+    expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
+    continuationGuard?: () => boolean,
   ) => Promise<void>;
   /** Refresh the discovered command list (extension/prompt/skill) from pi. */
   refreshCommands: (sessionId: SessionId) => Promise<void>;
   /** Drop a fresh nonce on editorInjection so the Composer re-picks it up. */
   injectEditorText: (sessionId: SessionId, text: string) => void;
+  /** Fence pending-session reaping while asynchronous image reads are in progress. */
+  beginEditorAttachmentRead: (sessionId: SessionId) => void;
+  endEditorAttachmentRead: (sessionId: SessionId) => void;
+  /** Retain locally selected attachments while their revisioned host patch is in flight. */
+  stageEditorAttachments: (sessionId: SessionId, attachments: unknown[]) => void;
+  beginEditorPatch: (sessionId: SessionId) => void;
+  endEditorPatch: (sessionId: SessionId) => void;
+  clearEditorConflict: (sessionId: SessionId) => void;
+  /** Record a host-accepted local editor patch and retire any older snapshot injection. */
+  acknowledgeEditorPatch: (sessionId: SessionId, revision: number) => void;
   /** Clear a stale editorInjection so it won't re-fire on Composer remount.
    *  Called when the user takes over the textarea (types / picks a suggestion)
    *  or when content is sent — the injection is "consumed" and must not
@@ -823,7 +1050,14 @@ function appendUnifiedReplayBuffer(buffer: string[], data: string): string[] {
   return appendBoundedPanelBuffer(buffer, data);
 }
 
-export const useSessionsStore = create<SessionsStore>((set, get) => ({
+type SessionsSet = Parameters<StateCreator<SessionsStore>>[0];
+type SessionsGet = Parameters<StateCreator<SessionsStore>>[1];
+
+const buildSessionsStore = (
+  set: SessionsSet,
+  get: SessionsGet,
+  runAtomically: (operation: () => void) => void,
+): SessionsStore => ({
   workspaces: new Map(),
   sessions: new Map(),
   activeSessionId: null,
@@ -921,18 +1155,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         sessionTitle: title,
         sessionName: name,
         transcript: createTranscriptState(),
-        isStreaming: false,
+        availability: "unavailable",
+        runtimeSnapshot: undefined,
+        hostInstanceId: undefined,
+        sessionEpoch: 0,
+        editorRevision: 0,
+        editorAttachments: [],
+        editorAttachmentReads: 0,
+        editorPatchPending: 0,
         queuedMessages: undefined,
-        promptsInFlight: 0,
-        bashInFlight: 0,
-        interruptible: false,
-        interruptKind: undefined,
-        retryPending: false,
-        agentGeneration: 0,
-        lastEndedAgentGeneration: 0,
-        streamingEpoch: 0,
-        queueEpoch: 0,
-        identityEpoch: 0,
         unreadStatus: undefined,
         turnErrored: false,
         pendingDialogs: [],
@@ -967,6 +1198,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // No tree has been loaded yet; this becomes true when history is
         // discovered via loadHistory or the native `/tree` viewer.
         hasTreeHistory: false,
+        historyGeneration: 0,
         // Bootstrap hasn't run yet — it fires once when the session goes live.
         modelInitialized: false,
       });
@@ -1065,10 +1297,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // or a status change without version info mustn't clobber a prior
         // value). See P1-c.
         const transcript = becomingTerminal ? finalizeActiveBlocks(s.transcript) : s.transcript;
-        const runtime =
-          becomingTerminal || status === "starting"
-            ? resetRuntimeState(s, { bumpIdentity: true })
-            : s;
+        const runtime = becomingTerminal || status === "starting" ? resetRuntimeState(s) : s;
         sessions.set(sessionId, {
           ...runtime,
           status,
@@ -1100,88 +1329,41 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       let current = s;
       let newSessionDrafts = state.newSessionDrafts;
       let newSessionSetupDrafts = state.newSessionSetupDrafts;
+      let sessionDrafts = state.sessionDrafts;
       let anyPromoted = false;
 
       for (const event of events) {
         let unreadStatus = current.unreadStatus;
         let turnErrored = current.turnErrored;
-        let agentGeneration = current.agentGeneration;
-        let lastEndedAgentGeneration = current.lastEndedAgentGeneration;
-        if (event.type === "agent_start") agentGeneration += 1;
-        if (event.type === "agent_end") lastEndedAgentGeneration = agentGeneration;
-        const settlementApplies =
-          event.type === "agent_settled" && lastEndedAgentGeneration === agentGeneration;
-        let livenessPatch: Partial<Pick<SessionViewState, "isStreaming" | "retryPending">> = {};
-        let queuePatch: Pick<SessionViewState, "queuedMessages" | "queueEpoch"> | null = null;
-        const sessionName =
-          event.type === "session_info_changed" ? event.name : current.sessionName;
-
         if (event.type === "agent_start") {
-          // Runtime liveness comes only from the authoritative streaming_state
-          // adapter; raw lifecycle events update transcript/result metadata.
-          livenessPatch = { retryPending: false };
+          // Runtime liveness comes only from direct snapshots; lifecycle events
+          // update transcript/result metadata but never runtime booleans.
           turnErrored = false;
           unreadStatus = undefined;
         }
         if (event.type === "message_end" && event.message?.role === "assistant") {
           if (detectTurnError(event.message).isError) turnErrored = true;
         }
-        if (event.type === "agent_end") {
-          if (event.willRetry) {
-            livenessPatch = { retryPending: true };
-            turnErrored = false;
-          } else {
-            livenessPatch = { retryPending: false };
-          }
-        }
-        if (settlementApplies) {
-          // Pi publishes agent_settled after running extension settlement
-          // handlers. If one started a new run, agent_start has already
-          // advanced the generation and this old settlement must be ignored.
-          livenessPatch = { retryPending: false };
-        }
-        if (event.type === "auto_retry_start") {
-          livenessPatch = { retryPending: true };
-        }
-        if (event.type === "auto_retry_end" && event.success === false) {
-          livenessPatch = { retryPending: false };
-          turnErrored = true;
-        }
-        let interruptPatch: Pick<SessionViewState, "interruptible" | "interruptKind"> | null = null;
-        if (event.type === "streaming_state") {
-          const wasLogicallyStreaming = current.isStreaming || current.retryPending;
-          livenessPatch = {
-            isStreaming: event.isStreaming,
-            ...(event.isStreaming ? {} : { retryPending: false }),
-          };
-          if (!event.isStreaming && wasLogicallyStreaming) {
-            unreadStatus = turnErrored || unreadStatus === "error" ? "error" : "done";
-            turnErrored = false;
-          }
-        }
-        if (event.type === "interrupt_state") {
-          interruptPatch = {
-            interruptible: event.interruptible,
-            interruptKind: event.interruptible ? event.operation : undefined,
-          };
-        }
-        if (event.type === "queue_update") {
-          queuePatch = {
-            queuedMessages: queuedMessagesFromSnapshot(event.steering, event.followUp),
-            queueEpoch: current.queueEpoch + 1,
-          };
-        }
-
+        if (event.type === "auto_retry_end" && event.success === false) turnErrored = true;
+        const transcript = applyPiEvent(current.transcript, event);
+        // Raw Pi events remain authoritative for durable/session metadata and
+        // transcript detail. They deliberately do not derive runtime liveness:
+        // only direct host snapshots may change working/idle state.
         const thinkingLevel =
           event.type === "thinking_level_changed" ? event.level : current.thinkingLevel;
-        const transcript = applyPiEvent(current.transcript, event);
+        const sessionName =
+          event.type === "session_info_changed" ? event.name : current.sessionName;
         const userEchoed =
           event.type === "message_start" &&
           event.message?.role === "user" &&
           transcript.blocks.length > current.transcript.blocks.length;
         const promoted = !!current.isNewPending && userEchoed;
         if (promoted) {
+          const pendingDraft = newSessionDrafts.get(current.workspacePath);
           newSessionDrafts = clearNewSessionDraftFor(newSessionDrafts, current.workspacePath, true);
+          if (pendingDraft !== undefined) {
+            sessionDrafts = setSessionDraftFor(sessionDrafts, sessionId, pendingDraft);
+          }
           newSessionSetupDrafts = clearNewSessionSetupFor(
             newSessionSetupDrafts,
             current.workspacePath,
@@ -1189,25 +1371,23 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           );
           anyPromoted = true;
         }
-        const live = applyLivenessPatch(current, livenessPatch);
         current = {
-          ...live,
+          ...current,
           transcript,
+          thinkingLevel,
+          sessionName,
           unreadStatus,
           turnErrored,
-          agentGeneration,
-          lastEndedAgentGeneration,
-          sessionName,
-          thinkingLevel,
-          ...(interruptPatch ?? {}),
-          ...(queuePatch ?? {}),
+
           isNewPending: promoted ? false : current.isNewPending,
           editorInjection: promoted ? undefined : current.editorInjection,
         };
       }
 
       sessions.set(sessionId, current);
-      return anyPromoted ? { sessions, newSessionDrafts, newSessionSetupDrafts } : { sessions };
+      return anyPromoted
+        ? { sessions, newSessionDrafts, newSessionSetupDrafts, sessionDrafts }
+        : { sessions };
     });
   },
 
@@ -1224,6 +1404,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         ...s,
         transcript,
         historyCursor: { startIndex: page.startIndex, total: page.total },
+        historyGeneration: s.historyGeneration + 1,
         hasTreeHistory: s.hasTreeHistory || page.total > 0,
       });
       return { sessions };
@@ -1239,6 +1420,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     if (!s?.sessionFile || !cursor || cursor.startIndex <= 0 || s.historyLoadingEarlier) return;
     const requestedStartIndex = cursor.startIndex;
     const requestedFile = s.sessionFile;
+    const historyCapture = captureHistoryRead(s);
+    if (!historyCapture) return;
     set((state) => {
       const sessions = new Map(state.sessions);
       const cur = sessions.get(sessionId);
@@ -1247,8 +1430,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       return { sessions };
     });
     try {
-      const page = await window.pivis.invoke("session.loadHistory", {
-        sessionId,
+      const page = await requestBoundHistoryPage(sessionId, historyCapture, {
         before: requestedStartIndex,
       });
       set((state) => {
@@ -1257,8 +1439,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         if (!cur) return {};
         if (
           cur.sessionFile !== requestedFile ||
+          cur.historyGeneration !== historyCapture.historyGeneration ||
           cur.historyCursor?.startIndex !== requestedStartIndex
         ) {
+          return {};
+        }
+        if (!page) {
           sessions.set(sessionId, { ...cur, historyLoadingEarlier: undefined });
           return { sessions };
         }
@@ -1266,6 +1452,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           ...cur,
           transcript: prependHistory(cur.transcript, page.blocks),
           historyCursor: { startIndex: page.startIndex, total: page.total },
+          historyGeneration: cur.historyGeneration + 1,
           historyLoadingEarlier: undefined,
           hasTreeHistory: cur.hasTreeHistory || page.total > 0,
         });
@@ -1275,7 +1462,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       set((state) => {
         const sessions = new Map(state.sessions);
         const cur = sessions.get(sessionId);
-        if (!cur) return {};
+        if (
+          !cur ||
+          cur.sessionFile !== requestedFile ||
+          cur.historyGeneration !== historyCapture.historyGeneration ||
+          cur.historyCursor?.startIndex !== requestedStartIndex
+        )
+          return {};
         sessions.set(sessionId, { ...cur, historyLoadingEarlier: undefined });
         return { sessions };
       });
@@ -1287,26 +1480,34 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   refreshHistoricalCacheMissNotices: async (sessionId) => {
     const session = get().sessions.get(sessionId);
-    if (!session?.sessionFile || session.status !== "ready") return;
-    const identityEpoch = session.identityEpoch;
+    if (
+      !session?.sessionFile ||
+      session.status !== "ready" ||
+      session.availability !== "available" ||
+      !session.hostInstanceId
+    )
+      return;
+    const runtime = {
+      hostInstanceId: session.hostInstanceId,
+      sessionEpoch: session.sessionEpoch,
+    };
+    const sessionEpoch = session.sessionEpoch;
     const sessionFile = session.sessionFile;
     try {
-      const response = await window.pivis.invoke("session.sendCommand", {
+      const response = await invokeSessionCommand(
         sessionId,
-        command: { type: "get_cache_miss_notices" },
-      });
+        { type: "get_cache_miss_notices" },
+        runtime,
+      );
       if (!response.success) return;
       const parsed = CacheMissNoticeEventSchema.array().safeParse(
         (response.data as { notices?: unknown } | undefined)?.notices,
       );
       if (!parsed.success) return;
       const current = get().sessions.get(sessionId);
-      if (current?.identityEpoch !== identityEpoch || current.sessionFile !== sessionFile) return;
+      if (current?.sessionEpoch !== sessionEpoch || current.sessionFile !== sessionFile) return;
       get().applyEvents(sessionId, parsed.data);
-    } catch {
-      // SDK-host-only progressive enhancement. RPC fallback and older hosts
-      // keep history usable without replaying Pi's display-only notices.
-    }
+    } catch {}
   },
 
   addUserMessage: (sessionId, content, images, opts) => {
@@ -1336,10 +1537,11 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         isNewPending: false,
         editorInjection: undefined,
       });
-      // Clear the per-workspace draft exactly when the pending session
-      // becomes real (content landed). Doing it here — not in the Composer's
-      // submit handler — means a send that bails early (no-model guard,
-      // abort, worktree-creation failure) preserves the draft for retry.
+      // A Composer may have newer text by the time host custody returns.
+      // Promote that pending-session draft to the real session before clearing
+      // the workspace slot; the caller clears it only when the accepted
+      // submission still owns the same local edit generation.
+      const pendingDraft = s.isNewPending ? state.newSessionDrafts.get(s.workspacePath) : undefined;
       const drafts = clearNewSessionDraftFor(
         state.newSessionDrafts,
         s.workspacePath,
@@ -1350,11 +1552,13 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         s.workspacePath,
         !!s.isNewPending,
       );
-      // Clear the per-session draft (non-pending sessions) — content landed,
-      // so the typed text is consumed and won't resurface on switch-back.
-      // No-op when there's nothing stored (clearSessionDraftFor returns the
-      // same ref). Same early-bail rationale as the per-workspace clear above.
-      const sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
+      let sessionDrafts: Map<SessionId, string>;
+      if (opts?.clearDraft === false) {
+        sessionDrafts = new Map(state.sessionDrafts);
+        if (pendingDraft !== undefined) sessionDrafts.set(sessionId, pendingDraft);
+      } else {
+        sessionDrafts = clearSessionDraftFor(state.sessionDrafts, sessionId);
+      }
       return {
         sessions,
         newSessionDrafts: drafts,
@@ -1398,7 +1602,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, {
         ...s,
         transcript,
-        bashInFlight: s.bashInFlight + 1,
         isNewPending: false,
         editorInjection: undefined,
       });
@@ -1433,157 +1636,294 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       sessions.set(sessionId, {
         ...s,
         transcript,
-        bashInFlight: Math.max(0, s.bashInFlight - 1),
       });
       return { sessions };
     });
   },
 
-  setStreaming: (sessionId, isStreaming) => {
+  applyRuntimeState: (sessionId, runtimeState) => {
     set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const incomingSnapshot = runtimeState.snapshot;
+      const prior = current.runtimeSnapshot;
+      const staleSnapshot =
+        !!incomingSnapshot &&
+        prior?.hostInstanceId === incomingSnapshot.hostInstanceId &&
+        (incomingSnapshot.sessionEpoch < prior.sessionEpoch ||
+          (incomingSnapshot.sessionEpoch === prior.sessionEpoch &&
+            incomingSnapshot.snapshotSequence <= prior.snapshotSequence));
+      // Availability is an independently sequenced transport fact. Main may
+      // intentionally repeat the last snapshot when a lease expires or a
+      // transition starts; reject only stale snapshot replacement, never the
+      // unavailable/transitioning update itself.
+      const snapshot = staleSnapshot ? undefined : incomingSnapshot;
+      const available =
+        runtimeState.availability === "available" && !!(snapshot ?? current.runtimeSnapshot);
+      // Preserve the last direct snapshot for diagnostics and correlated
+      // resumption; availability gates every selector, so this cannot be
+      // mistaken for current idle/running authority while transport is fenced.
+      const nextSnapshot = snapshot ?? current.runtimeSnapshot;
+      const wasRunning = isSessionWorking(current);
+      const nowRunning = available && nextSnapshot?.isStreaming === true;
+      const authoritativeTurnEnded =
+        prior?.isStreaming === true &&
+        runtimeState.availability === "available" &&
+        snapshot?.isStreaming === false &&
+        snapshot.hostInstanceId === prior.hostInstanceId &&
+        snapshot.sessionEpoch === prior.sessionEpoch;
+      const catalog = snapshot?.catalog;
+      const statusSegments = catalog
+        ? new Map(Object.entries(catalog.statuses))
+        : current.statusSegments;
+      const widgets = catalog ? new Map(Object.entries(catalog.widgets)) : current.widgets;
+      const knownToastIds = new Set(current.toasts.map((toast) => toast.id));
+      const replicatedToasts = catalog
+        ? [
+            ...catalog.notifications
+              .filter((notice) => !knownToastIds.has(notice.id))
+              .map((notice) => ({
+                id: notice.id,
+                message: notice.message,
+                type: notice.type,
+                createdAt: Date.now(),
+              })),
+            ...catalog.capabilityDiagnostics
+              // A local public Theme is the expected, fully functional path
+              // for pi-vis-owned panels on current Pi. Keep the limitation in
+              // replicated diagnostics, but do not alarm users on every
+              // session startup for this non-actionable decorative fallback.
+              .filter((message) => message !== LOCAL_THEME_FALLBACK_DIAGNOSTIC)
+              .map((message) => ({ id: `capability:${message}`, message }))
+              .filter((notice) => !knownToastIds.has(notice.id))
+              .map((notice) => ({
+                ...notice,
+                type: "warning",
+                createdAt: Date.now(),
+              })),
+          ]
+        : [];
+      const editorGenerationChanged =
+        !!snapshot &&
+        (current.hostInstanceId !== snapshot.hostInstanceId ||
+          current.sessionEpoch !== snapshot.sessionEpoch);
+      const editorChanged =
+        !!snapshot &&
+        (editorGenerationChanged || snapshot.editor.revision > current.editorRevision);
+      const localDraft = state.sessionDrafts.get(sessionId) ?? "";
+      const localEditorDiverged =
+        !!snapshot &&
+        editorGenerationChanged &&
+        (localDraft !== snapshot.editor.text ||
+          JSON.stringify(current.editorAttachments) !==
+            JSON.stringify(snapshot.editor.attachments));
       const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, applyLivenessPatch(s, { isStreaming }));
+      sessions.set(sessionId, {
+        ...current,
+        availability: runtimeState.availability,
+        runtimeSnapshot: nextSnapshot,
+        hostInstanceId:
+          runtimeState.hostInstanceId ?? snapshot?.hostInstanceId ?? current.hostInstanceId,
+        sessionEpoch: snapshot?.sessionEpoch ?? current.sessionEpoch,
+        historyGeneration: editorGenerationChanged
+          ? current.historyGeneration + 1
+          : current.historyGeneration,
+        historyLoadingEarlier: editorGenerationChanged ? undefined : current.historyLoadingEarlier,
+        editorRevision: editorChanged
+          ? (snapshot?.editor.revision ?? current.editorRevision)
+          : current.editorRevision,
+        editorAttachments:
+          editorChanged && !localEditorDiverged && current.editorPatchPending === 0
+            ? (snapshot?.editor.attachments ?? [])
+            : current.editorAttachments,
+        editorConflict: snapshot
+          ? editorConflictFromCandidates(
+              snapshot.editor,
+              localEditorDiverged
+                ? { text: localDraft, attachments: current.editorAttachments }
+                : undefined,
+            )
+          : current.editorConflict,
+        // Snapshot editor state is replicated host state. Conflict text stays
+        // separately available in the host snapshot; never replace a local edit
+        // with it while a conflict is being reviewed.
+        editorInjection:
+          editorChanged &&
+          current.editorPatchPending === 0 &&
+          !localEditorDiverged &&
+          snapshot?.editor.conflictText === undefined
+            ? {
+                text: snapshot.editor.text,
+                nonce: ++editorInjectionNonce,
+                revision: snapshot.editor.revision,
+              }
+            : current.editorInjection,
+        unreadStatus: authoritativeTurnEnded
+          ? current.turnErrored || current.unreadStatus === "error"
+            ? "error"
+            : "done"
+          : current.unreadStatus,
+        turnErrored: authoritativeTurnEnded ? false : current.turnErrored,
+        runningSince:
+          !wasRunning && nowRunning
+            ? Date.now()
+            : wasRunning && !nowRunning
+              ? undefined
+              : current.runningSince,
+        queuedMessages: snapshot
+          ? queuedMessagesFromSnapshot(snapshot.steering, snapshot.followUp)
+          : current.queuedMessages,
+        currentModel: snapshot?.model?.id ?? current.currentModel,
+        currentProvider: snapshot?.model?.provider ?? current.currentProvider,
+        thinkingLevel: snapshot?.thinkingLevel ?? current.thinkingLevel,
+        sessionFile: snapshot?.sessionFile ?? current.sessionFile,
+        sessionName: snapshot ? snapshot.sessionName : current.sessionName,
+        statusSegments,
+        widgets,
+        toasts: replicatedToasts.length ? [...current.toasts, ...replicatedToasts] : current.toasts,
+        sessionTitle: catalog?.title ?? current.sessionTitle,
+      });
       return { sessions };
     });
   },
 
-  beginPromptInFlight: (sessionId) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, applyLivenessPatch(s, { promptsInFlight: s.promptsInFlight + 1 }));
-      return { sessions };
+  applyTransitionBatch: (sessionId, records, runtimeState) => {
+    runAtomically(() => {
+      for (const record of records) {
+        if (record.type === "event") get().applyEvents(sessionId, [record.event]);
+        else if (record.type === "ui") get().addUiRequest(sessionId, record.request);
+        else if (record.type === "panel") get().handlePanelEvent(sessionId, record.event);
+        else if (record.type === "submission") {
+          get().applySubmissionDisposition(sessionId, record.result);
+        } else if (record.type === "queue_restoration") {
+          get().applyQueueRestoration(sessionId, record);
+        }
+      }
+      get().applyRuntimeState(sessionId, runtimeState);
     });
   },
 
-  endPromptInFlight: (sessionId) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(
+  applyQueueRestoration: (sessionId, restoration) => {
+    const hasRecoverableText = [...restoration.steering, ...restoration.followUp].some(
+      (value) => value.trim().length > 0,
+    );
+    const hasRecoverableAttachments = restoration.originalAttachments.some(
+      (item) => item.images.length > 0,
+    );
+    const hasCommandReview = !!restoration.commandDescription?.trim();
+    // A zero-payload custody marker gives the user nothing to review. Retire it
+    // through the same main acknowledgement instead of rendering an alarming,
+    // empty recovery card that can only be dismissed.
+    if (!hasRecoverableText && !hasRecoverableAttachments && !hasCommandReview) {
+      void window.pivis.invoke("session.acknowledgeRestoration", {
         sessionId,
-        applyLivenessPatch(s, { promptsInFlight: Math.max(0, s.promptsInFlight - 1) }),
-      );
-      return { sessions };
-    });
-  },
-
-  enqueueOptimisticSteer: (sessionId, text) => {
-    const id = `optimistic-${++queuedMessageCounter}`;
+        restorationId: restoration.restorationId,
+      });
+      return;
+    }
+    const session = get().sessions.get(sessionId);
+    if (
+      !session ||
+      session.queueRestorations?.some((item) => item.restorationId === restoration.restorationId)
+    ) {
+      return;
+    }
+    const restored = [...restoration.steering, ...restoration.followUp].join("\n\n");
+    const currentDraft =
+      get().sessionDrafts.get(sessionId) ??
+      session.editorInjection?.text ??
+      session.runtimeSnapshot?.editor.text ??
+      "";
     set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
       const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      const queued = s.queuedMessages ?? { steering: [], followUp: [] };
       sessions.set(sessionId, {
-        ...s,
-        queuedMessages: {
-          ...queued,
-          steering: [...queued.steering, { id, text, source: "optimistic" }],
-        },
-        queueEpoch: s.queueEpoch + 1,
+        ...current,
+        queueRestorations: [...(current.queueRestorations ?? []), structuredClone(restoration)],
       });
       return { sessions };
     });
-    return id;
+    // Never overwrite newer typing. With a non-empty editor the review card
+    // exposes an explicit Restore action instead.
+    if (restored && !hasCommandReview && currentDraft.trim() === "") {
+      get().injectEditorText(sessionId, restored);
+    }
+    get().addToast(
+      sessionId,
+      hasCommandReview
+        ? "A command may have completed before acknowledgement; review it before retrying."
+        : "Queued text and possible original attachments require review; extensions may have transformed or consumed queue items.",
+      "warning",
+    );
   },
 
-  removeOptimisticQueuedMessage: (sessionId, id) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s?.queuedMessages) return {};
-      const steering = s.queuedMessages.steering.filter(
-        (m) => !(m.id === id && m.source === "optimistic"),
-      );
-      const followUp = s.queuedMessages.followUp.filter(
-        (m) => !(m.id === id && m.source === "optimistic"),
-      );
-      if (
-        steering.length === s.queuedMessages.steering.length &&
-        followUp.length === s.queuedMessages.followUp.length
-      )
-        return {};
-      sessions.set(sessionId, {
-        ...s,
-        queuedMessages: steering.length || followUp.length ? { steering, followUp } : undefined,
-        queueEpoch: s.queueEpoch + 1,
-      });
-      return { sessions };
+  dismissQueueRestoration: async (sessionId, restorationId) => {
+    const response = await window.pivis.invoke("session.acknowledgeRestoration", {
+      sessionId,
+      restorationId,
     });
-  },
-
-  replaceQueueFromAuthoritativeSnapshot: (sessionId, steering, followUp) => {
+    if (!response.acknowledged) return;
     set((state) => {
+      const session = state.sessions.get(sessionId);
+      if (!session) return {};
       const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
       sessions.set(sessionId, {
-        ...s,
-        queuedMessages: queuedMessagesFromSnapshot(steering, followUp),
-        queueEpoch: s.queueEpoch + 1,
+        ...session,
+        queueRestorations: (session.queueRestorations ?? []).filter(
+          (item) => item.restorationId !== restorationId,
+        ),
       });
       return { sessions };
     });
   },
 
-  clearQueue: (sessionId) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, { ...s, queuedMessages: undefined, queueEpoch: s.queueEpoch + 1 });
-      return { sessions };
-    });
+  restoreQueueRestorationText: (sessionId, restorationId) => {
+    const restoration = get()
+      .sessions.get(sessionId)
+      ?.queueRestorations?.find((item) => item.restorationId === restorationId);
+    if (!restoration) return;
+    const restored = [...restoration.steering, ...restoration.followUp].join("\n\n");
+    if (restored) get().injectEditorText(sessionId, restored);
   },
 
-  reconcileSessionState: (sessionId, snapshot, captured) => {
-    const parsed = SessionStateSchema.safeParse(snapshot);
-    if (!parsed.success) return;
-    const snap = parsed.data;
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s || s.identityEpoch !== captured.identityEpoch) return {};
-
-      let next = s;
-      if (
-        next.streamingEpoch === captured.streamingEpoch &&
-        typeof snap.isStreaming === "boolean"
-      ) {
-        if (snap.isStreaming) {
-          next = applyLivenessPatch(next, { isStreaming: true, retryPending: false });
-        } else if (!next.retryPending) {
-          next = applyLivenessPatch(next, { isStreaming: false, retryPending: false });
-        }
-      }
-
-      if (next.queueEpoch === captured.queueEpoch) {
-        if (snap.steering || snap.followUp) {
-          next = {
-            ...next,
-            queuedMessages: queuedMessagesFromSnapshot(snap.steering ?? [], snap.followUp ?? []),
-            queueEpoch: next.queueEpoch + 1,
-          };
-        } else if (snap.pendingMessageCount === 0) {
-          next = { ...next, queuedMessages: undefined, queueEpoch: next.queueEpoch + 1 };
-        }
-      }
-
-      if (next === s) return {};
-      sessions.set(sessionId, next);
-      return { sessions };
-    });
+  applySubmissionDisposition: (sessionId, result) => {
+    if (result.disposition === "outcome_unknown" || result.disposition === "extension_error") {
+      get().addToast(
+        sessionId,
+        result.message ??
+          (result.disposition === "outcome_unknown"
+            ? "Submission outcome is unknown; review it before retrying."
+            : "Extension command failed."),
+        result.disposition === "outcome_unknown" ? "warning" : "error",
+      );
+    }
   },
 
   abortSession: (sessionId) => {
-    const s = get().sessions.get(sessionId);
-    if (!isSessionAbortable(s)) return; // S3 no-op when idle
-    void window.pivis.invoke("session.interrupt", { sessionId }).catch(() => {}); // S3 rejection-safe
+    // ESC routing is host-authoritative: renderer state never decides whether
+    // an abort is applicable. The acknowledged disposition is retained in the
+    // runtime record/snapshot and surfaced if it is exceptional.
+    const requestId = crypto.randomUUID();
+    const session = get().sessions.get(sessionId);
+    if (!session?.hostInstanceId || session.availability !== "available") return;
+    void window.pivis
+      .invoke("session.escape", {
+        sessionId,
+        requestId,
+        expectedHostInstanceId: session.hostInstanceId,
+        expectedSessionEpoch: session.sessionEpoch,
+      })
+      .then((result) => {
+        if (result.disposition === "failed" || result.disposition === "outcome_unknown") {
+          get().addToast(
+            sessionId,
+            result.message ?? "Interrupt outcome is unknown.",
+            result.disposition === "outcome_unknown" ? "warning" : "error",
+          );
+        }
+      })
+      .catch((error) => get().addToast(sessionId, String(error), "error"));
   },
 
   addUiRequest: (sessionId, request) => {
@@ -1677,6 +2017,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   },
 
   handlePanelEvent: (sessionId, event) => {
+    const current = get().sessions.get(sessionId);
+    if (event.type === "panel_open" || event.type === "panel_close") {
+      // A host may reuse a numeric panel id after restart and React may
+      // coalesce clear/open renders. Every open is nevertheless a new
+      // host-bound input stream whose sequence starts at zero.
+      forgetPanelInputSequence(sessionId, event.panelId);
+    } else if (event.type === "panel_clear_all" && current?.panel) {
+      forgetPanelInputSequence(sessionId, current.panel.id);
+    } else if (event.type === "unified_panel_reset" && current?.unifiedPanel) {
+      forgetPanelInputSequence(sessionId, current.unifiedPanel.id);
+    }
     set((state) => {
       const s = state.sessions.get(sessionId);
       if (!s) return {};
@@ -1691,13 +2042,24 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
             // Composer via the view switcher afterwards).
             sessions.set(sessionId, {
               ...s,
-              unifiedPanel: { id: event.panelId, buffer: [] },
+              unifiedPanel: {
+                id: event.panelId,
+                hostInstanceId: event.hostInstanceId ?? s.hostInstanceId ?? "",
+                sessionEpoch: event.sessionEpoch ?? s.sessionEpoch,
+                buffer: [],
+              },
               unifiedPanelHidden: false,
             });
           } else {
             sessions.set(sessionId, {
               ...s,
-              panel: { id: event.panelId, overlay: event.overlay, buffer: [] },
+              panel: {
+                id: event.panelId,
+                overlay: event.overlay,
+                hostInstanceId: event.hostInstanceId ?? s.hostInstanceId ?? "",
+                sessionEpoch: event.sessionEpoch ?? s.sessionEpoch,
+                buffer: [],
+              },
             });
           }
           break;
@@ -1749,23 +2111,6 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           // overlay panels — those are handled by panel_clear_all.)
           sessions.set(sessionId, { ...s, unifiedPanel: undefined, unifiedPanelHidden: false });
           break;
-        case "host_fallback":
-          // The host couldn't start (pi too old / SDK import failed) and we
-          // fell back to pi --mode rpc. Panels are unavailable — surface as a
-          // toast so the user knows to update pi, without blocking the session.
-          sessions.set(sessionId, {
-            ...s,
-            toasts: [
-              ...s.toasts,
-              {
-                id: `toast-${++toastCounter}`,
-                message: event.reason,
-                type: "warning",
-                createdAt: Date.now(),
-              },
-            ],
-          });
-          break;
         case "session_warning":
           // Non-fatal warning (e.g. session file open elsewhere). Toast it.
           sessions.set(sessionId, {
@@ -1786,22 +2131,68 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
-  handleUnifiedSubmitRequest: async (sessionId, id, text) => {
+  handleUnifiedSubmitRequest: async (
+    sessionId,
+    id,
+    text,
+    editorRevision,
+    submissionIntentId,
+    hostInstanceId,
+    sessionEpoch,
+  ) => {
     const trimmed = text.trim();
     const state = get();
     const session = state.sessions.get(sessionId);
     const pendingDiffComments = state.getDiffCommentsForPrompt(sessionId);
+    const claim = await window.pivis.invoke("session.claimUnifiedSubmit", {
+      sessionId,
+      id,
+      rendererGeneration: RENDERER_GENERATION,
+      expectedHostInstanceId: hostInstanceId,
+      expectedSessionEpoch: sessionEpoch,
+    });
+    if (!claim.claimed) return;
+    const origin = { hostInstanceId, sessionEpoch };
+    const claimCurrent = (): boolean =>
+      Date.now() < claim.expiresAt && sessionMatchesRuntime(get().sessions.get(sessionId), origin);
+    const ensureClaimCurrent = (): void => {
+      if (!claimCurrent()) {
+        throw new InputNotConsumedError("Unified action claim expired or changed runtime");
+      }
+    };
+    const respond = async (result: { ok: boolean; bailed?: boolean; error?: string }) => {
+      if (!claimCurrent()) return { ok: false };
+      return window.pivis.invoke("session.unifiedSubmitResponse", {
+        sessionId,
+        id,
+        rendererGeneration: RENDERER_GENERATION,
+        claimId: claim.claimId,
+        expectedHostInstanceId: hostInstanceId,
+        expectedSessionEpoch: sessionEpoch,
+        ...result,
+      });
+    };
+    if (
+      !session ||
+      session.hostInstanceId !== hostInstanceId ||
+      session.sessionEpoch !== sessionEpoch ||
+      session.availability !== "available" ||
+      !claimCurrent()
+    ) {
+      void respond({
+        ok: false,
+        bailed: true,
+        error: "Session runtime is unavailable",
+      });
+      return;
+    }
+
     // Mirror the React Composer's early bail: an empty/whitespace submit is a
     // no-op unless pending diff comments are the prompt body. Tell the host it
     // bailed so it can restore — though empty restore is a no-op, keeping the
     // contract uniform is simplest.
     if (!trimmed && pendingDiffComments.length === 0) {
-      void window.pivis.invoke("session.unifiedSubmitResponse", {
-        sessionId,
-        id,
-        ok: false,
-        bailed: true,
-      });
+      void respond({ ok: false, bailed: true });
       return;
     }
 
@@ -1823,9 +2214,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       action.commandSource === undefined
     ) {
       get().addToast(sessionId, "No model selected", "error");
-      void window.pivis.invoke("session.unifiedSubmitResponse", {
-        sessionId,
-        id,
+      void respond({
         ok: false,
         bailed: true,
         error: "No model selected",
@@ -1833,82 +2222,191 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       return;
     }
 
+    const guarded =
+      <Args extends unknown[]>(fn: (...args: Args) => void) =>
+      (...args: Args): void => {
+        if (claimCurrent()) fn(...args);
+      };
+
     // Build the same deps the React Composer builds, but from store state (the
     // TUI path has no attachments/worktree pre-send block). executeAction + the
     // store actions it calls fire the optimistic bubble, draft clear, etc.
     const deps = {
-      invoke: <T = unknown>(channel: string, payload: unknown) =>
-        window.pivis.invoke(
+      invoke: async <T = unknown>(channel: string, payload: unknown) => {
+        ensureClaimCurrent();
+        let commandPayload = payload;
+        if (channel === "session.sendCommand") {
+          const command = (payload as { command: PiRpcCommand }).command;
+          commandPayload = {
+            ...(payload as object),
+            requestId: crypto.randomUUID(),
+            expectedHostInstanceId: session.hostInstanceId!,
+            expectedSessionEpoch: session.sessionEpoch,
+            ...(commandNeedsIntent(command) ? { intentId: crypto.randomUUID() } : {}),
+            sourceText: trimmed,
+            editorRevision,
+            uiSurface: "unified",
+          };
+        } else if (channel === "session.reload") {
+          commandPayload = {
+            sessionId,
+            request: {
+              requestId: crypto.randomUUID(),
+              intentId: crypto.randomUUID(),
+              expectedHostInstanceId: session.hostInstanceId!,
+              expectedSessionEpoch: session.sessionEpoch,
+              sourceText: trimmed,
+            },
+          };
+        } else if (channel === "session.share") {
+          commandPayload = {
+            ...(payload as object),
+            expectedHostInstanceId: session.hostInstanceId!,
+            expectedSessionEpoch: session.sessionEpoch,
+            exportIntentId: crypto.randomUUID(),
+          };
+        }
+        const result = (await window.pivis.invoke(
           channel as Parameters<typeof window.pivis.invoke>[0],
-          payload as Parameters<typeof window.pivis.invoke>[1],
-        ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+          commandPayload as Parameters<typeof window.pivis.invoke>[1],
+        )) as unknown as {
+          success: boolean;
+          data?: T;
+          error?: string;
+          disposition?: "not_executed" | "completed" | "outcome_unknown";
+          successorIdentity?: { hostInstanceId: string; sessionEpoch: number };
+        };
+        ensureClaimCurrent();
+        if (
+          (channel === "session.sendCommand" || channel === "session.reload") &&
+          result.disposition &&
+          result.disposition !== "completed"
+        ) {
+          throw new InputNotConsumedError(result.error ?? `Command ${result.disposition}`);
+        }
+        if (
+          channel === "session.sendCommand" &&
+          !result.successorIdentity &&
+          !sessionMatchesRuntime(get().sessions.get(sessionId), { hostInstanceId, sessionEpoch })
+        ) {
+          throw new InputNotConsumedError("Session changed before command continuation");
+        }
+        return result;
+      },
       uiSurface: "unified" as const,
-      beginPromptInFlight: get().beginPromptInFlight,
-      endPromptInFlight: get().endPromptInFlight,
-      enqueueOptimisticSteer: get().enqueueOptimisticSteer,
-      removeOptimisticQueuedMessage: get().removeOptimisticQueuedMessage,
-      addToast: get().addToast,
-      addUserMessage: get().addUserMessage,
-      clearPendingUserEcho: get().clearPendingUserEcho,
-      addBashCommand: get().addBashCommand,
-      finishBashCommand: get().finishBashCommand,
-      applyModelChange: get().applyModelChange,
-      addCustomMessage: get().addCustomMessage,
-      openChangelog: (markdown: string) => useChangelogStore.getState().openChangelog(markdown),
-      openPicker: get().openPicker,
-      adoptSessionFile: get().adoptSessionFileAndHydrate,
-      closeSessionTab: get().closeSessionTab,
-      openAppSettings: () => window.dispatchEvent(new CustomEvent("pivis:open-settings")),
-      openDiffViewer: (sid: SessionId) => openDiffForSession(sid),
+      submit: async (
+        sid: SessionId,
+        submission: import("@shared/pi-protocol/runtime-state.js").SessionSubmission,
+      ) => {
+        ensureClaimCurrent();
+        const result = await window.pivis.invoke("session.submit", { sessionId: sid, submission });
+        ensureClaimCurrent();
+        return result;
+      },
+      getSubmissionContext: (sid: SessionId) => {
+        if (!claimCurrent()) return undefined;
+        const current = get().sessions.get(sid);
+        const origin = { hostInstanceId, sessionEpoch };
+        if (!sessionMatchesRuntime(current, origin)) return undefined;
+        return { ...origin, editorRevision, intentId: submissionIntentId };
+      },
+      addToast: guarded(get().addToast),
+      addUserMessage: guarded(get().addUserMessage),
+      clearPendingUserEcho: guarded(get().clearPendingUserEcho),
+      addBashCommand: guarded(get().addBashCommand),
+      finishBashCommand: guarded(get().finishBashCommand),
+      applyModelChange: async (
+        sid: SessionId,
+        model: ModelInfo,
+        expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
+      ) => {
+        ensureClaimCurrent();
+        const result = await get().applyModelChange(sid, model, expectedRuntime);
+        ensureClaimCurrent();
+        return result;
+      },
+      addCustomMessage: guarded(get().addCustomMessage),
+      openChangelog: guarded((markdown: string) =>
+        useChangelogStore.getState().openChangelog(markdown),
+      ),
+      openPicker: guarded((sid: SessionId, picker: PickerRequest) =>
+        get().openPicker(sid, {
+          ...picker,
+          expectedHostInstanceId: session.hostInstanceId!,
+          expectedSessionEpoch: session.sessionEpoch,
+        }),
+      ),
+      adoptSessionFile: (sid: SessionId, file?: string, name?: string) =>
+        get().adoptSessionFileAndHydrate(sid, file, name, undefined, claimCurrent),
+      closeSessionTab: async (sid: SessionId) => {
+        ensureClaimCurrent();
+        await get().closeSessionTab(sid);
+        ensureClaimCurrent();
+      },
+      openAppSettings: guarded(() => window.dispatchEvent(new CustomEvent("pivis:open-settings"))),
+      openDiffViewer: guarded((sid: SessionId) => openDiffForSession(sid)),
       // Lazy import: tree-store imports sessions-store, so a static import here
       // would be circular. The unified-TUI submit path rarely hits /tree, so
       // deferring the module load is fine.
       openTreeViewer: (sid: SessionId) => {
-        void import("./tree-store.js").then((m) =>
-          m.useTreeStore.getState().openTreeForSession(sid),
-        );
+        if (!claimCurrent()) return;
+        void import("./tree-store.js").then((m) => {
+          if (claimCurrent()) m.useTreeStore.getState().openTreeForSession(sid);
+        });
       },
-      openLogin: () => window.dispatchEvent(new CustomEvent("pivis:open-login")),
+      openLogin: guarded(() => window.dispatchEvent(new CustomEvent("pivis:open-login"))),
       copyToClipboard: async (t: string) => {
+        ensureClaimCurrent();
         await window.pivis.invoke("clipboard.writeText", { text: t });
+        ensureClaimCurrent();
       },
       getAvailableModels: (sid: SessionId): ModelInfo[] =>
         get().sessions.get(sid)?.availableModels ?? [],
       getSessionName: (sid: SessionId) => get().sessions.get(sid)?.sessionName,
-      setSessionName: get().setSessionName,
+      setSessionName: guarded(get().setSessionName),
       getCurrentModel: (sid: SessionId) => get().sessions.get(sid)?.currentModel,
       isWorking: (sid: SessionId) => isSessionWorking(get().sessions.get(sid)),
       getSessionWorkspacePath: (sid: SessionId) => get().sessions.get(sid)?.workspacePath,
-      listSessions: (p: string) =>
-        window.pivis.invoke("workspace.listSessions", { workspacePath: p }),
+      listSessions: async (p: string) => {
+        ensureClaimCurrent();
+        const result = await window.pivis.invoke("workspace.listSessions", { workspacePath: p });
+        ensureClaimCurrent();
+        return result;
+      },
       onPromptAccepted: () => {
-        if (action.kind === "send-prompt" && pendingDiffComments.length > 0) {
+        if (claimCurrent() && action.kind === "send-prompt" && pendingDiffComments.length > 0) {
           get().clearSubmittedDiffComments(sessionId, pendingDiffComments);
         }
       },
     };
 
     try {
-      await executeAction(sessionId, action, deps);
-      if (
-        action.kind === "send-prompt" &&
-        action.commandSource !== "extension" &&
-        pendingDiffComments.length > 0
-      ) {
+      const result = await executeAction(sessionId, action, deps);
+      ensureClaimCurrent();
+      const submissionResult = result && "disposition" in result ? result : undefined;
+      const promptAccepted =
+        action.kind !== "send-prompt" ||
+        (submissionResult !== undefined &&
+          ["in_custody", "consumed", "completed", "extension_error"].includes(
+            submissionResult.disposition,
+          ));
+      if (!promptAccepted) {
+        void respond({
+          ok: false,
+          bailed: true,
+          error: submissionResult?.message ?? "Submission was not accepted by the runtime",
+        });
+        return;
+      }
+      if (action.kind === "send-prompt" && pendingDiffComments.length > 0) {
         get().clearSubmittedDiffComments(sessionId, pendingDiffComments);
       }
-      void window.pivis.invoke("session.unifiedSubmitResponse", {
-        sessionId,
-        id,
-        ok: true,
-      });
+      void respond({ ok: true });
     } catch (err) {
       // executeAction threw (invoke failure, etc.) — tell the host to restore
       // so the user can retry. The error itself surfaces via addToast inside
       // executeAction's error handling where applicable.
-      void window.pivis.invoke("session.unifiedSubmitResponse", {
-        sessionId,
-        id,
+      void respond({
         ok: false,
         bailed: true,
         error: err instanceof Error ? err.message : String(err),
@@ -2126,15 +2624,25 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
-  refreshAvailableModels: async (sessionId) => {
+  refreshAvailableModels: async (sessionId, expectedRuntime) => {
     if (typeof window === "undefined" || !window.pivis) return [];
     const currentModels = () => get().sessions.get(sessionId)?.availableModels ?? [];
+    const runtime =
+      expectedRuntime ??
+      (() => {
+        const session = get().sessions.get(sessionId);
+        return session?.hostInstanceId
+          ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
+          : undefined;
+      })();
+    if (!runtime || !sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+      return currentModels();
+    }
     try {
-      const res = await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_available_models" },
-      });
-      if (!res.success) return currentModels();
+      const res = await invokeSessionCommand(sessionId, { type: "get_available_models" }, runtime);
+      if (!res.success || !sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+        return currentModels();
+      }
       const raw = res.data as { models?: unknown[]; currentModelId?: string } | undefined;
       const list = Array.isArray(raw?.models) ? raw.models : [];
       const models = list
@@ -2143,6 +2651,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           return r.success ? r.data : null;
         })
         .filter((m): m is ModelInfo => m !== null);
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return currentModels();
       get().setAvailableModels(sessionId, models);
       return models;
     } catch {
@@ -2179,7 +2688,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     // switch) re-invokes this, but after the first run it is a no-op, so the
     // global last-used preference can NEVER be re-applied to an already-live
     // session and silently change its model.
-    if (!existing || existing.modelInitialized) return;
+    if (
+      !existing ||
+      existing.modelInitialized ||
+      !existing.hostInstanceId ||
+      existing.availability !== "available"
+    )
+      return;
+    const runtime = {
+      hostInstanceId: existing.hostInstanceId,
+      sessionEpoch: existing.sessionEpoch,
+    };
     const resumed = existing.resumed;
 
     // Claim the bootstrap synchronously, BEFORE any await, so a concurrent
@@ -2205,7 +2724,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     // a scope is active) and stores it; the current-model id is established
     // in step 2 from `get_state` (the authoritative source).
     try {
-      const models = await get().refreshAvailableModels(sessionId);
+      const models = await get().refreshAvailableModels(sessionId, runtime);
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
       // Match the last-used preference on BOTH id and provider — the
       // preference is provider-scoped (settings.lastUsedModel = {provider,
       // modelId}), so when two providers offer the same id we must pick the
@@ -2220,17 +2740,19 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
           (sameId.length === 1 ? sameId[0] : undefined))
         : undefined;
       if (match) {
-        await window.pivis
-          .invoke("session.sendCommand", {
-            sessionId,
-            command: {
-              type: "set_model",
-              ...(match.provider ? { provider: match.provider } : {}),
-              modelId: match.id,
-            },
-          })
+        await invokeSessionCommand(
+          sessionId,
+          {
+            type: "set_model",
+            ...(match.provider ? { provider: match.provider } : {}),
+            modelId: match.id,
+          },
+          runtime,
+        )
           .then((res) => {
-            if (res.success) get().setCurrentModel(sessionId, match.id, match.provider);
+            if (res.success && sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+              get().setCurrentModel(sessionId, match.id, match.provider);
+            }
           })
           .catch(() => {});
       } else {
@@ -2238,7 +2760,9 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // list endpoint tags the active model with `current: true`; step 2's
         // `get_state` is the authoritative source and will overwrite this.
         const active = models.find((m) => (m as Record<string, unknown>)["current"] === true);
-        if (active) get().setCurrentModel(sessionId, active.id, active.provider);
+        if (active && sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+          get().setCurrentModel(sessionId, active.id, active.provider);
+        }
       }
     } catch {
       /* best effort — leave the dropdown showing whatever the store already has */
@@ -2246,22 +2770,8 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
     // 2. Thinking level + session name/file (get_state).
     try {
-      const capturedSession = get().sessions.get(sessionId);
-      const captured = capturedSession
-        ? {
-            identityEpoch: capturedSession.identityEpoch,
-            streamingEpoch: capturedSession.streamingEpoch,
-            queueEpoch: capturedSession.queueEpoch,
-          }
-        : null;
-      const res = await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_state" },
-      });
-      if (!captured) return;
-      const currentAfterState = get().sessions.get(sessionId);
-      if (!currentAfterState || currentAfterState.identityEpoch !== captured.identityEpoch) return;
-      get().reconcileSessionState(sessionId, res?.data, captured);
+      const res = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
       const raw = res?.data as
         | {
             thinkingLevel?: unknown;
@@ -2286,6 +2796,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
         // and a non-xhigh model from another would show "xhigh" even though pi
         // had clamped it.
         await get().applyThinkingLevel(sessionId, ltl);
+        if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
       }
       if (raw.model && typeof raw.model.id === "string") {
         // Adopt pi's authoritative model id, and its provider when pi reports
@@ -2314,7 +2825,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     }
   },
 
-  applyModelChange: async (sessionId, model) => {
+  applyModelChange: async (sessionId, model, expectedRuntime) => {
     if (typeof window === "undefined" || !window.pivis) {
       return { ok: false, error: "Unavailable" };
     }
@@ -2322,6 +2833,14 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     if (!before) return { ok: false, error: "Unknown session" };
     const prevModel = before.currentModel;
     const prevProvider = before.currentProvider;
+    const runtime =
+      expectedRuntime ??
+      (before.hostInstanceId
+        ? { hostInstanceId: before.hostInstanceId, sessionEpoch: before.sessionEpoch }
+        : undefined);
+    if (!runtime || !sessionMatchesRuntime(before, runtime)) {
+      return { ok: false, error: "Runtime unavailable" };
+    }
     // The provider we actually send to pi. True providerless registry entries
     // must stay providerless: synthesizing one from the id makes the SDK host's
     // exact provider+id lookup miss. The host supports id-only resolution when
@@ -2333,11 +2852,15 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     get().setCurrentModel(sessionId, model.id, provider);
 
     try {
-      const res = await window.pivis.invoke("session.sendCommand", {
+      const res = await invokeSessionCommand(
         sessionId,
-        command: { type: "set_model", ...(provider ? { provider } : {}), modelId: model.id },
-      });
+        { type: "set_model", ...(provider ? { provider } : {}), modelId: model.id },
+        runtime,
+      );
       if (!res.success) throw new Error(res.error ?? "set_model failed");
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+        throw new Error("Session changed before model settlement");
+      }
     } catch (err) {
       // Revert so the dropdown reflects the model still actually in effect —
       // but only if our optimistic value is still the one showing. A newer
@@ -2348,7 +2871,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       set((state) => {
         const sessions = new Map(state.sessions);
         const s = sessions.get(sessionId);
-        if (!s || s.currentModel !== model.id || s.currentProvider !== provider) return {};
+        if (
+          !sessionMatchesRuntime(s, runtime) ||
+          s.currentModel !== model.id ||
+          s.currentProvider !== provider
+        )
+          return {};
         sessions.set(sessionId, { ...s, currentModel: prevModel, currentProvider: prevProvider });
         return { sessions };
       });
@@ -2367,12 +2895,10 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     let persistProvider = provider;
     let shouldPersist = true;
     try {
-      const stateRes = await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_state" },
-      });
+      const stateRes = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
       const raw = stateRes?.data as { model?: { id?: unknown; provider?: unknown } } | undefined;
       const s = get().sessions.get(sessionId);
+      if (!sessionMatchesRuntime(s, runtime)) return { ok: false, error: "Session changed" };
       if (s && s.currentModel === model.id && s.currentProvider === provider) {
         // Still our optimistic value — adopt pi's authoritative id/provider.
         // Only adopt the provider when pi returns a string: a missing/non-string
@@ -2393,7 +2919,11 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       // get_state failed: keep the optimistic value, but only persist if our
       // switch is still the one in effect (a newer change may have landed).
       const s = get().sessions.get(sessionId);
-      shouldPersist = !!(s && s.currentModel === model.id && s.currentProvider === provider);
+      shouldPersist = !!(
+        sessionMatchesRuntime(s, runtime) &&
+        s.currentModel === model.id &&
+        s.currentProvider === provider
+      );
     }
 
     if (shouldPersist) {
@@ -2409,16 +2939,18 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       // denominator updates promptly instead of waiting for the header's
       // periodic/agent_end refresh.
       try {
-        const statsRes = await window.pivis.invoke("session.sendCommand", {
+        const statsRes = await invokeSessionCommand(
           sessionId,
-          command: { type: "get_session_stats" },
-        });
+          { type: "get_session_stats" },
+          runtime,
+        );
         if (statsRes.success && statsRes.data) {
           const parsed = SessionStatsSchema.safeParse(statsRes.data);
           const s = get().sessions.get(sessionId);
           if (
             parsed.success &&
-            s?.currentModel === persistId &&
+            sessionMatchesRuntime(s, runtime) &&
+            s.currentModel === persistId &&
             s.currentProvider === persistProvider
           ) {
             get().setStats(sessionId, parsed.data as SessionStats);
@@ -2437,6 +2969,17 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     }
     const before = get().sessions.get(sessionId);
     if (!before) return { ok: false, error: "Unknown session" };
+    if (
+      !before.hostInstanceId ||
+      before.availability !== "available" ||
+      before.status !== "ready"
+    ) {
+      return { ok: false, error: "Runtime unavailable" };
+    }
+    const runtime = {
+      hostInstanceId: before.hostInstanceId,
+      sessionEpoch: before.sessionEpoch,
+    };
     const prevLevel = before.thinkingLevel;
 
     const requestId = nextThinkingRequestId++;
@@ -2446,18 +2989,22 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     get().setThinkingLevel(sessionId, level);
 
     try {
-      const res = await window.pivis.invoke("session.sendCommand", {
+      const res = await invokeSessionCommand(
         sessionId,
-        command: { type: "set_thinking_level", level },
-      });
+        { type: "set_thinking_level", level },
+        runtime,
+      );
       if (!res.success) throw new Error(res.error ?? "set_thinking_level failed");
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+        throw new Error("Session changed before thinking-level settlement");
+      }
 
       // Reconcile with the level pi actually applied (a model may clamp it).
       let clampedTo: ThinkingLevel | undefined;
-      const stateRes = await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_state" },
-      });
+      const stateRes = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
+      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+        throw new Error("Session changed before thinking-level reconciliation");
+      }
       const raw = stateRes?.data as { thinkingLevel?: unknown } | undefined;
       if (raw && typeof raw.thinkingLevel === "string") {
         const confirmed = ThinkingLevelSchema.safeParse(raw.thinkingLevel);
@@ -2486,7 +3033,7 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       set((state) => {
         const sessions = new Map(state.sessions);
         const s = sessions.get(sessionId);
-        if (!s || s.thinkingLevel !== level) return {};
+        if (!sessionMatchesRuntime(s, runtime) || s.thinkingLevel !== level) return {};
         sessions.set(sessionId, { ...s, thinkingLevel: prevLevel });
         return { sessions };
       });
@@ -2536,11 +3083,12 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const s = sessions.get(sessionId);
       if (!s) return {};
       const next: SessionViewState = {
-        ...resetRuntimeState(s, { bumpIdentity: true }),
+        ...resetRuntimeState(s),
         sessionFile,
         transcript: createTranscriptState(),
         hasTreeHistory: false,
         historyCursor: undefined,
+        historyGeneration: s.historyGeneration + 1,
         historyLoadingEarlier: undefined,
         unreadStatus: undefined,
         turnErrored: false,
@@ -2557,23 +3105,57 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
    *  identically regardless of which surface dispatched it. Mirrors the exact
    *  post-adopt steps the Composer used to inline (loadHistory + seedHistory +
    *  refreshWorkspaceSessions when there's a workspace). */
-  adoptSessionFileAndHydrate: async (sessionId, sessionFile, sessionName) => {
+  adoptSessionFileAndHydrate: async (
+    sessionId,
+    sessionFile,
+    sessionName,
+    expectedRuntime,
+    continuationGuard = () => true,
+  ) => {
+    if (!continuationGuard()) return;
+    const before = get().sessions.get(sessionId);
+    if (expectedRuntime && !sessionMatchesRuntime(before, expectedRuntime)) return;
     await get().adoptSessionFile(sessionId, sessionFile, sessionName);
+    if (!continuationGuard()) return;
+    if (expectedRuntime && before?.runtimeSnapshot) {
+      const adopted = get().sessions.get(sessionId);
+      if (
+        adopted?.availability === "unavailable" &&
+        adopted.hostInstanceId === expectedRuntime.hostInstanceId &&
+        adopted.sessionEpoch === expectedRuntime.sessionEpoch
+      ) {
+        get().applyRuntimeState(sessionId, {
+          availability: "available",
+          hostInstanceId: before.runtimeSnapshot.hostInstanceId,
+          sessionEpoch: before.runtimeSnapshot.sessionEpoch,
+          receivedAt: Date.now(),
+          snapshot: before.runtimeSnapshot,
+        });
+      }
+    }
     if (!sessionFile) return;
-    const history = await window.pivis.invoke("session.loadHistory", { sessionId });
-    get().seedHistory(sessionId, history ?? { blocks: [], startIndex: 0, total: 0 });
-    const workspacePath = get().sessions.get(sessionId)?.workspacePath;
+    const historyCapture = captureHistoryRead(get().sessions.get(sessionId), expectedRuntime);
+    if (!historyCapture) return;
+    const history = await requestBoundHistoryPage(sessionId, historyCapture);
+    if (!history || !continuationGuard()) return;
+    const current = get().sessions.get(sessionId);
+    if (!historyCaptureMatches(current, historyCapture)) return;
+    get().seedHistory(sessionId, history);
+    const workspacePath = current?.workspacePath;
     if (workspacePath) void get().refreshWorkspaceSessions(workspacePath);
   },
 
   /** Refresh the discovered command list (extension / prompt / skill). */
   refreshCommands: async (sessionId) => {
     if (typeof window === "undefined" || !window.pivis) return;
+    const session = get().sessions.get(sessionId);
+    if (!session?.hostInstanceId || session.availability !== "available") return;
+    const runtime = {
+      hostInstanceId: session.hostInstanceId,
+      sessionEpoch: session.sessionEpoch,
+    };
     try {
-      const res = await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_commands" },
-      });
+      const res = await invokeSessionCommand(sessionId, { type: "get_commands" }, runtime);
       if (!res || !res.success) return;
       // Tolerant read: pi v0.79.1 returns { commands: RpcSlashCommand[] };
       // the contract's PiRpcResponse is a discriminated union, but we
@@ -2614,6 +3196,89 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
     });
   },
 
+  beginEditorAttachmentRead: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...s, editorAttachmentReads: s.editorAttachmentReads + 1 });
+      return { sessions };
+    });
+  },
+
+  endEditorAttachmentRead: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s || s.editorAttachmentReads === 0) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, {
+        ...s,
+        editorAttachmentReads: Math.max(0, s.editorAttachmentReads - 1),
+      });
+      return { sessions };
+    });
+  },
+
+  stageEditorAttachments: (sessionId, attachments) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...s, editorAttachments: structuredClone(attachments) });
+      return { sessions };
+    });
+  },
+
+  beginEditorPatch: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...s, editorPatchPending: s.editorPatchPending + 1 });
+      return { sessions };
+    });
+  },
+
+  endEditorPatch: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s || s.editorPatchPending === 0) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, {
+        ...s,
+        editorPatchPending: Math.max(0, s.editorPatchPending - 1),
+      });
+      return { sessions };
+    });
+  },
+
+  clearEditorConflict: (sessionId) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s?.editorConflict) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...s, editorConflict: undefined });
+      return { sessions };
+    });
+  },
+
+  acknowledgeEditorPatch: (sessionId, revision) => {
+    set((state) => {
+      const s = state.sessions.get(sessionId);
+      if (!s || revision < s.editorRevision) return {};
+      const sessions = new Map(state.sessions);
+      const staleInjection =
+        s.editorInjection?.revision !== undefined && s.editorInjection.revision <= revision;
+      sessions.set(sessionId, {
+        ...s,
+        editorRevision: revision,
+        editorConflict: undefined,
+        editorInjection: staleInjection ? undefined : s.editorInjection,
+      });
+      return { sessions };
+    });
+  },
+
   clearEditorInjection: (sessionId) => {
     set((state) => {
       const s = state.sessions.get(sessionId);
@@ -2629,7 +3294,18 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
-      sessions.set(sessionId, { ...s, pendingPicker: picker });
+      sessions.set(sessionId, {
+        ...s,
+        pendingPicker: {
+          ...picker,
+          ...(picker.expectedHostInstanceId
+            ? { expectedHostInstanceId: picker.expectedHostInstanceId }
+            : s.hostInstanceId
+              ? { expectedHostInstanceId: s.hostInstanceId }
+              : {}),
+          expectedSessionEpoch: picker.expectedSessionEpoch ?? s.sessionEpoch,
+        } as PickerRequest,
+      });
       return { sessions };
     });
   },
@@ -2751,10 +3427,24 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       // persists entries as it goes, so the file IS the transcript.
       if (sessionFile) {
         try {
-          const history = await window.pivis.invoke("session.loadHistory", { sessionId });
-          get().seedHistory(sessionId, history ?? { blocks: [], startIndex: 0, total: 0 });
+          let historyCapture = captureHistoryRead(get().sessions.get(sessionId));
+          let history = historyCapture
+            ? await requestBoundHistoryPage(sessionId, historyCapture)
+            : undefined;
+          // Renderer attach may install the already-running host identity while
+          // a cold/open history read is in flight. Retry once against that new
+          // explicit owner; never apply the predecessor result.
+          if (!history && historyCapture) {
+            historyCapture = await waitForHistoryOwnershipChange(sessionId, historyCapture);
+            history = historyCapture
+              ? await requestBoundHistoryPage(sessionId, historyCapture)
+              : undefined;
+          }
+          if (history && historyCaptureMatches(get().sessions.get(sessionId), historyCapture!)) {
+            get().seedHistory(sessionId, history);
+          }
         } catch {
-          /* no history — fine */
+          /* stale or unavailable history — fine */
         }
       }
       if (focus) get().setActiveSession(sessionId);
@@ -2767,7 +3457,95 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
 
   closeSessionTab: async (sessionId, opts) => {
     if (typeof window !== "undefined" && window.pivis) {
-      await window.pivis.invoke("session.close", { sessionId }).catch(console.error);
+      try {
+        let prepared = await window.pivis.invoke("session.prepareClose", { sessionId });
+        const checkpoint = prepared?.checkpoint as
+          | {
+              snapshot?: AgentSessionSnapshot;
+              editor?: {
+                text?: string;
+                attachments?: unknown[];
+                conflictText?: string;
+                conflictAttachments?: unknown[];
+                alternateConflictText?: string;
+                alternateConflictAttachments?: unknown[];
+                additionalConflictCandidates?: Array<{ text: string; attachments: unknown[] }>;
+              };
+              intents?: unknown[];
+              restorations?: unknown[];
+              dialogs?: unknown[];
+              panels?: unknown[];
+            }
+          | undefined;
+        const localDraft = opts?.preservePendingDraft
+          ? ""
+          : (get().sessionDrafts.get(sessionId) ?? "");
+        const localSession = get().sessions.get(sessionId);
+        const localEditor = {
+          attachments: localSession?.editorAttachments ?? [],
+          pendingAttachmentReads: localSession?.editorAttachmentReads ?? 0,
+        };
+        const hasReviewableWork =
+          localDraft.trim().length > 0 ||
+          localEditor.attachments.length > 0 ||
+          localEditor.pendingAttachmentReads > 0 ||
+          !!checkpoint?.editor?.text?.trim() ||
+          checkpoint?.editor?.conflictText !== undefined ||
+          checkpoint?.editor?.alternateConflictText !== undefined ||
+          (checkpoint?.editor?.attachments?.length ?? 0) > 0 ||
+          (checkpoint?.editor?.conflictAttachments?.length ?? 0) > 0 ||
+          (checkpoint?.editor?.alternateConflictAttachments?.length ?? 0) > 0 ||
+          (checkpoint?.editor?.additionalConflictCandidates?.length ?? 0) > 0 ||
+          (checkpoint?.intents?.length ?? 0) > 0 ||
+          (checkpoint?.restorations?.length ?? 0) > 0 ||
+          (checkpoint?.dialogs?.length ?? 0) > 0 ||
+          (checkpoint?.panels?.length ?? 0) > 0 ||
+          checkpoint?.snapshot?.isIdle === false ||
+          checkpoint?.snapshot?.hostFacts.submitting === true ||
+          (checkpoint?.snapshot?.hostFacts.custodyCount ?? 0) > 0;
+        if (hasReviewableWork) {
+          const confirmed = window.confirm(
+            `Review the close checkpoint below. Force closing permanently discards this in-memory checkpoint and may leave work outcomes unknown.\n\n${closeCheckpointPreview(
+              checkpoint,
+              localDraft,
+              localEditor,
+            )}\n\nForce close now?`,
+          );
+          if (!confirmed) {
+            if (prepared?.reviewToken) {
+              await window.pivis.invoke("session.cancelClose", {
+                sessionId,
+                reviewToken: prepared.reviewToken,
+              });
+            }
+            return;
+          }
+          if (prepared?.reviewToken) {
+            await window.pivis.invoke("session.cancelClose", {
+              sessionId,
+              reviewToken: prepared.reviewToken,
+            });
+          }
+          prepared = await window.pivis.invoke("session.prepareClose", { sessionId, force: true });
+        }
+        if (prepared?.reviewToken) {
+          const result = await window.pivis.invoke("session.confirmClose", {
+            sessionId,
+            reviewToken: prepared.reviewToken,
+          });
+          if (!result.closed) {
+            get().addToast(
+              sessionId,
+              result.reason ?? "Session changed; review it before closing",
+              "warning",
+            );
+            return;
+          }
+        }
+      } catch (error) {
+        console.error(error);
+        return;
+      }
     }
     get().removeSession(sessionId, opts);
   },
@@ -3070,7 +3848,40 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
   prependDiffCommentsToPrompt: (sessionId, prompt) => {
     return prependCodeCommentsToPrompt(prompt, get().getDiffCommentsForPrompt(sessionId));
   },
-}));
+});
+
+export const useSessionsStore = create<SessionsStore>((rawSet, rawGet) => {
+  type StoreUpdate =
+    | SessionsStore
+    | Partial<SessionsStore>
+    | ((state: SessionsStore) => SessionsStore | Partial<SessionsStore>);
+  let transitionDraft: SessionsStore | undefined;
+  const invokeRawSet = rawSet as unknown as (update: StoreUpdate, replace?: boolean) => void;
+  const get = (): SessionsStore => transitionDraft ?? rawGet();
+  const set = ((update: StoreUpdate, replace?: boolean) => {
+    if (!transitionDraft) {
+      invokeRawSet(update, replace);
+      return;
+    }
+    const partial = typeof update === "function" ? update(transitionDraft) : update;
+    transitionDraft = replace
+      ? (partial as SessionsStore)
+      : ({ ...transitionDraft, ...partial } as SessionsStore);
+  }) as typeof rawSet;
+  const runAtomically = (operation: () => void): void => {
+    if (transitionDraft) throw new Error("Nested transition batches are not supported");
+    transitionDraft = rawGet();
+    let committed: SessionsStore | undefined;
+    try {
+      operation();
+      committed = transitionDraft;
+    } finally {
+      transitionDraft = undefined;
+    }
+    if (committed) invokeRawSet(committed, true);
+  };
+  return buildSessionsStore(set, get, runAtomically);
+});
 
 /**
  * Derive the git root for a session — prefers the worktree path

@@ -32,6 +32,7 @@
  * src/main/pi/host-imports.test.ts).
  */
 
+import * as crypto from "node:crypto";
 import {
   applyPiVisTheme,
   configureHttpDispatcher,
@@ -49,6 +50,12 @@ import { createDialogResolver, createUIContext } from "./ui-context.mjs";
 let runtime = null;
 let session = null;
 let handleCommand = null;
+let handleSubmit = null;
+let handleEscape = null;
+let handleReload = null;
+let publishSnapshot = null;
+let applyEditorPatch = null;
+let runtimeAuthority = null;
 let interruptActiveOperation = null;
 let dialogResolver = null;
 // Unified-TUI controller { dispose, resolveSubmit, resolveClipboardImage } —
@@ -59,8 +66,17 @@ let dialogResolver = null;
 let unifiedTuiController = null;
 let panelCounter = 0;
 const panels = new Map(); // panelId -> { inputHandler, resizeHandler }
+const hostInstanceId = crypto.randomUUID();
+let transportSequence = 0;
+const activeEpoch = 0;
 
 function send(msg) {
+  // Transition-sensitive records are retained by state-authority until its
+  // terminal snapshot can be emitted atomically. Do this BEFORE allocating an
+  // envelope so buffered records cannot create a transport-sequence gap.
+  const captured = runtimeAuthority?.captureOutbound?.(msg);
+  if (captured === true) return;
+  const outbound = captured?.live ? { ...msg, provisionalEpoch: captured.provisionalEpoch } : msg;
   // Guard the channel state: during graceful shutdown the IPC channel can
   // close (parent disconnected / exited) while pi's extension shutdown hooks
   // are still firing (e.g. plan-mode's clearUi → setStatus → send). Writing to
@@ -68,7 +84,18 @@ function send(msg) {
   // originate deep inside pi's dispose(), would surface as an uncaught error
   // that crashes the host mid-teardown. `process.connected` is false once the
   // channel is gone, so this is a no-op in exactly that window.
-  if (process.send && process.connected) process.send(msg);
+  if (process.send && process.connected) {
+    process.send({
+      ...outbound,
+      hostInstanceId,
+      sessionEpoch: runtimeAuthority?.sessionEpoch ?? activeEpoch,
+      transportSequence: ++transportSequence,
+    });
+  }
+}
+
+function sendControl(payload) {
+  send({ type: "control", payload });
 }
 
 function sendUiRequest(req) {
@@ -78,9 +105,26 @@ function sendUiRequest(req) {
 // --- Panel bridge (for custom() to ANSI output) ---
 
 const panelBridge = {
+  get activeCount() {
+    return panels.size;
+  },
+  checkpoint() {
+    return [...panels].map(([panelId, panel]) => ({
+      panelId,
+      overlay: panel.overlay,
+      unified: panel.unified,
+      ...(panel.mode ? { mode: panel.mode } : {}),
+      ...(panel.lastData ? { lastData: panel.lastData } : {}),
+    }));
+  },
   openPanel({ overlay, unified }) {
     const panelId = ++panelCounter;
-    panels.set(panelId, { inputHandler: null });
+    panels.set(panelId, {
+      inputHandler: null,
+      inputSequence: 0,
+      overlay,
+      unified: unified === true,
+    });
     send({ type: "panel_open", panelId, overlay, ...(unified ? { unified: true } : {}) });
     return panelId;
   },
@@ -89,7 +133,11 @@ const panelBridge = {
     // Stream straight to the renderer (which keeps a bounded replay buffer).
     // The host retains NO copy — accumulating every ANSI frame here would be
     // an unbounded leak for the life of the host process.
-    if (panels.has(panelId)) {
+    const panel = panels.get(panelId);
+    if (panel) {
+      // A bounded last frame/chunk is enough for close review without turning
+      // the host into an unbounded terminal replay buffer.
+      panel.lastData = String(data).slice(-65_536);
       send({ type: "panel_data", panelId, data });
     }
   },
@@ -107,7 +155,9 @@ const panelBridge = {
   // must pin a fixed grid instead of content-tracking (which would oscillate).
   // "content" = normal content-hugging mode. See panel-events.ts PanelModeEvent.
   setPanelMode(panelId, mode) {
-    if (panels.has(panelId)) {
+    const panel = panels.get(panelId);
+    if (panel) {
+      panel.mode = mode;
       send({ type: "panel_mode", panelId, mode });
     }
   },
@@ -122,9 +172,18 @@ const panelBridge = {
     if (p) p.inputHandler = null;
   },
 
-  feedInput(panelId, data) {
-    const p = panels.get(panelId);
-    if (p?.inputHandler) p.inputHandler(data);
+  feedInput(panelId, sequence, data) {
+    const panel = panels.get(panelId);
+    const acknowledgedThrough = panel?.inputSequence ?? 0;
+    if (!panel || sequence <= acknowledgedThrough) return { acknowledgedThrough };
+    const expected = acknowledgedThrough + 1;
+    if (!panel.inputHandler) return { acknowledgedThrough };
+    if (sequence !== expected) {
+      return { acknowledgedThrough, gap: { expected, received: sequence } };
+    }
+    panel.inputHandler(data);
+    panel.inputSequence = sequence;
+    return { acknowledgedThrough: sequence };
   },
 
   setResizeHandler(panelId, handler) {
@@ -184,11 +243,13 @@ const panelBridge = {
 
 let initialized = false;
 
-// Minimum pi version required for SDK-host (panels).
-// Below this, fall back to pi --mode rpc (no panels).
+// Minimum pi version required for the SDK host.
+// Below this, startup fails with an actionable compatibility error.
 import { compareVersions } from "./version.mjs";
 
-const MIN_PI_VERSION = "0.80.0";
+// preflightResult is a public AgentSession.prompt option in Pi 0.80.6.
+// Keep the SDK host on that documented surface; no private pi imports.
+const MIN_PI_VERSION = "0.80.6";
 
 function checkMinVersion(pi, piPath) {
   const version = pi.VERSION;
@@ -198,7 +259,7 @@ function checkMinVersion(pi, piPath) {
   }
   if (compareVersions(version, MIN_PI_VERSION) < 0) {
     console.error(
-      `[pi-session-host] pi version ${version} < min ${MIN_PI_VERSION}. Falling back to --mode rpc.`,
+      `[pi-session-host] pi version ${version} < min ${MIN_PI_VERSION}. SDK host unavailable.`,
     );
     return false;
   }
@@ -219,16 +280,15 @@ async function handleInit(msg) {
     // Step 1: Import pi SDK
     const pi = await importPi(piPath);
 
-    // Minimum version gate — exit with well-known code so main falls back to --mode rpc.
-    // versionTooLow is sent on the error wire message AND the exit code is 42;
-    // both signal "below min" so the registry can craft a "update pi" message.
+    // Minimum version gate. versionTooLow is sent on the error wire message
+    // and the exit code is 42 so main can report an actionable incompatibility.
     if (!checkMinVersion(pi, piPath)) {
       send({
         type: "error",
         message: `pi version ${pi.VERSION} is below minimum ${MIN_PI_VERSION}`,
         versionTooLow: true,
       });
-      process.exit(42); // 42 = version-too-low (triggers fallback in SessionHost)
+      process.exit(42); // 42 = version-too-low
     }
 
     const piTui = await importPiTui(piPath);
@@ -252,24 +312,26 @@ async function handleInit(msg) {
     // Step 2: Bootstrap
     configureHttpDispatcher(piPath);
     // Load the pi theme that matches pi-vis's active color scheme. Two layers:
-    //  (1) PIVIS_PI_THEME loads pi's built-in dark/light as a base (and is the
-    //      fallback for the RPC path / if the custom install below fails).
+    //  (1) PIVIS_PI_THEME loads pi's built-in dark/light as a base if the
+    //      indexed custom install below cannot be applied.
     //  (2) PIVIS_PI_THEME_COLORS carries STABLE per-role ANSI palette INDICES
-    //      (role → 16–255), scheme-independent. We build a pi Theme from them
-    //      and install it as the active singleton, so every host surface
-    //      (extension theme.fg widgets/status, the unified TUI, custom()
-    //      panels) emits role-identity bytes (`\x1b[38;5;N m`) rather than
-    //      baked RGB. The RENDERER resolves each index against the active
-    //      colorscheme at paint time, so a scheme swap recolors everything
-    //      live without re-emitting from the host. A failure here is non-fatal:
-    //      we keep the base theme and log.
+    //      (role → 16–255), scheme-independent. We build a public pi Theme for
+    //      pi-vis-owned extension surfaces. If Pi's public root cannot install
+    //      it globally, we keep the local theme and publish a visible
+    //      capability diagnostic instead of reaching into private singleton
+    //      symbols or claiming complete decorative parity.
     const baseTheme = initHostTheme(pi, process.env.PIVIS_PI_THEME || undefined);
     let theme = baseTheme;
+    const capabilityDiagnostics = [];
     const paletteJson = process.env.PIVIS_PI_THEME_COLORS;
     if (paletteJson) {
       try {
         const { fg, bg } = JSON.parse(paletteJson);
-        if (fg && bg) theme = applyPiVisTheme(pi, fg, bg);
+        if (fg && bg) {
+          const result = applyPiVisTheme(pi, fg, bg);
+          theme = result.theme;
+          if (!result.success && result.error) capabilityDiagnostics.push(result.error);
+        }
       } catch (err) {
         console.error(
           "[pi-session-host] pi-vis theme install failed; using base pi theme:",
@@ -285,8 +347,11 @@ async function handleInit(msg) {
     // and that prompt round-trips to the renderer via createDialog. The
     // host-level `dialogResolver` must already be wired so the user's
     // `dialog_response` resolves the in-flight prompt.
-    const { resolve: resolveDialog, createDialog } = createDialogResolver(sendUiRequest);
-    dialogResolver = { resolve: resolveDialog };
+    const resolver = createDialogResolver(sendUiRequest, (operationId) => {
+      send({ type: "ui_ack", operationId });
+    });
+    const { createDialog } = resolver;
+    dialogResolver = resolver;
 
     // Trust prompt: a blocking select dialog offering pi's full choice set
     // (trust folder / trust parent / session-only / deny / deny-session-only).
@@ -310,9 +375,10 @@ async function handleInit(msg) {
     // session identity lives on the SessionManager. Passing create() here when
     // a sessionFile was given would silently drop the user's history and
     // create a fresh session, which is the worst kind of data bug.
+    const configuredSessionDir = process.env["PI_CODING_AGENT_SESSION_DIR"];
     const sessionManager = sessionFile
-      ? pi.SessionManager.open(sessionFile)
-      : pi.SessionManager.create(cwd);
+      ? pi.SessionManager.open(sessionFile, configuredSessionDir)
+      : pi.SessionManager.create(cwd, configuredSessionDir);
 
     const createRuntime = async ({
       cwd: sc,
@@ -348,8 +414,8 @@ async function handleInit(msg) {
 
     session = runtime.session;
 
-    // Fail fast (→ clean fallback to pi --mode rpc) if this pi version doesn't
-    // expose the SDK surface the bridge relies on, instead of crashing later.
+    // Fail fast if this pi version does not expose the SDK surface the bridge
+    // relies on, instead of crashing later.
     assertHostCapabilities(session, runtime);
 
     // Step 5: Create ExtensionUIContext
@@ -357,9 +423,14 @@ async function handleInit(msg) {
     // not pi's Theme singleton. Reconstruct pi's own getEditorTheme() from the
     // PUBLIC surface (theme.fg + getSelectListTheme) — see ui-context.mjs.
     const editorTheme = buildEditorTheme(pi, theme);
+    // The bridge installs an AsyncLocalStorage-aware tracker below. UI context
+    // calls through this stable object so lifecycle-owned dialogs/custom panels
+    // can suspend only their own watchdog.
+    const lifecycleUiTracker = { track: (promise) => promise };
     const {
       context: uiContext,
       runWithInvocationSurface,
+      state: uiState,
       unified: unifiedCtrl,
     } = createUIContext({
       theme,
@@ -367,9 +438,11 @@ async function handleInit(msg) {
       panelBridge,
       createDialog,
       sendToMain: sendUiRequest,
+      trackBlockingUi: (promise) => lifecycleUiTracker.track(promise),
       tuiModules,
     });
     unifiedTuiController = unifiedCtrl;
+    for (const diagnostic of capabilityDiagnostics) uiState.addCapabilityDiagnostic(diagnostic);
     // NOTE: uiContext is cwd-independent (theme/dialog/panel/sendToMain don't
     // change with cwd). It's passed to bindExtensions below and reused across
     // rebinds via the bridge's setRebindSession — do NOT stash it on
@@ -380,6 +453,12 @@ async function handleInit(msg) {
     // bindExtensions used by both the initial bind and every rebind)
     const {
       handleCommand: handle,
+      handleSubmit: submit,
+      handleEscape: escapeRequest,
+      handleReload: reload,
+      publishSnapshot: publish,
+      applyEditorPatch: patchEditor,
+      authority,
       bindExtensions: bindExt,
       interruptActiveOperation: interrupt,
     } = setupCommandBridge({
@@ -389,19 +468,40 @@ async function handleInit(msg) {
       send,
       panelBridge,
       disposeUnifiedTui: unifiedCtrl.dispose,
+      cancelDialogs: () => dialogResolver?.cancelAll(),
       runWithInvocationSurface,
       pi,
       agentDir,
       cwd,
+      hostInstanceId,
+      sendControl,
+      initialBinding: true,
+      lifecycleUiTracker,
+      uiState: {
+        ...uiState,
+        pendingDialogCount: () => dialogResolver?.pendingCount ?? 0,
+      },
     });
+    runtimeAuthority = authority;
 
     // Step 7: Bind extensions (initial session)
     await bindExt(session);
 
     // Step 8: Signal ready (include version so renderer can display it)
     handleCommand = handle;
+    handleSubmit = submit;
+    handleEscape = escapeRequest;
+    handleReload = reload;
+    publishSnapshot = publish;
+    applyEditorPatch = patchEditor;
     interruptActiveOperation = interrupt;
-    send({ type: "ready", piVersion: pi.VERSION });
+    const initialBatch = authority.commitInitialBinding();
+    sendControl({
+      type: "ready",
+      piVersion: pi.VERSION,
+      snapshot: initialBatch.terminalSnapshot,
+      records: initialBatch.records,
+    });
     console.error(`[pi-session-host] Ready (pi ${pi.VERSION}, cwd: ${cwd})`);
   } catch (err) {
     console.error("[pi-session-host] Init failed:", err);
@@ -414,6 +514,18 @@ async function handleInit(msg) {
 
 process.on("message", async (msg) => {
   try {
+    const closeAllowed = new Set(["prepare_close", "confirm_close", "cancel_close"]);
+    if (runtimeAuthority?.isClosing && msg.type !== "init" && !closeAllowed.has(msg.type)) {
+      if (typeof msg.id === "string") {
+        send({
+          type: "response",
+          id: msg.id,
+          success: false,
+          error: "Session close preparation is in progress",
+        });
+      }
+      return;
+    }
     switch (msg.type) {
       case "init":
         await handleInit(msg);
@@ -432,12 +544,83 @@ process.on("message", async (msg) => {
         break;
 
       case "interrupt":
+        // Legacy callers are acknowledged through the direct ESC path now.
         await interruptActiveOperation?.();
         break;
 
-      case "panel_input":
-        panelBridge.feedInput(msg.panelId, msg.data);
+      case "submit": {
+        const result = await handleSubmit?.(msg);
+        send({ type: "response", id: msg.id, success: true, data: result });
         break;
+      }
+
+      case "escape": {
+        const result = await handleEscape?.(msg.requestId);
+        send({ type: "response", id: msg.id, success: true, data: result });
+        break;
+      }
+
+      case "state_request": {
+        const snapshot = await runtimeAuthority?.requestFullSnapshot();
+        send({ type: "response", id: msg.id, success: true, data: snapshot });
+        break;
+      }
+
+      case "reload": {
+        await handleReload?.();
+        send({ type: "response", id: msg.id, success: true });
+        break;
+      }
+
+      case "editor_patch": {
+        const result = applyEditorPatch?.(msg.patch);
+        publishSnapshot?.();
+        send({ type: "response", id: msg.id, success: true, data: result });
+        break;
+      }
+
+      case "prepare_close": {
+        const checkpoint = runtimeAuthority?.prepareClose(msg.force === true);
+        send({ type: "response", id: msg.id, success: true, data: checkpoint });
+        break;
+      }
+
+      case "confirm_close": {
+        const result = runtimeAuthority?.confirmClose(msg.token) ?? { valid: false };
+        send({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: result,
+          closeConfirmation: true,
+        });
+        break;
+      }
+
+      case "cancel_close": {
+        const cancelled = runtimeAuthority?.cancelClose(msg.token) ?? false;
+        send({ type: "response", id: msg.id, success: true, data: { cancelled } });
+        break;
+      }
+
+      case "restoration_ack":
+        runtimeAuthority?.acknowledgeRestoration(msg.restorationId);
+        break;
+
+      case "renderer_detached":
+        dialogResolver?.cancelAll?.();
+        panelBridge.closeAll();
+        unifiedTuiController?.dispose?.({ preservePendingSubmits: true });
+        send({ type: "renderer_cancelled", rendererGeneration: msg.rendererGeneration });
+        publishSnapshot?.();
+        break;
+
+      case "panel_input": {
+        const result = panelBridge.feedInput(msg.panelId, msg.sequence, msg.data);
+        if (result.acknowledgedThrough === msg.sequence) runtimeAuthority?.noteMutation();
+        send({ type: "response", id: msg.id, success: true, data: result });
+        break;
+      }
 
       case "panel_resize":
         panelBridge.resize(msg.panelId, msg.cols, msg.rows, msg.force === true);
@@ -445,6 +628,7 @@ process.on("message", async (msg) => {
 
       case "panel_close_request":
         panelBridge.cancel(msg.panelId);
+        send({ type: "ui_ack", operationId: msg.operationId });
         break;
 
       // Unified-TUI editor submit: the renderer ran the submit pipeline and
@@ -456,6 +640,7 @@ process.on("message", async (msg) => {
           bailed: msg.bailed,
           error: msg.error,
         });
+        publishSnapshot?.();
         break;
 
       // Clipboard image read (Ctrl+V paste in the unified editor): the main
@@ -509,4 +694,4 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Signal that we're alive
-process.send?.({ type: "spawned" });
+sendControl({ type: "spawned" });

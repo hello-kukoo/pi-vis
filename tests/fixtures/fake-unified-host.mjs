@@ -27,6 +27,7 @@
  *   { type:"event", event } / { type:"panel_open", panelId, overlay, unified? }
  *   { type:"panel_data", panelId, data } / { type:"panel_close", panelId }
  */
+import crypto from "node:crypto";
 import * as fs from "node:fs";
 
 const INPUT_FILE = process.env.PIVIS_TEST_HOST_INPUT_FILE;
@@ -37,6 +38,14 @@ const MODELS = [
   { id: "fake-model-2", name: "Fake Model Two", api: "fake", provider: "fake", reasoning: true },
 ];
 
+const hostInstanceId = crypto.randomUUID();
+const sessionEpoch = 0;
+let transportSequence = 0;
+let snapshotSequence = 0;
+let editorRevision = 0;
+let editorText = "";
+let editorAttachments = [];
+let closeToken;
 let panelOpen = false;
 let panelTimer = null;
 let factoryWidgetActive = false;
@@ -46,6 +55,7 @@ let submitCounter = 0;
 const pendingSubmits = new Map();
 const AUTO_CLOSE_MS = Number(process.env.PIVIS_TEST_UNIFIED_AUTO_CLOSE_MS || 0);
 const AUTO_CLOSE_AFTER_DRAFT = process.env.PIVIS_TEST_UNIFIED_AUTO_CLOSE_AFTER_DRAFT || "";
+const HANG_UNIFIED_SUBMIT = process.env.PIVIS_TEST_HANG_UNIFIED_SUBMIT === "1";
 let autoClosedAfterDraft = false;
 
 // The kitty keyboard protocol handshake the REAL host writes in
@@ -57,7 +67,54 @@ let autoClosedAfterDraft = false;
 const KITTY_HANDSHAKE = "\x1b[?2004h\x1b[>7u\x1b[?u\x1b[c";
 
 function send(msg) {
-  if (typeof process.send === "function") process.send(msg);
+  if (typeof process.send === "function") {
+    process.send({
+      ...msg,
+      hostInstanceId,
+      sessionEpoch,
+      transportSequence: ++transportSequence,
+    });
+  }
+}
+
+function sendControl(payload) {
+  send({ type: "control", payload });
+}
+
+function snapshot() {
+  return {
+    hostInstanceId,
+    sessionEpoch,
+    snapshotSequence: ++snapshotSequence,
+    capturedAt: Date.now(),
+    isStreaming: false,
+    isIdle: true,
+    isCompacting: false,
+    isRetrying: false,
+    retryAttempt: 0,
+    isBashRunning: false,
+    model: MODELS[0],
+    thinkingLevel: "medium",
+    sessionId: "fake-unified",
+    pendingMessageCount: 0,
+    steering: [],
+    followUp: [],
+    hostFacts: {
+      submitting: false,
+      actualCompaction: false,
+      navigation: false,
+      pendingDialogs: 0,
+      custodyCount: 0,
+    },
+    catalog: {
+      notifications: [],
+      statuses: {},
+      widgets: {},
+      toolsExpanded: false,
+      capabilityDiagnostics: [],
+    },
+    editor: { revision: editorRevision, text: editorText, attachments: editorAttachments },
+  };
 }
 
 function recordInput(data) {
@@ -93,7 +150,7 @@ function submitUnifiedDraft() {
   const id = `fake-submit-${++submitCounter}`;
   pendingSubmits.set(id, text);
   editorDraft = "";
-  send({ type: "unified_submit_request", id, text });
+  send({ type: "unified_submit_request", id, text, editorRevision });
 }
 
 function updateFakeEditorDraft(data) {
@@ -104,9 +161,11 @@ function updateFakeEditorDraft(data) {
       submitUnifiedDraft();
     } else if (ch === "\b" || ch === "\x7f") {
       editorDraft = editorDraft.slice(0, -1);
+      editorRevision++;
       maybeCloseDeferredUnifiedPanel();
     } else if (ch === "\n" || ch >= " ") {
       editorDraft += ch;
+      editorRevision++;
     }
   }
   if (
@@ -292,17 +351,75 @@ function openCustomPanel(uiSurface) {
 // ─── Wire protocol handling ────────────────────────────────────────────────
 
 process.on("message", (msg) => {
+  if (process.env.PIVIS_TEST_HOST_MESSAGE_LOG) {
+    fs.appendFileSync(
+      process.env.PIVIS_TEST_HOST_MESSAGE_LOG,
+      `${JSON.stringify({ type: msg?.type, command: msg?.command?.type, text: msg?.submission?.text })}\n`,
+    );
+  }
   try {
     switch (msg?.type) {
       case "init":
-        send({ type: "spawned" });
-        send({ type: "ready", piVersion: "99.0.0" });
+        sendControl({ type: "spawned" });
+        sendControl({ type: "ready", piVersion: "99.0.0", snapshot: snapshot() });
         // Open the unified panel shortly after ready, mirroring an extension
         // registering a factory setWidget during its first tool call.
         setTimeout(openUnifiedPanel, 300);
         break;
       case "command":
         handleCommand(msg.id, msg.command, msg.uiSurface);
+        break;
+      case "state_request":
+        reply(msg.id, true, snapshot());
+        break;
+      case "prepare_close":
+        closeToken = crypto.randomUUID();
+        reply(msg.id, true, {
+          token: closeToken,
+          mutationSequence: snapshotSequence,
+          snapshot: snapshot(),
+          custody: [],
+          activeIntents: [],
+          restorations: [],
+          ui: {
+            editor: { revision: editorRevision, text: editorText, attachments: editorAttachments },
+            unifiedSubmissions: [...pendingSubmits].map(([id, text]) => ({ id, text })),
+            panels: panelOpen ? [{ panelId: PANEL_ID }] : [],
+          },
+        });
+        break;
+      case "confirm_close":
+        reply(msg.id, true, { valid: msg.token === closeToken });
+        break;
+      case "cancel_close": {
+        const cancelled = msg.token === closeToken;
+        if (cancelled) closeToken = undefined;
+        reply(msg.id, true, { cancelled });
+        break;
+      }
+      case "submit": {
+        const submission = msg.submission;
+        if (HANG_UNIFIED_SUBMIT && submission.surface === "unified") break;
+        reply(msg.id, true, {
+          intentId: submission.intentId,
+          hostInstanceId: submission.expectedHostId,
+          sessionEpoch: submission.expectedEpoch,
+          editorRevision: submission.editorRevision,
+          disposition: "consumed",
+        });
+        if (submission.text === "/custom-panel") openCustomPanel(submission.surface);
+        break;
+      }
+      case "editor_patch":
+        editorRevision = msg.patch?.revision ?? editorRevision;
+        editorText = msg.patch?.text ?? editorText;
+        editorAttachments = structuredClone(msg.patch?.attachments ?? []);
+        reply(msg.id, true, {
+          accepted: true,
+          revision: editorRevision,
+          text: editorText,
+          attachments: editorAttachments,
+        });
         break;
       case "panel_input":
         // Keystrokes from UnifiedTuiHost's xterm → record for the input-routing
@@ -312,6 +429,7 @@ process.on("message", (msg) => {
           recordInput(msg.data);
           updateFakeEditorDraft(msg.data);
         }
+        reply(msg.id, true, { acknowledgedThrough: msg.sequence });
         break;
       case "panel_resize":
         // A force resize = xterm remounted (clean terminal). The real host

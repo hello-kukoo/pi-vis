@@ -26,6 +26,11 @@ import { Terminal } from "@xterm/xterm";
 import type React from "react";
 import { useEffect, useRef } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import {
+  acknowledgePanelInput,
+  nextPanelInputSequence,
+  panelInputGapMessage,
+} from "../../lib/panel-input-sequence.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { getTheme } from "../../theme/registry.js";
@@ -51,9 +56,13 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const panelRef = useRef<{ id: number; buffer: string[]; mode?: "content" | "viewport" } | null>(
-    null,
-  );
+  const panelRef = useRef<{
+    id: number;
+    hostInstanceId: string;
+    sessionEpoch: number;
+    buffer: string[];
+    mode?: "content" | "viewport";
+  } | null>(null);
   // The current sizing pass, exposed by the lifecycle effect so the mode-change
   // effect below can re-run it without taking sync's deps.
   const syncRef = useRef<(() => void) | null>(null);
@@ -66,6 +75,8 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
   // xterm on every streamed frame).
   panelRef.current = unifiedPanel ?? null;
   const panelId = unifiedPanel?.id;
+  const panelHostInstanceId = unifiedPanel?.hostInstanceId;
+  const panelSessionEpoch = unifiedPanel?.sessionEpoch;
   const panelMode = unifiedPanel?.mode ?? "content";
   modeRef.current = panelMode;
 
@@ -170,6 +181,8 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
         void window.pivis
           .invoke("session.panelResize", {
             sessionId,
+            expectedHostInstanceId: currentPanel.hostInstanceId,
+            expectedSessionEpoch: currentPanel.sessionEpoch,
             panelId: currentPanel.id,
             cols,
             rows,
@@ -204,9 +217,38 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
 
     // User keystrokes → host TUI (panelInput is shared with custom() panels).
     const onDataDispose = term.onData((data) => {
+      const sequence = nextPanelInputSequence(
+        sessionId,
+        currentPanel.hostInstanceId,
+        currentPanel.sessionEpoch,
+        currentPanel.id,
+      );
       void window.pivis
-        .invoke("session.panelInput", { sessionId, panelId: currentPanel.id, data })
-        .catch(() => {});
+        .invoke("session.panelInput", {
+          sessionId,
+          expectedHostInstanceId: currentPanel.hostInstanceId,
+          expectedSessionEpoch: currentPanel.sessionEpoch,
+          panelId: currentPanel.id,
+          sequence,
+          data,
+        })
+        .then((result) => {
+          acknowledgePanelInput(
+            sessionId,
+            currentPanel.hostInstanceId,
+            currentPanel.sessionEpoch,
+            currentPanel.id,
+            result.acknowledgedThrough,
+          );
+          if (result.gap) {
+            useSessionsStore
+              .getState()
+              .addToast(sessionId, panelInputGapMessage(result.gap), "warning");
+          }
+        })
+        .catch((error) => {
+          useSessionsStore.getState().addToast(sessionId, String(error), "error");
+        });
     });
 
     // Re-derive sizing when the transcript column resizes (window resize,
@@ -236,7 +278,7 @@ export function UnifiedTuiHost({ sessionId }: UnifiedTuiHostProps): React.ReactE
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [sessionId, panelId]);
+  }, [sessionId, panelId, panelHostInstanceId, panelSessionEpoch]);
 
   return (
     <div className="custom-panel unified-panel">

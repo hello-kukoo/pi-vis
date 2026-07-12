@@ -39,6 +39,212 @@ describe("SessionHost", () => {
     __forkOverride.fn = null;
     SessionHost.__dialogTimeoutMsForTests = null;
     host.stop();
+    vi.useRealTimers();
+  });
+
+  describe("control silence", () => {
+    it("does not retire a healthy host while provisional lifecycle UI is awaiting a user", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      const unresponsive = vi.fn();
+      const leases = vi.fn();
+      host.on("unresponsive", unresponsive);
+      host.on("lifecycleUiLease", leases);
+      fake.emitWire({
+        type: "extension_ui_request",
+        id: "lifecycle-dialog",
+        operationId: "lifecycle-dialog",
+        method: "confirm",
+        title: "Lifecycle confirmation",
+        message: "Continue?",
+        provisionalEpoch: 1,
+      });
+      (host as unknown as { lastControlAt: number }).lastControlAt = Date.now() - 9_000;
+
+      await new Promise((resolve) => setTimeout(resolve, 650));
+
+      expect(unresponsive).not.toHaveBeenCalled();
+      expect(fake.killed).toBe(false);
+      expect(fake.sent.filter((message) => message.type === "state_request")).toHaveLength(0);
+      host.sendUiResponse(
+        JSON.stringify({
+          type: "extension_ui_response",
+          id: "lifecycle-dialog",
+          confirmed: true,
+        }),
+      );
+      expect(leases.mock.calls).toEqual([[true]]);
+      fake.emitWire({ type: "ui_ack", operationId: "lifecycle-dialog" });
+      expect(leases.mock.calls).toEqual([[true], [false]]);
+    });
+
+    it("suspends a lifecycle command deadline while correlated UI remains open", async () => {
+      vi.useFakeTimers();
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      let settled = false;
+      const command = host.sendCommand({ type: "new_session" } as never).finally(() => {
+        settled = true;
+      });
+      const outbound = [...fake.sent].reverse().find((message) => message.type === "command");
+      if (!outbound || outbound.type !== "command") throw new Error("missing command");
+      fake.emitWire({
+        type: "extension_ui_request",
+        id: "slow-command-dialog",
+        operationId: "slow-command-dialog",
+        method: "confirm",
+        title: "Lifecycle",
+        message: "Continue?",
+        provisionalEpoch: 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(settled).toBe(false);
+
+      fake.emitWire({ type: "ui_ack", operationId: "slow-command-dialog" });
+      fake.emitWire({ type: "response", id: outbound.id, success: true, data: {} });
+      await expect(command).resolves.toMatchObject({ success: true });
+    });
+
+    it("suspends the reload request deadline while correlated UI remains open", async () => {
+      vi.useFakeTimers();
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      fake.initialized = false;
+      let settled = false;
+      const reload = host.reloadInPlace().finally(() => {
+        settled = true;
+      });
+      const outbound = [...fake.sent].reverse().find((message) => message.type === "reload");
+      if (!outbound || outbound.type !== "reload") throw new Error("missing reload request");
+      fake.emitWire({
+        type: "panel_open",
+        panelId: 77,
+        overlay: true,
+        unified: false,
+        provisionalEpoch: 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(settled).toBe(false);
+
+      fake.emitWire({ type: "panel_close", panelId: 77 });
+      fake.emitWire({ type: "response", id: outbound.id, success: true });
+      await expect(reload).resolves.toBeUndefined();
+    });
+
+    it("releases a provisional dialog lease on host-side timeout acknowledgement", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      const leases = vi.fn();
+      host.on("lifecycleUiLease", leases);
+      fake.emitWire({
+        type: "extension_ui_request",
+        id: "timed-dialog",
+        operationId: "timed-operation",
+        method: "confirm",
+        title: "Timed",
+        message: "Continue?",
+        provisionalEpoch: 1,
+      });
+      fake.emitWire({ type: "ui_ack", operationId: "timed-operation" });
+
+      expect(leases.mock.calls).toEqual([[true], [false]]);
+    });
+
+    it("does not treat non-control frames as control-channel liveness", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      (host as unknown as { lastControlAt: number }).lastControlAt = 123;
+
+      fake.emitWire({ type: "event", event: { type: "agent_start" } });
+
+      expect((host as unknown as { lastControlAt: number }).lastControlAt).toBe(123);
+      fake.emitControl({ type: "snapshot", snapshot: fake.snapshot(), full: false });
+      expect((host as unknown as { lastControlAt: number }).lastControlAt).toBeGreaterThan(123);
+    });
+
+    it("does not refresh control liveness from an unsuccessful state response", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      fake.autoRespondToStateRequests = false;
+      (host as unknown as { lastControlAt: number }).lastControlAt = 123;
+
+      const request = host.requestSnapshot();
+      const stateRequest = [...fake.sent]
+        .reverse()
+        .find((message) => message.type === "state_request");
+      if (!stateRequest) throw new Error("missing state request");
+      fake.emitWire({
+        type: "response",
+        id: stateRequest.id,
+        success: false,
+        data: fake.snapshot(),
+        error: "probe failed",
+      });
+
+      await expect(request).rejects.toThrow("Invalid correlated full snapshot response");
+      expect((host as unknown as { lastControlAt: number }).lastControlAt).toBe(123);
+    });
+
+    it("ignores a stale silence-probe failure after newer control traffic", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      fake.autoRespondToStateRequests = false;
+      const controlSilence = vi.fn();
+      host.on("controlSilence", controlSilence);
+      (host as unknown as { lastControlAt: number }).lastControlAt = Date.now() - 2_100;
+
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      const stateRequest = [...fake.sent]
+        .reverse()
+        .find((message) => message.type === "state_request");
+      if (!stateRequest) throw new Error("missing state request");
+      fake.emitControl({ type: "snapshot", snapshot: fake.snapshot(), full: false });
+      fake.emitWire({
+        type: "response",
+        id: stateRequest.id,
+        success: false,
+        error: "old probe failed",
+      });
+      await Promise.resolve();
+
+      expect(controlSilence).not.toHaveBeenCalled();
+      expect(fake.killed).toBe(false);
+    });
+
+    it("adopts a newer epoch from a correlated gap-repair snapshot", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      fake.autoRespondToStateRequests = false;
+      fake.transportSequence++;
+      fake.emitWire({ type: "event", event: { type: "agent_start" } });
+      const stateRequest = [...fake.sent]
+        .reverse()
+        .find((message) => message.type === "state_request");
+      if (!stateRequest) throw new Error("missing state request");
+      fake.sessionEpoch = 1;
+      const snapshot = fake.snapshot();
+
+      fake.emitWire({ type: "response", id: stateRequest.id, success: true, data: snapshot });
+      await Promise.resolve();
+
+      expect(host.sessionEpoch).toBe(1);
+      expect((host as unknown as { transportFenced: boolean }).transportFenced).toBe(false);
+    });
+
+    it("probes with one correlated state request without inventing a transport gap", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      const gap = vi.fn();
+      host.on("transportGap", gap);
+      (host as unknown as { lastControlAt: number }).lastControlAt = Date.now() - 2_100;
+
+      await new Promise((resolve) => setTimeout(resolve, 650));
+
+      expect(fake.sent.filter((message) => message.type === "state_request")).toHaveLength(1);
+      expect(gap).not.toHaveBeenCalled();
+    });
   });
 
   describe("waitForReady", () => {
@@ -107,38 +313,66 @@ describe("SessionHost", () => {
 
   describe("W1: watchdog re-arm gap for an unanswered pre-ready dialog", () => {
     it("waitForReady rejects within a bounded time if the pre-ready dialog is never answered", async () => {
-      // Shrink the dialog timeout so the test is fast.
+      // Shrink the dialog timeout so the test is fast and deterministically
+      // drive the watchdog rather than waiting on wall-clock time.
       SessionHost.__dialogTimeoutMsForTests = 100;
-      const p = host.waitForReady();
+      vi.useFakeTimers();
+      try {
+        const p = host.waitForReady();
+        const rejection = expect(p).rejects.toThrow(/dialog/i);
 
-      // The trust prompt fires during host startup (pre-ready):
-      fake.emitMessage({
-        type: "extension_ui_request",
-        id: "trust_1",
-        method: "select",
-        title: "Trust?",
-      });
+        // The trust prompt fires during host startup (pre-ready). emitWire
+        // supplies the real host envelope and generation identity.
+        fake.emitWire({
+          type: "extension_ui_request",
+          id: "trust_1",
+          method: "select",
+          title: "Trust?",
+          options: ["Trust this folder", "Cancel"],
+        });
 
-      // ... and the user never answers. No sendUiResponse, no ready, no exit.
-      // waitForReady MUST still reject within a bounded time (the fix adds a
-      // dialog-outstanding timeout; the original code hung forever).
-      const start = Date.now();
-      await expect(p).rejects.toThrow(/dialog/i);
-      const elapsed = Date.now() - start;
-      // Bounded: well under the 30s startup timeout (the fix uses a shorter
-      // dialog timeout). Generous upper bound to avoid CI flake.
-      expect(elapsed).toBeLessThan(15_000);
+        // ... and the user never answers. No sendUiResponse, no ready, no exit.
+        // The dialog watchdog, rather than the startup watchdog, must bound it.
+        const start = Date.now();
+        await vi.advanceTimersByTimeAsync(100);
+        await rejection;
+        expect(Date.now() - start).toBeLessThan(15_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leases startup while an initial-binding custom panel is open", async () => {
+      vi.useFakeTimers();
+      try {
+        const p = host.waitForReady();
+        let settled = false;
+        void p.finally(() => {
+          settled = true;
+        });
+        fake.emitWire({ type: "panel_open", panelId: 41, overlay: true });
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(settled).toBe(false);
+
+        fake.emitWire({ type: "panel_close", panelId: 41 });
+        fake.emitReady("0.80.6");
+        await expect(p).resolves.toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("sendUiResponse re-arms the watchdog so a normally-answered trust prompt still reaches ready", async () => {
       // Confirms the fix doesn't break the happy path: dialog arrives, user
       // answers, sendUiResponse re-arms, host then sends ready.
       const p = host.waitForReady();
-      fake.emitMessage({
+      fake.emitWire({
         type: "extension_ui_request",
         id: "trust_1",
         method: "select",
         title: "Trust?",
+        options: ["Trust this folder", "Cancel"],
       });
       // User answers:
       host.sendUiResponse(
@@ -169,14 +403,14 @@ describe("SessionHost", () => {
 
       expect(() => {
         host.sendUiResponse(JSON.stringify({ type: "extension_ui_response", id: "d", value: "x" }));
-        host.sendPanelInput(1, "x");
+        void host.sendPanelInput(1, 1, "x").catch(() => {});
         host.sendPanelResize(1, 80, 24);
-        host.sendPanelClose(1);
+        host.sendPanelClose(1, "close-1");
       }).not.toThrow();
       expect(errors).toHaveLength(0);
     });
 
-    it("uses callback sends so channel-close races are swallowed", () => {
+    it("rejects acknowledged panel input when the channel closes", async () => {
       const errors: Error[] = [];
       host.on("error", (err) => errors.push(err));
 
@@ -187,7 +421,7 @@ describe("SessionHost", () => {
         return false;
       }) as typeof fake.send;
 
-      expect(() => host.sendPanelInput(1, "x")).not.toThrow();
+      await expect(host.sendPanelInput(1, 1, "x")).rejects.toThrow("channel closed");
       expect(errors).toHaveLength(0);
     });
   });
@@ -203,7 +437,7 @@ describe("SessionHost", () => {
 
       // Host responds:
       const sentCmd = fake.sent.find((m) => m.type === "command")!;
-      fake.emitMessage({
+      fake.emitWire({
         type: "response",
         id: sentCmd.id,
         success: true,
@@ -223,7 +457,7 @@ describe("SessionHost", () => {
       const sentCmd = fake.sent.find((m) => m.type === "command")!;
       expect(sentCmd.uiSurface).toBe("composer");
       expect(sentCmd.command).toEqual({ type: "prompt", message: "/custom" });
-      fake.emitMessage({ type: "response", id: sentCmd.id, success: true, data: {} });
+      fake.emitWire({ type: "response", id: sentCmd.id, success: true, data: {} });
       await expect(p).resolves.toMatchObject({ success: true });
     });
 
@@ -233,7 +467,7 @@ describe("SessionHost", () => {
 
       const p = host.sendCommand({ type: "clone" } as never);
       const sentCmd = fake.sent.find((m) => m.type === "command")!;
-      fake.emitMessage({
+      fake.emitWire({
         type: "response",
         id: sentCmd.id,
         success: false,
@@ -251,8 +485,9 @@ describe("SessionHost", () => {
       await host.waitForReady();
 
       const p = host.sendCommand({ type: "get_state" } as never);
+      fake.emitStderr("fatal host detail\n");
       fake.emitExit(1);
-      await expect(p).rejects.toThrow(/Host process exited/);
+      await expect(p).rejects.toThrow(/Host process exited.*fatal host detail/s);
     });
   });
 
@@ -297,11 +532,12 @@ describe("SessionHost", () => {
       host.on("uiRequest", () => seen.push("uiRequest"));
 
       const readyP = host.waitForReady();
-      fake.emitMessage({
+      fake.emitWire({
         type: "extension_ui_request",
         id: "t",
         method: "select",
         title: "Trust?",
+        options: ["Trust this folder", "Cancel"],
       });
       // The uiRequest must have been forwarded already (before ready):
       expect(seen).toEqual(["uiRequest"]);
@@ -314,11 +550,15 @@ describe("SessionHost", () => {
   });
 
   describe("panel I/O round-trips (wire contract for the force-close hatch)", () => {
-    it("sendPanelInput emits {type:panel_input, panelId, data}", async () => {
+    it("sendPanelInput resolves only after the host acknowledges its sequence", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
-      host.sendPanelInput(3, "\r");
-      expect(fake.sent).toContainEqual({ type: "panel_input", panelId: 3, data: "\r" });
+      await expect(host.sendPanelInput(3, 1, "\r")).resolves.toEqual({
+        acknowledgedThrough: 1,
+      });
+      expect(fake.sent).toContainEqual(
+        expect.objectContaining({ type: "panel_input", panelId: 3, sequence: 1, data: "\r" }),
+      );
     });
 
     it("sendPanelResize emits {type:panel_resize, panelId, cols, rows}", async () => {
@@ -349,8 +589,12 @@ describe("SessionHost", () => {
     it("sendPanelClose emits {type:panel_close_request, panelId} (the escape hatch)", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
-      host.sendPanelClose(3);
-      expect(fake.sent).toContainEqual({ type: "panel_close_request", panelId: 3 });
+      host.sendPanelClose(3, "close-3");
+      expect(fake.sent).toContainEqual({
+        type: "panel_close_request",
+        panelId: 3,
+        operationId: "close-3",
+      });
     });
 
     it("sendInterrupt emits {type:interrupt}", async () => {
@@ -396,12 +640,17 @@ describe("SessionHost", () => {
     it("forwards unified_submit_request as a unifiedSubmitRequest event", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
-      let captured: { id: string; text: string } | null = null;
-      host.on("unifiedSubmitRequest", (id, text) => {
-        captured = { id, text };
+      let captured: { id: string; text: string; editorRevision: number } | null = null;
+      host.on("unifiedSubmitRequest", (id, text, editorRevision) => {
+        captured = { id, text, editorRevision };
       });
-      fake.emitMessage({ type: "unified_submit_request", id: "u1", text: "hello" });
-      expect(captured).toEqual({ id: "u1", text: "hello" });
+      fake.emitMessage({
+        type: "unified_submit_request",
+        id: "u1",
+        text: "hello",
+        editorRevision: 7,
+      });
+      expect(captured).toEqual({ id: "u1", text: "hello", editorRevision: 7 });
     });
 
     it("sendUnifiedSubmitResponse forwards {type:unified_submit_response} to the host", async () => {
@@ -482,7 +731,7 @@ describe("isSessionHost (panel-capability duck type)", () => {
 
   it("is true for any proc exposing sendPanelInput, false otherwise", () => {
     expect(isSessionHost({ sendPanelInput: () => {} })).toBe(true);
-    // A PiProcess-shaped object (no panel methods) → false (clean no-op path).
+    // An unrelated process-shaped object (no host panel methods) is rejected.
     expect(isSessionHost({ sendCommand: () => {}, stop: () => {} })).toBe(false);
     expect(isSessionHost(null)).toBe(false);
     expect(isSessionHost(undefined)).toBe(false);

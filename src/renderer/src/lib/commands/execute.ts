@@ -50,6 +50,7 @@ import type {
   ScopedModelsData,
   TrustStateData,
 } from "@shared/pi-protocol/responses.js";
+import type { SessionSubmission, SubmissionResult } from "@shared/pi-protocol/runtime-state.js";
 import { modelDisplayName } from "../model-utils.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
 import type { ComposerAction } from "./types.js";
@@ -62,10 +63,15 @@ export interface ExecuteDeps {
   ) => Promise<{ success: boolean; data?: T; error?: string }>;
   /** Surface that submitted this command; host-side extension UI follows it. */
   uiSurface?: "composer" | "unified" | undefined;
-  beginPromptInFlight: (sessionId: SessionId) => void;
-  endPromptInFlight: (sessionId: SessionId) => void;
-  enqueueOptimisticSteer: (sessionId: SessionId, text: string) => string;
-  removeOptimisticQueuedMessage: (sessionId: SessionId, id: string) => void;
+  submit?: (sessionId: SessionId, submission: SessionSubmission) => Promise<SubmissionResult>;
+  getSubmissionContext?: (sessionId: SessionId) =>
+    | {
+        hostInstanceId: string;
+        sessionEpoch: number;
+        editorRevision: number;
+        intentId?: string | undefined;
+      }
+    | undefined;
   /** Add a transient toast notification in the active session. */
   addToast: (
     sessionId: SessionId,
@@ -77,7 +83,7 @@ export interface ExecuteDeps {
     sessionId: SessionId,
     content: string,
     images?: string[],
-    opts?: { registerEcho?: boolean },
+    opts?: { registerEcho?: boolean; clearDraft?: boolean },
   ) => void;
   /** Clear an optimistic echo registration when the send failed before pi could echo it. */
   clearPendingUserEcho: (sessionId: SessionId, content: string) => void;
@@ -91,6 +97,7 @@ export interface ExecuteDeps {
   applyModelChange: (
     sessionId: SessionId,
     model: ModelInfo,
+    expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
   ) => Promise<{ ok: boolean; error?: string }>;
   /** Persist a custom_message block (TUI parity for /session). */
   addCustomMessage: (sessionId: SessionId, content: string) => void;
@@ -123,15 +130,12 @@ export interface ExecuteDeps {
   setSessionName: (sessionId: SessionId, name: string) => void;
   /** Look up the session's current model id (for last-used model echo). */
   getCurrentModel: (sessionId: SessionId) => string | undefined;
-  /** Whether the session is mid-turn (agent running). Used to send a
-   *  `steer` instead of queuing a new `prompt` while the model works. */
+  /** Whether runtime is authoritatively streaming (used only by /reload's UI guard). */
   isWorking: (sessionId: SessionId) => boolean;
   /** Look up the active session's workspace path (for /resume). */
   getSessionWorkspacePath: (sessionId: SessionId) => string | undefined;
   /** List sessions in a workspace (for /resume). */
   listSessions: (workspacePath: string) => Promise<SessionSummary[]>;
-  /** Called once a fire-and-forget extension prompt eventually reports success. */
-  onPromptAccepted?: (sessionId: SessionId) => void;
 }
 
 export class InputNotConsumedError extends Error {
@@ -141,7 +145,11 @@ export class InputNotConsumedError extends Error {
   }
 }
 
-export type PickerRequest =
+export interface CommandCompletion {
+  completionRuntime: { hostInstanceId: string; sessionEpoch: number };
+}
+
+export type PickerRequest = (
   | { kind: "model"; search?: string }
   | { kind: "fork"; messages: Array<{ entryId: string; text: string }> }
   | { kind: "resume"; sessions: SessionSummary[] }
@@ -156,7 +164,12 @@ export type PickerRequest =
       savedDecision: boolean | null;
       projectTrusted: boolean;
       options: ProjectTrustOption[];
-    };
+    }
+) & {
+  /** Runtime that opened the picker; continuations must never rebind after replacement. */
+  expectedHostInstanceId?: string;
+  expectedSessionEpoch?: number;
+};
 
 type InvokeEnvelope<T> = { success: boolean; data?: T; error?: string };
 
@@ -175,13 +188,12 @@ export async function executeAction(
   sessionId: SessionId,
   action: ComposerAction,
   deps: ExecuteDeps,
-): Promise<void> {
+): Promise<SubmissionResult | CommandCompletion | undefined> {
   switch (action.kind) {
     case "send-prompt":
-      await executeSendPrompt(sessionId, action, deps);
-      return;
+      return executeSendPrompt(sessionId, action, deps);
     case "bash":
-      executeBash(sessionId, action, deps);
+      await executeBash(sessionId, action, deps);
       return;
     case "model":
       await executeModel(sessionId, action, deps);
@@ -193,8 +205,7 @@ export async function executeAction(
       await executeSessionInfo(sessionId, deps);
       return;
     case "new-session":
-      await executeNewSession(sessionId, deps);
-      return;
+      return executeNewSession(sessionId, deps);
     case "compact":
       await executeCompact(sessionId, action, deps);
       return;
@@ -205,8 +216,7 @@ export async function executeAction(
       await executeFork(sessionId, deps);
       return;
     case "clone":
-      await executeClone(sessionId, deps);
-      return;
+      return executeClone(sessionId, deps);
     case "resume":
       await executeResume(sessionId, deps);
       return;
@@ -217,8 +227,7 @@ export async function executeAction(
       await executeQuit(sessionId, deps);
       return;
     case "reload":
-      await executeReload(sessionId, deps);
-      return;
+      return executeReload(sessionId, deps);
     case "scoped-models":
       await executeScopedModels(sessionId, deps);
       return;
@@ -268,209 +277,98 @@ async function executeSendPrompt(
   sessionId: SessionId,
   action: Extract<ComposerAction, { kind: "send-prompt" }>,
   deps: ExecuteDeps,
-): Promise<void> {
-  // Extensions may complete without ever emitting agent_start; skipping the
-  // spinner avoids a stuck "Working…" indicator.
-  if (action.commandSource === "extension") {
-    const extensionCommand: {
-      type: "prompt";
-      message: string;
-      images?: Array<{ type: "image"; data: string; mimeType: string }>;
-    } = {
-      type: "prompt",
-      message: action.text,
-    };
-    if (action.images && action.images.length > 0) {
-      extensionCommand.images = action.images.map((i) => ({
-        type: "image" as const,
-        data: i.data,
-        mimeType: i.mimeType,
-      }));
-    }
-    // Fire-and-forget: do NOT await the invoke.
-    // The composer must not block on a command whose `prompt` response
-    // only resolves when its custom panel closes (ctx.ui.custom awaits done()).
-    // Events stream back through the session subscription independently.
-    // The .catch() is required: without awaiting, a rejected invoke (e.g. the
-    // session process died) would otherwise be an unhandled promise rejection.
-    deps
-      .invoke("session.sendCommand", {
-        sessionId,
-        command: extensionCommand,
-        uiSurface: deps.uiSurface,
-      })
-      .then((res) => {
-        if (res.success) {
-          deps.onPromptAccepted?.(sessionId);
-        } else {
-          deps.addToast(
-            sessionId,
-            `Extension command failed: ${res.error ?? "Command failed"}`,
-            "error",
-          );
-        }
-      })
-      .catch((err) => {
-        console.error("[execute] extension command failed:", err);
-        // P2-a: a dead session / failed send would otherwise vanish silently
-        // — the composer swallowed the input (fire-and-forget), so the user
-        // gets no feedback that their /mcp / extension invocation did nothing.
-        // Surface it as an error toast.
-        deps.addToast(
-          sessionId,
-          `Extension command failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
-        );
-      });
-    return;
+): Promise<SubmissionResult> {
+  const context = deps.getSubmissionContext?.(sessionId);
+  if (!deps.submit || !context) {
+    const message = "Runtime snapshot is unavailable; input was not submitted.";
+    deps.addToast(sessionId, message, "warning");
+    throw new InputNotConsumedError(message);
   }
-
-  // Unknown slash passthrough is intentionally conservative. If the renderer's
-  // discovered-command list is stale, an extension/custom UI command can arrive
-  // here with `commandSource === undefined` even though pi will handle it as a
-  // slash command and may only open UI (no agent_start / user echo). Do NOT add
-  // an optimistic text bubble or optimistic streaming for those slash-shaped
-  // prompts; let pi's authoritative events decide whether real agent work began.
-  const isUnknownSlashPassthrough =
-    action.commandSource === undefined && action.text.startsWith("/");
-
-  // If the model is mid-turn, send a `steer` instead of a new `prompt`.
-  // A `prompt` sent while busy is queued by pi and only runs after the
-  // current turn finishes; `steer` injects the message into the running
-  // turn so the user's course correction takes effect immediately. Unknown
-  // slash passthrough is excluded for the same reason as above: a stale
-  // extension command should not be converted into a steer message.
-  const isSteer = !isUnknownSlashPassthrough && deps.isWorking(sessionId);
-
-  // Plain prompts: pi will deliver a user message via the wire (role: "user"
-  // message_start) which renders the authoritative text — we still seed the
-  // bubble optimistically so the user sees their text instantly. Steers are
-  // different: they render as pending queued bubbles until pi's queue_update
-  // removes the pending entry and the subsequent user echo appends the single
-  // delivered transcript block. Prompt-template / skill / unknown slash sends
-  // rely on the wire echo (if any) instead of optimistic transcript text.
-  const registeredOptimisticEcho = action.commandSource === undefined && !isUnknownSlashPassthrough;
-  if (registeredOptimisticEcho && !isSteer) {
+  const submission: SessionSubmission = {
+    intentId: context.intentId ?? crypto.randomUUID(),
+    expectedHostId: context.hostInstanceId,
+    expectedEpoch: context.sessionEpoch,
+    editorRevision: context.editorRevision,
+    text: action.text,
+    images: (action.images ?? []).map((image) => ({
+      type: "image" as const,
+      data: image.data,
+      mimeType: image.mimeType,
+    })),
+    // This is a user preference only. The host reads fresh public session
+    // state and Pi chooses prompt/steer/follow-up at execution time.
+    requestedMode: "steer",
+    surface: deps.uiSurface ?? "composer",
+  };
+  let result: SubmissionResult;
+  try {
+    result = await deps.submit(sessionId, submission);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.addToast(sessionId, message, "error");
+    throw new InputNotConsumedError(message);
+  }
+  const consumed = ["in_custody", "consumed", "completed", "extension_error"].includes(
+    result.disposition,
+  );
+  if (!consumed) {
+    const message = result.message ?? `Submission ${result.disposition.replaceAll("_", " ")}`;
+    deps.addToast(
+      sessionId,
+      message,
+      result.disposition === "outcome_unknown" ? "warning" : "error",
+    );
+    throw new InputNotConsumedError(message);
+  }
+  // Canonical transcript state remains event-derived. An optimistic echo is
+  // created only after the host has acknowledged custody/consumption.
+  if (
+    result.disposition !== "in_custody" &&
+    action.commandSource === undefined &&
+    !action.text.startsWith("/")
+  ) {
     deps.addUserMessage(
       sessionId,
       action.text,
-      action.images?.map((i) => i.dataUrl),
-      { registerEcho: !isSteer },
+      action.images?.map((image) => image.dataUrl),
+      {
+        registerEcho: true,
+      },
     );
   }
-
-  if (isSteer) {
-    const steerCommand: {
-      type: "steer";
-      message: string;
-      images?: Array<{ type: "image"; data: string; mimeType: string }>;
-    } = {
-      type: "steer",
-      message: action.text,
-    };
-    if (action.images && action.images.length > 0) {
-      steerCommand.images = action.images.map((i) => ({
-        type: "image" as const,
-        data: i.data,
-        mimeType: i.mimeType,
-      }));
-    }
-    const optimisticId = deps.enqueueOptimisticSteer(sessionId, action.text);
-    let res: { success: boolean; data?: unknown; error?: string };
-    try {
-      res = await deps.invoke("session.sendCommand", {
-        sessionId,
-        command: steerCommand,
-        uiSurface: deps.uiSurface,
-      });
-    } catch (err) {
-      deps.removeOptimisticQueuedMessage(sessionId, optimisticId);
-      const message =
-        err instanceof Error ? err.message : `Failed to steer current turn: ${String(err)}`;
-      deps.addToast(sessionId, message, "error");
-      throw new InputNotConsumedError(message);
-    }
-    if (!res.success) {
-      deps.removeOptimisticQueuedMessage(sessionId, optimisticId);
-      const message = res.error ?? "Failed to steer current turn";
-      deps.addToast(sessionId, message, "error");
-      throw new InputNotConsumedError(message);
-    }
-    return;
+  if (result.disposition === "extension_error") {
+    deps.addToast(sessionId, result.message ?? "Extension command failed.", "error");
   }
-
-  const trackPromptInFlight = !isUnknownSlashPassthrough;
-  if (trackPromptInFlight) deps.beginPromptInFlight(sessionId);
-  const promptCommand: {
-    type: "prompt";
-    message: string;
-    images?: Array<{ type: "image"; data: string; mimeType: string }>;
-  } = {
-    type: "prompt",
-    message: action.text,
-  };
-  if (action.images && action.images.length > 0) {
-    promptCommand.images = action.images.map((i) => ({
-      type: "image" as const,
-      data: i.data,
-      mimeType: i.mimeType,
-    }));
-  }
-  // S1/S2: a rejected prompt (pi guard -> success:false) or a thrown invoke
-  // (dead session / closed IPC channel) will never emit agent_start/
-  // agent_end, so clear streaming here — otherwise isStreaming sticks true
-  // and the working indicator / ESC handler lie. (Success path is still
-  // cleared by agent_end in applyEvent.)
-  let res: { success: boolean; data?: unknown; error?: string };
-  try {
-    res = await deps.invoke("session.sendCommand", {
-      sessionId,
-      command: promptCommand,
-      uiSurface: deps.uiSurface,
-    });
-  } catch (err) {
-    if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
-    const message = err instanceof Error ? err.message : `Failed to send prompt: ${String(err)}`;
-    deps.addToast(sessionId, message, "error");
-    throw new InputNotConsumedError(message);
-  } finally {
-    if (trackPromptInFlight) deps.endPromptInFlight(sessionId);
-  }
-  if (!res.success) {
-    if (registeredOptimisticEcho) deps.clearPendingUserEcho(sessionId, action.text);
-    const message = res.error ?? "Failed to send prompt";
-    deps.addToast(sessionId, message, "error");
-    throw new InputNotConsumedError(message);
-  }
+  return result;
 }
 
 // ── bash ────────────────────────────────────────────────────────────────
 
-function executeBash(
+async function executeBash(
   sessionId: SessionId,
   action: Extract<ComposerAction, { kind: "bash" }>,
   deps: ExecuteDeps,
-): void {
+): Promise<void> {
   deps.addBashCommand(sessionId, action.command);
-  void deps
-    .invoke<{ output?: string; exitCode?: number }>("session.sendCommand", {
+  try {
+    const res = await deps.invoke<{ output?: string; exitCode?: number }>("session.sendCommand", {
       sessionId,
       command: {
         type: "bash",
         command: action.command,
         excludeFromContext: action.excludeFromContext,
       },
-    })
-    .then((res) => {
-      if (res.success) {
-        deps.finishBashCommand(sessionId, res.data?.output ?? "", res.data?.exitCode ?? 0);
-      } else {
-        deps.finishBashCommand(sessionId, res.error ?? "Command failed", res.data?.exitCode ?? 1);
-      }
-    })
-    .catch((err) => {
-      deps.finishBashCommand(sessionId, String(err), 1);
     });
+    if (res.success) {
+      deps.finishBashCommand(sessionId, res.data?.output ?? "", res.data?.exitCode ?? 0);
+    } else {
+      deps.finishBashCommand(sessionId, res.error ?? "Command failed", res.data?.exitCode ?? 1);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.finishBashCommand(sessionId, message, 1);
+    throw new InputNotConsumedError(message);
+  }
 }
 
 // ── /model ──────────────────────────────────────────────────────────────
@@ -500,7 +398,11 @@ async function executeModel(
         ...(exact.provider !== undefined ? { provider: exact.provider } : {}),
         ...(exact.name !== undefined ? { name: exact.name } : {}),
       };
-      const res = await deps.applyModelChange(sessionId, model);
+      const context = deps.getSubmissionContext?.(sessionId);
+      const expectedRuntime = context
+        ? { hostInstanceId: context.hostInstanceId, sessionEpoch: context.sessionEpoch }
+        : undefined;
+      const res = await deps.applyModelChange(sessionId, model, expectedRuntime);
       if (!res.ok) {
         deps.addToast(sessionId, `Failed to set model: ${res.error ?? "unknown error"}`, "error");
         return;
@@ -537,20 +439,16 @@ async function executeName(
       command: { type: "set_session_name", name: action.name },
     });
   } catch (err) {
-    deps.addToast(
-      sessionId,
-      `Failed to set session name: ${err instanceof Error ? err.message : String(err)}`,
-      "error",
-    );
-    return;
+    const message = `Failed to set session name: ${err instanceof Error ? err.message : String(err)}`;
+    deps.addToast(sessionId, message, "error");
+    throw new InputNotConsumedError(message);
   }
   if (!res.success) {
     deps.addToast(sessionId, res.error ?? "Failed to set session name", "error");
     return;
   }
   // Pi also emits session_info_changed; this optimistic write keeps the GUI
-  // responsive and covers RPC fallback timing where the event can arrive after
-  // the response.
+  // responsive when the event arrives after the command response.
   deps.setSessionName(sessionId, action.name);
   deps.addToast(sessionId, `Session name set: ${action.name}`);
 }
@@ -559,16 +457,36 @@ async function executeName(
 
 async function executeSessionInfo(sessionId: SessionId, deps: ExecuteDeps): Promise<void> {
   // TUI parity: render in the chat as a custom_message block, not a toast.
-  const [statsRes, stateRes] = await Promise.all([
-    deps.invoke<Record<string, unknown>>("session.sendCommand", {
+  let statsRes: InvokeEnvelope<Record<string, unknown>>;
+  let stateRes: InvokeEnvelope<{
+    sessionName?: string;
+    sessionFile?: string;
+    sessionId?: string;
+  }>;
+  try {
+    [statsRes, stateRes] = await Promise.all([
+      deps.invoke<Record<string, unknown>>("session.sendCommand", {
+        sessionId,
+        command: { type: "get_session_stats" },
+      }),
+      deps.invoke<{ sessionName?: string; sessionFile?: string; sessionId?: string }>(
+        "session.sendCommand",
+        { sessionId, command: { type: "get_state" } },
+      ),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.addToast(sessionId, message, "error");
+    throw new InputNotConsumedError(message);
+  }
+  if (!statsRes.success || !stateRes.success) {
+    deps.addToast(
       sessionId,
-      command: { type: "get_session_stats" },
-    }),
-    deps.invoke<{ sessionName?: string; sessionFile?: string; sessionId?: string }>(
-      "session.sendCommand",
-      { sessionId, command: { type: "get_state" } },
-    ),
-  ]);
+      statsRes.error ?? stateRes.error ?? "Failed to read session information",
+      "error",
+    );
+    return;
+  }
   const stats = statsRes.data ?? {};
   const state = stateRes.data ?? {};
   const sessionName = (state.sessionName as string | undefined) ?? deps.getSessionName(sessionId);
@@ -582,7 +500,10 @@ async function executeSessionInfo(sessionId: SessionId, deps: ExecuteDeps): Prom
 
 // ── /new ───────────────────────────────────────────────────────────────
 
-async function executeNewSession(sessionId: SessionId, deps: ExecuteDeps): Promise<void> {
+async function executeNewSession(
+  sessionId: SessionId,
+  deps: ExecuteDeps,
+): Promise<CommandCompletion | undefined> {
   const res = await deps.invoke<CancellationData>("session.sendCommand", {
     sessionId,
     command: { type: "new_session" },
@@ -594,9 +515,9 @@ async function executeNewSession(sessionId: SessionId, deps: ExecuteDeps): Promi
   // Successful new_session → main process re-runs the fileChanged flow
   // (get_state + safeSend("session.fileChanged")). The renderer's
   // adoptSessionFile handles transcript reset + tab re-pointing.
-  if (!res.data?.cancelled) {
-    deps.addToast(sessionId, "Started a fresh session");
-  }
+  if (res.data?.cancelled) return;
+  deps.addToast(sessionId, "Started a fresh session");
+  return replacementCompletion(sessionId, res, deps);
 }
 
 // ── /compact ───────────────────────────────────────────────────────────
@@ -657,7 +578,10 @@ async function executeFork(sessionId: SessionId, deps: ExecuteDeps): Promise<voi
 
 // ── /clone ─────────────────────────────────────────────────────────────
 
-async function executeClone(sessionId: SessionId, deps: ExecuteDeps): Promise<void> {
+async function executeClone(
+  sessionId: SessionId,
+  deps: ExecuteDeps,
+): Promise<CommandCompletion | undefined> {
   const res = await deps.invoke<CancellationData>("session.sendCommand", {
     sessionId,
     command: { type: "clone" },
@@ -666,9 +590,32 @@ async function executeClone(sessionId: SessionId, deps: ExecuteDeps): Promise<vo
     deps.addToast(sessionId, res.error ?? "Failed to clone session", "error");
     return;
   }
-  if (!res.data?.cancelled) {
-    deps.addToast(sessionId, "Cloned to new session");
+  if (res.data?.cancelled) return;
+  deps.addToast(sessionId, "Cloned to new session");
+  return replacementCompletion(sessionId, res, deps);
+}
+
+function replacementCompletion(
+  sessionId: SessionId,
+  response: InvokeEnvelope<unknown>,
+  deps: ExecuteDeps,
+): CommandCompletion {
+  const successor = (
+    response as InvokeEnvelope<unknown> & {
+      successorIdentity?: { hostInstanceId?: unknown; sessionEpoch?: unknown };
+    }
+  ).successorIdentity;
+  if (typeof successor?.hostInstanceId !== "string" || typeof successor.sessionEpoch !== "number") {
+    const message = "Replacement completed without a correlated successor runtime";
+    deps.addToast(sessionId, message, "error");
+    throw new InputNotConsumedError(message);
   }
+  return {
+    completionRuntime: {
+      hostInstanceId: successor.hostInstanceId,
+      sessionEpoch: successor.sessionEpoch,
+    },
+  };
 }
 
 // ── /resume ────────────────────────────────────────────────────────────
@@ -717,7 +664,10 @@ async function executeQuit(sessionId: SessionId, deps: ExecuteDeps): Promise<voi
   await deps.closeSessionTab(sessionId);
 }
 
-async function executeReload(sessionId: SessionId, deps: ExecuteDeps): Promise<void> {
+async function executeReload(
+  sessionId: SessionId,
+  deps: ExecuteDeps,
+): Promise<CommandCompletion | undefined> {
   if (deps.isWorking(sessionId)) {
     deps.addToast(
       sessionId,
@@ -736,6 +686,22 @@ async function executeReload(sessionId: SessionId, deps: ExecuteDeps): Promise<v
     "Reloaded settings, extensions, skills, prompts, and themes.",
     "success",
   );
+  const successor = (
+    res as typeof res & {
+      successorIdentity?: { hostInstanceId?: unknown; sessionEpoch?: unknown };
+    }
+  ).successorIdentity;
+  if (typeof successor?.hostInstanceId !== "string" || typeof successor.sessionEpoch !== "number") {
+    const message = "Reload completed without a correlated successor runtime";
+    deps.addToast(sessionId, message, "error");
+    throw new InputNotConsumedError(message);
+  }
+  return {
+    completionRuntime: {
+      hostInstanceId: successor.hostInstanceId,
+      sessionEpoch: successor.sessionEpoch,
+    },
+  };
 }
 
 // ── /trust ─────────────────────────────────────────────────────────────

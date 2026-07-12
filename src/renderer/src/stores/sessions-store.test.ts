@@ -1,8 +1,13 @@
 import type { SessionId } from "@shared/ids.js";
 import { ExtensionUiRequestSchema } from "@shared/pi-protocol/extension-ui.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
+import type {
+  AgentSessionSnapshot,
+  RuntimeStateUpdate,
+} from "@shared/pi-protocol/runtime-state.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildDiffModel } from "../lib/diff/diff-model.js";
+import { nextPanelInputSequence } from "../lib/panel-input-sequence.js";
 import {
   isNewSessionPending,
   isPendingNewSessionActiveFor,
@@ -18,6 +23,81 @@ const SESSION_A = "session-a" as SessionId;
 const SESSION_B = "session-b" as SessionId;
 const SESSION_C = "session-c" as SessionId;
 const WORKSPACE = "/tmp/test-workspace";
+const PANEL_HOST_A = "11111111-1111-4111-8111-111111111111";
+const PANEL_HOST_B = "22222222-2222-4222-8222-222222222222";
+const nextPanelSequence = (panelId: number, hostInstanceId = PANEL_HOST_A) =>
+  nextPanelInputSequence(SESSION_A, hostInstanceId, 0, panelId);
+function installLiveCreateSession(): () => void {
+  const original = useSessionsStore.getState().createSession;
+  useSessionsStore.setState({
+    createSession: (...args: Parameters<typeof original>) => {
+      original(...args);
+      const sessionId = args[0];
+      useSessionsStore.getState().setSessionStatus(sessionId, "ready");
+      useSessionsStore.getState().applyRuntimeState(sessionId, runtimeState(false));
+    },
+  });
+  return () => useSessionsStore.setState({ createSession: original });
+}
+
+function claimedUnified() {
+  return { claimed: true as const, claimId: "claim-test", expiresAt: Date.now() + 60_000 };
+}
+
+function loadedHistory(
+  payload: unknown,
+  page: { blocks: unknown[]; startIndex: number; total: number },
+) {
+  return {
+    status: "loaded" as const,
+    historyGeneration: (payload as { historyGeneration: number }).historyGeneration,
+    page,
+  };
+}
+
+function runtimeState(
+  isStreaming: boolean,
+  sequence = 1,
+  availability: RuntimeStateUpdate["availability"] = "available",
+): RuntimeStateUpdate {
+  const snapshot: AgentSessionSnapshot | undefined =
+    availability === "available"
+      ? {
+          hostInstanceId: "host-1",
+          sessionEpoch: 1,
+          snapshotSequence: sequence,
+          capturedAt: Date.now(),
+          isStreaming,
+          isIdle: !isStreaming,
+          isCompacting: false,
+          isRetrying: false,
+          retryAttempt: 0,
+          isBashRunning: false,
+          model: null,
+          thinkingLevel: "off",
+          sessionId: "wire",
+          pendingMessageCount: 0,
+          steering: [],
+          followUp: [],
+          hostFacts: {
+            submitting: false,
+            actualCompaction: false,
+            navigation: false,
+            pendingDialogs: 0,
+            custodyCount: 0,
+          },
+          catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
+          editor: { revision: 0, text: "", attachments: [] },
+        }
+      : undefined;
+  return {
+    availability,
+    hostInstanceId: "host-1",
+    sessionEpoch: 1,
+    receivedAt: Date.now(),
+    ...(snapshot ? { snapshot } : {}),
+  };
+}
 
 describe("sessions store - diff comments", () => {
   beforeEach(() => {
@@ -218,7 +298,7 @@ describe("sessions store - diff comments", () => {
   it("reattaches pending diff comments when a closed session file is reopened", async () => {
     const sessionFile = "/tmp/session-a.jsonl";
     const originalWindow = (globalThis as { window?: unknown }).window;
-    const invokeMock = vi.fn(async (channel: string) => {
+    const invokeMock = vi.fn(async (channel: string, payload?: unknown) => {
       if (channel === "session.open") {
         return {
           outcome: "opened",
@@ -228,7 +308,9 @@ describe("sessions store - diff comments", () => {
           sessionStatus: "cold",
         };
       }
-      if (channel === "session.loadHistory") return { blocks: [], startIndex: 0, total: 0 };
+      if (channel === "session.loadHistory") {
+        return loadedHistory(payload, { blocks: [], startIndex: 0, total: 0 });
+      }
       throw new Error(`unexpected channel ${channel}`);
     });
     (globalThis as { window: unknown }).window = { pivis: { invoke: invokeMock } };
@@ -375,273 +457,324 @@ describe("sessions store - session name from pi", () => {
   });
 });
 
-describe("sessions store - batched session events", () => {
+describe("sessions store - runtime snapshots", () => {
   beforeEach(() => {
     useSessionsStore.setState({
       sessions: new Map(),
       activeSessionId: null,
       workspaces: new Map(),
       activeWorkspacePath: null,
-      newSessionDrafts: new Map(),
-      newSessionSetupDrafts: new Map(),
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
   });
 
-  it("applyEvents is equivalent to sequential applyEvent for mixed session fields", () => {
-    const events = [
-      { type: "agent_start" as const },
-      { type: "session_info_changed" as const, name: "Batch name" },
-      { type: "thinking_level_changed" as const, level: "high" as const },
-      { type: "agent_end" as const },
+  it("orders direct snapshots and ignores an older sequence", () => {
+    const store = useSessionsStore.getState();
+    store.applyRuntimeState(SESSION_A, runtimeState(true, 2));
+    store.applyRuntimeState(SESSION_A, runtimeState(false, 1));
+    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(true);
+  });
+
+  it("applies same-sequence unavailable and transitioning transport facts", () => {
+    const store = useSessionsStore.getState();
+    const available = runtimeState(true, 4);
+    store.applyRuntimeState(SESSION_A, available);
+    const repeated = available.snapshot!;
+
+    store.applyRuntimeState(SESSION_A, {
+      ...available,
+      availability: "unavailable",
+      reason: "lease expired",
+      snapshot: repeated,
+    });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.availability).toBe("unavailable");
+    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(false);
+
+    store.applyRuntimeState(SESSION_A, {
+      ...available,
+      availability: "transitioning",
+      snapshot: repeated,
+    });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.availability).toBe("transitioning");
+  });
+
+  it("commits transition records and their terminal snapshot in one store notification", () => {
+    const notifications: Array<{ availability: string | undefined; blocks: number }> = [];
+    const unsubscribe = useSessionsStore.subscribe((state) => {
+      const session = state.sessions.get(SESSION_A);
+      notifications.push({
+        availability: session?.availability,
+        blocks: session?.transcript.blocks.length ?? 0,
+      });
+    });
+    const terminal = runtimeState(true, 2);
+
+    useSessionsStore
+      .getState()
+      .applyTransitionBatch(
+        SESSION_A,
+        [{ type: "event", event: { type: "agent_start" } }],
+        terminal,
+      );
+    unsubscribe();
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({ availability: "available" });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.runtimeSnapshot).toEqual(
+      terminal.snapshot,
+    );
+  });
+
+  it("derives availability and direct getter selectors from the snapshot", () => {
+    const store = useSessionsStore.getState();
+    store.applyRuntimeState(SESSION_A, runtimeState(true));
+    const running = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(running?.availability).toBe("available");
+    expect(isSessionWorking(running)).toBe(true);
+    expect(running?.runningSince).toBeDefined();
+    store.applyRuntimeState(SESSION_A, runtimeState(false, 2, "unavailable"));
+    const unavailable = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(isSessionWorking(unavailable)).toBe(false);
+    expect(unavailable?.runningSince).toBeUndefined();
+  });
+
+  it("does not infer turn completion from transitioning or unavailable transport state", () => {
+    const store = useSessionsStore.getState();
+    store.applyRuntimeState(SESSION_A, runtimeState(true));
+    useSessionsStore.setState((state) => {
+      const sessions = new Map(state.sessions);
+      sessions.set(SESSION_A, { ...sessions.get(SESSION_A)!, turnErrored: true });
+      return { sessions };
+    });
+
+    store.applyRuntimeState(SESSION_A, runtimeState(true, 1, "transitioning"));
+    let session = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    expect(session.unreadStatus).toBeUndefined();
+    expect(session.turnErrored).toBe(true);
+    expect(session.runningSince).toBeUndefined();
+
+    store.applyRuntimeState(SESSION_A, runtimeState(true, 1, "unavailable"));
+    session = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    expect(session.unreadStatus).toBeUndefined();
+    expect(session.turnErrored).toBe(true);
+
+    store.applyRuntimeState(SESSION_A, runtimeState(false, 2, "available"));
+    session = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    expect(session.unreadStatus).toBe("error");
+    expect(session.turnErrored).toBe(false);
+  });
+
+  it("surfaces replicated capability diagnostics as deduplicated warnings", () => {
+    const state = runtimeState(false);
+    if (state.snapshot) {
+      state.snapshot.catalog.capabilityDiagnostics = ["Decorative capability unavailable"];
+    }
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, state);
+    const next = runtimeState(false, 2);
+    if (next.snapshot) {
+      next.snapshot.catalog.capabilityDiagnostics = ["Decorative capability unavailable"];
+    }
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, next);
+
+    const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
+    expect(toasts).toContainEqual(
+      expect.objectContaining({
+        message: "Decorative capability unavailable",
+        type: "warning",
+      }),
+    );
+    expect(
+      toasts.filter((toast) => toast.message === "Decorative capability unavailable"),
+    ).toHaveLength(1);
+  });
+
+  it("does not toast the expected local semantic-theme fallback", () => {
+    const state = runtimeState(false);
+    if (!state.snapshot) throw new Error("missing snapshot");
+    state.snapshot.catalog.capabilityDiagnostics = [
+      "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.",
     ];
 
-    for (const event of events) useSessionsStore.getState().applyEvent(SESSION_A, event);
-    const sequential = useSessionsStore.getState().sessions.get(SESSION_A);
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, state);
 
-    useSessionsStore.setState({
-      sessions: new Map(),
-      activeSessionId: null,
-      workspaces: new Map(),
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.toasts).toEqual([]);
+  });
+
+  it("does not inject an extension edit over a local patch in flight and exposes the conflict", () => {
+    const store = useSessionsStore.getState();
+    store.beginEditorPatch(SESSION_A);
+    const extensionState = runtimeState(false);
+    if (!extensionState.snapshot) throw new Error("missing snapshot");
+    extensionState.snapshot.editor = { revision: 1, text: "extension edit", attachments: [] };
+    store.applyRuntimeState(SESSION_A, extensionState);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toBeUndefined();
+
+    const conflictState = runtimeState(false, 2);
+    if (!conflictState.snapshot) throw new Error("missing snapshot");
+    conflictState.snapshot.editor = {
+      revision: 1,
+      text: "extension edit",
+      attachments: [],
+      conflictText: "my newer draft",
+    };
+    store.applyRuntimeState(SESSION_A, conflictState);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorConflict).toEqual({
+      authoritativeText: "extension edit",
+      authoritativeAttachments: [],
+      localText: "my newer draft",
+      localAttachments: [],
     });
-    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
-    useSessionsStore.getState().applyEvents(SESSION_A, events);
-    const batched = useSessionsStore.getState().sessions.get(SESSION_A);
+    store.endEditorPatch(SESSION_A);
+  });
 
-    expect({
-      isStreaming: batched?.isStreaming,
-      unreadStatus: batched?.unreadStatus,
-      sessionName: batched?.sessionName,
-      thinkingLevel: batched?.thinkingLevel,
-      turnErrored: batched?.turnErrored,
-    }).toEqual({
-      isStreaming: sequential?.isStreaming,
-      unreadStatus: sequential?.unreadStatus,
-      sessionName: sequential?.sessionName,
-      thinkingLevel: sequential?.thinkingLevel,
-      turnErrored: sequential?.turnErrored,
+  it("exposes an attachment-only rejected patch as an editor conflict", () => {
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
+    const state = runtimeState(false, 2);
+    if (!state.snapshot) throw new Error("missing snapshot");
+    state.snapshot.editor = {
+      revision: 2,
+      text: "extension edit",
+      attachments: [],
+      conflictText: "",
+      conflictAttachments: [{ kind: "file", name: "local-only.txt" }],
+    };
+
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, state);
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorConflict).toEqual({
+      authoritativeText: "extension edit",
+      authoritativeAttachments: [],
+      localText: "",
+      localAttachments: [{ kind: "file", name: "local-only.txt" }],
     });
   });
 
-  it("keeps streaming across an agent_end willRetry inside a batch", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-        { type: "agent_end", willRetry: true },
-      ]);
-
-    const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(session?.isStreaming).toBe(true);
-    expect(session?.runningSince).toBeDefined();
-    expect(session?.unreadStatus).toBeUndefined();
-    expect(session?.turnErrored).toBe(false);
-  });
-
-  it("uses agent_settled as the definitive idle and abort boundary", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-        { type: "interrupt_state", interruptible: true, operation: "agent" },
-        { type: "agent_end", willRetry: true },
-        { type: "agent_settled" },
-        { type: "interrupt_state", interruptible: false },
-        { type: "streaming_state", isStreaming: false },
-      ]);
-
-    const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(session?.isStreaming).toBe(false);
-    expect(session?.retryPending).toBe(false);
-    expect(session?.interruptible).toBe(false);
-    expect(session?.runningSince).toBeUndefined();
-    expect(session?.unreadStatus).toBe("done");
-    expect(isSessionAbortable(session)).toBe(false);
-  });
-
-  it("preserves a non-retryable error status when agent_settled follows agent_end", () => {
-    useSessionsStore.getState().applyEvents(SESSION_A, [
-      { type: "agent_start" },
-      { type: "streaming_state", isStreaming: true },
-      {
-        type: "message_end",
-        message: { role: "assistant", stopReason: "error", errorMessage: "provider failed" },
-      },
-      { type: "agent_end", willRetry: false },
-      { type: "agent_settled" },
-      { type: "streaming_state", isStreaming: false },
-    ]);
-
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("error");
-  });
-
-  it("ignores an old agent_settled after an extension handler starts a new run", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-        { type: "agent_end", willRetry: false },
-        { type: "agent_start" },
-        { type: "interrupt_state", interruptible: true, operation: "agent" },
-        { type: "agent_settled" },
-      ]);
-
-    const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(session?.isStreaming).toBe(true);
-    expect(session?.retryPending).toBe(false);
-    expect(session?.interruptible).toBe(true);
-    expect(session?.runningSince).toBeDefined();
-    expect(session?.unreadStatus).toBeUndefined();
-    expect(isSessionAbortable(session)).toBe(true);
-  });
-
-  it("old agent settlement preserves a newer bash interrupt", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-        { type: "agent_end", willRetry: false },
-        { type: "interrupt_state", interruptible: true, operation: "bash" },
-        { type: "agent_settled" },
-        { type: "streaming_state", isStreaming: false },
-      ]);
-
-    const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(session?.isStreaming).toBe(false);
-    expect(session?.interruptible).toBe(true);
-    expect(session?.interruptKind).toBe("bash");
-    expect(isSessionAbortable(session)).toBe(true);
-  });
-
-  it("promotes a pending new session when a user echo arrives in a batch", () => {
+  it("preserves a newer local draft and attachments across host generation replacement", () => {
     const store = useSessionsStore.getState();
-    store.setNewSessionDraft(WORKSPACE, "hello");
-    store.applyEvents(SESSION_A, [
-      { type: "message_start", message: { role: "user", content: "hello" } },
+    store.setSessionDraft(SESSION_A, "newer local draft");
+    store.stageEditorAttachments(SESSION_A, [
+      { kind: "file", name: "local.txt", path: "/tmp/local.txt" },
     ]);
+    const replacement = runtimeState(false);
+    if (!replacement.snapshot) throw new Error("missing snapshot");
+    replacement.snapshot.editor = {
+      revision: 0,
+      text: "",
+      attachments: [],
+      conflictText: "host-retained alternate",
+      conflictAttachments: [{ kind: "file", name: "alternate.txt", path: "/tmp/alternate.txt" }],
+    };
+
+    store.applyRuntimeState(SESSION_A, replacement);
 
     const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(session?.isNewPending).toBe(false);
-    expect(session?.transcript.blocks.map((b) => b.type)).toEqual(["user"]);
-    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+    expect(session?.editorInjection).toBeUndefined();
+    expect(session?.editorAttachments).toEqual([
+      { kind: "file", name: "local.txt", path: "/tmp/local.txt" },
+    ]);
+    expect(session?.editorConflict).toEqual({
+      authoritativeText: "",
+      authoritativeAttachments: [],
+      localText: "newer local draft",
+      localAttachments: [{ kind: "file", name: "local.txt", path: "/tmp/local.txt" }],
+      alternateText: "host-retained alternate",
+      alternateAttachments: [{ kind: "file", name: "alternate.txt", path: "/tmp/alternate.txt" }],
+    });
   });
 
-  it("keeps queued messages separate from transcript and replaces them authoritatively", () => {
+  it("retains same-text conflict candidates when their attachments differ", () => {
     const store = useSessionsStore.getState();
-    const id = store.enqueueOptimisticSteer(SESSION_A, "first");
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering).toEqual([
-      { id, text: "first", source: "optimistic" },
+    store.setSessionDraft(SESSION_A, "same text");
+    store.stageEditorAttachments(SESSION_A, [
+      { kind: "file", name: "renderer.txt", path: "/tmp/renderer.txt" },
     ]);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks).toEqual([]);
+    const replacement = runtimeState(false);
+    if (!replacement.snapshot) throw new Error("missing snapshot");
+    replacement.snapshot.editor = {
+      revision: 1,
+      text: "replacement authority",
+      attachments: [],
+      conflictText: "same text",
+      conflictAttachments: [{ kind: "file", name: "host.txt", path: "/tmp/host.txt" }],
+    };
 
-    store.applyEvent(SESSION_A, { type: "queue_update", steering: ["first"], followUp: ["later"] });
-    const queued = useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages;
-    expect(queued?.steering.map((m) => ({ text: m.text, source: m.source }))).toEqual([
-      { text: "first", source: "authoritative" },
-    ]);
-    expect(queued?.followUp.map((m) => ({ text: m.text, source: m.source }))).toEqual([
-      { text: "later", source: "authoritative" },
-    ]);
+    store.applyRuntimeState(SESSION_A, replacement);
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorConflict).toEqual({
+      authoritativeText: "replacement authority",
+      authoritativeAttachments: [],
+      localText: "same text",
+      localAttachments: [{ kind: "file", name: "renderer.txt", path: "/tmp/renderer.txt" }],
+      alternateText: "same text",
+      alternateAttachments: [{ kind: "file", name: "host.txt", path: "/tmp/host.txt" }],
+    });
   });
 
-  it("does not let stale optimistic failure cleanup remove authoritative queue", () => {
+  it("deduplicates alternate conflict candidates by text and attachments", () => {
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
+    const state = runtimeState(false, 2);
+    if (!state.snapshot) throw new Error("missing snapshot");
+    state.snapshot.editor = {
+      revision: 2,
+      text: "authority",
+      attachments: [],
+      conflictText: "candidate",
+      conflictAttachments: [{ kind: "file", name: "same.txt" }],
+      alternateConflictText: "candidate",
+      alternateConflictAttachments: [{ kind: "file", name: "same.txt" }],
+      additionalConflictCandidates: [
+        {
+          text: "third",
+          attachments: [{ kind: "file", name: "third.txt" }],
+        },
+      ],
+    };
+
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, state);
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorConflict).toEqual({
+      authoritativeText: "authority",
+      authoritativeAttachments: [],
+      localText: "candidate",
+      localAttachments: [{ kind: "file", name: "same.txt" }],
+      alternateText: "third",
+      alternateAttachments: [{ kind: "file", name: "third.txt" }],
+    });
+  });
+
+  it("binds picker continuations to the runtime that opened them", () => {
     const store = useSessionsStore.getState();
-    const id = store.enqueueOptimisticSteer(SESSION_A, "dup");
-    store.applyEvent(SESSION_A, { type: "queue_update", steering: ["dup", "dup"], followUp: [] });
-    store.removeOptimisticQueuedMessage(SESSION_A, id);
+    store.applyRuntimeState(SESSION_A, runtimeState(false));
+    store.openPicker(SESSION_A, { kind: "model" });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.pendingPicker).toMatchObject({
+      kind: "model",
+      expectedHostInstanceId: "host-1",
+      expectedSessionEpoch: 1,
+    });
+  });
+
+  it("replaces queued messages from each snapshot", () => {
+    const store = useSessionsStore.getState();
+    const first = runtimeState(true);
+    if (first.snapshot) {
+      first.snapshot.steering = ["first"];
+      first.snapshot.followUp = ["later"];
+    }
+    store.applyRuntimeState(SESSION_A, first);
+    const next = runtimeState(true, 2);
+    if (next.snapshot) {
+      next.snapshot.steering = ["replacement"];
+    }
+    store.applyRuntimeState(SESSION_A, next);
     expect(
       useSessionsStore
         .getState()
         .sessions.get(SESSION_A)
         ?.queuedMessages?.steering.map((m) => m.text),
-    ).toEqual(["dup", "dup"]);
-  });
-
-  it("trusts authoritative streaming false while prompt in-flight keeps the race window working", () => {
-    const store = useSessionsStore.getState();
-    store.beginPromptInFlight(SESSION_A);
-    const runningSince = useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince;
-    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(true);
-    expect(runningSince).toBeDefined();
-
-    store.applyEvents(SESSION_A, [
-      { type: "agent_end", willRetry: true },
-      { type: "streaming_state", isStreaming: false },
-    ]);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(false);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince).toBe(runningSince);
-
-    store.endPromptInFlight(SESSION_A);
-    expect(isSessionWorking(useSessionsStore.getState().sessions.get(SESSION_A))).toBe(false);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince).toBeUndefined();
-  });
-
-  it("reconciles get_state by identity and field epochs", () => {
-    const store = useSessionsStore.getState();
-    const initial = useSessionsStore.getState().sessions.get(SESSION_A)!;
-    const captured = {
-      identityEpoch: initial.identityEpoch,
-      streamingEpoch: initial.streamingEpoch,
-      queueEpoch: initial.queueEpoch,
-    };
-
-    store.reconcileSessionState(
-      SESSION_A,
-      {
-        sessionId: "wire",
-        thinkingLevel: "medium",
-        isStreaming: true,
-        steering: ["a"],
-        followUp: [],
-      },
-      captured,
+    ).toEqual(["replacement"]);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.followUp).toEqual(
+      [],
     );
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(true);
-    expect(
-      useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering[0]?.text,
-    ).toBe("a");
-
-    const stale = captured;
-    store.enqueueOptimisticSteer(SESSION_A, "newer");
-    store.reconcileSessionState(
-      SESSION_A,
-      { sessionId: "wire", thinkingLevel: "medium", isStreaming: false, pendingMessageCount: 0 },
-      stale,
-    );
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming).toBe(true);
-    expect(
-      useSessionsStore.getState().sessions.get(SESSION_A)?.queuedMessages?.steering.length,
-    ).toBe(2);
-  });
-
-  it("does not let get_state raw isStreaming false break logical retry liveness", () => {
-    const store = useSessionsStore.getState();
-    store.applyEvents(SESSION_A, [
-      { type: "agent_start" },
-      { type: "streaming_state", isStreaming: true },
-      { type: "agent_end", willRetry: true },
-    ]);
-    const retrying = useSessionsStore.getState().sessions.get(SESSION_A)!;
-    const captured = {
-      identityEpoch: retrying.identityEpoch,
-      streamingEpoch: retrying.streamingEpoch,
-      queueEpoch: retrying.queueEpoch,
-    };
-
-    store.reconcileSessionState(
-      SESSION_A,
-      { sessionId: "wire", thinkingLevel: "medium", isStreaming: false, pendingMessageCount: 0 },
-      captured,
-    );
-
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.retryPending).toBe(true);
-    expect(s?.isStreaming).toBe(true);
-    expect(isSessionWorking(s)).toBe(true);
   });
 });
 
@@ -905,7 +1038,7 @@ describe("sessions store - extension UI clear payloads", () => {
  * notification for background sessions and is cleared only when the user has
  * viewed the session and moves on, or starts a new turn there.
  */
-describe("sessions store - unread turn-result status dot", () => {
+describe("sessions store - runtime turn-result status", () => {
   beforeEach(() => {
     useSessionsStore.setState({
       sessions: new Map(),
@@ -914,204 +1047,13 @@ describe("sessions store - unread turn-result status dot", () => {
       activeWorkspacePath: null,
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
-    useSessionsStore.getState().createSession(SESSION_B, WORKSPACE);
   });
 
-  const finishTurn = (sessionId: SessionId, opts: { error?: boolean } = {}) => {
+  it("marks a completed direct runtime transition done", () => {
     const store = useSessionsStore.getState();
-    store.applyEvents(sessionId, [
-      { type: "agent_start" },
-      { type: "streaming_state", isStreaming: true },
-    ]);
-    store.applyEvent(sessionId, {
-      type: "message_end",
-      message: opts.error
-        ? { role: "assistant", stopReason: "error", errorMessage: "provider down" }
-        : { role: "assistant", stopReason: "end_turn" },
-    });
-    store.applyEvents(sessionId, [
-      { type: "agent_end" },
-      { type: "streaming_state", isStreaming: false },
-    ]);
-  };
-
-  it("marks a finished turn 'done' and an erroring turn 'error'", () => {
-    finishTurn(SESSION_A);
+    store.applyRuntimeState(SESSION_A, runtimeState(true));
+    store.applyRuntimeState(SESSION_A, runtimeState(false, 2));
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-
-    finishTurn(SESSION_A, { error: true });
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("error");
-  });
-
-  it("starts a new turn with no unread marker", () => {
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
-  });
-
-  it("a background session's marker persists while the user is elsewhere", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_B); // user is in B
-    finishTurn(SESSION_A); // A finishes in the background
-    // User never visits A — the notification must remain.
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-  });
-
-  it("clicking into the background session keeps the marker (not yet 'moved on')", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_B);
-    finishTurn(SESSION_A);
-    useSessionsStore.getState().setActiveSession(SESSION_A); // user visits A
-    // Just visiting is not enough — they must leave or send a message.
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-  });
-
-  it("clears when the user leaves the session they were viewing", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_A);
-    finishTurn(SESSION_A); // seen while active
-    useSessionsStore.getState().setActiveSession(SESSION_B); // move on
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
-  });
-
-  it("clears when the user clicks into the background session then leaves", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_B);
-    finishTurn(SESSION_A); // unread notification in A
-    useSessionsStore.getState().setActiveSession(SESSION_A); // visit A
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-    useSessionsStore.getState().setActiveSession(SESSION_B); // leave A
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
-  });
-
-  it("starting a new turn in the session clears the marker", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_B);
-    finishTurn(SESSION_A); // unread in background A
-    useSessionsStore.getState().setActiveSession(SESSION_A);
-    // User sends a new message → agent_start acknowledges the old marker.
-    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
-  });
-
-  it("switching between other sessions does not touch an unvisited background session", () => {
-    useSessionsStore.getState().createSession(SESSION_C, WORKSPACE);
-    useSessionsStore.getState().setActiveSession(SESSION_B); // user in B
-    finishTurn(SESSION_A); // A finishes in the background (never visited)
-    useSessionsStore.getState().setActiveSession(SESSION_C); // user switches B → C
-    // A was never visited; its notification must persist.
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-  });
-
-  it("clears the left (seen) session but keeps the destination's background marker", () => {
-    useSessionsStore.getState().setActiveSession(SESSION_B);
-    finishTurn(SESSION_A); // A unread (background notification)
-    finishTurn(SESSION_B); // B unread (active, user saw it)
-    // Move B → A: B was seen and is being left → cleared.
-    //              A is the destination being visited → marker survives.
-    useSessionsStore.getState().setActiveSession(SESSION_A);
-    expect(useSessionsStore.getState().sessions.get(SESSION_B)?.unreadStatus).toBeUndefined();
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
-  });
-
-  // ── Auto-retry: a willRetry agent_end is not a real turn end ───────────────
-  // pi reports a transient failure as an erroring message_end + an agent_end
-  // with `willRetry: true`, then makes another attempt. We must not surface a
-  // terminal dot (or stop "streaming") mid-retry, and the final color must
-  // reflect only the last attempt — whether or not the retry re-emits
-  // agent_start.
-
-  const errorMsg = { role: "assistant" as const, stopReason: "error", errorMessage: "503" };
-  const okMsg = { role: "assistant" as const, stopReason: "end_turn" };
-  const startStreamingTurn = (store: ReturnType<typeof useSessionsStore.getState>) => {
-    store.applyEvents(SESSION_A, [
-      { type: "agent_start" },
-      { type: "streaming_state", isStreaming: true },
-    ]);
-  };
-  const finishStreamingTurn = (store: ReturnType<typeof useSessionsStore.getState>) => {
-    store.applyEvent(SESSION_A, { type: "streaming_state", isStreaming: false });
-  };
-
-  it("does not surface a dot on a willRetry agent_end (stays streaming)", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.unreadStatus).toBeUndefined(); // no terminal marker yet
-    expect(s?.isStreaming).toBe(true); // still working through the retry gap
-  });
-
-  it("a retry that succeeds ends 'done', not 'error' (no agent_start between attempts)", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg }); // attempt 1 fails
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    // Retry attempt arrives WITHOUT a fresh agent_start, just new messages.
-    store.applyEvent(SESSION_A, { type: "message_end", message: okMsg }); // attempt 2 ok
-    store.applyEvent(SESSION_A, { type: "agent_end" });
-    finishStreamingTurn(store);
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.unreadStatus).toBe("done");
-    expect(s?.isStreaming).toBe(false);
-  });
-
-  it("a late failed auto_retry_end does not overwrite a completed final agent_end", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    store.applyEvent(SESSION_A, { type: "message_end", message: okMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end" });
-    finishStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "auto_retry_end", success: false });
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.unreadStatus).toBe("done");
-    expect(s?.isStreaming).toBe(false);
-  });
-
-  it("a retry that also fails ends 'error'", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end" });
-    finishStreamingTurn(store);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("error");
-  });
-
-  // Regression: when pi is sleeping in the exponential backoff between retry
-  // attempts and the user aborts, pi cancels the backoff and emits
-  // `auto_retry_end{success:false}` but NO final (non-retrying) `agent_end`
-  // (the only `agent_end` already fired carried `willRetry:true` before the
-  // backoff). Without handling that event, `isStreaming` + the "Running for …"
-  // timer stick on forever after the abort.
-  it("a failed auto_retry_end clears streaming when no final agent_end follows (abort during backoff)", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    const before = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(before?.isStreaming).toBe(true);
-    expect(before?.runningSince).toBeDefined();
-
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    // User aborts during the backoff sleep:
-    store.applyEvent(SESSION_A, {
-      type: "auto_retry_end",
-      success: false,
-      finalError: "Retry cancelled",
-    });
-    finishStreamingTurn(store);
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.isStreaming).toBe(false);
-    expect(s?.runningSince).toBeUndefined();
-    expect(s?.unreadStatus).toBe("error");
-  });
-
-  it("a successful auto_retry_end does not clear streaming (turn continues)", () => {
-    const store = useSessionsStore.getState();
-    startStreamingTurn(store);
-    store.applyEvent(SESSION_A, { type: "message_end", message: errorMsg });
-    store.applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    store.applyEvent(SESSION_A, { type: "auto_retry_end", success: true, attempt: 1 });
-    const s = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(s?.isStreaming).toBe(true); // still working
-    expect(s?.runningSince).toBeDefined();
   });
 });
 
@@ -1218,7 +1160,13 @@ describe("sessions store - custom panel reducer", () => {
       panelId: 1,
       overlay: true,
     });
-    expect(panel()).toEqual({ id: 1, overlay: true, buffer: [] });
+    expect(panel()).toEqual({
+      id: 1,
+      overlay: true,
+      hostInstanceId: "",
+      sessionEpoch: 0,
+      buffer: [],
+    });
   });
 
   it("panel_data appends to the matching panel's buffer", () => {
@@ -1273,6 +1221,47 @@ describe("sessions store - custom panel reducer", () => {
     expect(panel()?.id).toBe(1);
   });
 
+  it("panel_clear_all resets sequence state before a restarted host reuses the id", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    expect(nextPanelSequence(1)).toBe(1);
+    expect(nextPanelSequence(1)).toBe(2);
+    s.handlePanelEvent(SESSION_A, { type: "panel_clear_all" });
+    s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
+    expect(nextPanelSequence(1)).toBe(1);
+  });
+
+  it("scopes a coalesced same-id replacement input stream to full host identity", () => {
+    const s = useSessionsStore.getState();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: false,
+      hostInstanceId: PANEL_HOST_A,
+      sessionEpoch: 0,
+    });
+    expect(nextPanelSequence(1)).toBe(1);
+    expect(nextPanelSequence(1)).toBe(2);
+
+    // Coalesced replacement: no intervening panel_clear_all render. An input
+    // from the old passive effect cannot consume the new identity's sequence.
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 1,
+      overlay: false,
+      hostInstanceId: PANEL_HOST_B,
+      sessionEpoch: 0,
+    });
+    expect(nextPanelSequence(1, PANEL_HOST_A)).toBe(1);
+
+    expect(panel()).toMatchObject({
+      id: 1,
+      hostInstanceId: PANEL_HOST_B,
+      sessionEpoch: 0,
+    });
+    expect(nextPanelSequence(1, PANEL_HOST_B)).toBe(1);
+  });
+
   it("panel_clear_all clears the panel unconditionally", () => {
     const s = useSessionsStore.getState();
     s.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
@@ -1313,18 +1302,6 @@ describe("sessions store - custom panel reducer", () => {
     expect(unifiedPanel()?.mode).toBeUndefined();
   });
 
-  it("host_fallback surfaces a warning toast with the reason", () => {
-    useSessionsStore.getState().handlePanelEvent(SESSION_A, {
-      type: "host_fallback",
-      reason: "pi too old — update pi for panel support",
-    });
-    const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
-    expect(toasts.at(-1)).toMatchObject({
-      type: "warning",
-      message: "pi too old — update pi for panel support",
-    });
-  });
-
   it("session_warning surfaces a warning toast", () => {
     useSessionsStore.getState().handlePanelEvent(SESSION_A, {
       type: "session_warning",
@@ -1358,53 +1335,13 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
   });
-
   const session = () => useSessionsStore.getState().sessions.get(SESSION_A);
 
-  it("is false when not streaming", () => {
-    expect(shouldShowWorkingIndicator(session())).toBe(false);
-  });
-
-  it("is true when streaming with no extension UI open", () => {
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
+  it("uses direct runtime availability", () => {
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(true));
     expect(shouldShowWorkingIndicator(session())).toBe(true);
-  });
-
-  it("is false when streaming but only a dialog is pending (e.g. /agents select)", () => {
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    useSessionsStore.getState().addUiRequest(SESSION_A, {
-      type: "extension_ui_request",
-      id: "d1",
-      method: "select",
-      title: "Agents",
-      options: ["Settings"],
-    });
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false, 2, "unavailable"));
     expect(shouldShowWorkingIndicator(session())).toBe(false);
-  });
-
-  it("is false when streaming but only a custom panel is open (e.g. Settings)", () => {
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    useSessionsStore
-      .getState()
-      .handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
-    expect(shouldShowWorkingIndicator(session())).toBe(false);
-  });
-
-  it("stays true when a real tool call is active behind a custom panel", () => {
-    const store = useSessionsStore.getState();
-    store.setStreaming(SESSION_A, true);
-    store.handlePanelEvent(SESSION_A, { type: "panel_open", panelId: 1, overlay: false });
-    store.applyEvent(SESSION_A, {
-      type: "tool_execution_start",
-      toolCallId: "tool-1",
-      toolName: "read",
-      args: {},
-    });
-    expect(shouldShowWorkingIndicator(session())).toBe(true);
-  });
-
-  it("is false for an unknown/undefined session", () => {
-    expect(shouldShowWorkingIndicator(undefined)).toBe(false);
   });
 });
 
@@ -1425,6 +1362,7 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
  * how many times the SessionHeader remounts (every tab switch remounts it).
  */
 describe("sessions store - bootstrapModelState (model/thinking invariants)", () => {
+  let restoreCreateSession: () => void;
   let setModelCalls: Array<{ sessionId: string; modelId: string }>;
   let setThinkingCalls: Array<{ sessionId: string; level: string }>;
   // Per-session pi-side current model so get_state / get_available_models
@@ -1509,9 +1447,11 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
       workspaces: new Map(),
       activeWorkspacePath: null,
     });
+    restoreCreateSession = installLiveCreateSession();
   });
 
   afterEach(() => {
+    restoreCreateSession();
     vi.unstubAllGlobals();
   });
 
@@ -1720,6 +1660,7 @@ describe("sessions store - bootstrapModelState (model/thinking invariants)", () 
  * effect. The global last-used preference is persisted only on success.
  */
 describe("sessions store - applyModelChange / applyThinkingLevel (revert on failure)", () => {
+  let restoreCreateSession: () => void;
   let updateSpy: ReturnType<typeof vi.fn>;
 
   type Cmd = { type: string };
@@ -1742,12 +1683,14 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
       workspaces: new Map(),
       activeWorkspacePath: null,
     });
+    restoreCreateSession = installLiveCreateSession();
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
     useSessionsStore.getState().setCurrentModel(SESSION_A, "openrouter/model-x");
     useSessionsStore.getState().setThinkingLevel(SESSION_A, "low");
   });
 
   afterEach(() => {
+    restoreCreateSession();
     vi.unstubAllGlobals();
   });
 
@@ -2031,6 +1974,7 @@ describe("sessions store - applyModelChange / applyThinkingLevel (revert on fail
  * store so the dropdown highlights only the right row.
  */
 describe("sessions store - multi-provider same-id disambiguation", () => {
+  let restoreCreateSession: () => void;
   type Cmd = { type: string; modelId?: string | undefined; provider?: string | undefined };
   type Payload = { sessionId: string; command: Cmd };
   let setModelCalls: Array<{
@@ -2085,9 +2029,11 @@ describe("sessions store - multi-provider same-id disambiguation", () => {
       workspaces: new Map(),
       activeWorkspacePath: null,
     });
+    restoreCreateSession = installLiveCreateSession();
   });
 
   afterEach(() => {
+    restoreCreateSession();
     vi.unstubAllGlobals();
   });
 
@@ -2371,10 +2317,10 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
   });
 
-  it("applyEvent promotes the pending session when pi echoes a user message (skill/template path)", () => {
+  it("applyEvent promotes a pending session without losing a newer skill/template draft", () => {
     const store = useSessionsStore.getState();
     store.createSession(SESSION_A, WORKSPACE);
-    store.setNewSessionDraft(WORKSPACE, "/some-skill");
+    store.setNewSessionDraft(WORKSPACE, "new text typed after /some-skill");
     // Skill/template sends bypass the optimistic addUserMessage — pi echoes the
     // user message directly. With no pending echo this adds a user block, which
     // is the authoritative "first message landed" signal.
@@ -2386,6 +2332,9 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     expect(a?.isNewPending).toBe(false);
     expect(a?.transcript.blocks.length).toBeGreaterThan(0);
     expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_A)).toBe(
+      "new text typed after /some-skill",
+    );
   });
 
   it("applyEvent does NOT promote (or drop the draft) on a spontaneous custom message", () => {
@@ -2466,11 +2415,10 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     useSessionsStore.setState({ activeSessionId: SESSION_A, activeWorkspacePath: WORKSPACE });
 
     store.setActiveSession(SESSION_B);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(invoke).toHaveBeenCalledWith("session.close", { sessionId: SESSION_A });
-    expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(false);
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("session.prepareClose", { sessionId: SESSION_A });
+      expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(false);
+    });
     expect(useSessionsStore.getState().newSessionDrafts.get(WORKSPACE)).toBe("discard me");
     expect(useSessionsStore.getState().activeSessionId).toBe(SESSION_B);
 
@@ -2487,13 +2435,13 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     const store = useSessionsStore.getState();
     store.createSession(SESSION_A, WORKSPACE);
     store.createSession(SESSION_B, WORKSPACE, "/f/b.jsonl", undefined, undefined, "ready");
-    store.setStreaming(SESSION_A, true);
+    store.applyRuntimeState(SESSION_A, runtimeState(true));
     useSessionsStore.setState({ activeSessionId: SESSION_A, activeWorkspacePath: WORKSPACE });
 
     store.setActiveSession(SESSION_B);
     await Promise.resolve();
 
-    expect(invoke).not.toHaveBeenCalledWith("session.close", { sessionId: SESSION_A });
+    expect(invoke).not.toHaveBeenCalledWith("session.prepareClose", { sessionId: SESSION_A });
     expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(true);
   });
 
@@ -2510,7 +2458,7 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
   });
 
   it("openSessionTab seeds history from the paged loadHistory contract", async () => {
-    const invoke = vi.fn(async (channel: string) => {
+    const invoke = vi.fn(async (channel: string, payload?: unknown) => {
       if (channel === "session.open") {
         return {
           outcome: "opened",
@@ -2521,11 +2469,11 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
         };
       }
       if (channel === "session.loadHistory") {
-        return {
+        return loadedHistory(payload, {
           blocks: [{ id: "h1", type: "user", data: { content: "resumed" } }],
           startIndex: 0,
           total: 1,
-        };
+        });
       }
       return [];
     });
@@ -2538,6 +2486,54 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     const session = useSessionsStore.getState().sessions.get(SESSION_A);
     expect(session?.transcript.blocks.map((b) => b.id)).toEqual(["h1"]);
     expect(session?.historyCursor).toEqual({ startIndex: 0, total: 1 });
+  });
+
+  it("does not apply or clear a same-file pagination response after runtime replacement", async () => {
+    const payloads: unknown[] = [];
+    const resolvers: Array<(history: ReturnType<typeof loadedHistory>) => void> = [];
+    const invoke = vi.fn(async (_channel: string, payload?: unknown) => {
+      payloads.push(payload);
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE, "/f/same.jsonl");
+    store.seedHistory(SESSION_A, {
+      blocks: [{ id: "tail", type: "user", data: { content: "tail" } }],
+      startIndex: 1,
+      total: 2,
+    });
+
+    const predecessor = store.loadEarlierHistory(SESSION_A);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
+    const successor = useSessionsStore.getState().loadEarlierHistory(SESSION_A);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+
+    resolvers[0]!(
+      loadedHistory(payloads[0], {
+        blocks: [{ id: "predecessor", type: "user", data: { content: "stale" } }],
+        startIndex: 0,
+        total: 2,
+      }),
+    );
+    await predecessor;
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.historyLoadingEarlier).toBe(true);
+
+    resolvers[1]!(
+      loadedHistory(payloads[1], {
+        blocks: [{ id: "successor", type: "user", data: { content: "current" } }],
+        startIndex: 0,
+        total: 2,
+      }),
+    );
+    await successor;
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.transcript.blocks.map((block) => block.id)).toEqual(["successor", "tail"]);
+    expect(session?.historyLoadingEarlier).toBeUndefined();
   });
 
   it("adoptSessionFile clears stale history pagination state", async () => {
@@ -2558,11 +2554,13 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
   });
 
   it("loadEarlierHistory prepends the previous page and updates the cursor", async () => {
-    const invoke = vi.fn(async () => ({
-      blocks: [{ id: "earlier", type: "user", data: { content: "earlier" } }],
-      startIndex: 0,
-      total: 2,
-    }));
+    const invoke = vi.fn(async (_channel: string, payload?: unknown) =>
+      loadedHistory(payload, {
+        blocks: [{ id: "earlier", type: "user", data: { content: "earlier" } }],
+        startIndex: 0,
+        total: 2,
+      }),
+    );
     vi.stubGlobal("window", { pivis: { invoke } });
     const store = useSessionsStore.getState();
     store.createSession(SESSION_A, WORKSPACE, "/f/a.jsonl");
@@ -2575,7 +2573,15 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     await store.loadEarlierHistory(SESSION_A);
 
     const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(invoke).toHaveBeenCalledWith("session.loadHistory", { sessionId: SESSION_A, before: 1 });
+    expect(invoke).toHaveBeenCalledWith(
+      "session.loadHistory",
+      expect.objectContaining({
+        sessionId: SESSION_A,
+        expectedSessionFile: "/f/a.jsonl",
+        historyGeneration: 1,
+        before: 1,
+      }),
+    );
     expect(session?.transcript.blocks.map((b) => b.id)).toEqual(["earlier", "tail"]);
     expect(session?.historyCursor).toEqual({ startIndex: 0, total: 2 });
     expect(session?.historyLoadingEarlier).toBeUndefined();
@@ -2773,7 +2779,12 @@ describe("sessions store - unified TUI panel reducer", () => {
       overlay: false,
       unified: true,
     });
-    expect(unifiedPanel()).toEqual({ id: 7, buffer: [] });
+    expect(unifiedPanel()).toEqual({
+      id: 7,
+      hostInstanceId: "",
+      sessionEpoch: 0,
+      buffer: [],
+    });
     expect(customPanel()).toBeUndefined();
   });
 
@@ -2784,7 +2795,13 @@ describe("sessions store - unified TUI panel reducer", () => {
       overlay: true,
     });
     expect(unifiedPanel()).toBeUndefined();
-    expect(customPanel()).toEqual({ id: 3, overlay: true, buffer: [] });
+    expect(customPanel()).toEqual({
+      id: 3,
+      overlay: true,
+      hostInstanceId: "",
+      sessionEpoch: 0,
+      buffer: [],
+    });
   });
 
   it("panel_data routes to the unifiedPanel buffer when its id matches", () => {
@@ -2860,8 +2877,16 @@ describe("sessions store - unified TUI panel reducer", () => {
       overlay: false,
       unified: true,
     });
+    expect(nextPanelSequence(7)).toBe(1);
     s.handlePanelEvent(SESSION_A, { type: "unified_panel_reset" });
     expect(unifiedPanel()).toBeUndefined();
+    s.handlePanelEvent(SESSION_A, {
+      type: "panel_open",
+      panelId: 7,
+      overlay: false,
+      unified: true,
+    });
+    expect(nextPanelSequence(7)).toBe(1);
   });
 
   it("panel_clear_all clears custom panels but NOT the unified panel", () => {
@@ -2985,6 +3010,7 @@ describe("sessions store - historical cache notices", () => {
     ]);
     expect(invokeMock).not.toHaveBeenCalled();
 
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
     useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
 
     await vi.waitFor(() => {
@@ -2995,16 +3021,21 @@ describe("sessions store - historical cache notices", () => {
           ?.transcript.blocks.map((block) => block.id),
       ).toEqual(["assistant-1", "cache-miss-history", "user-2"]);
     });
-    expect(invokeMock).toHaveBeenCalledWith("session.sendCommand", {
-      sessionId: SESSION_A,
-      command: { type: "get_cache_miss_notices" },
-    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "session.sendCommand",
+      expect.objectContaining({
+        sessionId: SESSION_A,
+        command: { type: "get_cache_miss_notices" },
+        expectedHostInstanceId: "host-1",
+        expectedSessionEpoch: 1,
+      }),
+    );
   });
 
   it("replays notices again after an earlier-history page is prepended", async () => {
-    invokeMock.mockImplementation(async (channel: string) => {
+    invokeMock.mockImplementation(async (channel: string, payload?: unknown) => {
       if (channel === "session.loadHistory") {
-        return {
+        return loadedHistory(payload, {
           blocks: [
             {
               id: "assistant-1",
@@ -3014,7 +3045,7 @@ describe("sessions store - historical cache notices", () => {
           ],
           startIndex: 0,
           total: 2,
-        };
+        });
       }
       return {
         success: true,
@@ -3036,6 +3067,7 @@ describe("sessions store - historical cache notices", () => {
     useSessionsStore
       .getState()
       .createSession(SESSION_A, WORKSPACE, "/tmp/session.jsonl", undefined, undefined, "ready");
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
     useSessionsStore.getState().seedHistory(SESSION_A, {
       blocks: [{ id: "user-2", type: "user", data: { content: "Next" } }],
       startIndex: 1,
@@ -3053,6 +3085,228 @@ describe("sessions store - historical cache notices", () => {
           ?.transcript.blocks.map((block) => block.id),
       ).toEqual(["assistant-1", "cache-miss-history", "user-2"]);
     });
+  });
+});
+
+describe("sessions store - explicit close review", () => {
+  it("shows the actual checkpoint before force-closing", async () => {
+    const confirm = vi.fn((_message: string) => true);
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === "session.prepareClose") {
+        return {
+          reviewToken: "close-token",
+          checkpoint: {
+            editor: { text: "host-owned draft" },
+            intents: [{ disposition: "outcome_unknown", text: "ambiguous prompt" }],
+            restorations: [],
+            dialogs: [],
+            panels: [],
+          },
+        };
+      }
+      if (channel === "session.cancelClose") return { cancelled: true };
+      if (channel === "session.confirmClose") return { closed: true };
+      return {};
+    });
+    vi.stubGlobal("window", { pivis: { invoke }, confirm });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setSessionDraft(SESSION_A, "renderer-owned draft");
+
+    await store.closeSessionTab(SESSION_A);
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0]?.[0]).toContain("host-owned draft");
+    expect(confirm.mock.calls[0]?.[0]).toContain("renderer-owned draft");
+    expect(confirm.mock.calls[0]?.[0]).toContain("ambiguous prompt");
+    expect(confirm.mock.calls[0]?.[0]).toContain("permanently discards");
+  });
+
+  it("requires close review for an attachment-only editor conflict", async () => {
+    const confirm = vi.fn((_message: string) => false);
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === "session.prepareClose") {
+        return {
+          reviewToken: "close-token",
+          checkpoint: {
+            editor: {
+              text: "",
+              attachments: [],
+              conflictText: "",
+              conflictAttachments: [{ kind: "file", name: "local-only.txt" }],
+            },
+            intents: [],
+            restorations: [],
+            dialogs: [],
+            panels: [],
+          },
+        };
+      }
+      if (channel === "session.cancelClose") return { cancelled: true };
+      return {};
+    });
+    vi.stubGlobal("window", { pivis: { invoke }, confirm });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+
+    await useSessionsStore.getState().closeSessionTab(SESSION_A);
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0]?.[0]).toContain("local-only.txt");
+    expect(invoke).toHaveBeenCalledWith("session.cancelClose", {
+      sessionId: SESSION_A,
+      reviewToken: "close-token",
+    });
+  });
+});
+
+describe("sessions store - queue restoration", () => {
+  it("retains an attachment-only pending session across switching", () => {
+    const invoke = vi.fn(async () => ({}));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.createSession(SESSION_B, WORKSPACE, "/tmp/existing.jsonl");
+    store.beginEditorAttachmentRead(SESSION_A);
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(sessionHasHistory(session)).toBe(false);
+    expect(isNewSessionPending(session)).toBe(true);
+    store.setActiveSession(SESSION_A);
+    store.setActiveSession(SESSION_B);
+    expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorAttachmentReads).toBe(1);
+    expect(invoke).not.toHaveBeenCalledWith(
+      "session.prepareClose",
+      expect.objectContaining({ sessionId: SESSION_A }),
+    );
+    store.endEditorAttachmentRead(SESSION_A);
+    store.stageEditorAttachments(SESSION_A, [
+      { kind: "file", name: "notes.txt", path: "/tmp/notes.txt" },
+    ]);
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorAttachments).toHaveLength(1);
+  });
+
+  it("acknowledges an empty custody marker without showing an empty review card", async () => {
+    const invoke = vi.fn(async () => ({ acknowledged: true }));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+
+    store.applyQueueRestoration(SESSION_A, {
+      restorationId: "restore-empty",
+      steering: [],
+      followUp: [],
+      originalAttachments: [{ intentId: "empty-intent", images: [] }],
+    });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("session.acknowledgeRestoration", {
+        sessionId: SESSION_A,
+        restorationId: "restore-empty",
+      }),
+    );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queueRestorations).toBeUndefined();
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.toasts).toEqual([]);
+  });
+
+  it("retains an ambiguous command marker without auto-restoring executable text", () => {
+    const invoke = vi.fn(async () => ({ acknowledged: true }));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+
+    store.applyQueueRestoration(SESSION_A, {
+      restorationId: "ambiguous-command:intent-1",
+      steering: [],
+      followUp: ["!touch marker"],
+      originalAttachments: [],
+      commandDescription: "bash may have completed before acknowledgement was lost.",
+    });
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.queueRestorations).toEqual([
+      expect.objectContaining({
+        restorationId: "ambiguous-command:intent-1",
+        commandDescription: expect.stringContaining("bash may have completed"),
+      }),
+    ]);
+    expect(session?.editorInjection).toBeUndefined();
+    expect(invoke).not.toHaveBeenCalledWith("session.acknowledgeRestoration", expect.anything());
+  });
+
+  it("keeps original attachments separate and labels restoration for review", () => {
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+
+    useSessionsStore.getState().applyQueueRestoration(SESSION_A, {
+      restorationId: "restore-1",
+      steering: ["queued text"],
+      followUp: [],
+      originalAttachments: [
+        { intentId: "intent-1", images: [{ mimeType: "image/png", data: "base64" }] },
+      ],
+    });
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.editorInjection?.text).toBe("queued text");
+    expect(session?.queueRestorations).toEqual([
+      {
+        restorationId: "restore-1",
+        steering: ["queued text"],
+        followUp: [],
+        originalAttachments: [
+          { intentId: "intent-1", images: [{ mimeType: "image/png", data: "base64" }] },
+        ],
+      },
+    ]);
+    expect(session?.toasts.at(-1)?.message).toContain("original attachments");
+  });
+
+  it("deduplicates replay and never overwrites newer draft text", () => {
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.setSessionDraft(SESSION_A, "newer typing");
+    const restoration = {
+      restorationId: "restore-replay",
+      steering: [],
+      followUp: ["old restored text"],
+      originalAttachments: [],
+    };
+
+    store.applyQueueRestoration(SESSION_A, restoration);
+    const afterFirst = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(afterFirst?.editorInjection).toBeUndefined();
+    store.applyQueueRestoration(SESSION_A, restoration);
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queueRestorations).toHaveLength(1);
+    expect(useSessionsStore.getState().sessionDrafts.get(SESSION_A)).toBe("newer typing");
+  });
+
+  it("retires a reviewed restoration through main acknowledgement", async () => {
+    const invoke = vi.fn(async () => ({ acknowledged: true }));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.applyQueueRestoration(SESSION_A, {
+      restorationId: "restore-dismiss",
+      steering: [],
+      followUp: ["text"],
+      originalAttachments: [],
+    });
+
+    await store.dismissQueueRestoration(SESSION_A, "restore-dismiss");
+
+    expect(invoke).toHaveBeenCalledWith("session.acknowledgeRestoration", {
+      sessionId: SESSION_A,
+      restorationId: "restore-dismiss",
+    });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.queueRestorations).toEqual([]);
   });
 });
 
@@ -3075,8 +3329,26 @@ describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () 
       diffComments: new Map(),
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
+    // Unified submission is host-authoritative and requires the identity from
+    // an available runtime snapshot.
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue({ success: true });
+    invokeMock.mockImplementation(async (channel: string, payload?: unknown) => {
+      if (channel === "session.claimUnifiedSubmit") return claimedUnified();
+      if (channel === "session.submit") {
+        const submission = (payload as { submission: { intentId: string; editorRevision: number } })
+          .submission;
+        return {
+          intentId: submission.intentId,
+          hostInstanceId: "host-1",
+          sessionEpoch: 1,
+          editorRevision: submission.editorRevision,
+          disposition: "consumed" as const,
+        };
+      }
+      return { success: true };
+    });
     (globalThis as { window: unknown }).window = {
       pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
       dispatchEvent: vi.fn(),
@@ -3105,17 +3377,34 @@ describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () 
         c[0] === "session.sendCommand" &&
         (c[1] as { command?: { type?: string } }).command?.type === t,
     );
-  const sentPromptMessage = () =>
-    (
-      invokeMock.mock.calls.find(
-        (c) =>
-          c[0] === "session.sendCommand" &&
-          (c[1] as { command?: { type?: string } }).command?.type === "prompt",
-      )?.[1] as { command?: { message?: string } } | undefined
-    )?.command?.message;
+  const sentSubmission = () =>
+    invokeMock.mock.calls.find((c) => c[0] === "session.submit")?.[1] as
+      | { submission: { intentId: string; editorRevision: number; text: string; surface: string } }
+      | undefined;
+
+  it("does not replay a unified action when main reports an existing execution claim", async () => {
+    invokeMock.mockResolvedValueOnce({ claimed: false });
+
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(
+        SESSION_A,
+        "claimed-action",
+        "!touch marker",
+        0,
+        "intent-claimed",
+        "host-1",
+        1,
+      );
+
+    expect(sentCommandType("bash")).toBe(false);
+    expect(lastUnifiedResponse()).toBeUndefined();
+  });
 
   it("an empty submit bails without dispatching a prompt", async () => {
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id1", "   ");
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(SESSION_A, "id1", "   ", 0, "intent-id1", "host-1", 1);
     expect(lastUnifiedResponse()).toMatchObject({ id: "id1", ok: false, bailed: true });
     expect(sentCommandType("prompt")).toBe(false);
   });
@@ -3129,18 +3418,33 @@ describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () 
       text: "Please simplify this branch.",
     });
 
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id-comments", "   ");
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(
+        SESSION_A,
+        "id-comments",
+        "   ",
+        0,
+        "intent-comments",
+        "host-1",
+        1,
+      );
 
-    expect(sentCommandType("prompt")).toBe(true);
-    expect(sentPromptMessage()).toContain("### User comments on the code");
-    expect(sentPromptMessage()).toContain("File: src/a.ts");
-    expect(sentPromptMessage()).toContain("Line: 42");
+    expect(sentCommandType("prompt")).toBe(false);
+    expect(sentSubmission()?.submission).toMatchObject({
+      text: expect.stringContaining("### User comments on the code"),
+      surface: "unified",
+    });
+    expect(sentSubmission()?.submission.text).toContain("File: src/a.ts");
+    expect(sentSubmission()?.submission.text).toContain("Line: 42");
     expect(lastUnifiedResponse()).toMatchObject({ id: "id-comments", ok: true });
     expect(useSessionsStore.getState().getDiffCommentsForPrompt(SESSION_A)).toEqual([]);
   });
 
   it("a send-prompt with no model bails + toasts (no-model guard parity)", async () => {
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id2", "hello");
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(SESSION_A, "id2", "hello", 0, "intent-id2", "host-1", 1);
     expect(lastUnifiedResponse()).toMatchObject({
       id: "id2",
       ok: false,
@@ -3152,26 +3456,166 @@ describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () 
     expect(toasts.at(-1)).toMatchObject({ type: "error", message: "No model selected" });
   });
 
-  it("a valid prompt runs the shared pipeline, adds the optimistic bubble, and replies ok:true", async () => {
+  it("a valid prompt waits for host consumption before adding an echo and replying ok:true", async () => {
     useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id3", "hello world");
-    expect(sentCommandType("prompt")).toBe(true);
+    let resolveSubmission!: (result: {
+      intentId: string;
+      hostInstanceId: string;
+      sessionEpoch: number;
+      editorRevision: number;
+      disposition: "consumed";
+    }) => void;
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === "session.claimUnifiedSubmit") return Promise.resolve(claimedUnified());
+      if (channel === "session.submit") {
+        return new Promise((resolve) => {
+          resolveSubmission = resolve;
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const request = useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(SESSION_A, "id3", "hello world", 41, "intent-id3", "host-1", 1);
+    await vi.waitFor(() => expect(sentSubmission()).toBeDefined());
+    expect(sentCommandType("prompt")).toBe(false);
+    // There is no pre-custody optimistic transcript bubble.
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks).toEqual([]);
+
+    const submission = sentSubmission()!.submission;
+    expect(submission.intentId).toBe("intent-id3");
+    expect(submission.editorRevision).toBe(41);
+    resolveSubmission({
+      intentId: submission.intentId,
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: submission.editorRevision,
+      disposition: "consumed",
+    });
+    await request;
+
     expect(lastUnifiedResponse()).toMatchObject({ id: "id3", ok: true });
-    const blocks = useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks ?? [];
-    expect(blocks.some((b) => b.type === "user")).toBe(true);
+  });
+
+  it("suppresses late unified continuation and acknowledgement after claim expiry", async () => {
+    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let resolveSubmission!: (result: {
+      intentId: string;
+      hostInstanceId: string;
+      sessionEpoch: number;
+      editorRevision: number;
+      disposition: "consumed";
+    }) => void;
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === "session.claimUnifiedSubmit") {
+        return Promise.resolve({ claimed: true, claimId: "expiring-claim", expiresAt: 1_010 });
+      }
+      if (channel === "session.submit") {
+        return new Promise((resolve) => {
+          resolveSubmission = resolve;
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const pending = useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(
+        SESSION_A,
+        "expiring",
+        "do this once",
+        9,
+        "intent-expiring",
+        "host-1",
+        1,
+      );
+    await vi.waitFor(() => expect(sentSubmission()).toBeDefined());
+    now = 1_020;
+    resolveSubmission({
+      intentId: "intent-expiring",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 9,
+      disposition: "consumed",
+    });
+    await pending;
+
+    expect(lastUnifiedResponse()).toBeUndefined();
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks).toEqual([]);
+    nowSpy.mockRestore();
+  });
+
+  it("does not open a picker or toast after a claimed command continuation expires", async () => {
+    let now = 2_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let resolveCommand!: (result: unknown) => void;
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === "session.claimUnifiedSubmit") {
+        return Promise.resolve({ claimed: true, claimId: "fork-claim", expiresAt: 2_010 });
+      }
+      if (channel === "session.sendCommand") {
+        return new Promise((resolve) => {
+          resolveCommand = resolve;
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const pending = useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(
+        SESSION_A,
+        "expiring-fork",
+        "/fork",
+        0,
+        "intent-fork",
+        "host-1",
+        1,
+      );
+    await vi.waitFor(() => expect(sentCommandType("get_fork_messages")).toBe(true));
+    now = 2_020;
+    resolveCommand({
+      success: true,
+      disposition: "completed",
+      data: { messages: [{ entryId: "entry-1", text: "fork me" }] },
+    });
+    await pending;
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.pendingPicker).toBeUndefined();
+    expect(session?.toasts).toEqual([]);
+    expect(lastUnifiedResponse()).toBeUndefined();
+    nowSpy.mockRestore();
   });
 
   it("a prompt send failure replies bailed so the host restores unified editor text", async () => {
     useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
-    invokeMock.mockImplementation(async (channel: string) => {
-      if (channel === "session.sendCommand") {
-        return { success: false, error: "provider unavailable" };
+    invokeMock.mockImplementation(async (channel: string, payload?: unknown) => {
+      if (channel === "session.claimUnifiedSubmit") return claimedUnified();
+      if (channel === "session.submit") {
+        const submission = (payload as { submission: { intentId: string; editorRevision: number } })
+          .submission;
+        return {
+          intentId: submission.intentId,
+          hostInstanceId: "host-1",
+          sessionEpoch: 1,
+          editorRevision: submission.editorRevision,
+          disposition: "rejected" as const,
+          message: "provider unavailable",
+        };
       }
       return { success: true };
     });
 
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id-fail", "hello");
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(SESSION_A, "id-fail", "hello", 0, "intent-fail", "host-1", 1);
 
+    expect(sentCommandType("prompt")).toBe(false);
+    expect(sentSubmission()?.submission.text).toBe("hello");
     expect(lastUnifiedResponse()).toMatchObject({
       id: "id-fail",
       ok: false,
@@ -3184,7 +3628,9 @@ describe("sessions store - unified TUI submit (handleUnifiedSubmitRequest)", () 
 
   it("a bash command (!prefix) bypasses the no-model guard and dispatches", async () => {
     // no currentModel set — bash must still go through (Composer parity)
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id4", "!ls -la");
+    await useSessionsStore
+      .getState()
+      .handleUnifiedSubmitRequest(SESSION_A, "id4", "!ls -la", 0, "intent-id4", "host-1", 1);
     expect(sentCommandType("bash")).toBe(true);
     expect(lastUnifiedResponse()).toMatchObject({ id: "id4", ok: true });
   });
@@ -3208,9 +3654,9 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
     invokeMock.mockReset();
-    invokeMock.mockImplementation((channel: string) => {
+    invokeMock.mockImplementation((channel: string, payload?: unknown) => {
       if (channel === "session.loadHistory") {
-        return Promise.resolve({ blocks: [], startIndex: 0, total: 0 });
+        return Promise.resolve(loadedHistory(payload, { blocks: [], startIndex: 0, total: 0 }));
       }
       return Promise.resolve({ success: true });
     });
@@ -3237,7 +3683,14 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
     const s = useSessionsStore.getState().sessions.get(SESSION_A);
     expect(s?.sessionFile).toBe("/new/session.jsonl");
     expect(s?.sessionName).toBe("Forked");
-    expect(invokeMock).toHaveBeenCalledWith("session.loadHistory", { sessionId: SESSION_A });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "session.loadHistory",
+      expect.objectContaining({
+        sessionId: SESSION_A,
+        expectedSessionFile: "/new/session.jsonl",
+        historyGeneration: expect.any(Number),
+      }),
+    );
     expect(invokeMock).toHaveBeenCalledWith("workspace.listSessions", { workspacePath: WORKSPACE });
   });
 
@@ -3246,6 +3699,83 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("session.loadHistory", expect.anything());
     expect(invokeMock).not.toHaveBeenCalledWith("workspace.listSessions", expect.anything());
   });
+
+  it("preserves the acknowledged successor runtime while adopting its file", async () => {
+    const runtime = runtimeState(false);
+    const identity = {
+      hostInstanceId: runtime.snapshot!.hostInstanceId,
+      sessionEpoch: runtime.snapshot!.sessionEpoch,
+    };
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtime);
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+
+    await useSessionsStore
+      .getState()
+      .adoptSessionFileAndHydrate(SESSION_A, "/new/session.jsonl", "Forked", identity);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.availability).toBe("available");
+    expect(session?.runtimeSnapshot).toEqual(runtime.snapshot);
+  });
+
+  it("does not seed delayed predecessor history across a later runtime generation", async () => {
+    const runtime = runtimeState(false);
+    const identity = {
+      hostInstanceId: runtime.snapshot!.hostInstanceId,
+      sessionEpoch: runtime.snapshot!.sessionEpoch,
+    };
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtime);
+    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
+    let historyPayload: unknown;
+    let resolveHistory!: (history: ReturnType<typeof loadedHistory>) => void;
+    invokeMock.mockImplementation((channel: string, payload?: unknown) => {
+      if (channel === "session.loadHistory") {
+        historyPayload = payload;
+        return new Promise((resolve) => {
+          resolveHistory = resolve;
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const pending = useSessionsStore
+      .getState()
+      .adoptSessionFileAndHydrate(SESSION_A, "/new/session.jsonl", "Forked", identity);
+    await vi.waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "session.loadHistory",
+        expect.objectContaining({
+          sessionId: SESSION_A,
+          expectedSessionFile: "/new/session.jsonl",
+          expectedHostInstanceId: identity.hostInstanceId,
+          expectedSessionEpoch: identity.sessionEpoch,
+        }),
+      ),
+    );
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, {
+      ...runtime,
+      sessionEpoch: identity.sessionEpoch + 1,
+      receivedAt: Date.now(),
+      snapshot: {
+        ...runtime.snapshot!,
+        sessionEpoch: identity.sessionEpoch + 1,
+        snapshotSequence: runtime.snapshot!.snapshotSequence + 1,
+      },
+    });
+    useSessionsStore.getState().addCustomMessage(SESSION_A, "new-runtime-content");
+    resolveHistory(
+      loadedHistory(historyPayload, {
+        blocks: [{ id: "old-history", type: "user", data: { content: "stale" } }],
+        startIndex: 0,
+        total: 1,
+      }),
+    );
+    await pending;
+
+    const blocks = useSessionsStore.getState().sessions.get(SESSION_A)?.transcript.blocks ?? [];
+    expect(blocks.some((block) => block.id === "old-history")).toBe(false);
+    expect(blocks.some((block) => block.type === "custom_message")).toBe(true);
+  });
 });
 
 // ── S1/S2 turn-end truth table + abortSession contract (ESC-to-interrupt) ──
@@ -3253,10 +3783,8 @@ describe("sessions store - adoptSessionFileAndHydrate", () => {
 // terminal SessionStatus, rejected/failed prompt send) and never gets stuck
 // true; and that abortSession is a no-op when idle + rejection-safe.
 
-describe("sessions store - isStreaming turn-end truth (S1, S2) + abortSession (S3)", () => {
+describe("sessions store - host-authoritative escape", () => {
   const invokeMock = vi.fn();
-  const originalWindow = (globalThis as { window?: unknown }).window;
-
   beforeEach(() => {
     useSessionsStore.setState({
       sessions: new Map(),
@@ -3265,171 +3793,25 @@ describe("sessions store - isStreaming turn-end truth (S1, S2) + abortSession (S
       activeWorkspacePath: null,
     });
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
-    invokeMock.mockReset();
-    invokeMock.mockResolvedValue({ success: true });
-    (globalThis as { window: unknown }).window = {
-      pivis: { invoke: invokeMock, on: vi.fn(() => () => {}) },
-      dispatchEvent: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    };
+    invokeMock.mockResolvedValue({ disposition: "already_inactive" });
+    vi.stubGlobal("window", { pivis: { invoke: invokeMock } });
   });
 
-  afterEach(() => {
-    if (originalWindow === undefined) {
-      delete (globalThis as { window?: unknown }).window;
-    } else {
-      (globalThis as { window: unknown }).window = originalWindow;
-    }
-  });
-
-  const isStreaming = () =>
-    useSessionsStore.getState().sessions.get(SESSION_A)?.isStreaming ?? false;
-  const runningSince = () => useSessionsStore.getState().sessions.get(SESSION_A)?.runningSince;
-
-  it("agent_end stays streaming until authoritative streaming_state false", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-      ]);
-    expect(isStreaming()).toBe(true);
-    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_end", willRetry: false });
-    expect(isStreaming()).toBe(true);
-    useSessionsStore
-      .getState()
-      .applyEvent(SESSION_A, { type: "streaming_state", isStreaming: false });
-    expect(isStreaming()).toBe(false);
-    expect(runningSince()).toBeUndefined();
-  });
-
-  it("willRetry agent_end keeps authoritative streaming; a following agent_start does not clear it", () => {
-    useSessionsStore
-      .getState()
-      .applyEvents(SESSION_A, [
-        { type: "agent_start" },
-        { type: "streaming_state", isStreaming: true },
-      ]);
-    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_end", willRetry: true });
-    expect(isStreaming()).toBe(true);
-    useSessionsStore.getState().applyEvent(SESSION_A, { type: "agent_start" });
-    expect(isStreaming()).toBe(true);
-  });
-
-  it("a rejected prompt invoke clears isStreaming (S2)", async () => {
-    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
-    invokeMock.mockRejectedValueOnce(new Error("dead session"));
-    // Drive through the shared submit pipeline so executeSendPrompt's
-    // try/catch is the path under test.
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id1", "hello");
-    // Give the fire-and-forget clear a tick to settle.
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(isStreaming()).toBe(false);
-  });
-
-  it("a success:false prompt response clears isStreaming (S1)", async () => {
-    useSessionsStore.getState().setCurrentModel(SESSION_A, "anthropic/claude");
-    invokeMock.mockResolvedValueOnce({ success: false, error: "guard" });
-    await useSessionsStore.getState().handleUnifiedSubmitRequest(SESSION_A, "id2", "hello");
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(isStreaming()).toBe(false);
-  });
-
-  it("setSessionStatus -> 'exited' from 'ready' clears isStreaming and active transcript work (S1)", () => {
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    useSessionsStore.getState().applyEvent(SESSION_A, {
-      type: "message_start",
-      message: { role: "assistant" },
-    });
-    useSessionsStore.getState().applyEvent(SESSION_A, {
-      type: "tool_execution_start",
-      toolCallId: "tool-1",
-      toolName: "read",
-      args: {},
-    });
-    expect(isStreaming()).toBe(true);
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
-    const session = useSessionsStore.getState().sessions.get(SESSION_A);
-    expect(isStreaming()).toBe(false);
-    expect(runningSince()).toBeUndefined();
-    expect(session?.transcript.activeAssistantId).toBeNull();
-    expect(session?.transcript.activeToolCallIds.size).toBe(0);
-    expect(
-      session?.transcript.blocks.every((b) =>
-        b.type === "assistant" || b.type === "tool_call" ? b.data.isStreaming === false : true,
-      ),
-    ).toBe(true);
-    expect(isSessionAbortable(session)).toBe(false);
-  });
-
-  it("setSessionStatus -> 'failed' from 'ready' clears isStreaming (S1)", () => {
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "failed", "boom");
-    expect(isStreaming()).toBe(false);
-  });
-
-  it("setSessionStatus -> 'ready' from 'ready' (benign re-emit) does NOT clear streaming", () => {
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    const before = runningSince();
-    expect(before).toBeDefined();
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "ready");
-    expect(isStreaming()).toBe(true);
-    expect(runningSince()).toBe(before);
-  });
-
-  it("setSessionStatus -> 'exited' from 'exited' (re-emit) does NOT touch a live turn's timer", () => {
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
-    // Now start a (hypothetical) fresh turn on an exited session and
-    // confirm a duplicate exited re-emit is a no-op.
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    const before = runningSince();
-    useSessionsStore.getState().setSessionStatus(SESSION_A, "exited");
-    // becomingTerminal is false (already terminal), so streaming is preserved.
-    expect(isStreaming()).toBe(true);
-    expect(runningSince()).toBe(before);
-  });
-
-  it("abortSession: streaming -> invokes session.interrupt", () => {
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    invokeMock.mockClear();
-    useSessionsStore.getState().abortSession(SESSION_A);
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    const [channel, payload] = invokeMock.mock.calls[0] as [string, { sessionId: SessionId }];
-    expect(channel).toBe("session.interrupt");
-    expect(payload).toEqual({ sessionId: SESSION_A });
-  });
-
-  it("abortSession: prompt in flight before agent_start is abortable", () => {
-    useSessionsStore.getState().beginPromptInFlight(SESSION_A);
-    invokeMock.mockClear();
-    useSessionsStore.getState().abortSession(SESSION_A);
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    const [channel, payload] = invokeMock.mock.calls[0] as [string, { sessionId: SessionId }];
-    expect(channel).toBe("session.interrupt");
-    expect(payload).toEqual({ sessionId: SESSION_A });
-  });
-
-  it("abortSession: idle -> invoke NOT called (no-op, S3)", () => {
-    invokeMock.mockClear();
+  it("does not dispatch escape from an unavailable runtime", () => {
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false, 1, "unavailable"));
     useSessionsStore.getState().abortSession(SESSION_A);
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("abortSession: rejecting invoke -> no unhandled rejection (S3)", async () => {
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
-    invokeMock.mockRejectedValueOnce(new Error("host fallback"));
-    // Should not throw.
+  it("binds escape to the currently available host and epoch", () => {
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, runtimeState(false));
     useSessionsStore.getState().abortSession(SESSION_A);
-    // Drain microtasks so the rejected promise settles (the .catch swallows).
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(true).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("session.escape", {
+      sessionId: SESSION_A,
+      requestId: expect.any(String),
+      expectedHostInstanceId: "host-1",
+      expectedSessionEpoch: 1,
+    });
   });
 });
 

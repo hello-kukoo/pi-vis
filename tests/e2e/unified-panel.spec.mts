@@ -32,6 +32,7 @@ interface Folders {
   workspaceDir: string;
   piSessionsDir: string;
   inputFile: string;
+  hostLog: string;
 }
 
 async function makeFolders(): Promise<Folders> {
@@ -41,8 +42,10 @@ async function makeFolders(): Promise<Folders> {
     workspaceDir: base("pivis-e2e-unified-ws-"),
     piSessionsDir: base("pivis-e2e-unified-pi-"),
     inputFile: "",
+    hostLog: "",
   };
   folders.inputFile = join(folders.settingsDir, "host-input.log");
+  folders.hostLog = join(folders.settingsDir, "host-messages.log");
   return folders;
 }
 
@@ -72,6 +75,7 @@ async function launchApp(
       // The seams that make this test deterministic:
       PIVIS_TEST_HOST_SCRIPT: FAKE_HOST,
       PIVIS_TEST_HOST_INPUT_FILE: folders.inputFile,
+      PIVIS_TEST_HOST_MESSAGE_LOG: folders.hostLog,
       ...extraEnv,
       ELECTRON_RENDERER_URL: undefined,
     },
@@ -142,6 +146,58 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
           },
         )
         .toContain("xyz");
+    } finally {
+      await app.close();
+      rmrf(folders.settingsDir);
+      rmrf(folders.workspaceDir);
+      rmrf(folders.piSessionsDir);
+    }
+  });
+
+  test("a hanging claimed unified action expires to review and is never dispatched twice", async () => {
+    test.setTimeout(90_000);
+    const folders = await makeFolders();
+    const { app, window } = await launchApp(folders, {
+      PIVIS_TEST_HANG_UNIFIED_SUBMIT: "1",
+      PIVIS_TEST_UNIFIED_CLAIM_TIMEOUT_MS: "200",
+    });
+
+    try {
+      await window.getByRole("button", { name: "New session" }).click();
+      const panel = window.locator(".unified-panel");
+      await expect(panel).toBeVisible({ timeout: 20_000 });
+      await panel.locator(".xterm").click();
+      await window.keyboard.type("hang exactly once");
+      await window.keyboard.press("Enter");
+
+      const review = window.getByText("Review interrupted command", { exact: true });
+      await expect(review).toBeVisible({ timeout: 10_000 });
+      await expect(window.getByText(/hang exactly once/)).toBeVisible();
+      await expect(window.getByRole("button", { name: "Restore to Composer" })).toHaveCount(0);
+
+      await expect
+        .poll(() => {
+          if (!fs.existsSync(folders.hostLog)) return 0;
+          return fs
+            .readFileSync(folders.hostLog, "utf8")
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { type?: string })
+            .filter((entry) => entry.type === "submit").length;
+        })
+        .toBe(1);
+      await window.waitForTimeout(400);
+      const submitCount = fs
+        .readFileSync(folders.hostLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { type?: string })
+        .filter((entry) => entry.type === "submit").length;
+      expect(submitCount).toBe(1);
+      await window.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await expect(review).toHaveCount(0);
     } finally {
       await app.close();
       rmrf(folders.settingsDir);

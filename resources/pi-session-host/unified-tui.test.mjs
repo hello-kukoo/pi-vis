@@ -12,7 +12,7 @@
  * NEVER run resources/pi-session-host/ui-context.mjs's `ensureUnifiedTui()` —
  * the code that builds a REAL pi-tui `TUI` (Editor + widget Containers) and
  * relies on pi's theme. That is exactly where the original bug lived: the host
- * passed pi's Theme singleton to `new Editor(tui, theme)`, but pi-tui's Editor
+ * passed pi's full Theme to `new Editor(tui, theme)`, but pi-tui's Editor
  * needs an `EditorTheme` ({ borderColor:(s)=>string, selectList }), so
  * `Editor.render()` threw `this.borderColor is not a function` on the first
  * render tick — the panel opened (Composer replaced) but produced no output and
@@ -26,7 +26,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { importPi, importPiTui } from "./bootstrap.mjs";
+import { importPi, importPiTui, initHostTheme } from "./bootstrap.mjs";
 import { buildEditorTheme } from "./editor-theme.mjs";
 import { createUIContext } from "./ui-context.mjs";
 
@@ -53,11 +53,6 @@ function locatePiBin() {
 }
 
 const PI_BIN = locatePiBin();
-
-// THEME_KEY mirrors bootstrap.mjs initHostTheme — read the global theme the
-// way the host does, without a private import.
-const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
-const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
 
 // A capturing panel bridge: records the wire messages ensureUnifiedTui() emits,
 // AND wires input routing so a test can feed keystrokes through the real
@@ -143,8 +138,7 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
   async function setup() {
     pi = await importPi(PI_BIN);
     piTui = await importPiTui(PI_BIN);
-    pi.initTheme();
-    theme = globalThis[THEME_KEY] ?? globalThis[THEME_KEY_OLD];
+    theme = initHostTheme(pi);
     controllers = [];
   }
 
@@ -170,7 +164,7 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
     // The load-bearing invariant pi-tui's Editor depends on.
     expect(typeof editorTheme.borderColor).toBe("function");
     expect(() => editorTheme.borderColor("─")).not.toThrow();
-    // Document the bug: the raw pi theme singleton — what the host used to pass
+    // Document the bug: the raw full pi Theme — what the host used to pass
     // straight into `new Editor(tui, theme)` — is NOT a valid EditorTheme.
     expect(typeof theme.borderColor).not.toBe("function");
   });

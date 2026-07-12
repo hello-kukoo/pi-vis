@@ -3,6 +3,7 @@ import type { DialogUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/e
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { RENDERER_GENERATION } from "../../lib/renderer-generation.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import "./ExtensionDialogHost.css";
 
@@ -241,7 +242,7 @@ export function ExtensionDialogHost({
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
   const dismissUiRequest = useSessionsStore((s) => s.dismissUiRequest);
   const current = session?.pendingDialogs[0] as DialogUiRequest | undefined;
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [responding, setResponding] = useState(false);
 
   // Claim ESC while a dialog is open so a background streaming session isn't
   // aborted (the dialog's own controls respond/cancel).
@@ -249,45 +250,35 @@ export function ExtensionDialogHost({
 
   const handleRespond = useCallback(
     async (requestId: string, response: Record<string, unknown>) => {
-      dismissUiRequest(sessionId, requestId);
-      if (timerRef.current) clearTimeout(timerRef.current);
-
+      if (responding || !current?.hostInstanceId || current.sessionEpoch === undefined) return;
+      setResponding(true);
       const payload = {
         type: "extension_ui_response" as const,
         id: requestId,
         ...response,
       };
 
-      await window.pivis.invoke("session.respondToUiRequest", {
-        sessionId,
-        response: payload as ExtensionUiResponse,
-      });
+      try {
+        const result = await window.pivis.invoke("session.respondToUiRequest", {
+          sessionId,
+          rendererGeneration: RENDERER_GENERATION,
+          expectedHostInstanceId: current.hostInstanceId,
+          expectedSessionEpoch: current.sessionEpoch,
+          operationId:
+            (current as (DialogUiRequest & { operationId?: string }) | undefined)?.operationId ??
+            requestId,
+          response: payload as ExtensionUiResponse,
+        });
+        if (result.acknowledged) dismissUiRequest(sessionId, requestId);
+      } finally {
+        setResponding(false);
+      }
     },
-    [sessionId, dismissUiRequest],
+    [sessionId, dismissUiRequest, current, responding],
   );
 
-  // Auto-dismiss on timeout. Per the pi protocol (docs/rpc.md), `timeout`
-  // is in milliseconds and the dialog is fire-and-forget on expiry: pi
-  // auto-resolves the request with the default value client-side, so we
-  // simply drop our local state — sending a `cancelled: true` would
-  // actually be a user choice, not a timeout, and would clobber pi's
-  // resolution. The old behaviour multiplied by 1000 (10s → 2.8h) which
-  // was the source of the seconds-bug e2e regression.
-  useEffect(() => {
-    if (!current) return;
-    const timeout = (current as { timeout?: number }).timeout;
-    if (!timeout) return;
-
-    timerRef.current = setTimeout(() => {
-      // Drop the dialog locally; do NOT send a response.
-      dismissUiRequest(sessionId, current.id);
-    }, timeout);
-
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [current, dismissUiRequest, sessionId]);
-
+  // Timeout and AbortSignal cancellation are enforced by the host. The request
+  // stays visible until the correlated host acknowledgement arrives.
   if (!current) return null;
 
   // No modal overlay: the dialog lives in the Composer slot so the

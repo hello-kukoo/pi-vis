@@ -32,6 +32,11 @@ import { Terminal } from "@xterm/xterm";
 import type React from "react";
 import { useCallback, useEffect, useRef } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import {
+  acknowledgePanelInput,
+  nextPanelInputSequence,
+  panelInputGapMessage,
+} from "../../lib/panel-input-sequence.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { getTheme } from "../../theme/registry.js";
@@ -67,6 +72,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   const panelRef = useRef<{
     id: number;
     overlay: boolean;
+    hostInstanceId: string;
+    sessionEpoch: number;
     buffer: string[];
     mode?: "content" | "viewport";
   } | null>(null);
@@ -80,6 +87,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   // every streamed chunk).
   panelRef.current = panel ?? null;
   const panelId = panel?.id;
+  const panelHostInstanceId = panel?.hostInstanceId;
+  const panelSessionEpoch = panel?.sessionEpoch;
   // Display mode, read live by the sizer without being a rebuild dep. custom()
   // panels default to "viewport" (a stable pinned grid) because they are always
   // full-frame overlays — content-tracking them chases the overlay's centering
@@ -243,6 +252,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
         void window.pivis
           .invoke("session.panelResize", {
             sessionId,
+            expectedHostInstanceId: currentPanel.hostInstanceId,
+            expectedSessionEpoch: currentPanel.sessionEpoch,
             panelId: currentPanel.id,
             cols,
             rows,
@@ -280,13 +291,38 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
 
     // ── User keystrokes → panel input IPC ──
     const onDataDispose = term.onData((data) => {
+      const sequence = nextPanelInputSequence(
+        sessionId,
+        currentPanel.hostInstanceId,
+        currentPanel.sessionEpoch,
+        currentPanel.id,
+      );
       void window.pivis
         .invoke("session.panelInput", {
           sessionId,
+          expectedHostInstanceId: currentPanel.hostInstanceId,
+          expectedSessionEpoch: currentPanel.sessionEpoch,
           panelId: currentPanel.id,
+          sequence,
           data,
         })
-        .catch(() => {});
+        .then((result) => {
+          acknowledgePanelInput(
+            sessionId,
+            currentPanel.hostInstanceId,
+            currentPanel.sessionEpoch,
+            currentPanel.id,
+            result.acknowledgedThrough,
+          );
+          if (result.gap) {
+            useSessionsStore
+              .getState()
+              .addToast(sessionId, panelInputGapMessage(result.gap), "warning");
+          }
+        })
+        .catch((error) => {
+          useSessionsStore.getState().addToast(sessionId, String(error), "error");
+        });
     });
 
     // ── Resize observer ──
@@ -320,7 +356,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [sessionId, panelId]); // Re-create terminal if panel identity changes (NOT on buffer appends)
+  }, [sessionId, panelId, panelHostInstanceId, panelSessionEpoch]); // Full host-bound panel identity; never rebuild on buffer appends
 
   // ── Escape key: not a panel-close mechanism ──
   // Extensions own the panel lifecycle via the `done` callback; pi-vis cannot
@@ -346,7 +382,13 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
         title="Force-close this panel (cancels the extension's request)"
         onClick={() => {
           void window.pivis
-            .invoke("session.panelClose", { sessionId, panelId: panel.id })
+            .invoke("session.panelClose", {
+              sessionId,
+              expectedHostInstanceId: panel.hostInstanceId,
+              expectedSessionEpoch: panel.sessionEpoch,
+              panelId: panel.id,
+              operationId: crypto.randomUUID(),
+            })
             .catch(() => {});
         }}
       >

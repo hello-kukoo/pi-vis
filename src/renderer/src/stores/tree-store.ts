@@ -3,9 +3,8 @@
 // Mirrors diff-store's single-instance overlay conventions: every `set`
 // produces a new Map/Set (never in-place mutation); only one overlay
 // open at a time. Per the plan, the tree viewer is SDK-host-only — see
-// the `phase: "unsupported"` path below for the friendly degradation
-// when running against `pi --mode rpc` or an old pi version that lacks
-// session.sessionManager.getTree() / session.navigateTree().
+// the `phase: "unsupported"` path below for friendly degradation when the
+// installed pi lacks session.sessionManager.getTree() / session.navigateTree().
 
 import type { SessionId } from "@shared/ids.js";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
@@ -19,7 +18,26 @@ import type {
 import type { SessionStats } from "@shared/pi-protocol/responses.js";
 import { create } from "zustand";
 import { buildNestedTree } from "../components/tree/tree-flatten.js";
-import { useSessionsStore } from "./sessions-store.js";
+import { invokeSessionCommand } from "../lib/session-command.js";
+import { isSessionWorking, useSessionsStore } from "./sessions-store.js";
+
+function currentRuntime(sessionId: SessionId) {
+  const session = useSessionsStore.getState().sessions.get(sessionId);
+  return session?.hostInstanceId && session.availability === "available"
+    ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
+    : undefined;
+}
+
+function runtimeIsCurrent(
+  sessionId: SessionId,
+  runtime: { hostInstanceId: string; sessionEpoch: number },
+): boolean {
+  const current = currentRuntime(sessionId);
+  return (
+    current?.hostInstanceId === runtime.hostInstanceId &&
+    current.sessionEpoch === runtime.sessionEpoch
+  );
+}
 
 // ── Phases / state shape ──────────────────────────────────────────────
 
@@ -59,10 +77,10 @@ interface TreeStore {
   refresh: () => Promise<void>;
 }
 
-// Friendly message shown when the tree viewer can't run (RPC fallback or
-// older pi missing session.sessionManager.getTree/navigateTree). Never
-// surface pi's raw "Unknown command: get_tree" — that reads as an
-// internal bug, not a runtime feature gate (review S2).
+// Friendly message shown when the tree viewer cannot run because the runtime
+// lacks session.sessionManager.getTree/navigateTree. Never surface pi's raw
+// "Unknown command: get_tree" — that reads as an internal bug, not a runtime
+// feature gate (review S2).
 const UNSUPPORTED_MESSAGE = "Tree view requires the SDK host — update pi or reload the session.";
 
 // Mid-turn guard copy. Mirrors executeReload's wording (execute.ts:562).
@@ -145,21 +163,29 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
     // clobbered mid-stream (review B1).
     const sessions = useSessionsStore.getState().sessions;
     const session = sessions.get(sessionId);
-    if (session?.isStreaming) {
+    if (isSessionWorking(session)) {
       useSessionsStore.getState().addToast(sessionId, STREAMING_GUARD_MESSAGE, "warning");
+      return;
+    }
+    const runtime = currentRuntime(sessionId);
+    if (!runtime) {
+      useSessionsStore.getState().addToast(sessionId, "Session runtime is unavailable", "warning");
       return;
     }
 
     set({ navigating: true });
     try {
-      const res = (await window.pivis.invoke("session.sendCommand", {
+      const res = (await invokeSessionCommand(
         sessionId,
-        command: {
+        {
           type: "navigate_tree",
           targetId,
           summarize: get().summarizeOnSwitch || undefined,
         },
-      })) as { success: boolean; error?: string; data?: NavigateTreeData };
+        runtime,
+        { sourceText: `Navigate conversation tree to ${targetId}` },
+      )) as { success: boolean; error?: string; data?: NavigateTreeData };
+      if (!runtimeIsCurrent(sessionId, runtime)) return;
 
       if (!res.success) {
         // Defensive — the navigate command failing mid-flight should
@@ -194,6 +220,7 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
         sessionId,
         entries: branch,
       })) as TranscriptBlock[];
+      if (!runtimeIsCurrent(sessionId, runtime)) return;
       useSessionsStore
         .getState()
         .seedHistory(sessionId, { blocks: transcript, startIndex: 0, total: transcript.length });
@@ -206,17 +233,19 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
       // level (only agent.state.messages), so those need no reconcile;
       // token stats DO track the branch (review S4, corrected).
       try {
-        const statsRes = (await window.pivis.invoke("session.sendCommand", {
+        const statsRes = (await invokeSessionCommand(
           sessionId,
-          command: { type: "get_session_stats" },
-        })) as { success: boolean; data?: SessionStats };
-        if (statsRes.success && statsRes.data) {
+          { type: "get_session_stats" },
+          runtime,
+        )) as { success: boolean; data?: SessionStats };
+        if (statsRes.success && statsRes.data && runtimeIsCurrent(sessionId, runtime)) {
           useSessionsStore.getState().setStats(sessionId, statsRes.data);
         }
       } catch {
         // Stats refresh is best-effort — don't block the navigation.
       }
 
+      if (!runtimeIsCurrent(sessionId, runtime)) return;
       useSessionsStore.getState().addToast(sessionId, "Switched to selected branch", "success");
       set({ navigating: false, open: false });
     } catch (err) {
@@ -235,10 +264,14 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
     const sessionId = get().sessionId;
     if (!sessionId) return;
     try {
-      const res = (await window.pivis.invoke("session.sendCommand", {
+      const runtime = currentRuntime(sessionId);
+      if (!runtime) throw new Error("Session runtime is unavailable");
+      const res = (await invokeSessionCommand(
         sessionId,
-        command: { type: "set_label", targetId, label },
-      })) as { success: boolean; error?: string };
+        { type: "set_label", targetId, label },
+        runtime,
+      )) as { success: boolean; error?: string };
+      if (!runtimeIsCurrent(sessionId, runtime)) return;
       if (!res.success) {
         useSessionsStore
           .getState()
@@ -261,22 +294,21 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
     if (!sessionId) return;
     let res: { success: boolean; error?: string; data?: GetTreeData };
     try {
-      res = (await window.pivis.invoke("session.sendCommand", {
-        sessionId,
-        command: { type: "get_tree" },
-      })) as { success: boolean; error?: string; data?: GetTreeData };
+      const runtime = currentRuntime(sessionId);
+      if (!runtime) throw new Error("Session runtime is unavailable");
+      res = (await invokeSessionCommand(sessionId, { type: "get_tree" }, runtime)) as {
+        success: boolean;
+        error?: string;
+        data?: GetTreeData;
+      };
+      if (!runtimeIsCurrent(sessionId, runtime)) return;
     } catch (err) {
-      // A THROWN command is NEVER a capability gap. Gaps come back as a
-      // resolved response — either `data.unsupported` (host: pi too old for
-      // getTree) or `success:false` "Unknown command: get_tree" (pi --mode
-      // rpc fallback). A throw here is a transient — the host process is
-      // restarting (after /reload or idle-eviction-and-reactivation), a
-      // command arrived during the activation window, or an IPC hiccup.
-      // Show the REAL error in the retryable "error" phase; the overlay
-      // auto-recovers when the session goes ready again (TreeViewerHost),
-      // and re-submitting /tree re-runs refresh. The old code mapped every
-      // throw to the permanent "unsupported" message, which is why a
-      // transient stuck the viewer — even through /reload.
+      // A thrown command is never a capability gap. Capability gaps return a
+      // resolved unsupported response. A throw here is transient — the host
+      // may be restarting, activation may still be in progress, or IPC may
+      // have failed. Show the real error in the retryable "error" phase; the
+      // overlay recovers when the session is ready again and `/tree` retries
+      // refresh.
       set({
         phase: "error",
         errorMessage: err instanceof Error ? err.message : String(err),
@@ -284,10 +316,8 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
       return;
     }
     if (!res.success) {
-      // `pi --mode rpc` fallback resolves with success:false "Unknown
-      // command: get_tree" — a genuine capability gap (no SDK host). The
-      // host path never reaches here: it returns success:true with
-      // data.unsupported, or throws (handled above).
+      // A resolved failure is a capability gap. The host reports supported
+      // runtimes with `data.unsupported`; thrown failures are handled above.
       set({
         phase: "unsupported",
         errorMessage: UNSUPPORTED_MESSAGE,

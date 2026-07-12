@@ -89,6 +89,21 @@ describe("uiContext dialog return-value contract", () => {
     ).toBeUndefined();
   });
 
+  it("registers dialog custody with the lifecycle UI tracker", async () => {
+    const trackBlockingUi = vi.fn((promise) => promise);
+    const ui = createUIContext({
+      theme: {},
+      panelBridge: {},
+      createDialog: vi.fn(async () => ({ value: "tracked" })),
+      sendToMain: vi.fn(),
+      trackBlockingUi,
+      tuiModules: {},
+    }).context;
+
+    await expect(ui.input("Tracked")).resolves.toBe("tracked");
+    expect(trackBlockingUi).toHaveBeenCalledTimes(1);
+  });
+
   it("passes the right method + args through to createDialog", async () => {
     const createDialog = vi.fn(async () => ({ value: "x" }));
     const ui = createUIContext({
@@ -474,6 +489,72 @@ describe("unified TUI: setWidget factory routing", () => {
   });
 });
 
+describe("unified TUI: authoritative submit draft", () => {
+  it("retains submitted text until custody and preserves concurrent typing as a conflict", () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory());
+
+    h.editor.onSubmit("submitted draft");
+    const id = lastSubmitId(h.sendToMain);
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 0,
+      text: "submitted draft",
+    });
+
+    expect(
+      h.bundle.state.applyEditorPatch({ baseRevision: 0, revision: 1, text: "new local text" }),
+    ).toMatchObject({ accepted: true, revision: 1 });
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      text: "submitted draft",
+      conflictText: "new local text",
+    });
+
+    h.editor.getText.mockReturnValue("new local text");
+    h.unified.resolveSubmit(id, { ok: false, bailed: true });
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 1,
+      text: "new local text",
+      conflictText: "submitted draft",
+    });
+  });
+
+  it("replicates unsent attachments with revisioned editor patches", () => {
+    const h = makeHarness();
+    const attachments = [
+      {
+        kind: "image",
+        name: "diagram.png",
+        path: "/tmp/diagram.png",
+        dataUrl: "data:image/png;base64,x",
+      },
+    ];
+
+    expect(
+      h.bundle.state.applyEditorPatch({
+        baseRevision: 0,
+        revision: 1,
+        text: "draft",
+        attachments,
+      }),
+    ).toMatchObject({ accepted: true, attachments });
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 1,
+      text: "draft",
+      attachments,
+    });
+  });
+
+  it("clears the authoritative pending draft only after custody", () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory());
+    h.editor.onSubmit("accepted draft");
+    expect(h.bundle.state.editorSnapshot().text).toBe("accepted draft");
+
+    h.unified.resolveSubmit(lastSubmitId(h.sendToMain), { ok: true });
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({ revision: 1, text: "" });
+  });
+});
+
 describe("unified TUI: onTerminalInput (pre-editor input chain)", () => {
   it("buffers a handler until the first factory widget, then attaches it; unsubscribe detaches", () => {
     const h = makeHarness();
@@ -519,6 +600,24 @@ describe("unified TUI: onTerminalInput (pre-editor input chain)", () => {
 });
 
 describe("unified TUI: editor submit + guard bail-restore", () => {
+  it("onSubmit sends the authoritative editor revision with the text", async () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory());
+    h.editor.getExpandedText.mockReturnValue("hello world");
+    for (const listener of h.tui.inputListeners) listener("d");
+    await Promise.resolve();
+
+    h.editor.onSubmit("hello world");
+
+    expect(h.sendToMain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "unified_submit_request",
+        text: "hello world",
+        editorRevision: 1,
+      }),
+    );
+  });
+
   it("onSubmit sends a unified_submit_request carrying the text", () => {
     const h = makeHarness();
     h.context.setWidget("k", makeFactory());
@@ -552,6 +651,21 @@ describe("unified TUI: editor submit + guard bail-restore", () => {
     h.editor.getText.mockReturnValue("new typing"); // user typed after submit
     h.unified.resolveSubmit(lastSubmitId(h.sendToMain), { ok: false, bailed: true });
     expect(h.editor.setText).not.toHaveBeenCalled();
+  });
+
+  it("preserves a pending submit through renderer-loss disposal and restores it on bail", () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory());
+    h.editor.onSubmit("reload-safe prompt");
+    const id = lastSubmitId(h.sendToMain);
+
+    h.unified.dispose({ preservePendingSubmits: true });
+    expect(h.bundle.state.pendingUnifiedSubmissions()).toEqual([
+      { id, text: "reload-safe prompt", revision: 0 },
+    ]);
+    h.unified.resolveSubmit(id, { ok: false, bailed: true });
+
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({ text: "reload-safe prompt" });
   });
 
   it("a resolveSubmit for an id cleared by explicit dispose is a no-op (late reply after teardown)", () => {
@@ -604,9 +718,45 @@ describe("unified TUI: clipboard image paste (input-listener driven)", () => {
     expect(h.editor.insertTextAtCursor).toHaveBeenCalledTimes(1);
     const inserted = h.editor.insertTextAtCursor.mock.calls[0][0];
     expect(inserted).toMatch(/pi-vis-clipboard-.*\.png$/);
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({ revision: 1, text: inserted });
     // clean up the real temp file the resolver wrote to os.tmpdir()
     try {
       fs.unlinkSync(inserted);
+    } catch {
+      /* already gone */
+    }
+  });
+
+  it("preserves a clipboard image separately when the editor changed during the read", () => {
+    const h = makeHarness();
+    h.context.setWidget("k", makeFactory());
+    h.setKbMatches((_data, action) => action === "app.clipboard.pasteImage");
+    for (const l of h.tui.inputListeners) l("\x1bv");
+    const id = lastClipboardId(h.sendToMain);
+    expect(
+      h.bundle.state.applyEditorPatch({
+        baseRevision: 0,
+        revision: 1,
+        text: "newer draft",
+        attachments: [],
+      }),
+    ).toMatchObject({ accepted: true });
+
+    h.unified.resolveClipboardImage(id, { bytes: PNG_1X1, mimeType: "image/png" });
+
+    expect(h.editor.insertTextAtCursor).not.toHaveBeenCalled();
+    const snapshot = h.bundle.state.editorSnapshot();
+    expect(snapshot).toMatchObject({
+      revision: 2,
+      text: "newer draft",
+      conflictText: expect.stringMatching(/pi-vis-clipboard-.*\.png$/),
+      attachments: [expect.objectContaining({ kind: "file", path: expect.any(String) })],
+    });
+    expect(h.bundle.state.catalogSnapshot().notifications).toContainEqual(
+      expect.objectContaining({ type: "warning" }),
+    );
+    try {
+      fs.unlinkSync(snapshot.attachments[0].path);
     } catch {
       /* already gone */
     }
@@ -623,18 +773,28 @@ describe("unified TUI: clipboard image paste (input-listener driven)", () => {
     expect(h.editor.insertTextAtCursor).not.toHaveBeenCalled();
   });
 
-  it("a clipboard reply after teardown is a no-op", () => {
+  it("preserves a clipboard reply that arrives after its TUI generation retired", () => {
     const h = makeHarness();
     h.context.setWidget("k", makeFactory());
     h.setKbMatches((_data, action) => action === "app.clipboard.pasteImage");
     for (const l of h.tui.inputListeners) l("\x1bv");
     const id = lastClipboardId(h.sendToMain);
-    h.context.setWidget("k", undefined); // teardown clears pendingClipboardReads
+    h.context.setWidget("k", undefined);
 
-    expect(() =>
-      h.unified.resolveClipboardImage(id, { bytes: PNG_1X1, mimeType: "image/png" }),
-    ).not.toThrow();
+    h.unified.resolveClipboardImage(id, { bytes: PNG_1X1, mimeType: "image/png" });
+
     expect(h.editor.insertTextAtCursor).not.toHaveBeenCalled();
+    const snapshot = h.bundle.state.editorSnapshot();
+    expect(snapshot).toMatchObject({
+      revision: 1,
+      conflictText: expect.stringMatching(/pi-vis-clipboard-.*\.png$/),
+      attachments: [expect.objectContaining({ path: expect.any(String) })],
+    });
+    try {
+      fs.unlinkSync(snapshot.attachments[0].path);
+    } catch {
+      /* already gone */
+    }
   });
 });
 
@@ -743,6 +903,34 @@ describe("unified TUI: editor bridges", () => {
     expect(h.context.getEditorText()).toBe("expanded!");
   });
 
+  it("clears only a revision-matched editor after submission custody is acknowledged", () => {
+    const h = makeHarness();
+    h.context.setEditorText("submitted");
+
+    expect(
+      h.bundle.state.acceptEditorSubmission({
+        intentId: "accepted",
+        editorRevision: 1,
+        text: "submitted",
+      }),
+    ).toBe(true);
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 2,
+      text: "",
+      attachments: [],
+    });
+
+    h.context.setEditorText("new typing");
+    expect(
+      h.bundle.state.acceptEditorSubmission({
+        intentId: "stale",
+        editorRevision: 2,
+        text: "submitted",
+      }),
+    ).toBe(false);
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({ revision: 3, text: "new typing" });
+  });
+
   it("setEditorText writes to the unified editor when present, else falls back to sendToMain", () => {
     const h = makeHarness();
     h.context.setEditorText("fallback"); // no TUI yet
@@ -755,10 +943,116 @@ describe("unified TUI: editor bridges", () => {
     expect(h.editor.setText).toHaveBeenCalledWith("direct");
   });
 
-  it("pasteToEditor is a safe no-op when no unified TUI exists", () => {
+  it("pasteToEditor revision-replicates text when the native Composer is active", () => {
     const h = makeHarness();
-    expect(() => h.context.pasteToEditor("hi")).not.toThrow();
+    h.context.pasteToEditor("hi");
+
     expect(h.editor.handleInput).not.toHaveBeenCalled();
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({ revision: 1, text: "hi" });
+    expect(h.sendToMain).toHaveBeenCalledWith(
+      expect.objectContaining({ method: "set_editor_text", text: "hi" }),
+    );
+    expect(
+      h.bundle.state.applyEditorPatch({
+        baseRevision: 0,
+        revision: 1,
+        text: "newer local draft",
+        attachments: [],
+      }),
+    ).toMatchObject({
+      accepted: false,
+      revision: 1,
+      text: "hi",
+      conflictText: "newer local draft",
+    });
+  });
+
+  it("setEditorText preserves an attachment-only rejected local conflict", () => {
+    const h = makeHarness();
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 1,
+      text: "extension original",
+      attachments: [],
+    });
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 2,
+      text: "",
+      attachments: [{ kind: "file", name: "local.txt" }],
+    });
+
+    h.context.setEditorText("extension replacement");
+
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 2,
+      text: "extension replacement",
+      conflictText: "",
+      conflictAttachments: [{ kind: "file", name: "local.txt" }],
+    });
+  });
+
+  it("pasteToEditor preserves an attachment-only rejected local conflict", () => {
+    const h = makeHarness();
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 1,
+      text: "extension original",
+      attachments: [],
+    });
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 2,
+      text: "",
+      attachments: [{ kind: "file", name: "local.txt" }],
+    });
+
+    h.context.pasteToEditor(" pasted");
+
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      revision: 2,
+      text: "extension original pasted",
+      conflictText: "",
+      conflictAttachments: [{ kind: "file", name: "local.txt" }],
+    });
+  });
+
+  it("retains every deduplicated recovery conflict candidate", () => {
+    const h = makeHarness();
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 1,
+      text: "authority",
+      attachments: [],
+    });
+    h.bundle.state.applyEditorPatch({
+      baseRevision: 0,
+      revision: 2,
+      text: "primary",
+      attachments: [{ kind: "file", name: "primary.txt" }],
+      alternateConflictText: "alternate",
+      alternateConflictAttachments: [{ kind: "file", name: "alternate.txt" }],
+      additionalConflictCandidates: [
+        {
+          text: "additional",
+          attachments: [{ kind: "file", name: "additional.txt" }],
+        },
+      ],
+    });
+
+    expect(h.bundle.state.editorSnapshot()).toMatchObject({
+      text: "authority",
+      conflictText: "primary",
+      conflictAttachments: [{ kind: "file", name: "primary.txt" }],
+      alternateConflictText: "alternate",
+      alternateConflictAttachments: [{ kind: "file", name: "alternate.txt" }],
+      additionalConflictCandidates: [
+        {
+          text: "additional",
+          attachments: [{ kind: "file", name: "additional.txt" }],
+        },
+      ],
+    });
   });
 
   it("pasteToEditor feeds the editor a bracketed-paste sequence when a TUI exists", () => {

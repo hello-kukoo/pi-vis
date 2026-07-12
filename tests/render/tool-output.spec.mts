@@ -163,6 +163,35 @@ test.describe("tool output detail UI", () => {
     await expect(card.locator(".tool-card__output-line").first()).toContainText("preview-line-001");
     await expect.poll(() => card.locator(".tool-card__output-line").count()).toBeLessThan(90);
 
+    await page.evaluate(() => {
+      const target = window as unknown as {
+        __clipboardWrites?: Array<{ text: string }>;
+        pivis: {
+          invoke: (channel: string, args?: unknown) => Promise<unknown>;
+        };
+      };
+      target.__clipboardWrites = [];
+      const originalInvoke = target.pivis.invoke;
+      target.pivis.invoke = (channel, args) => {
+        if (channel === "clipboard.writeText") {
+          target.__clipboardWrites?.push(args as { text: string });
+          return Promise.resolve({ ok: true });
+        }
+        return originalInvoke(channel, args);
+      };
+    });
+    await card.getByRole("button", { name: "Copy all" }).click();
+    await expect(card.getByRole("button", { name: "Copied" })).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __clipboardWrites?: Array<{ text: string }> })
+              .__clipboardWrites?.[0]?.text,
+        ),
+      )
+      .toContain("preview-line-001");
+
     await outputRegion.evaluate((el) => {
       el.scrollTop = el.scrollHeight;
     });

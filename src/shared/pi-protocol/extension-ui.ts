@@ -3,6 +3,9 @@ import { z } from "zod";
 const BaseUiRequest = z.object({
   type: z.literal("extension_ui_request"),
   id: z.string(),
+  operationId: z.string().optional(),
+  hostInstanceId: z.string().uuid().optional(),
+  sessionEpoch: z.number().int().nonnegative().optional(),
 });
 
 export const SelectUiRequestSchema = BaseUiRequest.extend({

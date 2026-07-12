@@ -195,63 +195,91 @@ export function createTrustResolver(pi, agentDir, cwd, promptChoice) {
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
-// pi shares the active Theme across module loaders via a globalThis symbol
-// (see theme.js: the exported `theme` Proxy just reads globalThis[THEME_KEY]).
-// Reading that global ourselves — after the PUBLIC initTheme() populates it —
-// gives us the EXACT object every extension uses via ctx.ui.theme.fg(...),
-// with ZERO private imports (the previous version deep-imported theme.js).
-// The key is the package name, stable across versions; the old key is a
-// fallback for pre-rename pi builds.
-const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
-const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
+const THEME_FG_ROLES = [
+  "accent",
+  "border",
+  "borderAccent",
+  "borderMuted",
+  "success",
+  "error",
+  "warning",
+  "muted",
+  "dim",
+  "text",
+  "thinkingText",
+  "userMessageText",
+  "customMessageText",
+  "customMessageLabel",
+  "toolTitle",
+  "toolOutput",
+  "mdHeading",
+  "mdLink",
+  "mdLinkUrl",
+  "mdCode",
+  "mdCodeBlock",
+  "mdCodeBlockBorder",
+  "mdQuote",
+  "mdQuoteBorder",
+  "mdHr",
+  "mdListBullet",
+  "toolDiffAdded",
+  "toolDiffRemoved",
+  "toolDiffContext",
+  "syntaxComment",
+  "syntaxKeyword",
+  "syntaxFunction",
+  "syntaxVariable",
+  "syntaxString",
+  "syntaxNumber",
+  "syntaxType",
+  "syntaxOperator",
+  "syntaxPunctuation",
+  "thinkingOff",
+  "thinkingMinimal",
+  "thinkingLow",
+  "thinkingMedium",
+  "thinkingHigh",
+  "thinkingXhigh",
+  "thinkingMax",
+  "bashMode",
+];
+const THEME_BG_ROLES = [
+  "selectedBg",
+  "userMessageBg",
+  "customMessageBg",
+  "toolPendingBg",
+  "toolSuccessBg",
+  "toolErrorBg",
+];
 
 /**
- * Initialize the theme for extension use and return the active Theme.
- *
- * initTheme() is a public export; it loads the named (or default) theme and
- * stores it on globalThis. Extensions read it via the `theme` Proxy, which is
- * just a view onto that same global — so returning the global here hands
- * ctx.ui.theme the identical instance with no private module import.
+ * Initialize Pi's own theme through its public API and return a complete local
+ * neutral Theme for the extension context. Pi's public root has no theme
+ * getter, so reading its private singleton is deliberately forbidden.
  */
 export function initHostTheme(pi, themeName) {
   pi.initTheme(themeName);
-  const theme = globalThis[THEME_KEY] ?? globalThis[THEME_KEY_OLD];
-  if (!theme) {
-    throw new Error("Theme not initialized: initTheme() did not populate the global theme.");
-  }
-  return theme;
+  const fg = Object.fromEntries(THEME_FG_ROLES.map((role) => [role, 7]));
+  const bg = Object.fromEntries(THEME_BG_ROLES.map((role) => [role, 0]));
+  return new pi.Theme(fg, bg, "256color");
 }
 
 /**
- * Install a pi `Theme` built from STABLE per-role ANSI palette INDICES as pi's
- * ACTIVE theme singleton, so every `ctx.ui.theme.fg(role)` and all pi-tui
- * rendering emit role-identity bytes (`\x1b[38;5;N m`) rather than baked RGB.
- * The RENDERER resolves each index against the active colorscheme at paint
- * time (xterm `extendedAnsi` + AnsiText's index→token map), so a scheme change
- * recolors every cell — including ones already in the buffer — with zero
- * re-emit and zero host involvement.
- *
- * Uses ONLY public surface: `Theme` is a public export, so `new pi.Theme(...)`
- * constructs an instance the same way pi's own `createTheme` does; then we
- * write it to the SAME `globalThis` symbol `initHostTheme` reads (and that pi's
- * `theme` Proxy forwards to), which is runtime symbol access — not a private
- * module import (host-imports.test.ts allows it). `pi.setThemeInstance()` would
- * do this too but is NOT on pi's public index, so the symbol write is the
- * sanctioned equivalent.
- *
- * Because the per-role VALUES are numbers, pi's `fgAnsi`/`bgAnsi` takes the
- * numeric branch and emits a stable indexed escape (the `mode` arg is unused
- * for numeric inputs) — the color is never baked into the byte stream.
- *
- * @param {object} pi        - pi's public module (from importPi).
- * @param {object} fgColors  - pi role → stable ANSI palette index (foregrounds).
- * @param {object} bgColors  - pi role → stable ANSI palette index (backgrounds).
- * @returns {object} the installed Theme instance (also stored on the global so
- *   extensions/pi-tui read it via `ctx.ui.theme`).
+ * Build a local pi Theme from stable ANSI role indices. If Pi's PUBLIC root
+ * exports a setter, install it. Otherwise return an explicit capability
+ * failure together with the usable local theme; callers must surface the
+ * diagnostic and must not mutate undocumented global symbols.
  */
 export function applyPiVisTheme(pi, fgColors, bgColors) {
   const theme = new pi.Theme(fgColors, bgColors, "truecolor");
-  globalThis[THEME_KEY] = theme;
-  globalThis[THEME_KEY_OLD] = theme;
-  return theme;
+  if (typeof pi.setThemeInstance === "function") {
+    pi.setThemeInstance(theme);
+    return { success: true, theme };
+  }
+  return {
+    success: false,
+    theme,
+    error:
+      "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.",
+  };
 }

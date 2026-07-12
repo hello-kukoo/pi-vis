@@ -8,7 +8,8 @@ import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useVirtualList } from "../../hooks/useVirtualList.js";
 import type { PickerRequest } from "../../lib/commands/execute.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
-import { useSessionsStore } from "../../stores/sessions-store.js";
+import { invokeSessionCommand } from "../../lib/session-command.js";
+import { sessionMatchesRuntime, useSessionsStore } from "../../stores/sessions-store.js";
 import { FadeText } from "../common/FadeText.js";
 import "./AppPickerHost.css";
 
@@ -61,6 +62,23 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
   useEscapeClaim(!!picker);
 
   if (!picker) return null;
+  const pickerRuntime =
+    picker.expectedHostInstanceId && picker.expectedSessionEpoch !== undefined
+      ? {
+          hostInstanceId: picker.expectedHostInstanceId,
+          sessionEpoch: picker.expectedSessionEpoch,
+        }
+      : undefined;
+  const requirePickerRuntime = () => {
+    if (!pickerRuntime) throw new Error("Picker has no originating runtime identity");
+    return pickerRuntime;
+  };
+  const pickerSlotIsCurrent = () =>
+    useSessionsStore.getState().sessions.get(sessionId)?.pendingPicker === picker;
+  const pickerRuntimeIsCurrent = () =>
+    !!pickerRuntime &&
+    pickerSlotIsCurrent() &&
+    sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), pickerRuntime);
 
   // The picker sub-components are mounted when a picker is active. They
   // each receive the same close-on-cancel pattern.
@@ -72,7 +90,8 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
           {...(picker.search !== undefined ? { search: picker.search } : {})}
           onClose={() => closePicker(sessionId)}
           onPick={async (model) => {
-            const res = await applyModelChange(sessionId, model);
+            const res = await applyModelChange(sessionId, model, pickerRuntime);
+            if (!pickerRuntimeIsCurrent()) return;
             if (res.ok) {
               addToast(sessionId, `Model: ${modelDisplayName(model)}`);
             } else {
@@ -87,23 +106,44 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
           messages={picker.messages}
           onClose={() => closePicker(sessionId)}
           onPick={async (entryId) => {
-            const res = (await window.pivis.invoke("session.sendCommand", {
+            const res = (await invokeSessionCommand(
               sessionId,
-              command: { type: "fork", entryId },
-            })) as {
+              { type: "fork", entryId },
+              requirePickerRuntime(),
+              { sourceText: "/fork" },
+            )) as {
               success: boolean;
               data?: { text?: string; cancelled?: boolean };
               error?: string;
+              successorIdentity?: { hostInstanceId: string; sessionEpoch: number };
             };
             if (!res.success) {
+              if (!pickerRuntimeIsCurrent()) return;
               addToast(sessionId, res.error ?? "Failed to fork", "error");
               closePicker(sessionId);
               return;
             }
             if (res.data?.cancelled) {
-              closePicker(sessionId);
+              if (pickerRuntimeIsCurrent()) closePicker(sessionId);
               return;
             }
+            const successor = res.successorIdentity;
+            if (!successor) {
+              addToast(sessionId, "Fork completed without a correlated successor runtime", "error");
+              return;
+            }
+            const resynced = await window.pivis.invoke("session.runtimeResync", { sessionId });
+            if (
+              resynced.hostInstanceId !== successor.hostInstanceId ||
+              resynced.sessionEpoch !== successor.sessionEpoch ||
+              !pickerSlotIsCurrent()
+            )
+              return;
+            useSessionsStore.getState().applyRuntimeState(sessionId, resynced);
+            if (
+              !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), successor)
+            )
+              return;
             // TUI prefills the editor with the forked-from text. The
             // fileChanged event (emitted by main) takes care of the
             // transcript reset and tab re-pointing; we only need to
@@ -125,6 +165,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
           sessions={picker.sessions}
           onClose={() => closePicker(sessionId)}
           onPick={async (target) => {
+            if (!pickerRuntimeIsCurrent()) return;
             // Focus an existing tab if the file is already open, else
             // open a new tab. `openSessionTab` returns the id either way.
             const liveTab = Array.from(useSessionsStore.getState().sessions.values()).find(
@@ -144,6 +185,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
               return;
             }
             const id = await openSessionTab(workspacePath, target.filePath, { focus: true });
+            if (!pickerSlotIsCurrent()) return;
             if (id) setActiveSession(id);
             closePicker(sessionId);
           }}
@@ -156,10 +198,12 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
           onClose={() => closePicker(sessionId)}
           onApply={async (enabledIds, persist) => {
             const commandType = persist ? "save_scoped_models" : "set_scoped_models";
-            const res = (await window.pivis.invoke("session.sendCommand", {
+            const res = (await invokeSessionCommand(
               sessionId,
-              command: { type: commandType, enabledIds },
-            })) as { success: boolean; error?: string };
+              { type: commandType, enabledIds },
+              requirePickerRuntime(),
+            )) as { success: boolean; error?: string };
+            if (!pickerRuntimeIsCurrent()) return;
             if (!res.success) {
               addToast(sessionId, res.error ?? "Failed to update model scope", "error");
               return;
@@ -173,8 +217,8 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
             // dropdown reflects the new scope live (mirrors pi's
             // getAvailableModels returning the scoped subset). Best-effort:
             // refreshAvailableModels swallows errors.
-            await useSessionsStore.getState().refreshAvailableModels(sessionId);
-            closePicker(sessionId);
+            await useSessionsStore.getState().refreshAvailableModels(sessionId, pickerRuntime);
+            if (pickerRuntimeIsCurrent()) closePicker(sessionId);
           }}
         />
       )}
@@ -183,10 +227,12 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
           providers={picker.providers}
           onClose={() => closePicker(sessionId)}
           onPick={async (provider) => {
-            const res = (await window.pivis.invoke("session.sendCommand", {
+            const res = (await invokeSessionCommand(
               sessionId,
-              command: { type: "logout_provider", provider: provider.id },
-            })) as { success: boolean; error?: string };
+              { type: "logout_provider", provider: provider.id },
+              requirePickerRuntime(),
+            )) as { success: boolean; error?: string };
+            if (!pickerRuntimeIsCurrent()) return;
             if (!res.success) {
               addToast(sessionId, res.error ?? "Failed to log out", "error");
               return;
@@ -201,19 +247,22 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
             // /model. Mirrors pi's modelRegistry.refresh() +
             // updateAvailableProviderCount() (the bridge already awaits
             // modelRegistry.refresh() inside logout_provider).
-            await useSessionsStore.getState().refreshAvailableModels(sessionId);
-            closePicker(sessionId);
+            await useSessionsStore.getState().refreshAvailableModels(sessionId, pickerRuntime);
+            if (pickerRuntimeIsCurrent()) closePicker(sessionId);
           }}
         />
       )}
       {picker.kind === "trust" && (
         <TrustPicker
           sessionId={sessionId}
+          runtime={requirePickerRuntime()}
           cwd={picker.cwd}
           savedDecision={picker.savedDecision}
           projectTrusted={picker.projectTrusted}
           options={picker.options}
-          onClose={() => closePicker(sessionId)}
+          onClose={() => {
+            if (pickerSlotIsCurrent()) closePicker(sessionId);
+          }}
         />
       )}
     </div>
@@ -903,6 +952,7 @@ function LogoutPicker({
 // pi's TUI, which likewise requires a restart.
 function TrustPicker({
   sessionId,
+  runtime,
   cwd,
   savedDecision,
   projectTrusted,
@@ -910,6 +960,7 @@ function TrustPicker({
   onClose,
 }: {
   sessionId: SessionId;
+  runtime: { hostInstanceId: string; sessionEpoch: number };
   cwd: string;
   savedDecision: boolean | null;
   projectTrusted: boolean;
@@ -956,14 +1007,19 @@ function TrustPicker({
       }
       setSaving(true);
       try {
-        const res = (await window.pivis.invoke("session.sendCommand", {
+        const res = (await invokeSessionCommand(
           sessionId,
-          command: {
+          {
             type: "set_trust",
             updates: option.updates,
             trusted: option.trusted,
           },
-        })) as { success: boolean; error?: string };
+          runtime,
+        )) as { success: boolean; error?: string };
+        if (!sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)) {
+          setSaving(false);
+          return;
+        }
         if (!res.success) {
           addToast(sessionId, res.error ?? "Failed to save trust decision", "error");
           setSaving(false);
@@ -979,23 +1035,41 @@ function TrustPicker({
         // for this to take effect."). Refused mid-turn by the registry, but
         // /trust is user-initiated and unlikely to race a turn; a refusal
         // surfaces as a toast.
-        const reloadRes = (await window.pivis.invoke("session.reload", { sessionId })) as {
-          success: boolean;
-          error?: string;
-        };
-        if (!reloadRes.success) {
+        const reloadRes = await window.pivis.invoke("session.reload", {
+          sessionId,
+          request: {
+            requestId: crypto.randomUUID(),
+            intentId: crypto.randomUUID(),
+            expectedHostInstanceId: runtime.hostInstanceId,
+            expectedSessionEpoch: runtime.sessionEpoch,
+            sourceText: "/trust reload",
+          },
+        });
+        if (
+          !reloadRes.success ||
+          reloadRes.disposition !== "completed" ||
+          !reloadRes.successorIdentity
+        ) {
           addToast(
             sessionId,
             reloadRes.error ?? "Reload failed; trust applies on next session start.",
             "warning",
           );
+        } else {
+          const resynced = await window.pivis.invoke("session.runtimeResync", { sessionId });
+          if (
+            resynced.hostInstanceId === reloadRes.successorIdentity.hostInstanceId &&
+            resynced.sessionEpoch === reloadRes.successorIdentity.sessionEpoch
+          ) {
+            useSessionsStore.getState().applyRuntimeState(sessionId, resynced);
+          }
         }
       } catch (err) {
         addToast(sessionId, err instanceof Error ? err.message : String(err), "error");
         setSaving(false);
       }
     },
-    [options, saving, sessionId, addToast, closePicker],
+    [options, saving, sessionId, addToast, closePicker, runtime],
   );
 
   return (

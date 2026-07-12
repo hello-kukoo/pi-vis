@@ -30,6 +30,7 @@ import { AppUpdatePrompt } from "./components/updates/AppUpdatePrompt.js";
 import { UpdateProgress } from "./components/updates/UpdateProgress.js";
 import { useEscapeClaim } from "./hooks/useEscapeClaim.js";
 import { useGlobalEscapeInterrupt } from "./hooks/useGlobalEscapeInterrupt.js";
+import { RENDERER_GENERATION } from "./lib/renderer-generation.js";
 import { useAppUpdatesStore } from "./stores/app-updates-store.js";
 import { openDiffForSession, useDiffStore } from "./stores/diff-store.js";
 import { useSessionsStore } from "./stores/sessions-store.js";
@@ -40,9 +41,15 @@ import "./App.css";
 export function App(): React.ReactElement {
   useGlobalEscapeInterrupt();
   const activeSessionId = useSessionsStore((s) => s.activeSessionId);
+  const liveSessionIdsKey = useSessionsStore((s) => [...s.sessions.keys()].join("\u0000"));
   const setSessionStatus = useSessionsStore((s) => s.setSessionStatus);
   const applyEvents = useSessionsStore((s) => s.applyEvents);
+  const applyRuntimeState = useSessionsStore((s) => s.applyRuntimeState);
+  const applyTransitionBatch = useSessionsStore((s) => s.applyTransitionBatch);
+  const applySubmissionDisposition = useSessionsStore((s) => s.applySubmissionDisposition);
+  const applyQueueRestoration = useSessionsStore((s) => s.applyQueueRestoration);
   const addUiRequest = useSessionsStore((s) => s.addUiRequest);
+  const dismissUiRequest = useSessionsStore((s) => s.dismissUiRequest);
   const compact = useSessionsStore((s) => s.headerCompact);
   const handlePanelEvent = useSessionsStore((s) => s.handlePanelEvent);
   const handleUnifiedSubmitRequest = useSessionsStore((s) => s.handleUnifiedSubmitRequest);
@@ -370,8 +377,33 @@ export function App(): React.ReactElement {
       applyEvents(sessionId as SessionId, events);
     });
 
+    const unsubRuntime = window.pivis.on("session.runtimeState", ({ sessionId, state }) => {
+      applyRuntimeState(sessionId as SessionId, state);
+    });
+
+    const unsubTransition = window.pivis.on(
+      "session.transitionBatch",
+      ({ sessionId, records, state }) => {
+        applyTransitionBatch(sessionId as SessionId, records, state);
+      },
+    );
+
+    const unsubSubmission = window.pivis.on(
+      "session.submissionDisposition",
+      ({ sessionId, result }) => {
+        applySubmissionDisposition(sessionId as SessionId, result);
+      },
+    );
+
+    const unsubQueueRestoration = window.pivis.on("session.queueRestoration", (restoration) => {
+      applyQueueRestoration(restoration.sessionId as SessionId, restoration);
+    });
+
     const unsubUiReq = window.pivis.on("session.uiRequest", ({ sessionId, request }) => {
       addUiRequest(sessionId as SessionId, request);
+    });
+    const unsubUiAck = window.pivis.on("session.uiAcknowledged", ({ sessionId, operationId }) => {
+      dismissUiRequest(sessionId as SessionId, operationId);
     });
 
     const unsubStatus = window.pivis.on(
@@ -399,8 +431,24 @@ export function App(): React.ReactElement {
     // host can restore the editor on a guard bail.
     const unsubUnifiedSubmit = window.pivis.on(
       "session.unifiedSubmitRequest",
-      ({ sessionId, id, text }) => {
-        void handleUnifiedSubmitRequest(sessionId as SessionId, id, text);
+      ({
+        sessionId,
+        id,
+        text,
+        editorRevision,
+        submissionIntentId,
+        hostInstanceId,
+        sessionEpoch,
+      }) => {
+        void handleUnifiedSubmitRequest(
+          sessionId as SessionId,
+          id,
+          text,
+          editorRevision,
+          submissionIntentId,
+          hostInstanceId,
+          sessionEpoch,
+        );
       },
     );
 
@@ -410,9 +458,37 @@ export function App(): React.ReactElement {
     // reseeds the transcript, and refreshes the workspace session list.
     const unsubFileChanged = window.pivis.on(
       "session.fileChanged",
-      ({ sessionId, sessionFile, sessionName }) => {
+      ({ sessionId, hostInstanceId, sessionEpoch, sessionFile, sessionName }) => {
         void (async () => {
           const sid = sessionId as SessionId;
+          let current = useSessionsStore.getState().sessions.get(sid);
+          if (
+            current?.hostInstanceId !== hostInstanceId ||
+            current.sessionEpoch !== sessionEpoch ||
+            current.availability !== "available"
+          ) {
+            try {
+              const resynced = await window.pivis.invoke("session.runtimeResync", {
+                sessionId: sid,
+              });
+              if (
+                resynced.hostInstanceId !== hostInstanceId ||
+                resynced.sessionEpoch !== sessionEpoch ||
+                resynced.availability !== "available"
+              )
+                return;
+              useSessionsStore.getState().applyRuntimeState(sid, resynced);
+              current = useSessionsStore.getState().sessions.get(sid);
+            } catch {
+              return;
+            }
+          }
+          if (
+            current?.hostInstanceId !== hostInstanceId ||
+            current.sessionEpoch !== sessionEpoch ||
+            current.availability !== "available"
+          )
+            return;
           // Re-assert the session as active. Same sessionId re-points to the new
           // file, so activeSessionId is usually already correct — but explicitly
           // setting it clears any stale unreadStatus on the previously-active
@@ -422,7 +498,10 @@ export function App(): React.ReactElement {
           // Adopt the new file + reseed the transcript + refresh the workspace
           // session list. The single shared helper keeps this identical to the
           // Composer and unified-TUI submit paths (no drift).
-          await adoptSessionFileAndHydrate(sid, sessionFile, sessionName);
+          await adoptSessionFileAndHydrate(sid, sessionFile, sessionName, {
+            hostInstanceId,
+            sessionEpoch,
+          });
         })();
       },
     );
@@ -468,7 +547,12 @@ export function App(): React.ReactElement {
 
     return () => {
       unsubEvent();
+      unsubRuntime();
+      unsubTransition();
+      unsubSubmission();
+      unsubQueueRestoration();
       unsubUiReq();
+      unsubUiAck();
       unsubStatus();
       unsubFileChanged();
       unsubUpdateAvailable();
@@ -482,7 +566,12 @@ export function App(): React.ReactElement {
     };
   }, [
     applyEvents,
+    applyRuntimeState,
+    applyTransitionBatch,
+    applySubmissionDisposition,
+    applyQueueRestoration,
     addUiRequest,
+    dismissUiRequest,
     setSessionStatus,
     setActiveSession,
     adoptSessionFileAndHydrate,
@@ -490,6 +579,33 @@ export function App(): React.ReactElement {
     handlePanelEvent,
     handleUnifiedSubmitRequest,
   ]);
+
+  useEffect(() => {
+    const sessionIds = liveSessionIdsKey
+      ? liveSessionIdsKey.split("\u0000").map((id) => id as SessionId)
+      : [];
+    // Renderer generation is window-wide. Attach every live session so a
+    // background dialog/panel cannot remain blocked on the renderer that died.
+    for (const sid of sessionIds) {
+      void window.pivis
+        .invoke("session.rendererAttach", {
+          sessionId: sid,
+          rendererGeneration: RENDERER_GENERATION,
+        })
+        .then((state) => applyRuntimeState(sid, state))
+        .catch(() => {});
+    }
+    const onFocus = () => {
+      for (const sid of sessionIds) {
+        void window.pivis
+          .invoke("session.runtimeResync", { sessionId: sid })
+          .then((state) => applyRuntimeState(sid, state))
+          .catch(() => {});
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [liveSessionIdsKey, applyRuntimeState]);
 
   const handlePiRecheck = useCallback(async () => {
     const info = await window.pivis.invoke("pi.locate", undefined);

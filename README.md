@@ -76,23 +76,23 @@ npm run dist       # build + electron-builder (mac dmg/zip)
 
 ## Architecture
 
-- Every session runs the real pi agent in its own isolated subprocess — an SDK-direct session host (`resources/pi-session-host/`), falling back to `pi --mode rpc` if the host can't start — exact terminal parity, same extensions, same compaction
-- RPC protocol (fallback path): JSONL on stdin/stdout with correlated request IDs
-- Extension UI (select/confirm/input/editor dialogs, toasts, status segments, widgets) bridged from the session subprocess and rendered natively
-- Session files in `~/.pi/agent/sessions/` are enumerated for workspace history; the file's header `cwd` field is used for grouping (not directory-name encoding)
-- Settings: `~/Library/Application Support/pi-vis/settings.json` (overrideable via `PIVIS_SETTINGS_DIR` env var for tests)
+- Each live session runs in an SDK-direct host (`resources/pi-session-host/`) and has one `AgentSession` authority; there is no secondary RPC session transport.
+- The host publishes direct snapshots with identity, epoch, sequence, availability leases, queues, catalog, and editor revisions. Renderer state is a validated projection, not synthetic liveness.
+- Text/image submission has explicit dispositions and FIFO custody across compaction/navigation; ESC queue restoration, renderer generations, and UI/panel acknowledgements make handoffs recoverable.
+- The registry refuses activation at its process cap and uses a two-phase close checkpoint rather than evicting idle sessions.
+- Extension UI and pi-tui panels are bridged from the host and rendered natively.
+- Session files in `~/.pi/agent/sessions/` provide persisted history; headers group sessions by `cwd`.
 
 ## Key files
 
 | Path | Purpose |
 |------|---------|
-| `src/shared/pi-protocol/` | Zod schemas for every RPC command, event, response, extension-ui type |
-| `src/shared/ipc-contract.ts` | Typed IPC surface (renderer ↔ main) |
-| `src/main/pi/jsonl-stream.ts` | Byte-level JSONL parser (splits only on `\n`, never Unicode separators) |
-| `src/main/pi/pi-process.ts` | Single pi subprocess wrapper with correlated RPC |
-| `src/main/sessions/session-registry.ts` | SessionId → PiProcess lifecycle, blocks double-open |
-| `src/renderer/src/stores/transcript.ts` | Pure reducer: PiEvent → TranscriptBlock[] |
-| `tests/fixtures/fake-pi.mjs` | Scripted stand-in for real pi (for e2e tests) |
+| `resources/pi-session-host/state-authority.mjs` | Direct AgentSession snapshots, admission, custody, escape, and transitions |
+| `src/main/sessions/session-registry.ts` | Host lifecycle, leases, capacity, acknowledgements, and close checkpoints |
+| `src/shared/pi-protocol/runtime-state.ts` | Runtime state schemas |
+| `src/shared/ipc-contract.ts` | Typed renderer ↔ main IPC surface |
+| `src/renderer/src/stores/sessions-store.ts` | Renderer runtime projection and session UI state |
+| `tests/fixtures/fake-pi.mjs` | Version/update test executable |
 
 ## Acknowledgements
 

@@ -21,6 +21,7 @@ import { type LaunchedElectronApplication, launchElectron } from "./electron-lau
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FAKE_PI = join(__dirname, "../fixtures/fake-pi.mjs");
+const FAKE_SESSION_HOST = join(__dirname, "../fixtures/fake-session-host.mjs");
 const APP_ENTRY = join(__dirname, "../../out/main/index.js");
 
 interface Folders {
@@ -61,6 +62,7 @@ async function launchApp(
       PIVIS_SETTINGS_DIR: folders.settingsDir,
       FAKE_PI_SESSIONS_DIR: folders.piSessionsDir,
       PIVIS_SESSIONS_DIR: folders.piSessionsDir,
+      PIVIS_TEST_HOST_SCRIPT: FAKE_SESSION_HOST,
       ELECTRON_RENDERER_URL: undefined,
     },
   });
@@ -135,6 +137,7 @@ function setupRepoWithHugeDiff(workspaceDir: string): void {
 test.describe("Diff viewer", () => {
   test.beforeAll(() => {
     fs.chmodSync(FAKE_PI, 0o755);
+    fs.chmodSync(FAKE_SESSION_HOST, 0o755);
   });
 
   test("header button shows badge, opens viewer with 2 files; per-file section renders", async () => {

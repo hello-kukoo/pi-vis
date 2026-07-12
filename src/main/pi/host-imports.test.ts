@@ -10,7 +10,6 @@ import { describe, expect, it } from "vitest";
  *   - pi's public entry: `dist/index.js`
  *   - public pi-tui:      `@earendil-works/pi-tui/dist/index.js`
  *   - bundled undici:     `undici/index.js`
- * plus the public `globalThis[Symbol.for("…:theme")]` for the active Theme.
  *
  * It must NOT deep-import pi internals (`dist/core/**`, `dist/modes/**`, etc.).
  * Such imports are the fragility the architecture was designed to avoid: they
@@ -30,7 +29,14 @@ describe("pi-session-host import discipline", () => {
   const files = ["host.mjs", "bootstrap.mjs", "ui-context.mjs", "bridge.mjs"];
 
   // Private pi paths the host must never reference.
-  const forbidden = [/dist\/core\//, /dist\/modes\//, /\/core\/extensions/, /interactive\/theme/];
+  const forbidden = [
+    /dist\/core\//,
+    /dist\/modes\//,
+    /\/core\/extensions/,
+    /interactive\/theme/,
+    /Symbol\.for\([^)]*theme/i,
+    /globalThis\[[^\]]*theme/i,
+  ];
 
   for (const file of files) {
     it(`${file} references no private pi paths`, () => {

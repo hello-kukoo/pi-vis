@@ -36,16 +36,9 @@ function setStats(stats: SessionStats): void {
     workspacePath: "/tmp/project",
     status: "ready",
     transcript: createTranscriptState(),
-    isStreaming: false,
-    promptsInFlight: 0,
-    bashInFlight: 0,
-    interruptible: false,
-    retryPending: false,
-    agentGeneration: 0,
-    lastEndedAgentGeneration: 0,
-    streamingEpoch: 0,
-    queueEpoch: 0,
-    identityEpoch: 0,
+    availability: "unavailable",
+    sessionEpoch: 0,
+    editorRevision: 0,
     turnErrored: false,
     pendingDialogs: [],
     statusSegments: new Map(),
@@ -56,7 +49,7 @@ function setStats(stats: SessionStats): void {
     resumed: false,
     modelInitialized: true,
     stats,
-  } as SessionViewState;
+  } as unknown as SessionViewState;
 
   useSessionsStore.setState({ sessions: new Map([[sessionId, session]]) });
 }

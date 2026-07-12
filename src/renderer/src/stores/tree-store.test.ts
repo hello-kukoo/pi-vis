@@ -58,6 +58,39 @@ beforeEach(() => {
   const sess = useSessionsStore.getState();
   sess.createSession(SESSION_A, WORKSPACE);
   sess.setSessionStatus(SESSION_A, "ready");
+  sess.applyRuntimeState(SESSION_A, {
+    availability: "available",
+    hostInstanceId: "tree-host",
+    sessionEpoch: 1,
+    receivedAt: Date.now(),
+    snapshot: {
+      hostInstanceId: "tree-host",
+      sessionEpoch: 1,
+      snapshotSequence: 1,
+      capturedAt: Date.now(),
+      isStreaming: false,
+      isIdle: true,
+      isCompacting: false,
+      isRetrying: false,
+      retryAttempt: 0,
+      isBashRunning: false,
+      model: null,
+      thinkingLevel: "off",
+      sessionId: "wire-tree",
+      pendingMessageCount: 0,
+      steering: [],
+      followUp: [],
+      hostFacts: {
+        submitting: false,
+        actualCompaction: false,
+        navigation: false,
+        pendingDialogs: 0,
+        custodyCount: 0,
+      },
+      catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
+      editor: { revision: 0, text: "", attachments: [] },
+    },
+  });
   sess.setActiveSession(SESSION_A);
 });
 
@@ -111,14 +144,18 @@ describe("tree-store — open / refresh", () => {
 
     expect(calls[0]).toEqual({
       channel: "session.sendCommand",
-      payload: { sessionId: SESSION_A, command: { type: "get_tree" } },
+      payload: expect.objectContaining({
+        sessionId: SESSION_A,
+        command: { type: "get_tree" },
+        expectedHostInstanceId: "tree-host",
+        expectedSessionEpoch: 1,
+      }),
     });
   });
 
-  it("get_tree success:false (pi --mode rpc fallback) → phase 'unsupported' with the friendly message (review S2)", async () => {
-    // pi --mode rpc returns `Unknown command: get_tree` — a genuine
-    // capability gap (no SDK host), surfaced as success:false. Never show
-    // that raw string.
+  it("get_tree capability rejection → phase 'unsupported' with the friendly message (review S2)", async () => {
+    // An installed SDK without the public tree capability may return an
+    // unknown-command error. Never show that raw string.
     nextResponse = async () => ({
       success: false,
       error: "Unknown command: get_tree",
@@ -192,7 +229,39 @@ describe("tree-store — navigateTo", () => {
     await useTreeStore.getState().openTreeForSession(SESSION_A);
     calls.length = 0;
 
-    useSessionsStore.getState().setStreaming(SESSION_A, true);
+    useSessionsStore.getState().applyRuntimeState(SESSION_A, {
+      availability: "available",
+      hostInstanceId: "host-tree",
+      sessionEpoch: 1,
+      receivedAt: Date.now(),
+      snapshot: {
+        hostInstanceId: "host-tree",
+        sessionEpoch: 1,
+        snapshotSequence: 1,
+        capturedAt: Date.now(),
+        isStreaming: true,
+        isIdle: false,
+        isCompacting: false,
+        isRetrying: false,
+        retryAttempt: 0,
+        isBashRunning: false,
+        model: null,
+        thinkingLevel: "off",
+        sessionId: "wire-tree",
+        pendingMessageCount: 0,
+        steering: [],
+        followUp: [],
+        hostFacts: {
+          submitting: false,
+          actualCompaction: false,
+          navigation: false,
+          pendingDialogs: 0,
+          custodyCount: 0,
+        },
+        catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
+        editor: { revision: 0, text: "", attachments: [] },
+      },
+    });
 
     await useTreeStore.getState().navigateTo("u1");
 

@@ -7,8 +7,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
+import { invokeSessionCommand } from "../../lib/session-command.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
-import { gitRootForSession, useSessionsStore } from "../../stores/sessions-store.js";
+import {
+  gitRootForSession,
+  sessionMatchesRuntime,
+  useSessionsStore,
+} from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
 import { IconBranch, IconCheck, IconChevronDown } from "../common/icons.js";
@@ -60,7 +65,15 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   // Cold-aware gate. A boolean on purpose: starting→ready doesn't re-fire
   // effects, but cold→starting does. Sessions whose process is alive get
   // to drive their models/stats/get_state effects.
-  const live = session?.status === "starting" || session?.status === "ready";
+  const live =
+    session?.status === "ready" && session.availability === "available" && !!session.hostInstanceId;
+  const runtime = useMemo(
+    () =>
+      session?.hostInstanceId
+        ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
+        : undefined,
+    [session?.hostInstanceId, session?.sessionEpoch],
+  );
 
   // Seed the store with pi's authoritative model + thinking level for this
   // session, and (for brand-new sessions) apply the global last-used
@@ -87,15 +100,15 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   useEffect(() => {
     if (!live) return;
     const fetchStats = () => {
-      window.pivis
-        .invoke("session.sendCommand", {
-          sessionId,
-          command: { type: "get_session_stats" },
-        })
+      if (!runtime) return;
+      invokeSessionCommand(sessionId, { type: "get_session_stats" }, runtime)
         .then((res) => {
           if (res.success && res.data) {
             const parsed = SessionStatsSchema.safeParse(res.data);
-            if (parsed.success) {
+            if (
+              parsed.success &&
+              sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+            ) {
               const stats = parsed.data as SessionStats;
               setStats(sessionId, stats);
               if (stats.sessionFile) setSessionFile(sessionId, stats.sessionFile);
@@ -108,27 +121,29 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
     fetchStats();
     const interval = setInterval(fetchStats, 60_000);
     return () => clearInterval(interval);
-  }, [sessionId, live, setStats, setSessionFile]);
+  }, [sessionId, live, runtime, setStats, setSessionFile]);
 
   // Listen for agent_end to refresh stats
   useEffect(() => {
     return window.pivis.on("session.events", ({ sessionId: sid, events }) => {
       if (sid === sessionId && events.some((event) => event.type === "agent_end")) {
-        window.pivis
-          .invoke("session.sendCommand", {
-            sessionId,
-            command: { type: "get_session_stats" },
-          })
+        if (!runtime) return;
+        invokeSessionCommand(sessionId, { type: "get_session_stats" }, runtime)
           .then((res) => {
             if (res.success && res.data) {
               const parsed = SessionStatsSchema.safeParse(res.data);
-              if (parsed.success) setStats(sessionId, parsed.data as SessionStats);
+              if (
+                parsed.success &&
+                sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+              ) {
+                setStats(sessionId, parsed.data as SessionStats);
+              }
             }
           })
           .catch(() => {});
       }
     });
-  }, [sessionId, setStats]);
+  }, [sessionId, runtime, setStats]);
 
   // The model + thinking pickers (and their handlers) live in
   // <SessionControls> — this component only owns the name, the worktree chip,
@@ -143,10 +158,16 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   const handleRenameConfirm = useCallback(async () => {
     if (nameInput.trim()) {
       try {
-        await window.pivis.invoke("session.sendCommand", {
+        if (!runtime) throw new Error("Session runtime is unavailable");
+        const result = await invokeSessionCommand(
           sessionId,
-          command: { type: "set_session_name", name: nameInput.trim() },
-        });
+          { type: "set_session_name", name: nameInput.trim() },
+          runtime,
+        );
+        if (!result.success) throw new Error(result.error ?? "Failed to set session name");
+        if (!sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)) {
+          throw new Error("Session changed before rename settlement");
+        }
         setSessionName(sessionId, nameInput.trim());
         if (session?.workspacePath) {
           void refreshWorkspaceSessions(session.workspacePath);
@@ -156,7 +177,14 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
       }
     }
     setEditingName(false);
-  }, [nameInput, sessionId, setSessionName, refreshWorkspaceSessions, session?.workspacePath]);
+  }, [
+    nameInput,
+    sessionId,
+    setSessionName,
+    refreshWorkspaceSessions,
+    session?.workspacePath,
+    runtime,
+  ]);
 
   // ── Compact mode (responsive reflow) ───────────────────────────────
   const headerRef = useRef<HTMLDivElement>(null);
@@ -459,10 +487,18 @@ export function SessionControls({
       if (e.key !== "Escape") return;
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       if (e.isComposing || e.keyCode === 229) return;
-      // Preserve the model search field's two-step Escape behavior: its
-      // target handler clears a non-empty search first, then closes on the
-      // next Escape. React's preventDefault reaches this native bubble
-      // listener, so we only close if no inner control already handled it.
+      // Preserve the model search field's two-step Escape behavior even if a
+      // background runtime update briefly moved focus away from the search:
+      // non-empty search clears first; only the next Escape closes.
+      if (modelOpen && modelSearch) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setModelSearch("");
+        queueMicrotask(() => searchInputRef.current?.focus());
+        return;
+      }
+      // The focused input handles the same branch itself. React's
+      // preventDefault reaches this native bubble listener.
       if (e.defaultPrevented) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -471,7 +507,7 @@ export function SessionControls({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [modelOpen, thinkingOpen]);
+  }, [modelOpen, modelSearch, thinkingOpen]);
 
   const currentModelInfo = useMemo<ModelInfo | undefined>(
     () =>
@@ -570,12 +606,16 @@ export function SessionControls({
                 onKeyDown={(e) => {
                   switch (e.key) {
                     case "Escape":
-                      if (modelSearch) {
+                      // Read the input's current DOM value so a rapid
+                      // fill/type→Escape cannot observe a stale React closure
+                      // and close the entire picker instead of clearing first.
+                      if (e.currentTarget.value) {
                         setModelSearch("");
                       } else {
                         setModelOpen(false);
                       }
                       e.preventDefault();
+                      e.stopPropagation();
                       break;
                     case "ArrowDown":
                       e.preventDefault();

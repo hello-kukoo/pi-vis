@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { PI_COMMAND_POLICY } from "../../src/shared/pi-protocol/commands.ts";
 import { assertHostCapabilities, setupCommandBridge } from "./bridge.mjs";
 
 // The bridge translates pi-vis wire commands → pi SDK method calls. It is plain
@@ -6,6 +8,13 @@ import { assertHostCapabilities, setupCommandBridge } from "./bridge.mjs";
 // shape slips past tsc AND every other test — exactly the failure class the
 // Phase-1 capture effort was about. These tests pin the mapping with a fully
 // faked AgentSession/runtime.
+
+it("has an explicit bridge branch for every classified command", () => {
+  const source = fs.readFileSync(new URL("./bridge.mjs", import.meta.url), "utf8");
+  for (const commandType of Object.keys(PI_COMMAND_POLICY)) {
+    expect(source, `missing bridge case for ${commandType}`).toContain(`case "${commandType}"`);
+  }
+});
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────
 
@@ -15,7 +24,11 @@ function makeSession(overrides = {}) {
     model: { id: "claude-x", provider: "anthropic" },
     thinkingLevel: "medium",
     isStreaming: false,
+    isIdle: true,
     isCompacting: false,
+    isRetrying: false,
+    retryAttempt: 0,
+    isBashRunning: false,
     steeringMode: "off",
     followUpMode: "off",
     sessionFile: "/s/file.jsonl",
@@ -31,8 +44,19 @@ function makeSession(overrides = {}) {
     steer: vi.fn(async () => {}),
     followUp: vi.fn(async () => {}),
     abort: vi.fn(async () => {}),
+    abortCompaction: vi.fn(),
+    abortBranchSummary: vi.fn(),
+    abortRetry: vi.fn(),
+    clearQueue: vi.fn(() => ({})),
+    navigateTree: vi.fn(async () => ({ cancelled: false })),
     setModel: vi.fn(async () => {}),
+    cycleModel: vi.fn(async () => ({ model: { id: "next" }, thinkingLevel: "low" })),
     setThinkingLevel: vi.fn(() => {}),
+    cycleThinkingLevel: vi.fn(() => "high"),
+    setSteeringMode: vi.fn(() => {}),
+    setFollowUpMode: vi.fn(() => {}),
+    setAutoCompactionEnabled: vi.fn(() => {}),
+    setAutoRetryEnabled: vi.fn(() => {}),
     executeBash: vi.fn(async () => ({ output: "ok", exitCode: 0, cancelled: false })),
     abortBash: vi.fn(() => {}),
     compact: vi.fn(async () => {}),
@@ -50,7 +74,10 @@ function makeSession(overrides = {}) {
         { provider: "anthropic", id: "claude-x", name: "Claude X" },
       ]),
     },
-    extensionRunner: { getRegisteredCommands: vi.fn(() => []) },
+    extensionRunner: {
+      getCommand: vi.fn(() => undefined),
+      getRegisteredCommands: vi.fn(() => []),
+    },
     resourceLoader: { getSkills: vi.fn(() => ({ skills: [] })) },
     sessionManager: { getLeafId: vi.fn(() => "leaf-9") },
     settingsManager: { setEnabledModels: vi.fn(), getEnabledModels: vi.fn(() => undefined) },
@@ -73,7 +100,7 @@ function makeRuntime(session) {
 }
 
 /** Build a bridge + a `send` spy; return helpers to drive commands. */
-function setup(sessionOverrides) {
+function setup(sessionOverrides, bridgeOverrides = {}) {
   const session = makeSession(sessionOverrides);
   const runtime = makeRuntime(session);
   const send = vi.fn();
@@ -84,8 +111,9 @@ function setup(sessionOverrides) {
     uiContext: {},
     send,
     panelBridge,
+    ...bridgeOverrides,
   });
-  const { handleCommand } = bridge;
+  const { handleCommand, handleSubmit, handleReload, bindExtensions } = bridge;
   let nextId = 0;
   const run = async (command) => {
     const id = `cmd-${++nextId}`;
@@ -102,6 +130,9 @@ function setup(sessionOverrides) {
     send,
     panelBridge,
     interruptActiveOperation: bridge.interruptActiveOperation,
+    handleSubmit,
+    handleReload,
+    bindExtensions,
     run,
   };
 }
@@ -116,16 +147,129 @@ describe("setupCommandBridge — wiring", () => {
     expect(runtime.setBeforeSessionInvalidate).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards session events and synthetic streaming_state in-band", () => {
+  it("retires dialogs from the old extension generation at invalidation", () => {
+    const cancelDialogs = vi.fn();
+    const { runtime } = setup(undefined, { cancelDialogs });
+
+    runtime.setBeforeSessionInvalidate.mock.calls[0][0]();
+
+    expect(cancelDialogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects extension-action reload against fresh active host getters", async () => {
+    const { session, handleReload } = setup({ isIdle: false, isStreaming: true });
+
+    await expect(handleReload()).rejects.toThrow("current response");
+
+    expect(session.reload).not.toHaveBeenCalled();
+  });
+
+  it("cancels dialogs from the old extension generation during reload", async () => {
+    const cancelDialogs = vi.fn();
+    const { session, handleReload } = setup(undefined, { cancelDialogs });
+    session.reload.mockImplementationOnce(async ({ beforeSessionStart }) => {
+      await beforeSessionStart();
+    });
+
+    await handleReload();
+
+    expect(cancelDialogs).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes extension replacement actions through transition fencing", async () => {
+    const sendControl = vi.fn();
+    const { session, runtime, bindExtensions } = setup(undefined, { sendControl });
+    await bindExtensions(session);
+    const actions = session.bindExtensions.mock.calls[0][0].commandContextActions;
+
+    await actions.newSession({ parentSession: "/tmp/parent.jsonl" });
+
+    expect(runtime.newSession).toHaveBeenCalledWith({ parentSession: "/tmp/parent.jsonl" });
+    expect(sendControl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "transition_batch",
+        batch: expect.objectContaining({ terminalSnapshot: expect.any(Object) }),
+      }),
+    );
+  });
+
+  it("allows a command-context replacement to own its one active submission", async () => {
+    const { session, runtime, handleSubmit, bindExtensions } = setup();
+    await bindExtensions(session);
+    const actions = session.bindExtensions.mock.calls[0][0].commandContextActions;
+    runtime.newSession.mockImplementationOnce(async () => {
+      await runtime.setRebindSession.mock.calls[0][0](
+        makeSession({ sessionId: "extension-replacement" }),
+      );
+      return { cancelled: false };
+    });
+    session.prompt.mockImplementation(async (_text, options) => {
+      await actions.newSession();
+      options.preflightResult(true);
+    });
+
+    await expect(
+      handleSubmit({
+        submission: {
+          intentId: "extension-owned-replacement",
+          expectedHostId: "test-host",
+          expectedEpoch: 0,
+          editorRevision: 0,
+          text: "/replace-from-extension",
+          images: [],
+          requestedMode: "followUp",
+          surface: "composer",
+        },
+      }),
+    ).resolves.toMatchObject({ disposition: "consumed", sessionEpoch: 0 });
+    expect(runtime.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires extension-triggered replacement after post-invalidation failure", async () => {
+    const { session, runtime, send, bindExtensions } = setup();
+    await bindExtensions(session);
+    const actions = session.bindExtensions.mock.calls[0][0].commandContextActions;
+    runtime.newSession.mockImplementationOnce(async () => {
+      runtime.setBeforeSessionInvalidate.mock.calls[0][0]();
+      throw new Error("extension replacement failed");
+    });
+
+    await expect(actions.newSession()).rejects.toThrow("extension replacement failed");
+    expect(send).toHaveBeenCalledWith({
+      type: "fatal_transition_error",
+      message: "extension replacement failed",
+    });
+  });
+
+  it("waitForIdle observes the current public session getter", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, bindExtensions } = setup({ isIdle: false, isStreaming: true });
+      await bindExtensions(session);
+      const actions = session.bindExtensions.mock.calls[0][0].commandContextActions;
+      let settled = false;
+      const pending = actions.waitForIdle().finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(false);
+
+      session.isStreaming = false;
+      session.isIdle = true;
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forwards raw session events without inferred state events", () => {
     const { session, send } = setup();
     const subscriber = session.subscribe.mock.calls[0][0];
-    session.isStreaming = true;
-    subscriber({ type: "agent_start" });
-    expect(send).toHaveBeenCalledWith({ type: "event", event: { type: "agent_start" } });
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "streaming_state", isStreaming: true },
-    });
+    const event = { type: "agent_end", willRetry: true, opaque: { value: 1 } };
+    subscriber(event);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ type: "event", event });
   });
 
   it("honors Pi 0.80.4 showCacheMissNotices in SDK-host mode", () => {
@@ -193,155 +337,6 @@ describe("setupCommandBridge — wiring", () => {
     expect(session.sessionManager.getEntries).not.toHaveBeenCalled();
   });
 
-  it("re-announces streaming state on rebind even when the value is unchanged", async () => {
-    const { runtime, send } = setup();
-    send.mockClear();
-    const rebind = runtime.setRebindSession.mock.calls[0][0];
-    const nextSession = makeSession({ isStreaming: false });
-    await rebind(nextSession);
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "streaming_state", isStreaming: false },
-    });
-  });
-
-  it("re-announces interrupt state on rebind even when the value is unchanged", async () => {
-    const { runtime, send } = setup();
-    send.mockClear();
-    const rebind = runtime.setRebindSession.mock.calls[0][0];
-    const nextSession = makeSession();
-    await rebind(nextSession);
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: false },
-    });
-  });
-
-  it("keeps synthetic streaming true across retry backoff", async () => {
-    const { session, send, run } = setup();
-    const subscriber = session.subscribe.mock.calls[0][0];
-    session.isStreaming = true;
-    subscriber({ type: "agent_start" });
-    send.mockClear();
-
-    subscriber({ type: "agent_end", willRetry: true });
-    session.isStreaming = false;
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(send).not.toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "streaming_state", isStreaming: false },
-    });
-    const res = await run({ type: "get_state" });
-    expect(res.data.isStreaming).toBe(true);
-  });
-
-  it("clears a stale retry latch at pi 0.80.4's agent_settled boundary", () => {
-    const { session, send, run } = setup();
-    const subscriber = session.subscribe.mock.calls[0][0];
-    session.isStreaming = true;
-    subscriber({ type: "agent_start" });
-    subscriber({ type: "agent_end", willRetry: true });
-    session.isStreaming = false;
-    send.mockClear();
-
-    subscriber({ type: "agent_settled" });
-
-    expect(send).toHaveBeenCalledWith({ type: "event", event: { type: "agent_settled" } });
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "streaming_state", isStreaming: false },
-    });
-    return expect(run({ type: "get_state" })).resolves.toMatchObject({
-      data: { isStreaming: false },
-    });
-  });
-
-  it("does not let an old agent_settled clear a run started by its extension handlers", async () => {
-    let resolvePrompt;
-    const promptPromise = new Promise((resolve) => {
-      resolvePrompt = resolve;
-    });
-    const { session, send, run, interruptActiveOperation } = setup({
-      prompt: vi.fn((_message, options) => {
-        options.preflightResult(true);
-        return promptPromise;
-      }),
-    });
-    await run({ type: "prompt", message: "first run" });
-    const subscriber = session.subscribe.mock.calls[0][0];
-    session.isStreaming = true;
-    subscriber({ type: "agent_start" });
-    subscriber({ type: "agent_end", willRetry: false });
-    subscriber({ type: "agent_start" });
-    send.mockClear();
-
-    subscriber({ type: "agent_settled" });
-
-    expect(send).toHaveBeenCalledWith({ type: "event", event: { type: "agent_settled" } });
-    expect(send).not.toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "streaming_state", isStreaming: false },
-    });
-    expect(send).not.toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: false },
-    });
-    await expect(run({ type: "get_state" })).resolves.toMatchObject({
-      data: { isStreaming: true },
-    });
-
-    // The old prompt resolves immediately after its stale settlement event,
-    // while the extension-triggered run remains active. Its abort hook must be
-    // handed off to that run instead of disappearing in the promise's finally.
-    resolvePrompt();
-    await Promise.resolve();
-    await interruptActiveOperation();
-    expect(session.abort).toHaveBeenCalledTimes(1);
-    expect(send).not.toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: false },
-    });
-
-    subscriber({ type: "agent_end", willRetry: false });
-    session.isStreaming = false;
-    subscriber({ type: "agent_settled" });
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: false },
-    });
-  });
-
-  it("tracks prompt operations as interruptible until the prompt promise settles", async () => {
-    let resolvePrompt;
-    const promptPromise = new Promise((resolve) => {
-      resolvePrompt = resolve;
-    });
-    const { session, send, run, interruptActiveOperation } = setup({
-      prompt: vi.fn((_message, options) => {
-        options.preflightResult(true);
-        return promptPromise;
-      }),
-    });
-
-    const res = await run({ type: "prompt", message: "/mcp" });
-    expect(res.success).toBe(true);
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: true, operation: "agent" },
-    });
-
-    await interruptActiveOperation();
-    expect(session.abort).toHaveBeenCalledTimes(1);
-
-    resolvePrompt();
-    await Promise.resolve();
-    expect(send).toHaveBeenCalledWith({
-      type: "event",
-      event: { type: "interrupt_state", interruptible: false },
-    });
-  });
-
   it("before-invalidate only emits panel_clear_all when a panel was open", () => {
     // closeAll() returns false → no panels → no spam.
     const { runtime, send } = setup();
@@ -378,8 +373,12 @@ describe("setupCommandBridge — command mapping", () => {
     expect(res.success).toBe(true);
   });
 
-  it("set_model resolves the Model via the registry by provider+id", async () => {
-    const { session, run } = setup();
+  it("set_model resolves the Model and immediately publishes its direct snapshot", async () => {
+    const sendControl = vi.fn();
+    const { session, run } = setup(undefined, { sendControl });
+    session.setModel.mockImplementation((model) => {
+      session.model = model;
+    });
     const res = await run({ type: "set_model", provider: "anthropic", modelId: "claude-x" });
     expect(session.setModel).toHaveBeenCalledWith({
       provider: "anthropic",
@@ -387,6 +386,44 @@ describe("setupCommandBridge — command mapping", () => {
       name: "Claude X",
     });
     expect(res.success).toBe(true);
+    expect(sendControl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "snapshot",
+        snapshot: expect.objectContaining({ model: expect.objectContaining({ id: "claude-x" }) }),
+      }),
+    );
+  });
+
+  it("maps cycle and explicit setting commands to their public AgentSession methods", async () => {
+    const { session, run } = setup();
+    await expect(run({ type: "cycle_model" })).resolves.toMatchObject({
+      success: true,
+      data: { model: { id: "next" }, thinkingLevel: "low" },
+    });
+    await expect(run({ type: "cycle_thinking_level" })).resolves.toMatchObject({
+      success: true,
+      data: { level: "high" },
+    });
+    await run({ type: "set_steering_mode", mode: "one-at-a-time" });
+    await run({ type: "set_follow_up_mode", mode: "all" });
+    await run({ type: "set_auto_compaction", enabled: false });
+    await run({ type: "set_auto_retry", enabled: false });
+    await run({ type: "abort_retry" });
+    expect(session.cycleModel).toHaveBeenCalledOnce();
+    expect(session.cycleThinkingLevel).toHaveBeenCalledOnce();
+    expect(session.setSteeringMode).toHaveBeenCalledWith("one-at-a-time");
+    expect(session.setFollowUpMode).toHaveBeenCalledWith("all");
+    expect(session.setAutoCompactionEnabled).toHaveBeenCalledWith(false);
+    expect(session.setAutoRetryEnabled).toHaveBeenCalledWith(false);
+    expect(session.abortRetry).toHaveBeenCalledOnce();
+  });
+
+  it("get_messages returns the authoritative public session messages", async () => {
+    const { run } = setup({ messages: [{ role: "user", content: "hello" }] });
+    await expect(run({ type: "get_messages" })).resolves.toMatchObject({
+      success: true,
+      data: { messages: [{ role: "user", content: "hello" }] },
+    });
   });
 
   it("set_model resolves providerless models by id", async () => {
@@ -665,6 +702,181 @@ describe("setupCommandBridge — command mapping", () => {
     expect(res.data).toEqual({ cancelled: true });
   });
 
+  it("rejects replacement while another host command is still active", async () => {
+    let resolveModels;
+    const models = new Promise((resolve) => {
+      resolveModels = resolve;
+    });
+    const { session, runtime, run } = setup();
+    session.modelRegistry.getAvailable.mockReturnValueOnce(models);
+    const settingModel = run({ type: "set_model", provider: "anthropic", modelId: "claude-x" });
+    await vi.waitFor(() => expect(session.modelRegistry.getAvailable).toHaveBeenCalled());
+
+    await expect(run({ type: "new_session" })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringMatching(/current session work/i),
+    });
+    expect(runtime.newSession).not.toHaveBeenCalled();
+    resolveModels([{ provider: "anthropic", id: "claude-x", name: "Claude X" }]);
+    await expect(settingModel).resolves.toMatchObject({ success: true });
+  });
+
+  it("rejects ordinary commands while a replacement transition is active", async () => {
+    let resolveReplacement;
+    const replacementDone = new Promise((resolve) => {
+      resolveReplacement = resolve;
+    });
+    const { runtime, run } = setup();
+    runtime.newSession.mockReturnValueOnce(replacementDone);
+    const replacing = run({ type: "new_session" });
+    await vi.waitFor(() => expect(runtime.newSession).toHaveBeenCalled());
+
+    await expect(run({ type: "get_state" })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringMatching(/replacement is in progress/i),
+    });
+    resolveReplacement({ cancelled: false });
+    await expect(replacing).resolves.toMatchObject({ success: true });
+  });
+
+  it("rejects replacement while a consumed prompt promise is still active", async () => {
+    let resolvePrompt;
+    const promptDone = new Promise((resolve) => {
+      resolvePrompt = resolve;
+    });
+    const { session, runtime, handleSubmit, run } = setup();
+    session.prompt.mockImplementation((_text, options) => {
+      session.isStreaming = true;
+      session.isIdle = false;
+      options.preflightResult(true);
+      return promptDone;
+    });
+    await expect(
+      handleSubmit({
+        submission: {
+          intentId: "active-before-replacement",
+          expectedHostId: "test-host",
+          expectedEpoch: 0,
+          editorRevision: 0,
+          text: "active",
+          images: [],
+          requestedMode: "followUp",
+          surface: "composer",
+        },
+      }),
+    ).resolves.toMatchObject({ disposition: "consumed" });
+    // Exercise the narrow boundary where Pi reports idle before the original
+    // prompt promise's terminal settlement reaches the authority.
+    session.isStreaming = false;
+    session.isIdle = true;
+
+    await expect(run({ type: "new_session" })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringMatching(/current session work/i),
+    });
+    expect(runtime.newSession).not.toHaveBeenCalled();
+    resolvePrompt();
+    await Promise.resolve();
+  });
+
+  it("gives initial extension binding the same correlated lifecycle UI lease", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveUi;
+      const uiDone = new Promise((resolve) => {
+        resolveUi = resolve;
+      });
+      const lifecycleUiTracker = { track: (promise) => promise };
+      const { session, bindExtensions } = setup(undefined, {
+        initialBinding: true,
+        lifecycleUiTracker,
+      });
+      session.bindExtensions.mockImplementationOnce(async () => {
+        await lifecycleUiTracker.track(uiDone);
+      });
+
+      const pending = bindExtensions(session);
+      await vi.advanceTimersByTimeAsync(120_000);
+      let settled = false;
+      void pending.finally(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      resolveUi();
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses lifecycle timeout only for a blocking UI promise opened by that lifecycle", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveUi;
+      const uiDone = new Promise((resolve) => {
+        resolveUi = resolve;
+      });
+      const lifecycleUiTracker = { track: (promise) => promise };
+      const { runtime, run } = setup(undefined, { lifecycleUiTracker });
+      runtime.newSession.mockImplementationOnce(async () => {
+        await lifecycleUiTracker.track(uiDone);
+        return { cancelled: false };
+      });
+
+      const pending = run({ type: "new_session" });
+      await vi.advanceTimersByTimeAsync(120_000);
+      let settled = false;
+      void pending.finally(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      resolveUi();
+      await expect(pending).resolves.toMatchObject({ success: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let an unrelated persistent panel pause lifecycle timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise(() => {});
+      const panelBridge = { closeAll: vi.fn(() => false), activeCount: 1 };
+      const { runtime, run } = setup(undefined, { panelBridge });
+      runtime.newSession.mockReturnValueOnce(never);
+
+      const pending = run({ type: "new_session" });
+      await vi.advanceTimersByTimeAsync(60_100);
+
+      await expect(pending).resolves.toMatchObject({
+        success: false,
+        error: expect.stringMatching(/lifecycle timed out/i),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retires the host when replacement fails after Pi invalidates the old session", async () => {
+    const { runtime, send, run } = setup();
+    runtime.newSession.mockImplementationOnce(async () => {
+      runtime.setBeforeSessionInvalidate.mock.calls[0][0]();
+      throw new Error("replacement creation failed");
+    });
+
+    const res = await run({ type: "new_session" });
+
+    expect(res.success).toBe(false);
+    expect(send).toHaveBeenCalledWith({
+      type: "fatal_transition_error",
+      message: "replacement creation failed",
+    });
+  });
+
   it("clone uses sessionManager.getLeafId and forks at-position", async () => {
     const { session, runtime, run } = setup();
     const res = await run({ type: "clone" });
@@ -680,6 +892,64 @@ describe("setupCommandBridge — command mapping", () => {
     expect(runtime.fork).not.toHaveBeenCalled();
     expect(res.success).toBe(false);
     expect(res.error).toMatch(/no current entry/i);
+  });
+
+  it("runs authoritative submissions under their renderer invocation surface", async () => {
+    const runWithInvocationSurface = vi.fn((_surface, fn) => fn());
+    const { handleSubmit } = setup(undefined, { runWithInvocationSurface });
+
+    const result = await handleSubmit({
+      submission: {
+        intentId: "surface-submit",
+        expectedHostId: "test-host",
+        expectedEpoch: 0,
+        editorRevision: 0,
+        text: "/custom-panel",
+        images: [],
+        requestedMode: "steer",
+        surface: "composer",
+      },
+    });
+
+    expect(result.disposition).toBe("consumed");
+    expect(runWithInvocationSurface).toHaveBeenCalledWith("composer", expect.any(Function));
+  });
+
+  it("routes revision-matched submission custody into the host editor authority", async () => {
+    const acceptEditorSubmission = vi.fn(() => true);
+    const uiState = {
+      catalogSnapshot: () => ({}),
+      editorSnapshot: () => ({ revision: 3, text: "submitted", attachments: [] }),
+      acceptEditorSubmission,
+      applyEditorPatch: () => ({ accepted: false }),
+    };
+    const { handleSubmit } = setup(
+      {
+        prompt: vi.fn((_text, options) => {
+          options.preflightResult(true);
+          return Promise.resolve();
+        }),
+      },
+      { uiState },
+    );
+
+    await expect(
+      handleSubmit({
+        submission: {
+          intentId: "clear-editor",
+          expectedHostId: "test-host",
+          expectedEpoch: 0,
+          editorRevision: 3,
+          text: "submitted",
+          images: [],
+          requestedMode: "followUp",
+          surface: "composer",
+        },
+      }),
+    ).resolves.toMatchObject({ disposition: "consumed" });
+    expect(acceptEditorSubmission).toHaveBeenCalledWith(
+      expect.objectContaining({ intentId: "clear-editor", editorRevision: 3 }),
+    );
   });
 
   it("prompt responds early via preflightResult(true) without awaiting the turn", async () => {
@@ -922,6 +1192,15 @@ describe("assertHostCapabilities", () => {
     const runtime = makeRuntime(session);
     runtime.setRebindSession = undefined;
     expect(() => assertHostCapabilities(session, runtime)).toThrow(/runtime\.setRebindSession/);
+  });
+
+  it("throws when the state authority command lookup is missing", () => {
+    const session = makeSession();
+    session.extensionRunner.getCommand = undefined;
+    const runtime = makeRuntime(session);
+    expect(() => assertHostCapabilities(session, runtime)).toThrow(
+      /session\.extensionRunner\.getCommand/,
+    );
   });
 
   it("throws when a getState getter is absent", () => {

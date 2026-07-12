@@ -1,112 +1,140 @@
+import * as crypto from "node:crypto";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { newSessionId } from "@shared/ids.js";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
-import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
+import {
+  type PiRpcCommand,
+  commandNeedsIntent,
+  commandPolicy,
+} from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
-import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
+import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
+import {
+  type AgentSessionSnapshot,
+  AgentSessionSnapshotSchema,
+  type CommandSettlement,
+  type EscapeResult,
+  type ReloadRequest,
+  ReloadRequestSchema,
+  type ReloadSettlement,
+  type RendererCommandRequest,
+  RendererCommandRequestSchema,
+  type RuntimeRecord,
+  type RuntimeStateUpdate,
+  type SessionSubmission,
+  SessionSubmissionSchema,
+  type SubmissionResult,
+  SubmissionResultSchema,
+  type TransitionBatch,
+  TransitionBatchSchema,
+} from "@shared/pi-protocol/runtime-state.js";
 import lockfile from "proper-lockfile";
 import { resolveHostExecPath } from "../pi/locate-node.js";
-import { PiProcess } from "../pi/pi-process.js";
-import { HostVersionTooLowError, SessionHost, isSessionHost } from "../pi/session-host.js";
+import { SessionHost } from "../pi/session-host.js";
 
-export type SessionCommandUiSurface = "composer" | "unified";
-export type SessionInterruptKind = "agent" | "bash" | "compact";
-type SessionInterruptSource = "command" | "event";
-type SessionInterruptOperation = { kind: SessionInterruptKind; source: SessionInterruptSource };
+interface RetainedIntent {
+  payload: SessionSubmission;
+  disposition: SubmissionResult["disposition"];
+  updatedAt: number;
+  recoveryPublished?: boolean | undefined;
+  queuedAtAdmission?: boolean | undefined;
+  result?: SubmissionResult | undefined;
+}
+
+interface RetainedCommandIntent {
+  request: RendererCommandRequest;
+  dispatched: boolean;
+  recoveryPublished?: boolean | undefined;
+}
+
+interface PendingUnifiedSubmit {
+  id: string;
+  text: string;
+  editorRevision: number;
+  submissionIntentId: string;
+  hostInstanceId: string;
+  sessionEpoch: number;
+  claimedGeneration?: number | undefined;
+  claimId?: string | undefined;
+  claimExpiresAt?: number | undefined;
+}
 
 export interface SessionRecord {
   sessionId: SessionId;
   workspacePath: string;
-  /** If set, the session's pi process runs in this worktree directory
-   *  instead of workspacePath. Set at first-send time via
-   *  setWorktreeAndRespawn. */
   worktreePath?: string | undefined;
   sessionFile?: string | undefined;
   status: SessionStatus;
   error?: string | undefined;
-  proc?: PiProcess | SessionHost | undefined;
-  /** Timestamp of last activity (open, command, or agent event). Used for LRU eviction. */
+  proc?: SessionHost | undefined;
   lastActiveAt: number;
-  /** True while any runtime operation is active (busy = ineligible for idle kill). */
-  busy: boolean;
-  /** Authoritative normalized agent liveness (separate from bash/compact interrupts). */
-  _agentStreaming: boolean;
-  /** Latest fallback get_state request; older responses are ignored. */
-  _runtimeSnapshotRequest: number;
-  retryPending: boolean;
-  /** Monotonic agent_start generation used to reject a stale agent_settled. */
-  _agentGeneration: number;
-  /** Generation most recently closed by agent_end. */
-  _lastEndedAgentGeneration: number;
-  interruptible: boolean;
-  interruptKind?: SessionInterruptKind | undefined;
-  _interruptOps?: Map<number, SessionInterruptOperation> | undefined;
-  _nextInterruptOpId?: number | undefined;
-  /** Whether we hold the proper-lockfile advisory lock on the session file. */
-  _hasLock?: boolean;
-  /** True while activateSession() is mid-flight — guards re-entrant double-spawn. */
-  _activating?: boolean;
-  /** Resolves when the current activation attempt finishes (success, failure, or cancellation). */
+  availability: RuntimeStateUpdate["availability"];
+  snapshot?: AgentSessionSnapshot | undefined;
+  _snapshotMutationFingerprint?: string | undefined;
+  _editorRecovery?: AgentSessionSnapshot["editor"] | undefined;
+  _deferredInitialBatch?: TransitionBatch | undefined;
+  snapshotReceivedAt?: number | undefined;
+  leaseExpiresAt?: number | undefined;
+  _hasLock?: boolean | undefined;
+  _activating?: boolean | undefined;
   _activationDone?: Promise<void> | undefined;
   _resolveActivationDone?: (() => void) | undefined;
-  /** Serializes reload/worktree respawn requests so overlapping restarts cannot race cwd/mode. */
   _restartChain?: Promise<void> | undefined;
-  /** True while a restart is queued/running; commands should queue instead of hitting the old proc. */
-  _restartInProgress?: boolean;
-  /** Suppress one activation's pending-command flush because a restart is replacing that proc. */
-  _suppressNextActivationFlush?: boolean;
-  /**
-   * Set by closeSession when it runs during activateSession's async window
-   * (the lock-acquire / waitForReady awaits). activateSession checks this
-   * after each await: if set, it tears down whatever it just spawned and
-   * returns WITHOUT reviving the deleted record or spawning a fallback —
-   * the close wins. See P1-e (close-during-activate) + P1-h (queue hang).
-   */
-  _dead?: boolean;
-  /**
-   * What the caller REQUESTED for host mode (the `useHost` arg to the first
-   * activateSession). Unlike `_useHost` (which is overwritten to false on
-   * fallback), this is sticky — it records intent, not outcome. /reload
-   * re-tries the host iff this is true, so a session that fell back to rpc
-   * can re-promote after a pi upgrade, while a session the caller never
-   * wanted in host mode stays rpc. See P2-b.
-   */
-  _hostRequested?: boolean;
-  /** Whether the session last ran in SDK-host mode (vs pi --mode rpc).
-   *  Remembered across reload/respawn so a re-activation preserves the mode
-   *  (without it, /reload and worktree-per-session silently reverted to
-   *  --mode rpc and lost panel support). */
-  _useHost?: boolean;
-  /** Timestamp of the last automatic runtime-host restart. A second crash
-   *  inside the cooldown is left failed instead of creating a restart loop. */
-  _lastHostRecoveryAt?: number;
-  /**
-   * True once the proc is fully established and able to accept commands — i.e.
-   * AFTER the host handshake (waitForReady) for host mode, or immediately for
-   * the PiProcess/fallback branch. `proc` alone is NOT a readiness signal:
-   * host mode assigns `record.proc = hostProc` BEFORE waitForReady (so the
-   * init-time trust dialog can round-trip), and the host rejects every command
-   * with "Not initialized" until its session finishes initializing. sendCommand
-   * MUST gate on this flag, not on `proc` presence, or the renderer's init
-   * commands (fired on "starting") race the handshake and bounce. See P1-i.
-   */
-  _procReady?: boolean;
-  /** Commands queued while the proc was being established (activation in flight). */
-  _pendingSend?:
-    | Array<{
-        command: PiRpcCommand;
-        uiSurface?: SessionCommandUiSurface | undefined;
-        resolve: (res: PiRpcResponse) => void;
-        reject: (err: Error) => void;
-      }>
+  _dead?: boolean | undefined;
+  _procReady?: boolean | undefined;
+  _piPath?: string | undefined;
+  _env?: Record<string, string> | undefined;
+  _rapidFailureCount: number;
+  _lastFailureAt?: number | undefined;
+  _leaseTimer?: ReturnType<typeof setTimeout> | undefined;
+  _lifecycleUiLease?: boolean | undefined;
+  _hostTransition?: { transitionId: string; provisionalEpoch: number } | undefined;
+  _retainedIntents: Map<string, RetainedIntent>;
+  _pendingSubmissionPromises: Map<string, Promise<SubmissionResult>>;
+  _expiredUnifiedIntents: Set<string>;
+  _acknowledgedUnifiedIntents: Set<string>;
+  _unifiedRestorationIntents: Map<string, string>;
+  _retainedCommandIntents: Map<string, RetainedCommandIntent>;
+  _restorations: Map<string, unknown>;
+  _rendererGeneration: number;
+  _mutationSequence: number;
+  _closeToken?: { value: string; mutationSequence: number; force: boolean } | undefined;
+  _closing?: boolean | undefined;
+  _panelInputSequence: Map<number, number>;
+  _panelInputChains: Map<
+    number,
+    Promise<{ acknowledgedThrough: number; gap?: { expected: number; received: number } }>
+  >;
+  _pendingUiRequests: Map<string, ExtensionUiRequest>;
+  _openPanels: Map<number, PanelEvent>;
+  _pendingUnifiedSubmits: Map<string, PendingUnifiedSubmit>;
+  _retiredUnifiedRequests: Set<string>;
+  _unifiedClaimTimers: Map<string, ReturnType<typeof setTimeout>>;
+  _panelCheckpoints: Map<number, { lastData?: string; mode?: "content" | "viewport" }>;
+  _pendingUiAcks: Map<
+    string,
+    {
+      promise: Promise<boolean>;
+      resolve: (value: boolean) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
+  _pendingRendererCancellation?:
+    | {
+        generation: number;
+        resolve: (acknowledged: boolean) => void;
+        timer: ReturnType<typeof setTimeout>;
+      }
     | undefined;
 }
 
-const MAX_IDLE_PROCESSES = 10;
-const HOST_RECOVERY_COOLDOWN_MS = 30_000;
+const MAX_SESSION_PROCESSES = 10;
+const RAPID_FAILURE_WINDOW_MS = 30_000;
+const DEFAULT_UNIFIED_CLAIM_TIMEOUT_MS = 60_000;
 
 type SessionEventCallback = (sessionId: SessionId, event: PiEvent) => void;
 type UiRequestCallback = (sessionId: SessionId, req: ExtensionUiRequest) => void;
@@ -119,1002 +147,2139 @@ type StatusChangedCallback = (
 type PanelEventCallback = (sessionId: SessionId, event: PanelEvent) => void;
 type UnifiedSubmitRequestCallback = (
   sessionId: SessionId,
-  req: { id: string; text: string },
+  req: {
+    id: string;
+    text: string;
+    editorRevision: number;
+    submissionIntentId: string;
+    hostInstanceId: string;
+    sessionEpoch: number;
+  },
+) => void;
+type RuntimeStateCallback = (sessionId: SessionId, state: RuntimeStateUpdate) => void;
+type SubmissionCallback = (sessionId: SessionId, result: SubmissionResult) => void;
+type QueueRestorationCallback = (sessionId: SessionId, payload: unknown) => void;
+type UiAcknowledgedCallback = (sessionId: SessionId, operationId: string) => void;
+type TransitionBatchCallback = (
+  sessionId: SessionId,
+  records: RuntimeRecord[],
+  state: RuntimeStateUpdate,
 ) => void;
 
 export class SessionRegistry {
   private sessions = new Map<SessionId, SessionRecord>();
-  private byFile = new Map<string, SessionId>(); // resolved file path → SessionId
-
-  private onEvent: SessionEventCallback;
-  private onUiRequest: UiRequestCallback;
-  private onStatusChanged: StatusChangedCallback;
-  private onPanelEvent: PanelEventCallback;
-  private onUnifiedSubmitRequest: UnifiedSubmitRequestCallback;
+  private byFile = new Map<string, SessionId>();
 
   constructor(
-    onEvent: SessionEventCallback,
-    onUiRequest: UiRequestCallback,
-    onStatusChanged: StatusChangedCallback,
-    onPanelEvent: PanelEventCallback,
-    onUnifiedSubmitRequest: UnifiedSubmitRequestCallback,
-  ) {
-    this.onEvent = onEvent;
-    this.onUiRequest = onUiRequest;
-    this.onStatusChanged = onStatusChanged;
-    this.onPanelEvent = onPanelEvent;
-    this.onUnifiedSubmitRequest = onUnifiedSubmitRequest;
-  }
+    private onEvent: SessionEventCallback,
+    private onUiRequest: UiRequestCallback,
+    private onStatusChanged: StatusChangedCallback,
+    private onPanelEvent: PanelEventCallback,
+    private onUnifiedSubmitRequest: UnifiedSubmitRequestCallback,
+    private onRuntimeState: RuntimeStateCallback = () => {},
+    private onSubmission: SubmissionCallback = () => {},
+    private onQueueRestoration: QueueRestorationCallback = () => {},
+    private onUiAcknowledged: UiAcknowledgedCallback = () => {},
+    private onTransitionBatch: TransitionBatchCallback = () => {},
+    private options: { unifiedClaimTimeoutMs?: number } = {},
+  ) {}
 
-  /**
-   * Create a cold record for a session. Does NOT spawn a process; the
-   * renderer learns the id from the invoke result, and activation happens
-   * on focus (see activateSession).
-   */
   openSession(workspacePath: string, sessionFile?: string, worktreePath?: string): SessionId {
     if (sessionFile) {
       const resolved = path.resolve(sessionFile);
       const existing = this.byFile.get(resolved);
       if (existing) {
-        const rec = this.sessions.get(existing);
-        if (rec && rec.status !== "exited" && rec.status !== "failed") {
+        const record = this.sessions.get(existing);
+        if (record && record.status !== "exited" && record.status !== "failed") {
           throw new Error(`Session file already open: ${resolved}`);
         }
+        this.sessions.delete(existing);
         this.byFile.delete(resolved);
-        if (rec && (rec.status === "exited" || rec.status === "failed")) {
-          this.sessions.delete(existing);
-        }
       }
     }
-
     const sessionId = newSessionId();
     const record: SessionRecord = {
       sessionId,
       workspacePath,
-      sessionFile,
       worktreePath,
+      sessionFile,
       status: "cold",
       lastActiveAt: Date.now(),
-      busy: false,
-      _agentStreaming: false,
-      _runtimeSnapshotRequest: 0,
-      retryPending: false,
-      _agentGeneration: 0,
-      _lastEndedAgentGeneration: 0,
-      interruptible: false,
+      availability: "unavailable",
+      _rapidFailureCount: 0,
+      _retainedIntents: new Map(),
+      _pendingSubmissionPromises: new Map(),
+      _expiredUnifiedIntents: new Set(),
+      _acknowledgedUnifiedIntents: new Set(),
+      _unifiedRestorationIntents: new Map(),
+      _retainedCommandIntents: new Map(),
+      _restorations: new Map(),
+      _rendererGeneration: 0,
+      _mutationSequence: 0,
+      _panelInputSequence: new Map(),
+      _panelInputChains: new Map(),
+      _pendingUiRequests: new Map(),
+      _openPanels: new Map(),
+      _pendingUnifiedSubmits: new Map(),
+      _retiredUnifiedRequests: new Set(),
+      _unifiedClaimTimers: new Map(),
+      _panelCheckpoints: new Map(),
+      _pendingUiAcks: new Map(),
     };
     this.sessions.set(sessionId, record);
-
-    if (sessionFile) {
-      this.byFile.set(path.resolve(sessionFile), sessionId);
-    }
-
-    // No onStatusChanged emit — the renderer learns the id from the invoke result.
+    if (sessionFile) this.byFile.set(path.resolve(sessionFile), sessionId);
     return sessionId;
   }
 
-  /**
-   * Spawn the pi process for an existing cold record. Idempotent: a second
-   * call while a process is alive is a no-op. Re-spawns after exit.
-   */
   async activateSession(
     sessionId: SessionId,
     piPath: string,
     env?: Record<string, string>,
-    useHost = false,
-    options: { allowRpcFallback?: boolean } = {},
+    _legacyUseHost = true,
+    _legacyOptions: unknown = undefined,
   ): Promise<void> {
     const record = this.sessions.get(sessionId);
-    if (!record) {
-      throw new Error(`Unknown session: ${sessionId}`);
-    }
-
-    // Re-entrant guard. activateSession is async: it awaits the session-file
-    // lock and, in host mode, the host's startup handshake. A second call
-    // arriving mid-flight — e.g. the renderer re-firing session.activate
-    // before the "starting" status has landed — must NOT spawn a second
-    // process. The `record.proc &&` idempotency check below can't catch this,
-    // because proc is still undefined during the async window (the old sync
-    // activateSession set proc in the same tick as "starting", so this gap
-    // didn't exist). The _activating flag closes it; reload/respawn paths
-    // clear proc deliberately and call activateSession from a quiescent state,
-    // so they're unaffected.
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
     if (record._activating) return record._activationDone;
-    if (record.proc && (record.status === "starting" || record.status === "ready")) {
-      return;
+    if (record.proc && (record.status === "starting" || record.status === "ready")) return;
+
+    const liveCount = [...this.sessions.values()].filter(
+      (item) => item.proc || item._activating,
+    ).length;
+    if (liveCount >= MAX_SESSION_PROCESSES) {
+      const message = `Session process limit (${MAX_SESSION_PROCESSES}) reached. Close a session explicitly or raise the cap.`;
+      record.status = "failed";
+      record.error = message;
+      this.onStatusChanged(sessionId, "failed", message);
+      this.publishUnavailable(record, message);
+      throw new Error(message);
     }
 
     record._activating = true;
     record._activationDone = new Promise((resolve) => {
       record._resolveActivationDone = resolve;
     });
-    // P2-b: remember whether the caller has EVER requested host mode. This is
-    // sticky across both startup fallback and runtime failover so /reload can
-    // re-try the host after a pi upgrade or transient crash. _useHost tracks
-    // the actual running mode; _hostRequested tracks intent. A later internal
-    // compatibility-mode activation (useHost=false) must not erase that intent.
-    if (record._hostRequested === undefined || useHost) {
-      record._hostRequested = useHost;
-    }
+    record._piPath = piPath;
+    record._env = env;
     record.error = undefined;
-    // Not ready until the proc is fully established (post-handshake in host
-    // mode). Reset here so a re-activation (reload/respawn) re-queues until the
-    // fresh proc is up rather than firing at a half-spawned host. See P1-i.
-    record._procReady = false;
-    record._agentStreaming = false;
-    record._runtimeSnapshotRequest += 1;
-    record._agentGeneration = 0;
-    record._lastEndedAgentGeneration = 0;
     record.status = "starting";
+    record.availability = "transitioning";
     this.onStatusChanged(sessionId, "starting");
+    this.publishRuntime(record, "transitioning", "Host startup");
 
     try {
-      // Advisory file lock — warns if the session file is open elsewhere
-      // (terminal pi). Non-blocking; if it fails we continue but emit a note.
-      // Skip if we already hold the lock (e.g. reload/respawn reuses the same
-      // session file) — otherwise proper-lockfile would see our own lockfile
-      // and emit a false "open elsewhere" warning.
-      if (record.sessionFile && !record._hasLock) {
-        try {
-          // proper-lockfile lock() is async and retries by default.
-          // We use a 0-retry policy so we fail immediately if locked.
-          // realpath:false must match the unlock() call in closeSession —
-          // otherwise lock() tracks the lock under the realpath'd key while
-          // unlock() looks up the raw path and throws ENOTACQUIRED, leaving
-          // proper-lockfile's recurring update timer running (and the
-          // lockfile on disk) forever.
-          // P1-d: proper-lockfile's default onCompromised throws, which fires
-          // from a recurring updateLock setTimeout when the lockfile mtime is
-          // compromised (e.g. terminal pi touches the same <file>.lock). That
-          // throw is an uncaught exception in the main process on a documented,
-          // expected scenario — the advisory lock exists BECAUSE of this
-          // contention. Override it to log + mark the lock lost (wrapped in
-          // try/catch so the override itself can never throw either).
-          await lockfile.lock(record.sessionFile, {
-            retries: 0,
-            realpath: false,
-            lockfilePath: `${record.sessionFile}.lock`,
-            onCompromised: (err: Error) => {
-              try {
-                console.warn(`[session-registry] Session lock compromised: ${err?.message ?? err}`);
-                record._hasLock = false; // we no longer hold it; skip unlock
-              } catch {
-                /* never let the override itself throw from the timer */
-              }
-            },
-          });
-          record._hasLock = true;
-        } catch {
-          // Lock is held elsewhere (e.g., terminal pi)
-          console.warn(`[session-registry] Session file is open elsewhere: ${record.sessionFile}`);
-          record._hasLock = false;
-          this.onPanelEvent(sessionId, {
-            type: "session_warning",
-            message: "Session file is open in another pi instance. Changes may conflict.",
-          });
-        }
-      }
-
-      // P1-e: if closeSession ran during the lock acquire above, bail out
-      // immediately. Don't spawn a proc onto a deleted record.
-      if (record._dead) {
-        record._activating = false;
-        return;
-      }
-
-      const cwd = record.worktreePath ?? record.workspacePath;
-
-      let proc: PiProcess | SessionHost;
-      let hostPiVersion: string | undefined;
-
-      // Forward a proc's UI requests (dialogs) to the renderer. Attached
-      // per-proc — and, for the host, BEFORE waitForReady — because the
-      // project-trust confirm dialog fires DURING host startup (inside
-      // resourceLoader.reload). If we waited until after readiness to attach
-      // this, that prompt would be emitted with no listener and dropped,
-      // deadlocking init. The generation guard (`record.proc !== p`) makes a
-      // stale dead-host emission a no-op once we've swapped to the fallback.
-      const attachUiRequest = (p: PiProcess | SessionHost) => {
-        p.on("uiRequest", (req) => {
-          if (record.proc !== p) return;
-          this.onUiRequest(sessionId, req);
-        });
-      };
-
-      // Try SessionHost first (progressive enhancement).
-      // If the host fails to start, fall back to PiProcess (today's behavior).
-      if (useHost) {
-        record._useHost = true;
-        // Retarget the host onto the user's system Node when it's newer than
-        // Electron's bundled Node (e.g. user has Node 22.x, Electron 31 ships
-        // 20.14). Without this, the host misses Node built-ins like
-        // `node:sqlite` (Node ≥ 22.5) that extensions such as @cursor/sdk
-        // require — they work in terminal pi (which runs under the user's
-        // Node) but break in the forked host. Cached, so this is one
-        // login-shell round-trip per app lifetime. See locate-node.ts.
-        const { execPath: hostNodeExecPath } = await resolveHostExecPath();
-        const hostProc = new SessionHost(piPath, cwd, record.sessionFile, env, hostNodeExecPath);
-        // Set record.proc + attach forwarders NOW (pre-readiness) so the
-        // init-time trust dialog round-trips. If the host fails below, the
-        // fallback path reassigns record.proc and these become inert.
-        record.proc = hostProc;
-        attachUiRequest(hostProc);
-        hostProc.on("panelOpen", (panelId, overlay, unified) => {
-          if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, {
-            type: "panel_open",
-            panelId,
-            overlay,
-            ...(unified ? { unified: true } : {}),
-          });
-        });
-        hostProc.on("panelData", (panelId, data) => {
-          if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, { type: "panel_data", panelId, data });
-        });
-        hostProc.on("panelClose", (panelId) => {
-          if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, { type: "panel_close", panelId });
-        });
-        hostProc.on("panelMode", (panelId, mode) => {
-          if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, { type: "panel_mode", panelId, mode });
-        });
-        hostProc.on("panelClearAll", () => {
-          if (record.proc !== hostProc) return;
-          this.onPanelEvent(sessionId, { type: "panel_clear_all" });
-        });
-        hostProc.on("unifiedSubmitRequest", (id, text) => {
-          if (record.proc !== hostProc) return;
-          this.onUnifiedSubmitRequest(sessionId, { id, text });
-        });
-
-        try {
-          await hostProc.waitForReady();
-          // P1-e: closeSession may have run during waitForReady. The host was
-          // killed (closeSession stopped it → exit → waitForReady reject) —
-          // but waitForReady can also RESOLVE if ready raced the kill. Either
-          // way, if the session is dead, don't proceed.
-          if (record._dead) {
-            hostProc.removeAllListeners();
-            hostProc.stop();
-            record._activating = false;
-            return;
-          }
-          proc = hostProc;
-          hostPiVersion = hostProc.piVersion;
-        } catch (hostErr) {
-          // P1-e: if closeSession ran during waitForReady, the host was killed
-          // by the close — that's not a host failure, it's a cancellation.
-          // Do NOT fall back to PiProcess onto the deleted record (that was
-          // the orphan bug). Just tear down and return.
-          if (record._dead) {
-            hostProc.removeAllListeners();
-            hostProc.stop();
-            record._activating = false;
-            return;
-          }
-          record.proc = undefined;
-          hostProc.removeAllListeners();
-          hostProc.stop();
-          const reason = hostErr instanceof Error ? hostErr.message : String(hostErr);
-          if (options.allowRpcFallback === false) {
-            // Runtime recovery is SDK-host-only. If the replacement host cannot
-            // initialize, leave the session failed instead of silently changing
-            // execution modes; the user can retry after fixing the cause.
-            this.onPanelEvent(sessionId, {
-              type: "session_warning",
-              message: `SDK host restart failed: ${reason}`,
-            });
-            throw hostErr;
-          }
-          // Initial activation keeps the existing progressive-enhancement
-          // behavior until the legacy RPC fallback is removed project-wide.
-          record._useHost = false;
-          const isVersionTooLow = hostErr instanceof HostVersionTooLowError;
-          console.warn(
-            `[session-registry] SessionHost failed, falling back to pi --mode rpc: ${reason}`,
-          );
-          const fallbackProc = new PiProcess(piPath, cwd, record.sessionFile, env);
-          proc = fallbackProc;
-          attachUiRequest(fallbackProc);
-          this.onPanelEvent(sessionId, {
-            type: "host_fallback",
-            reason: isVersionTooLow ? `${reason} — update pi for panel support` : reason,
-          });
-        }
-      } else {
-        proc = new PiProcess(piPath, cwd, record.sessionFile, env);
-        attachUiRequest(proc);
-      }
-      // P1-e: final dead-check before assigning the proc and attaching
-      // listeners. Covers the PiProcess branch (no waitForReady) and the
-      // post-fallback window.
-      if (record._dead) {
-        proc.stop();
-        record._activating = false;
-        return;
-      }
+      await this.acquireLock(record);
+      if (record._dead) return;
+      const { execPath } = await resolveHostExecPath();
+      if (record._dead) return;
+      const proc = new SessionHost(
+        piPath,
+        record.worktreePath ?? record.workspacePath,
+        record.sessionFile,
+        env,
+        execPath,
+      );
       record.proc = proc;
-
-      const readyTimer = setTimeout(() => {
-        if (record.proc !== proc) return;
-        if (record.status === "starting") {
-          record.status = "ready";
-          this.onStatusChanged(sessionId, "ready", undefined, hostPiVersion);
-        }
-      }, 2000);
-      readyTimer.unref?.();
-
-      proc.on("event", (event) => {
-        if (record.proc !== proc) return;
-        record.lastActiveAt = Date.now();
-        const host = isSessionHost(proc);
-        let refreshFallbackState = false;
-        if ("__unknown" in event) {
-          // no-op
-        } else if (event.type === "agent_start") {
-          record._agentGeneration += 1;
-          record.retryPending = false;
-          if (!host) this._beginInterruptOperation(record, "agent");
-          refreshFallbackState = !host;
-        } else if (event.type === "agent_end") {
-          record._lastEndedAgentGeneration = record._agentGeneration;
-          record.retryPending = !!event.willRetry;
-          refreshFallbackState = !host;
-        } else if (
-          event.type === "agent_settled" &&
-          record._lastEndedAgentGeneration === record._agentGeneration
-        ) {
-          // Pi publishes agent_settled after running extension settlement
-          // handlers. If one started a new run, its agent_start has already
-          // advanced the generation and this old settlement must be ignored.
-          record.retryPending = false;
-          refreshFallbackState = !host;
-        } else if (event.type === "auto_retry_start") {
-          record.retryPending = true;
-          refreshFallbackState = !host;
-        } else if (event.type === "auto_retry_end") {
-          if (!event.success) record.retryPending = false;
-          refreshFallbackState = !host;
-        } else if (event.type === "streaming_state") {
-          record._agentStreaming = event.isStreaming;
-          if (!event.isStreaming) record.retryPending = false;
-        } else if (event.type === "interrupt_state") {
-          record.interruptible = event.interruptible;
-          record.interruptKind = event.interruptible ? event.operation : undefined;
-        }
-        record.busy = record._agentStreaming || record.retryPending || record.interruptible;
-        if (record.status === "starting") {
-          record.status = "ready";
-          this.onStatusChanged(sessionId, "ready", undefined, hostPiVersion);
-        }
-        this.onEvent(sessionId, event);
-        if (refreshFallbackState && proc instanceof PiProcess) {
-          this._refreshFallbackRuntimeState(record, proc);
-        }
-      });
-
-      // uiRequest is attached per-proc above (pre-readiness for the host) so
-      // the init-time trust dialog isn't dropped — not re-attached here.
-
-      /**
-       * A host that dies after readiness used to strand the session until the
-       * user switched away or reopened the app. Restart the SDK host in place,
-       * preserving the session file and advisory lock. Recovery explicitly
-       * disables RPC fallback: failure leaves the session failed rather than
-       * silently changing execution modes. A cooldown prevents a crashing
-       * extension from creating an unbounded host-restart loop.
-       */
-      const restartAfterRuntimeHostFailure = (reason: string): boolean => {
-        if (!isSessionHost(proc) || record._dead || record._restartInProgress) return false;
-        const now = Date.now();
-        if (now - (record._lastHostRecoveryAt ?? 0) < HOST_RECOVERY_COOLDOWN_MS) {
-          this.onPanelEvent(sessionId, {
-            type: "session_warning",
-            message: `SDK host failed again shortly after restarting: ${reason}`,
-          });
-          return false;
-        }
-        record._lastHostRecoveryAt = now;
-        record._useHost = true;
-        this.onPanelEvent(sessionId, {
-          type: "session_warning",
-          message: `SDK host stopped unexpectedly; restarting it now. ${reason}`,
-        });
-        queueMicrotask(() => {
-          // A close, manual activation, or explicit restart that won the race
-          // takes precedence over this best-effort automatic restart.
-          if (
-            this.sessions.get(sessionId) !== record ||
-            record._dead ||
-            record.proc ||
-            record._activating ||
-            record._restartInProgress
-          ) {
-            return;
-          }
-          void this.activateSession(sessionId, piPath, env, true, { allowRpcFallback: false });
-        });
-        return true;
-      };
-
-      proc.on("exit", (code) => {
-        // The timer must never leak. Clear before the generation guard.
-        clearTimeout(readyTimer);
-        if (record.proc !== proc) return;
-        record.status = "exited";
-        record.proc = undefined;
-        record._procReady = false;
-        record.busy = false;
-        record._agentStreaming = false;
-        record.retryPending = false;
-        this._clearInterruptOperations(record);
-        if (code !== 0 && code !== null) {
-          const tail = proc.stderrLog.slice(-5).join("").trim();
-          record.error = tail
-            ? `Exited with code ${code}: ${tail.slice(-400)}`
-            : `Exited with code ${code}`;
-        } else {
-          record.error = undefined;
-        }
-        const didScheduleRestart = restartAfterRuntimeHostFailure(
-          record.error ?? "The host stopped unexpectedly",
-        );
-        // P1-f: retain the advisory lock across an in-place host restart;
-        // otherwise release it now so a dead-and-abandoned session does not
-        // leak its lockfile or proper-lockfile update timer.
-        if (!didScheduleRestart) this._releaseLockIfHeld(sessionId);
-        // A dying host cannot reliably emit panel_close. Clear both transient
-        // custom panels and the persistent unified panel before compatibility
-        // mode restores the native Composer.
-        this.onPanelEvent(sessionId, { type: "panel_clear_all" });
-        this.onPanelEvent(sessionId, { type: "unified_panel_reset" });
-        this.onStatusChanged(sessionId, "exited", record.error);
-      });
-
-      proc.on("error", (err) => {
-        if (record.proc !== proc) return;
-        record.status = "failed";
-        record.proc = undefined;
-        record._procReady = false;
-        record.busy = false;
-        record._agentStreaming = false;
-        record.retryPending = false;
-        this._clearInterruptOperations(record);
-        record.error = err.message;
-        // Detach first so the exit caused by stop() is rejected by the
-        // generation guard rather than producing a second terminal transition.
+      this.attachHost(record, proc);
+      await proc.waitForReady();
+      if (record._dead || record.proc !== proc) {
         proc.stop();
-        const didScheduleRestart = restartAfterRuntimeHostFailure(err.message);
-        if (!didScheduleRestart) this._releaseLockIfHeld(sessionId);
-        this.onPanelEvent(sessionId, { type: "panel_clear_all" });
-        this.onPanelEvent(sessionId, { type: "unified_panel_reset" });
-        this.onStatusChanged(sessionId, "failed", err.message);
-      });
-
-      // The proc is now fully established (host: post-handshake; PiProcess/
-      // fallback: constructed). Mark it ready BEFORE flushing so the queued
-      // commands — and any arriving during/after the flush — route to the live
-      // proc instead of re-queuing. Until this point sendCommand MUST queue,
-      // even though record.proc was set early in host mode. See P1-i.
-      if (record._suppressNextActivationFlush) {
-        record._suppressNextActivationFlush = false;
-      } else {
-        record._procReady = true;
-        // Flush any commands that arrived while the proc was being established
-        // (during the session-file lock await and, in host mode, the startup
-        // handshake). They were queued by sendCommand(); now that proc is live
-        // they can go out for real.
-        this._flushPending(sessionId);
+        return;
       }
-    } catch (err) {
+      await this.recoverEditorAfterRestart(record, proc);
+      if (record._dead || record.proc !== proc) {
+        proc.stop();
+        return;
+      }
+      record._procReady = true;
+      record.status = "ready";
+      record.error = undefined;
+      // Keep the recovery budget across a successful ready handshake. A second
+      // crash inside RAPID_FAILURE_WINDOW_MS must leave the session failed
+      // rather than creating an endless crash/restart loop.
+      this.onStatusChanged(sessionId, "ready", undefined, proc.piVersion);
+      await this.resyncSession(sessionId);
+    } catch (error) {
+      if (record._dead) return;
+      const message = error instanceof Error ? error.message : String(error);
+      record.proc?.stop();
+      record.proc = undefined;
+      record._procReady = false;
       record.status = "failed";
-      record.error = err instanceof Error ? err.message : String(err);
-      // Suppression is scoped to the activation attempt used by a restart.
-      // If that attempt fails, do not let the stale flag poison a later normal
-      // activation by skipping _procReady/_flushPending on success.
-      record._suppressNextActivationFlush = false;
-      this._rejectPending(sessionId, record.error);
-      this._releaseLockIfHeld(sessionId); // P1-f: sync-failure path.
-      this.onStatusChanged(sessionId, "failed", record.error);
-      return;
+      record.error = message;
+      this.releaseLock(record);
+      this.onStatusChanged(sessionId, "failed", message);
+      this.publishUnavailable(record, message);
+      throw error;
     } finally {
       record._activating = false;
       record._resolveActivationDone?.();
-      record._activationDone = undefined;
       record._resolveActivationDone = undefined;
+      record._activationDone = undefined;
     }
-
-    // After successful spawn, enforce the idle process limit
-    this.enforceIdleLimit(sessionId);
   }
 
-  private _refreshFallbackRuntimeState(record: SessionRecord, proc: PiProcess): void {
-    const request = ++record._runtimeSnapshotRequest;
-    void proc
-      .sendCommand({ type: "get_state" })
-      .then((response) => {
-        if (record.proc !== proc || request !== record._runtimeSnapshotRequest) return;
-        const rawStreaming = (response.data as { isStreaming?: unknown } | undefined)?.isStreaming;
-        if (!response.success || typeof rawStreaming !== "boolean") return;
-        // Older pi versions report raw false during retry backoff. retryPending
-        // is the adapter's compatibility latch; otherwise the snapshot wins.
-        const isStreaming = rawStreaming || record.retryPending;
-        record._agentStreaming = isStreaming;
-        if (!isStreaming) {
-          record.retryPending = false;
-          this._endInterruptOperationsByKind(record, "agent");
+  private attachHost(record: SessionRecord, proc: SessionHost): void {
+    const current = () => this.sessions.get(record.sessionId) === record && record.proc === proc;
+    proc.on("event", (event) => {
+      if (!current()) return;
+      record.lastActiveAt = Date.now();
+      record._mutationSequence++;
+      this.onEvent(record.sessionId, event);
+    });
+    proc.on("uiRequest", (request) => {
+      if (!current()) return;
+      record._mutationSequence++;
+      if (request.method === "set_editor_text") {
+        // Extension editor writes are already committed to host-authoritative
+        // revisioned state. Fetch that state instead of forwarding the legacy
+        // unversioned injection, which could overwrite an in-flight local edit.
+        void this.resyncSession(record.sessionId).catch((error) => {
+          if (current())
+            this.publishUnavailable(record, error instanceof Error ? error.message : String(error));
+        });
+        return;
+      }
+      const operationId =
+        (request as ExtensionUiRequest & { operationId?: string }).operationId ?? request.id;
+      record._pendingUiRequests.set(operationId, structuredClone(request));
+      this.onUiRequest(record.sessionId, request);
+    });
+    proc.on("lifecycleUiLease", (active) => {
+      if (!current()) return;
+      record._lifecycleUiLease = active;
+      if (record._leaseTimer) clearTimeout(record._leaseTimer);
+      record._leaseTimer = undefined;
+      if (active) {
+        record.leaseExpiresAt = undefined;
+      } else if (record.snapshot) {
+        const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
+        record.leaseExpiresAt = Date.now() + leaseMs;
+        this.armLease(record, leaseMs);
+      }
+      this.publishRuntime(record, record.availability);
+    });
+    proc.on("panelOpen", (panelId, overlay, unified, hostInstanceId, sessionEpoch) => {
+      if (!current()) return;
+      record._mutationSequence++;
+      record._panelInputSequence.set(panelId, 0);
+      const event: PanelEvent = {
+        type: "panel_open",
+        panelId,
+        overlay,
+        hostInstanceId,
+        sessionEpoch,
+        ...(unified ? { unified: true } : {}),
+      };
+      record._openPanels.set(panelId, event);
+      this.onPanelEvent(record.sessionId, event);
+    });
+    proc.on("panelData", (panelId, data) => {
+      if (!current()) return;
+      record._mutationSequence++;
+      const checkpoint = record._panelCheckpoints.get(panelId) ?? {};
+      record._panelCheckpoints.set(panelId, { ...checkpoint, lastData: data });
+      this.onPanelEvent(record.sessionId, { type: "panel_data", panelId, data });
+    });
+    proc.on("panelClose", (panelId) => {
+      if (!current()) return;
+      record._mutationSequence++;
+      record._panelInputSequence.delete(panelId);
+      record._panelInputChains.delete(panelId);
+      record._openPanels.delete(panelId);
+      record._panelCheckpoints.delete(panelId);
+      this.onPanelEvent(record.sessionId, { type: "panel_close", panelId });
+    });
+    proc.on("panelMode", (panelId, mode) => {
+      if (!current()) return;
+      record._mutationSequence++;
+      const checkpoint = record._panelCheckpoints.get(panelId) ?? {};
+      record._panelCheckpoints.set(panelId, { ...checkpoint, mode });
+      this.onPanelEvent(record.sessionId, { type: "panel_mode", panelId, mode });
+    });
+    proc.on("panelClearAll", () => {
+      if (!current()) return;
+      record._mutationSequence++;
+      record._openPanels.clear();
+      record._panelInputSequence.clear();
+      record._panelInputChains.clear();
+      record._panelCheckpoints.clear();
+      this.onPanelEvent(record.sessionId, { type: "panel_clear_all" });
+    });
+    proc.on("unifiedSubmitRequest", (id, text, editorRevision) => {
+      if (!current() || !proc.hostInstanceId) return;
+      record._mutationSequence++;
+      const retiredKey = `${proc.hostInstanceId}\0${proc.sessionEpoch}\0${id}`;
+      if (record._retiredUnifiedRequests.has(retiredKey)) {
+        proc.sendUnifiedSubmitResponse(
+          id,
+          false,
+          false,
+          "Unified request was already retired and cannot execute again",
+        );
+        return;
+      }
+      const existing = record._pendingUnifiedSubmits.get(id);
+      if (
+        existing?.hostInstanceId === proc.hostInstanceId &&
+        existing.sessionEpoch === proc.sessionEpoch
+      ) {
+        if (existing.claimedGeneration === undefined) {
+          this.onUnifiedSubmitRequest(record.sessionId, structuredClone(existing));
         }
-        record.busy = record._agentStreaming || record.retryPending || record.interruptible;
-        this.onEvent(record.sessionId, { type: "streaming_state", isStreaming });
-      })
-      .catch(() => {
-        // Process exit/error paths reset runtime state; a failed advisory
-        // snapshot must not invent a state transition.
+        return;
+      }
+      if (existing) this.clearUnifiedClaimTimer(record, id);
+      const request: PendingUnifiedSubmit = {
+        id,
+        text,
+        editorRevision,
+        submissionIntentId: crypto.randomUUID(),
+        hostInstanceId: proc.hostInstanceId,
+        sessionEpoch: proc.sessionEpoch,
+      };
+      record._pendingUnifiedSubmits.set(id, structuredClone(request));
+      this.onUnifiedSubmitRequest(record.sessionId, request);
+    });
+    proc.on("transitionStarted", (transitionId, provisionalEpoch) => {
+      if (!current()) return;
+      record._hostTransition = { transitionId, provisionalEpoch };
+      record.availability = "transitioning";
+      this.publishRuntime(record, "transitioning", "Session replacement in progress");
+    });
+    proc.on("transitionCancelled", (transitionId) => {
+      if (!current() || record._hostTransition?.transitionId !== transitionId) return;
+      record._hostTransition = undefined;
+      record.availability = "available";
+      if (record.snapshot) {
+        record.snapshotReceivedAt = Date.now();
+        const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
+        record.leaseExpiresAt = record.snapshotReceivedAt + leaseMs;
+        this.armLease(record, leaseMs);
+      }
+      this.publishRuntime(record, "available");
+    });
+    proc.on("snapshot", (snapshot) => {
+      if (!current() || (record._editorRecovery && record._deferredInitialBatch)) return;
+      this.installSnapshot(record, snapshot);
+    });
+    proc.on("transitionBatch", (batch) => {
+      if (!current()) return;
+      const allowInitial =
+        !record._procReady &&
+        record._hostTransition === undefined &&
+        batch.transitionId.startsWith("initial-");
+      if (record._editorRecovery) {
+        if (!allowInitial) {
+          this.publishUnavailable(record, "Unexpected transition batch during host recovery");
+          return;
+        }
+        record._deferredInitialBatch = structuredClone(batch);
+        return;
+      }
+      this.installTransitionBatch(record, batch, {
+        expectedTransition: record._hostTransition,
+        allowInitial,
       });
-  }
-
-  private _currentInterruptKind(record: SessionRecord): SessionInterruptKind | undefined {
-    const ops = record._interruptOps;
-    if (!ops || ops.size === 0) return undefined;
-    let latest: SessionInterruptKind | undefined;
-    for (const op of ops.values()) latest = op.kind;
-    return latest;
-  }
-
-  private _emitInterruptStateFromOps(record: SessionRecord): void {
-    const kind = this._currentInterruptKind(record);
-    const interruptible = kind !== undefined;
-    if (record.interruptible === interruptible && record.interruptKind === kind) return;
-    record.interruptible = interruptible;
-    record.interruptKind = kind;
-    record.busy = record._agentStreaming || record.retryPending || interruptible;
-    this.onEvent(record.sessionId, {
-      type: "interrupt_state",
-      interruptible,
-      ...(kind ? { operation: kind } : {}),
+    });
+    proc.on("controlSilence", () => {
+      if (!current()) return;
+      this.publishUnavailable(record, "Host missed the correlated state-probe deadline");
+    });
+    proc.on("transportGap", (expected, received) => {
+      if (!current()) return;
+      this.publishUnavailable(
+        record,
+        `Host transport gap (expected ${expected}, received ${received})`,
+      );
+      void this.resyncSession(record.sessionId).catch(() => {});
+    });
+    proc.on("submissionDisposition", (result) => {
+      if (!current()) return;
+      const settlementIsCurrent =
+        record.availability === "available" &&
+        record._hostTransition === undefined &&
+        result.hostInstanceId === record.proc?.hostInstanceId &&
+        result.sessionEpoch === record.snapshot?.sessionEpoch;
+      if (!settlementIsCurrent) {
+        this.retireStaleSubmissionDisposition(
+          record,
+          result,
+          "Submission settled after its admitted runtime entered a replacement boundary",
+        );
+        return;
+      }
+      this.retainDisposition(record, result);
+      this.onSubmission(record.sessionId, result);
+    });
+    proc.on("queueRestoration", (payload) => {
+      if (!current()) return;
+      const restorationId = (payload as { restorationId?: unknown }).restorationId;
+      if (typeof restorationId !== "string" || record._restorations.has(restorationId)) return;
+      record._restorations.set(restorationId, structuredClone(payload));
+      this.onQueueRestoration(record.sessionId, payload);
+      proc.acknowledgeRestoration(restorationId);
+    });
+    proc.on("rendererCancelled", (generation) => {
+      if (!current()) return;
+      const pending = record._pendingRendererCancellation;
+      if (!pending || pending.generation !== generation) return;
+      clearTimeout(pending.timer);
+      record._pendingRendererCancellation = undefined;
+      pending.resolve(true);
+    });
+    proc.on("uiAcknowledged", (operationId) => {
+      if (!current()) return;
+      const pending = record._pendingUiAcks.get(operationId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        record._pendingUiAcks.delete(operationId);
+        pending.resolve(true);
+      }
+      record._pendingUiRequests.delete(operationId);
+      this.onUiAcknowledged(record.sessionId, operationId);
+    });
+    proc.on("unresponsive", () => {
+      if (current())
+        this.handleRuntimeFailure(record, proc, "Host control channel was unresponsive");
+    });
+    proc.on("exit", (_code, _signal, diagnostic) => {
+      if (!current() || (record._activating && !record._procReady)) return;
+      this.handleRuntimeFailure(record, proc, diagnostic.message);
+    });
+    proc.on("error", (error) => {
+      if (!current() || (record._activating && !record._procReady)) return;
+      this.handleRuntimeFailure(record, proc, error.message);
     });
   }
 
-  private _beginInterruptOperation(
+  private installSnapshot(
     record: SessionRecord,
-    kind: SessionInterruptKind,
-    source: SessionInterruptSource = "event",
-  ): number {
-    if (!record._interruptOps) record._interruptOps = new Map();
-    const id = record._nextInterruptOpId ?? 1;
-    record._nextInterruptOpId = id + 1;
-    record._interruptOps.set(id, { kind, source });
-    this._emitInterruptStateFromOps(record);
-    return id;
-  }
-
-  private _endInterruptOperation(record: SessionRecord, id: number): void {
-    if (!record._interruptOps?.delete(id)) return;
-    this._emitInterruptStateFromOps(record);
-  }
-
-  private _endInterruptOperationsByKind(record: SessionRecord, kind: SessionInterruptKind): void {
-    const ops = record._interruptOps;
-    if (!ops) return;
-    let changed = false;
-    for (const [id, op] of ops) {
-      if (op.kind === kind) {
-        ops.delete(id);
-        changed = true;
+    snapshotInput: AgentSessionSnapshot,
+    publish = true,
+  ): void {
+    const parsed = AgentSessionSnapshotSchema.safeParse(snapshotInput);
+    if (!parsed.success) {
+      this.publishUnavailable(record, `Invalid runtime snapshot: ${parsed.error.message}`);
+      return;
+    }
+    const snapshot = parsed.data;
+    const prior = record.snapshot;
+    if (record.proc?.hostInstanceId && snapshot.hostInstanceId !== record.proc.hostInstanceId)
+      return;
+    if (prior?.hostInstanceId === snapshot.hostInstanceId) {
+      if (snapshot.sessionEpoch < prior.sessionEpoch) return;
+      if (
+        snapshot.sessionEpoch === prior.sessionEpoch &&
+        snapshot.snapshotSequence <= prior.snapshotSequence
+      ) {
+        return;
       }
     }
-    if (changed) this._emitInterruptStateFromOps(record);
+    const { snapshotSequence: _sequence, capturedAt: _capturedAt, ...mutationFacts } = snapshot;
+    const mutationFingerprint = JSON.stringify(mutationFacts);
+    if (
+      record._snapshotMutationFingerprint !== undefined &&
+      record._snapshotMutationFingerprint !== mutationFingerprint
+    ) {
+      record._mutationSequence++;
+    }
+    record._snapshotMutationFingerprint = mutationFingerprint;
+    record.snapshot = snapshot;
+    if (snapshot.isIdle && snapshot.pendingMessageCount === 0) {
+      for (const [intentId, retained] of record._retainedIntents) {
+        if (["completed", "extension_error"].includes(retained.disposition)) {
+          record._retainedIntents.delete(intentId);
+        }
+      }
+    }
+    record.snapshotReceivedAt = Date.now();
+    const leaseMs = snapshot.isIdle ? 5_000 : 1_000;
+    const transitionPending = record._hostTransition !== undefined;
+    record.leaseExpiresAt = transitionPending ? undefined : record.snapshotReceivedAt + leaseMs;
+    record.availability = transitionPending ? "transitioning" : "available";
+    record.lastActiveAt = Date.now();
+    if (snapshot.sessionFile) this.noteSessionFile(record.sessionId, snapshot.sessionFile);
+    if (transitionPending) {
+      if (record._leaseTimer) clearTimeout(record._leaseTimer);
+      record._leaseTimer = undefined;
+    } else {
+      this.armLease(record, leaseMs);
+    }
+    if (publish) this.publishRuntime(record, record.availability);
   }
 
-  private _activeInterruptKinds(record: SessionRecord): Set<SessionInterruptKind> {
-    const kinds = new Set<SessionInterruptKind>();
-    for (const op of record._interruptOps?.values() ?? []) kinds.add(op.kind);
-    return kinds;
+  private installTransitionBatch(
+    record: SessionRecord,
+    batchInput: TransitionBatch,
+    options: {
+      expectedTransition?: { transitionId: string; provisionalEpoch: number } | undefined;
+      allowInitial?: boolean | undefined;
+    } = {},
+  ): boolean {
+    const parsed = TransitionBatchSchema.safeParse(batchInput);
+    if (!parsed.success) {
+      this.publishUnavailable(record, `Invalid transition batch: ${parsed.error.message}`);
+      return false;
+    }
+    const batch = parsed.data;
+    const terminal = batch.terminalSnapshot;
+    const correlated =
+      (options.allowInitial === true &&
+        batch.transitionId === `initial-${terminal.hostInstanceId}`) ||
+      (options.expectedTransition !== undefined &&
+        batch.transitionId === options.expectedTransition.transitionId &&
+        batch.provisionalEpoch === options.expectedTransition.provisionalEpoch);
+    if (!correlated) {
+      this.publishUnavailable(record, "Uncorrelated transition batch");
+      return false;
+    }
+    const prior = record.snapshot;
+    if (
+      terminal.sessionEpoch !== batch.provisionalEpoch ||
+      record.proc?.hostInstanceId !== terminal.hostInstanceId ||
+      (prior?.hostInstanceId === terminal.hostInstanceId &&
+        (terminal.sessionEpoch < prior.sessionEpoch ||
+          (terminal.sessionEpoch === prior.sessionEpoch &&
+            terminal.snapshotSequence <= prior.snapshotSequence))) ||
+      batch.records.some(
+        (item) =>
+          (item.type === "submission" || item.type === "escape") &&
+          (item.result.hostInstanceId !== terminal.hostInstanceId ||
+            item.result.sessionEpoch !== batch.provisionalEpoch),
+      )
+    ) {
+      this.publishUnavailable(record, "Invalid transition batch identity");
+      return false;
+    }
+    if (options.expectedTransition !== undefined) record._hostTransition = undefined;
+    // Reduce every record privately in wire order. Nothing is renderer-visible
+    // until the terminal direct snapshot is installed and one combined IPC
+    // update is published.
+    record.snapshot = undefined;
+    for (const item of batch.records) {
+      if (item.type === "event") {
+        record._mutationSequence++;
+      } else if (item.type === "ui") {
+        record._mutationSequence++;
+        const operationId =
+          (item.request as ExtensionUiRequest & { operationId?: string }).operationId ??
+          item.request.id;
+        record._pendingUiRequests.set(operationId, structuredClone(item.request));
+      } else if (item.type === "panel") {
+        record._mutationSequence++;
+        if (item.event.type === "panel_open") {
+          record._openPanels.set(item.event.panelId, structuredClone(item.event));
+          record._panelInputSequence.set(item.event.panelId, 0);
+        } else if (item.event.type === "panel_data") {
+          const checkpoint = record._panelCheckpoints.get(item.event.panelId) ?? {};
+          record._panelCheckpoints.set(item.event.panelId, {
+            ...checkpoint,
+            lastData: item.event.data,
+          });
+        } else if (item.event.type === "panel_mode") {
+          const checkpoint = record._panelCheckpoints.get(item.event.panelId) ?? {};
+          record._panelCheckpoints.set(item.event.panelId, {
+            ...checkpoint,
+            mode: item.event.mode,
+          });
+        } else if (item.event.type === "panel_close") {
+          record._openPanels.delete(item.event.panelId);
+          record._panelInputSequence.delete(item.event.panelId);
+          record._panelInputChains.delete(item.event.panelId);
+          record._panelCheckpoints.delete(item.event.panelId);
+        } else if (item.event.type === "panel_clear_all") {
+          record._openPanels.clear();
+          record._panelInputSequence.clear();
+          record._panelInputChains.clear();
+          record._panelCheckpoints.clear();
+        }
+      } else if (item.type === "submission") {
+        this.retainDisposition(record, item.result);
+      } else if (item.type === "queue_restoration") {
+        if (!record._restorations.has(item.restorationId)) {
+          record._restorations.set(item.restorationId, structuredClone(item));
+          record.proc?.acknowledgeRestoration(item.restorationId);
+        }
+      }
+      // Escape results are already correlated to their request. Keeping them in
+      // this combined record stream preserves ordering without inventing state.
+    }
+    this.installSnapshot(record, terminal, false);
+    const state = this.publishRuntime(record, "available", undefined, false);
+    this.onTransitionBatch(record.sessionId, batch.records, state);
+    return true;
   }
 
-  private _clearInterruptOperations(record: SessionRecord): void {
-    if (record._interruptOps) record._interruptOps.clear();
-    this._emitInterruptStateFromOps(record);
+  private armLease(record: SessionRecord, leaseMs: number): void {
+    if (record._leaseTimer) clearTimeout(record._leaseTimer);
+    if (record._lifecycleUiLease) {
+      record._leaseTimer = undefined;
+      record.leaseExpiresAt = undefined;
+      return;
+    }
+    record._leaseTimer = setTimeout(() => {
+      if (!record.snapshotReceivedAt || Date.now() < (record.leaseExpiresAt ?? 0)) return;
+      this.publishUnavailable(record, "Runtime snapshot lease expired");
+      void this.resyncSession(record.sessionId).catch(() => {});
+    }, leaseMs + 10);
+    record._leaseTimer.unref?.();
   }
 
-  private _cancelPendingInterruptibleCommands(record: SessionRecord): number {
-    const pending = record._pendingSend;
-    if (!pending?.length) return 0;
-    const remaining: typeof pending = [];
-    let cancelled = 0;
-    for (const item of pending) {
-      if (this._isInterruptibleCommand(item.command)) {
-        cancelled++;
-        item.resolve({
-          type: "response",
-          command: item.command.type,
-          success: false,
-          error: "Interrupted before session was ready",
+  private publishRuntime(
+    record: SessionRecord,
+    availability: RuntimeStateUpdate["availability"],
+    reason?: string,
+    notify = true,
+  ): RuntimeStateUpdate {
+    const state: RuntimeStateUpdate = {
+      availability,
+      receivedAt: Date.now(),
+      ...(record.proc?.hostInstanceId ? { hostInstanceId: record.proc.hostInstanceId } : {}),
+      ...(record.snapshot
+        ? { sessionEpoch: record.snapshot.sessionEpoch, snapshot: record.snapshot }
+        : {}),
+      ...(record.leaseExpiresAt ? { leaseExpiresAt: record.leaseExpiresAt } : {}),
+      ...(reason ? { reason } : {}),
+    };
+    if (notify) this.onRuntimeState(record.sessionId, state);
+    return state;
+  }
+
+  private publishUnavailable(record: SessionRecord, reason: string): RuntimeStateUpdate {
+    record.availability = "unavailable";
+    // Preserve booleans in the last snapshot for diagnostics; selectors must
+    // gate them on availability and therefore cannot mistake stale state for idle.
+    return this.publishRuntime(record, "unavailable", reason);
+  }
+
+  private retireHostUi(record: SessionRecord): void {
+    record._lifecycleUiLease = false;
+    if (record._leaseTimer) clearTimeout(record._leaseTimer);
+    record._leaseTimer = undefined;
+    for (const pending of record._pendingUiAcks.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(false);
+    }
+    record._pendingUiAcks.clear();
+    if (record._pendingRendererCancellation) {
+      clearTimeout(record._pendingRendererCancellation.timer);
+      record._pendingRendererCancellation.resolve(false);
+      record._pendingRendererCancellation = undefined;
+    }
+    for (const operationId of record._pendingUiRequests.keys()) {
+      this.onUiAcknowledged(record.sessionId, operationId);
+    }
+    record._pendingUiRequests.clear();
+    record._openPanels.clear();
+    record._panelCheckpoints.clear();
+    record._panelInputSequence.clear();
+    record._panelInputChains.clear();
+  }
+
+  private captureEditorRecovery(record: SessionRecord): void {
+    const editor = record.snapshot?.editor;
+    if (
+      editor &&
+      (editor.text !== "" || editor.conflictText !== undefined || editor.attachments.length > 0)
+    ) {
+      record._editorRecovery = structuredClone(editor);
+    }
+  }
+
+  private async recoverEditorAfterRestart(record: SessionRecord, proc: SessionHost): Promise<void> {
+    const recovery = record._editorRecovery;
+    const initialBatch = record._deferredInitialBatch;
+    if (!recovery || !initialBatch) return;
+    const initial = initialBatch.terminalSnapshot.editor;
+    const equal = JSON.stringify(initial) === JSON.stringify(recovery);
+    if (!equal) {
+      type EditorCandidate = { text: string; attachments: unknown[] };
+      const storedCandidates = (editor: typeof recovery): EditorCandidate[] => [
+        ...(editor.conflictText !== undefined
+          ? [{ text: editor.conflictText, attachments: editor.conflictAttachments ?? [] }]
+          : []),
+        ...(editor.alternateConflictText !== undefined
+          ? [
+              {
+                text: editor.alternateConflictText,
+                attachments: editor.alternateConflictAttachments ?? [],
+              },
+            ]
+          : []),
+        ...(editor.additionalConflictCandidates ?? []),
+      ];
+      const deduplicateCandidates = (
+        represented: EditorCandidate[],
+        candidates: EditorCandidate[],
+      ): EditorCandidate[] => {
+        const seen = [...represented];
+        const unique: EditorCandidate[] = [];
+        for (const candidate of candidates) {
+          if (
+            seen.some(
+              (existing) =>
+                existing.text === candidate.text &&
+                JSON.stringify(existing.attachments) === JSON.stringify(candidate.attachments),
+            )
+          )
+            continue;
+          seen.push(candidate);
+          unique.push(candidate);
+        }
+        return unique;
+      };
+      let replacementState = initial;
+      let restoredRevision: number | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const carriedCandidates = deduplicateCandidates(
+          [
+            { text: recovery.text, attachments: recovery.attachments },
+            { text: replacementState.text, attachments: replacementState.attachments },
+          ],
+          [...storedCandidates(recovery), ...storedCandidates(replacementState)],
+        );
+        const [carriedAlternate, ...carriedAdditional] = carriedCandidates;
+        const restored = await proc.sendEditorPatch({
+          baseRevision: replacementState.revision,
+          revision: replacementState.revision + 1,
+          text: recovery.text,
+          attachments: recovery.attachments,
+          ...(carriedAlternate
+            ? {
+                alternateConflictText: carriedAlternate.text,
+                alternateConflictAttachments: carriedAlternate.attachments,
+              }
+            : {}),
+          ...(carriedAdditional.length > 0
+            ? { additionalConflictCandidates: carriedAdditional }
+            : {}),
         });
-      } else {
-        remaining.push(item);
+        if (!restored.success) throw new Error(restored.error ?? "Editor recovery failed");
+        const result = restored.data as
+          | {
+              accepted?: boolean;
+              revision?: number;
+              text?: string;
+              attachments?: unknown[];
+              conflictText?: string;
+              conflictAttachments?: unknown[];
+              alternateConflictText?: string;
+              alternateConflictAttachments?: unknown[];
+              additionalConflictCandidates?: Array<{ text: string; attachments: unknown[] }>;
+            }
+          | undefined;
+        if (result?.accepted === true && typeof result.revision === "number") {
+          restoredRevision = result.revision;
+          break;
+        }
+        if (
+          typeof result?.revision !== "number" ||
+          typeof result.text !== "string" ||
+          !Array.isArray(result.attachments)
+        ) {
+          throw new Error("Invalid editor recovery response");
+        }
+        replacementState = {
+          revision: result.revision,
+          text: result.text,
+          attachments: result.attachments,
+          ...(result.conflictText !== undefined
+            ? {
+                conflictText: result.conflictText,
+                conflictAttachments: result.conflictAttachments ?? [],
+                ...(result.alternateConflictText !== undefined
+                  ? {
+                      alternateConflictText: result.alternateConflictText,
+                      alternateConflictAttachments: result.alternateConflictAttachments ?? [],
+                    }
+                  : {}),
+                ...(result.additionalConflictCandidates?.length
+                  ? {
+                      additionalConflictCandidates: result.additionalConflictCandidates,
+                    }
+                  : {}),
+              }
+            : {}),
+        };
+      }
+      // If all retries conflict, the last rejected patch has already preserved
+      // the recovery text/attachments in host conflict state. Keep that live
+      // replacement instead of killing it and losing its canonical draft.
+      if (restoredRevision !== undefined) {
+        const candidates = deduplicateCandidates(
+          [{ text: recovery.text, attachments: recovery.attachments }],
+          [
+            ...storedCandidates(recovery),
+            ...(replacementState.text !== "" || replacementState.attachments.length > 0
+              ? [
+                  {
+                    text: replacementState.text,
+                    attachments: replacementState.attachments,
+                  },
+                ]
+              : []),
+            ...storedCandidates(replacementState),
+          ],
+        );
+        const [primaryConflict, alternateConflict, ...additionalConflicts] = candidates;
+        if (primaryConflict) {
+          const review = await proc.sendEditorPatch({
+            baseRevision: restoredRevision - 1,
+            revision: restoredRevision + 1,
+            text: primaryConflict.text,
+            attachments: primaryConflict.attachments,
+            ...(alternateConflict
+              ? {
+                  alternateConflictText: alternateConflict.text,
+                  alternateConflictAttachments: alternateConflict.attachments,
+                }
+              : {}),
+            ...(additionalConflicts.length > 0
+              ? { additionalConflictCandidates: additionalConflicts }
+              : {}),
+          });
+          if (
+            !review.success ||
+            (review.data as { accepted?: boolean } | undefined)?.accepted !== false
+          )
+            throw new Error(review.error ?? "Editor conflict recovery failed");
+        }
       }
     }
-    record._pendingSend = remaining.length > 0 ? remaining : undefined;
-    return cancelled;
-  }
-
-  private _isInterruptibleCommand(command: PiRpcCommand): boolean {
-    return (
-      command.type === "prompt" ||
-      command.type === "steer" ||
-      command.type === "follow_up" ||
-      command.type === "bash" ||
-      command.type === "compact"
+    const snapshot = await proc.requestSnapshot();
+    record._editorRecovery = undefined;
+    record._deferredInitialBatch = undefined;
+    this.installTransitionBatch(
+      record,
+      {
+        ...initialBatch,
+        provisionalEpoch: snapshot.sessionEpoch,
+        terminalSnapshot: snapshot,
+      },
+      { allowInitial: true },
     );
   }
 
-  /**
-   * Send a command to the session's pi process. If the process is live, send
-   * immediately. If activation is mid-flight (status "starting", proc not yet
-   * assigned — during the session-file lock await or the host startup
-   * handshake), queue the command and flush it once the proc is established.
-   * Otherwise (cold/exited/failed with no activation pending) fail fast with
-   * "No active process".
-   *
-   * The queue exists because activateSession is async: it emits "starting"
-   * *before* the proc exists, and the renderer reacts to "starting" by firing
-   * its init commands (get_state / get_available_models /
-   * get_session_stats). Without buffering those would race the proc
-   * assignment and fail with "No active process".
-   */
-  async sendCommand(
-    sessionId: SessionId,
-    command: PiRpcCommand,
-    options: { uiSurface?: SessionCommandUiSurface | undefined } = {},
-  ): Promise<PiRpcResponse> {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) throw new Error(`Unknown session: ${sessionId}`);
-    // Gate on readiness, NOT on proc presence: host mode assigns rec.proc
-    // pre-handshake (for the trust dialog), but the host bounces commands with
-    // "Not initialized" until init completes. _procReady flips true exactly
-    // when the proc can accept commands. See P1-i.
-    if (!rec._restartInProgress && rec.proc && rec._procReady) {
-      const proc = rec.proc;
-      const fallbackInterruptKind: SessionInterruptKind | null =
-        !isSessionHost(proc) && command.type === "prompt"
-          ? "agent"
-          : !isSessionHost(proc) && command.type === "bash"
-            ? "bash"
-            : !isSessionHost(proc) && command.type === "compact"
-              ? "compact"
-              : null;
-      const opId = fallbackInterruptKind
-        ? this._beginInterruptOperation(rec, fallbackInterruptKind, "command")
-        : null;
-      try {
-        const res = await proc.sendCommand(command, options);
-        if (opId !== null) {
-          this._endInterruptOperation(rec, opId);
-        }
-        return res;
-      } catch (err) {
-        if (opId !== null) this._endInterruptOperation(rec, opId);
-        throw err;
+  private handleRuntimeFailure(record: SessionRecord, proc: SessionHost, reason: string): void {
+    if (record.proc !== proc) return;
+    this.captureEditorRecovery(record);
+    record.proc = undefined;
+    this.retireHostUi(record);
+    record._procReady = false;
+    proc.stop();
+    record.status = "failed";
+    record.error = reason;
+    for (const retained of record._retainedIntents.values()) {
+      const recoverable =
+        ["in_custody", "consumed", "outcome_unknown"].includes(retained.disposition) ||
+        (retained.disposition === "completed" && retained.queuedAtAdmission === true);
+      if (!recoverable) continue;
+      retained.disposition = "outcome_unknown";
+      retained.updatedAt = Date.now();
+      if (retained.recoveryPublished) continue;
+      retained.recoveryPublished = true;
+      const payload = retained.payload;
+      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+        type: "queue_restoration",
+        restorationId: `ambiguous-submission:${payload.intentId}`,
+        steering: payload.requestedMode === "steer" ? [payload.text] : [],
+        followUp: payload.requestedMode === "followUp" ? [payload.text] : [],
+        originalAttachments: [{ intentId: payload.intentId, images: payload.images }],
+        requiresReview: true,
+      };
+      if (!record._restorations.has(restoration.restorationId)) {
+        record._restorations.set(restoration.restorationId, structuredClone(restoration));
+        this.onQueueRestoration(record.sessionId, restoration);
       }
-    }
-    if (rec.status === "starting" || rec._restartInProgress) {
-      return new Promise<PiRpcResponse>((resolve, reject) => {
-        if (!rec._pendingSend) rec._pendingSend = [];
-        rec._pendingSend.push({ command, uiSurface: options.uiSurface, resolve, reject });
+      this.onSubmission(record.sessionId, {
+        intentId: payload.intentId,
+        hostInstanceId: payload.expectedHostId,
+        sessionEpoch: payload.expectedEpoch,
+        editorRevision: payload.editorRevision,
+        disposition: "outcome_unknown",
+        message: "Host failed after custody; review the retained submission before retrying",
       });
     }
-    throw new Error(`No active process for session ${sessionId}`);
-  }
+    // Commands that crossed child IPC but lost their terminal response are
+    // never replayed. Publish one durable review marker per intent.
+    for (const [intentId, retained] of record._retainedCommandIntents) {
+      if (!retained.dispatched || retained.recoveryPublished) continue;
+      retained.recoveryPublished = true;
+      const restorationId = `ambiguous-command:${intentId}`;
+      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+        type: "queue_restoration",
+        restorationId,
+        steering: [],
+        followUp: [],
+        originalAttachments: [],
+        commandDescription: `${retained.request.command.type}${
+          retained.request.sourceText?.trim() ? ` (${retained.request.sourceText.trim()})` : ""
+        } may have completed before its acknowledgement was lost. Review before retrying.`,
+        requiresReview: true,
+      };
+      record._restorations.set(restorationId, structuredClone(restoration));
+      this.onQueueRestoration(record.sessionId, restoration);
+    }
 
-  /** Interrupt the active runtime operation. Safe no-op when idle. */
-  async interruptSession(sessionId: SessionId): Promise<void> {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) return;
-    this._cancelPendingInterruptibleCommands(rec);
-    if (!rec.proc || !rec._procReady) return;
-    if (isSessionHost(rec.proc)) {
-      rec.proc.sendInterrupt();
+    // A unified request belongs to the host identity that emitted it. If that
+    // host dies before the renderer response, never execute it against a
+    // replacement host. Convert its text into an explicit review-required
+    // restoration instead.
+    for (const pending of [...record._pendingUnifiedSubmits.values()]) {
+      if (pending.claimedGeneration !== undefined) {
+        this.retireUnifiedAsAmbiguous(
+          record,
+          pending,
+          "Unified submission may have executed before host acknowledgement was lost",
+          false,
+        );
+        continue;
+      }
+      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+        type: "queue_restoration",
+        restorationId: `interrupted-unified:${pending.id}`,
+        steering: [],
+        followUp: [pending.text],
+        originalAttachments: [],
+        requiresReview: true,
+      };
+      record._restorations.set(restoration.restorationId, structuredClone(restoration));
+      this.onQueueRestoration(record.sessionId, restoration);
+      record._pendingUnifiedSubmits.delete(pending.id);
+    }
+    this.publishUnavailable(record, reason);
+    this.onPanelEvent(record.sessionId, { type: "panel_clear_all" });
+    this.onPanelEvent(record.sessionId, { type: "unified_panel_reset" });
+    this.onStatusChanged(record.sessionId, "failed", reason);
+
+    const now = Date.now();
+    const rapid = now - (record._lastFailureAt ?? 0) < RAPID_FAILURE_WINDOW_MS;
+    record._lastFailureAt = now;
+    record._rapidFailureCount = rapid ? record._rapidFailureCount + 1 : 1;
+    if (record._rapidFailureCount > 1 || record._dead || !record._piPath) {
+      this.releaseLock(record);
       return;
     }
-    const kinds = this._activeInterruptKinds(rec);
-    if (kinds.size === 0) return;
-    const commands: PiRpcCommand[] = [];
-    if (kinds.has("agent") || kinds.has("compact")) commands.push({ type: "abort" });
-    if (kinds.has("bash")) commands.push({ type: "abort_bash" });
-    for (const command of commands) {
-      try {
-        await rec.proc.sendCommand(command);
-      } catch {
-        // Rejection-safe: ESC should never surface an unhandled rejection.
+    queueMicrotask(() => {
+      if (record._dead || record.proc || record._activating) return;
+      void this.activateSession(record.sessionId, record._piPath as string, record._env).catch(
+        () => {},
+      );
+    });
+  }
+
+  async submit(
+    sessionId: SessionId,
+    submissionInput: SessionSubmission,
+  ): Promise<SubmissionResult> {
+    const record = this.sessions.get(sessionId);
+    const parsed = SessionSubmissionSchema.safeParse(submissionInput);
+    if (!parsed.success) throw new Error(`Invalid submission: ${parsed.error.message}`);
+    const submission = parsed.data;
+    const rejectBeforeDispatch = (message: string): SubmissionResult => {
+      const result: SubmissionResult = {
+        intentId: submission.intentId,
+        hostInstanceId: submission.expectedHostId,
+        sessionEpoch: submission.expectedEpoch,
+        editorRevision: submission.editorRevision,
+        disposition: "not_submitted",
+        message,
+      };
+      if (record) this.onSubmission(sessionId, result);
+      return result;
+    };
+    if (record?._expiredUnifiedIntents.has(submission.intentId)) {
+      const result: SubmissionResult = {
+        intentId: submission.intentId,
+        hostInstanceId: submission.expectedHostId,
+        sessionEpoch: submission.expectedEpoch,
+        editorRevision: submission.editorRevision,
+        disposition: "outcome_unknown",
+        message: "Unified action claim expired before a safe settlement boundary",
+      };
+      this.onSubmission(sessionId, result);
+      return result;
+    }
+    if (record?._closing) {
+      return rejectBeforeDispatch("Session close preparation is in progress");
+    }
+    if (!record?.proc || !record._procReady) {
+      return rejectBeforeDispatch(`No active SDK host for session ${sessionId}`);
+    }
+    if (record.availability !== "available") {
+      return rejectBeforeDispatch(
+        `Session runtime is ${record.availability}; submission was not dispatched`,
+      );
+    }
+    if (
+      submission.expectedHostId !== record.proc.hostInstanceId ||
+      submission.expectedEpoch !== record.snapshot?.sessionEpoch
+    ) {
+      return rejectBeforeDispatch("Submission host identity or epoch is stale");
+    }
+    const prior = record._retainedIntents.get(submission.intentId);
+    if (prior) {
+      if (!isDeepStrictEqual(prior.payload, submission)) {
+        return rejectBeforeDispatch("Submission intent was reused with a different payload");
       }
+      const pending = record._pendingSubmissionPromises.get(submission.intentId);
+      if (pending) return pending;
+      if (prior.result) return structuredClone(prior.result);
+      return rejectBeforeDispatch("Submission intent is already unresolved");
+    }
+
+    const retained: RetainedIntent = {
+      payload: structuredClone(submission),
+      // Once IPC dispatch begins the host may cross the consumption boundary
+      // before its correlated response reaches main. Treat the unresolved
+      // interval conservatively so host loss can never imply safe replay.
+      disposition: "outcome_unknown",
+      updatedAt: Date.now(),
+    };
+    record._retainedIntents.set(submission.intentId, retained);
+    const admittedProc = record.proc;
+    const ownerIsCurrent = (): boolean =>
+      this.sessions.get(sessionId) === record &&
+      !record._closing &&
+      !record._dead &&
+      record.proc === admittedProc &&
+      admittedProc.hostInstanceId === submission.expectedHostId &&
+      admittedProc.sessionEpoch === submission.expectedEpoch &&
+      record.snapshot?.hostInstanceId === submission.expectedHostId &&
+      record.snapshot.sessionEpoch === submission.expectedEpoch &&
+      record.availability === "available" &&
+      record._hostTransition === undefined;
+    const settleUnknown = (
+      message: string,
+      publishRestoration: boolean,
+      publishDisposition: boolean,
+    ): SubmissionResult => {
+      retained.disposition = "outcome_unknown";
+      retained.updatedAt = Date.now();
+      const result: SubmissionResult = {
+        intentId: submission.intentId,
+        hostInstanceId: submission.expectedHostId,
+        sessionEpoch: submission.expectedEpoch,
+        editorRevision: submission.editorRevision,
+        disposition: "outcome_unknown",
+        message,
+      };
+      retained.result = structuredClone(result);
+      if (publishRestoration && !retained.recoveryPublished) {
+        retained.recoveryPublished = true;
+        const restorationId = `ambiguous-submission:${submission.intentId}`;
+        const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+          type: "queue_restoration",
+          restorationId,
+          steering: submission.requestedMode === "steer" ? [submission.text] : [],
+          followUp: submission.requestedMode === "followUp" ? [submission.text] : [],
+          originalAttachments: [{ intentId: submission.intentId, images: submission.images }],
+          requiresReview: true,
+        };
+        record._restorations.set(restorationId, structuredClone(restoration));
+        this.onQueueRestoration(sessionId, restoration);
+      }
+      if (publishDisposition) this.onSubmission(sessionId, result);
+      return result;
+    };
+    const operation = (async (): Promise<SubmissionResult> => {
+      try {
+        const result = await admittedProc.submit(submission);
+        if (record._expiredUnifiedIntents.has(submission.intentId)) {
+          return (
+            retained.result ?? {
+              intentId: submission.intentId,
+              hostInstanceId: submission.expectedHostId,
+              sessionEpoch: submission.expectedEpoch,
+              editorRevision: submission.editorRevision,
+              disposition: "outcome_unknown",
+              message: "Unified action claim expired before a safe settlement boundary",
+            }
+          );
+        }
+        if (!ownerIsCurrent()) {
+          return settleUnknown(
+            "Submission settled after its admitted runtime or session lifecycle was retired",
+            this.sessions.get(sessionId) === record && !record._closing && !record._dead,
+            false,
+          );
+        }
+        retained.result = structuredClone(result);
+        this.retainDisposition(record, result);
+        this.onSubmission(sessionId, result);
+        return result;
+      } catch (error) {
+        const currentOwner = ownerIsCurrent();
+        return settleUnknown(
+          `Submission may have crossed into Pi before acknowledgement was lost: ${error instanceof Error ? error.message : String(error)}`,
+          this.sessions.get(sessionId) === record && !record._closing && !record._dead,
+          currentOwner,
+        );
+      }
+    })();
+    record._pendingSubmissionPromises.set(submission.intentId, operation);
+    void operation.finally(() => {
+      if (record._pendingSubmissionPromises.get(submission.intentId) === operation) {
+        record._pendingSubmissionPromises.delete(submission.intentId);
+      }
+      if (record._acknowledgedUnifiedIntents.delete(submission.intentId)) {
+        record._expiredUnifiedIntents.delete(submission.intentId);
+        record._retainedIntents.delete(submission.intentId);
+      }
+    });
+    return operation;
+  }
+
+  private retireStaleSubmissionDisposition(
+    record: SessionRecord,
+    result: SubmissionResult,
+    message: string,
+  ): void {
+    const retained = record._retainedIntents.get(result.intentId);
+    if (!retained) return;
+    const unknown: SubmissionResult = {
+      intentId: result.intentId,
+      hostInstanceId: retained.payload.expectedHostId,
+      sessionEpoch: retained.payload.expectedEpoch,
+      editorRevision: retained.payload.editorRevision,
+      disposition: "outcome_unknown",
+      message,
+    };
+    retained.disposition = "outcome_unknown";
+    retained.result = structuredClone(unknown);
+    retained.updatedAt = Date.now();
+    if (retained.recoveryPublished) return;
+    retained.recoveryPublished = true;
+    const restorationId = `ambiguous-submission:${result.intentId}`;
+    const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+      type: "queue_restoration",
+      restorationId,
+      steering: retained.payload.requestedMode === "steer" ? [retained.payload.text] : [],
+      followUp: retained.payload.requestedMode === "followUp" ? [retained.payload.text] : [],
+      originalAttachments: [
+        { intentId: retained.payload.intentId, images: retained.payload.images },
+      ],
+      requiresReview: true,
+    };
+    record._restorations.set(restorationId, structuredClone(restoration));
+    this.onQueueRestoration(record.sessionId, restoration);
+  }
+
+  private retainDisposition(record: SessionRecord, resultInput: SubmissionResult): void {
+    const parsed = SubmissionResultSchema.safeParse(resultInput);
+    if (!parsed.success) return;
+    const result = parsed.data;
+    if (
+      result.hostInstanceId !== record.proc?.hostInstanceId ||
+      result.sessionEpoch !== record.snapshot?.sessionEpoch
+    )
+      return;
+    const retained = record._retainedIntents.get(result.intentId);
+    if (!retained) return;
+    retained.disposition = result.disposition;
+    retained.updatedAt = Date.now();
+    if (result.queued !== undefined) retained.queuedAtAdmission = result.queued;
+    if (["not_submitted", "rejected"].includes(result.disposition)) {
+      record._retainedIntents.delete(result.intentId);
     }
   }
 
-  /** Flush queued commands now that the proc is live (activation succeeded). */
-  private _flushPending(sessionId: SessionId): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec?._pendingSend?.length) return;
-    const pending = rec._pendingSend;
-    rec._pendingSend = undefined;
-    for (const item of pending) {
-      this.sendCommand(sessionId, item.command, { uiSurface: item.uiSurface }).then(
-        item.resolve,
-        item.reject,
+  async escapeSession(
+    sessionId: SessionId,
+    requestId: string,
+    expected: { hostInstanceId: string; sessionEpoch: number },
+  ): Promise<EscapeResult> {
+    const record = this.sessions.get(sessionId);
+    const base = {
+      requestId,
+      hostInstanceId: expected.hostInstanceId,
+      sessionEpoch: expected.sessionEpoch,
+    };
+    if (
+      !record?.proc ||
+      !record._procReady ||
+      record.status !== "ready" ||
+      record.availability !== "available" ||
+      record._hostTransition ||
+      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+    ) {
+      return {
+        ...base,
+        disposition: "not_applicable",
+        message: "Session changed or became unavailable before interrupt dispatch",
+      };
+    }
+    const proc = record.proc;
+    try {
+      const result = await proc.escape(requestId);
+      if (
+        this.sessions.get(sessionId) !== record ||
+        record._closing ||
+        record._dead ||
+        record.availability !== "available" ||
+        record._hostTransition !== undefined ||
+        record.proc !== proc ||
+        !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+      ) {
+        return {
+          ...base,
+          disposition: "outcome_unknown",
+          message: "Session changed before interrupt acknowledgement",
+        };
+      }
+      return result;
+    } catch (error) {
+      return {
+        ...base,
+        disposition: "outcome_unknown",
+        message: `Interrupt may have reached Pi before acknowledgement was lost: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  async resyncSession(sessionId: SessionId): Promise<RuntimeStateUpdate> {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    if (!record.proc || !record._procReady)
+      return this.publishUnavailable(record, "Runtime unavailable");
+    const proc = record.proc;
+    try {
+      const snapshot = await proc.requestSnapshot();
+      if (
+        this.sessions.get(sessionId) !== record ||
+        record._closing ||
+        record._dead ||
+        record.proc !== proc ||
+        !record._procReady
+      ) {
+        throw new Error("Session lifecycle changed before runtime resynchronization completed");
+      }
+      this.installSnapshot(record, snapshot);
+      return this.publishRuntime(record, record.availability);
+    } catch (error) {
+      if (
+        this.sessions.get(sessionId) !== record ||
+        record._closing ||
+        record._dead ||
+        record.proc !== proc
+      ) {
+        throw error;
+      }
+      return this.publishUnavailable(
+        record,
+        error instanceof Error ? error.message : String(error),
       );
     }
   }
 
-  /**
-   * Release the advisory session-file lock if we hold it (P1-f). Called from
-   * the proc exit/error listeners (async failure), the sync catch, and
-   * closeSession. No-op if we don't hold it (e.g. onCompromised already
-   * cleared _hasLock). Swallows ENOTACQUIRED (lock already released by
-   * onCompromised/setLockAsCompromised). Keeps the success path's lock
-   * intact (only these terminal paths call it).
-   */
-  private _releaseLockIfHeld(sessionId: SessionId): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec?._hasLock || !rec.sessionFile) return;
-    lockfile
-      .unlock(rec.sessionFile, {
-        lockfilePath: `${rec.sessionFile}.lock`,
-        realpath: false,
-      })
-      .catch(() => {});
-    rec._hasLock = false;
+  private clearUnifiedClaimTimer(record: SessionRecord, id: string): void {
+    const timer = record._unifiedClaimTimers.get(id);
+    if (timer) clearTimeout(timer);
+    record._unifiedClaimTimers.delete(id);
   }
 
-  /** Wait for an in-flight activation to reach a quiescent state before restart operations. */
-  private async _waitForActivationIfNeeded(record: SessionRecord): Promise<void> {
-    if (record._activating && record._activationDone) {
-      await record._activationDone;
-    }
-  }
-
-  /** Serialize reload/worktree restarts for a record. */
-  private async _runRestartExclusive(
+  private retireUnifiedAsAmbiguous(
     record: SessionRecord,
-    fn: () => Promise<void>,
-  ): Promise<void> {
-    if (record._activating) {
-      record._suppressNextActivationFlush = true;
+    pending: PendingUnifiedSubmit,
+    message: string,
+    sendHostResponse: boolean,
+  ): void {
+    this.clearUnifiedClaimTimer(record, pending.id);
+    const restorationId = `ambiguous-unified:${pending.id}`;
+    if (!record._restorations.has(restorationId)) {
+      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+        type: "queue_restoration",
+        restorationId,
+        steering: [],
+        followUp: [],
+        originalAttachments: [],
+        commandDescription: `${message}: ${pending.text}`,
+        requiresReview: true,
+      };
+      record._restorations.set(restorationId, structuredClone(restoration));
+      this.onQueueRestoration(record.sessionId, restoration);
     }
-    record._restartInProgress = true;
-    const previous = record._restartChain ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const chained = previous.then(
-      () => current,
-      () => current,
+    record._unifiedRestorationIntents.set(restorationId, pending.submissionIntentId);
+    record._expiredUnifiedIntents.add(pending.submissionIntentId);
+    record._retiredUnifiedRequests.add(
+      `${pending.hostInstanceId}\0${pending.sessionEpoch}\0${pending.id}`,
     );
-    record._restartChain = chained;
+    const unknownResult: SubmissionResult = {
+      intentId: pending.submissionIntentId,
+      hostInstanceId: pending.hostInstanceId,
+      sessionEpoch: pending.sessionEpoch,
+      editorRevision: pending.editorRevision,
+      disposition: "outcome_unknown",
+      message,
+    };
+    const retained = record._retainedIntents.get(pending.submissionIntentId);
+    if (retained) {
+      retained.disposition = "outcome_unknown";
+      retained.result = structuredClone(unknownResult);
+      retained.updatedAt = Date.now();
+      retained.recoveryPublished = true;
+    } else {
+      record._retainedIntents.set(pending.submissionIntentId, {
+        payload: {
+          intentId: pending.submissionIntentId,
+          expectedHostId: pending.hostInstanceId,
+          expectedEpoch: pending.sessionEpoch,
+          editorRevision: pending.editorRevision,
+          text: pending.text,
+          images: [],
+          requestedMode: "followUp",
+          surface: "unified",
+        },
+        disposition: "outcome_unknown",
+        result: structuredClone(unknownResult),
+        updatedAt: Date.now(),
+        recoveryPublished: true,
+      });
+    }
+    if (
+      sendHostResponse &&
+      record.proc?.hostInstanceId === pending.hostInstanceId &&
+      record.proc.sessionEpoch === pending.sessionEpoch
+    ) {
+      record.proc.sendUnifiedSubmitResponse(pending.id, false, false, message);
+    }
+    record._pendingUnifiedSubmits.delete(pending.id);
+    record._mutationSequence++;
+  }
 
-    await previous.catch(() => {});
-    let restartError: unknown;
-    try {
-      await fn();
-    } catch (err) {
-      restartError = err;
-      throw err;
-    } finally {
-      release();
-      if (record._restartChain === chained) {
-        record._restartChain = undefined;
-        record._restartInProgress = false;
-        if (record.proc && record._procReady) {
-          this._flushPending(record.sessionId);
-        } else {
-          const reason =
-            restartError instanceof Error
-              ? restartError.message
-              : (record.error ?? `Failed to activate session ${record.sessionId}`);
-          this._rejectPending(record.sessionId, reason);
+  private expireUnifiedClaim(
+    sessionId: SessionId,
+    id: string,
+    claimId: string,
+    claimedGeneration: number,
+  ): void {
+    const record = this.sessions.get(sessionId);
+    const pending = record?._pendingUnifiedSubmits.get(id);
+    if (
+      !record ||
+      !pending ||
+      pending.claimId !== claimId ||
+      pending.claimedGeneration !== claimedGeneration
+    )
+      return;
+    this.retireUnifiedAsAmbiguous(
+      record,
+      pending,
+      "Unified action claim expired before renderer acknowledgement",
+      true,
+    );
+  }
+
+  async rendererAttach(sessionId: SessionId, generation: number): Promise<RuntimeStateUpdate> {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    if (generation > record._rendererGeneration) {
+      const priorGeneration = record._rendererGeneration;
+      record._rendererGeneration = generation;
+      if (priorGeneration > 0 && record.proc) {
+        const acknowledged = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            if (record._pendingRendererCancellation?.generation === priorGeneration) {
+              record._pendingRendererCancellation = undefined;
+            }
+            resolve(false);
+          }, 2_000);
+          timer.unref?.();
+          record._pendingRendererCancellation = {
+            generation: priorGeneration,
+            resolve,
+            timer,
+          };
+          record.proc?.sendRendererDetached(priorGeneration);
+        });
+        if (!acknowledged) {
+          return this.publishUnavailable(record, "Renderer cancellation acknowledgement timed out");
         }
       }
     }
-  }
-
-  /** Restart callers need activation failures as rejections, not only status events. */
-  private async _throwIfRestartFailed(sessionId: SessionId): Promise<void> {
-    // Give asynchronous spawn errors/exits a short window to reach the registry handlers.
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    const rec = this.sessions.get(sessionId);
-    if (!rec) throw new Error(`Unknown session: ${sessionId}`);
-    const procExitCode = rec.proc?.exitCode;
-    if (procExitCode !== undefined && procExitCode !== null) {
-      throw new Error(rec.error ?? `Exited with code ${procExitCode}`);
-    }
-    if (rec.status === "failed" || rec.error || !rec.proc || !rec._procReady) {
-      throw new Error(rec.error ?? `Failed to activate session ${sessionId}`);
-    }
-  }
-
-  /** Reject all queued commands (activation failed). */
-  private _rejectPending(sessionId: SessionId, reason: string): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec?._pendingSend?.length) return;
-    const pending = rec._pendingSend;
-    rec._pendingSend = undefined;
-    for (const { reject } of pending) {
-      reject(new Error(reason));
-    }
-  }
-
-  /**
-   * Note the session file for a record that didn't have one at open time.
-   * No-op if the record is missing, already has a file, or byFile already
-   * maps the path.
-   */
-  noteSessionFile(sessionId: SessionId, sessionFile: string): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) return;
-    if (rec.sessionFile) return;
-    const resolved = path.resolve(sessionFile);
-    if (this.byFile.has(resolved)) return;
-    rec.sessionFile = sessionFile;
-    this.byFile.set(resolved, sessionId);
-  }
-
-  /**
-   * Re-point a session to a new file (used after /new, /fork, /clone,
-   * /switch_session). Always overrides the existing sessionFile (the
-   * "only-if-unset" guard of `noteSessionFile` is bypassed because pi
-   * has confirmed the new path is authoritative). `sessionFile` may be
-   * `undefined` to clear it (lazy new_session doesn't have one yet;
-   * the next harvest re-attaches).
-   *
-   * The byFile mapping is re-pointed: the old path is freed (if it
-   * still belongs to this session) and the new path is claimed.
-   */
-  updateSessionFile(sessionId: SessionId, sessionFile: string | undefined): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) return;
-    // Drop the old mapping if we still own it (resolves a real bug:
-    // after /new, the byFile map would still point at the previous
-    // file and block a switch back to it).
-    if (rec.sessionFile) {
-      const oldResolved = path.resolve(rec.sessionFile);
-      if (this.byFile.get(oldResolved) === sessionId) {
-        this.byFile.delete(oldResolved);
+    for (const request of [...record._pendingUnifiedSubmits.values()]) {
+      if (
+        request.hostInstanceId !== record.proc?.hostInstanceId ||
+        request.sessionEpoch !== record.proc.sessionEpoch
+      )
+        continue;
+      if (
+        request.claimedGeneration !== undefined &&
+        request.claimedGeneration !== record._rendererGeneration
+      ) {
+        this.retireUnifiedAsAmbiguous(
+          record,
+          request,
+          "Unified submission may have executed before renderer acknowledgement was lost",
+          true,
+        );
+        continue;
       }
-      // Release the advisory lock on the OLD file if we held it. The lock is
-      // per-file-path: after /new, /fork, or /clone the session moves to a NEW
-      // file, so keeping `_hasLock=true` would make the next activation skip
-      // locking the new file (it'd think it already holds it). Dropping it
-      // here lets the next activateSession acquire a fresh lock on the new path.
-      // P2-d (known limitation): the new file is NOT re-locked mid-session —
-      // only a /reload re-activates (and re-locks). So after /new//fork//clone,
-      // opening the new session file in terminal pi won't produce the "open
-      // elsewhere" warning until the next /reload. This is defensible: the new
-      // file may not exist on disk yet at swap time (so a lock acquire would
-      // create a lockfile for a not-yet-written file), and pi's own
-      // session-file writes don't need our advisory lock (we hold it only to
-      // warn about terminal-pi contention). Documented, not fixed.
-      this._releaseLockIfHeld(sessionId);
-    }
-    rec.sessionFile = sessionFile;
-    if (sessionFile) {
-      this.byFile.set(path.resolve(sessionFile), sessionId);
-    }
-  }
-
-  /**
-   * Tear down a session: detach the proc so the generation guards swallow
-   * the upcoming exit event, then stop the process, then remove the record.
-   */
-  closeSession(sessionId: SessionId): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) return;
-    // P1-e: mark the record dead so an in-flight activateSession (awaiting
-    // the lock or waitForReady) tears down what it spawned instead of
-    // reviving the record / spawning a fallback onto it.
-    rec._dead = true;
-    // P1-h: reject any commands queued during activation BEFORE deleting the
-    // record. Without this, _pendingSend promises hang forever (the record is
-    // gone, so _flushPending/_rejectPending can't find them to settle).
-    this._rejectPending(sessionId, "Session closed");
-    const proc = rec.proc;
-    rec.proc = undefined;
-    proc?.stop();
-
-    // Release the session file lock if we hold it (P1-f shared path).
-    this._releaseLockIfHeld(sessionId);
-
-    this.sessions.delete(sessionId);
-    if (rec.sessionFile) {
-      const resolved = path.resolve(rec.sessionFile);
-      if (this.byFile.get(resolved) === sessionId) {
-        this.byFile.delete(resolved);
+      if (request.claimedGeneration === undefined) {
+        this.onUnifiedSubmitRequest(sessionId, structuredClone(request));
       }
     }
+    for (const [intentId, retained] of record._retainedIntents) {
+      this.onSubmission(sessionId, {
+        intentId,
+        hostInstanceId:
+          record.proc?.hostInstanceId ?? record.snapshot?.hostInstanceId ?? "unavailable",
+        sessionEpoch: record.snapshot?.sessionEpoch ?? 0,
+        editorRevision: retained.payload.editorRevision,
+        disposition: retained.disposition,
+        ...(retained.disposition === "outcome_unknown"
+          ? {
+              message:
+                "The prior renderer lost contact before this operation reached a safe boundary",
+            }
+          : {}),
+      });
+    }
+    for (const restoration of record._restorations.values()) {
+      this.onQueueRestoration(sessionId, structuredClone(restoration));
+    }
+    return this.resyncSession(sessionId);
+  }
+
+  acknowledgeRestoration(sessionId: SessionId, restorationId: string): boolean {
+    const record = this.sessions.get(sessionId);
+    if (!record) return false;
+    const acknowledged = record._restorations.delete(restorationId);
+    if (acknowledged) {
+      const ambiguousIntentPrefix = "ambiguous-submission:";
+      if (restorationId.startsWith(ambiguousIntentPrefix)) {
+        record._retainedIntents.delete(restorationId.slice(ambiguousIntentPrefix.length));
+      }
+      const ambiguousCommandPrefix = "ambiguous-command:";
+      if (restorationId.startsWith(ambiguousCommandPrefix)) {
+        record._retainedCommandIntents.delete(restorationId.slice(ambiguousCommandPrefix.length));
+      }
+      const unifiedIntentId = record._unifiedRestorationIntents.get(restorationId);
+      if (unifiedIntentId) {
+        record._unifiedRestorationIntents.delete(restorationId);
+        if (record._pendingSubmissionPromises.has(unifiedIntentId)) {
+          // Review acknowledgement retires UI custody, not an unresolved host
+          // operation. Keep the tombstone until that promise settles so its
+          // late result can never escape the ambiguity fence.
+          record._acknowledgedUnifiedIntents.add(unifiedIntentId);
+        } else {
+          record._expiredUnifiedIntents.delete(unifiedIntentId);
+          record._retainedIntents.delete(unifiedIntentId);
+        }
+      }
+      record._mutationSequence++;
+    }
+    return acknowledged;
+  }
+
+  claimUnifiedSubmit(
+    sessionId: SessionId,
+    id: string,
+    rendererGeneration: number,
+    expected: { hostInstanceId: string; sessionEpoch: number },
+  ): { claimed: false } | { claimed: true; claimId: string; expiresAt: number } {
+    const record = this.sessions.get(sessionId);
+    const pending = record?._pendingUnifiedSubmits.get(id);
+    if (
+      !record ||
+      !pending ||
+      record._closing ||
+      record._rendererGeneration !== rendererGeneration ||
+      record.availability !== "available" ||
+      pending.hostInstanceId !== expected.hostInstanceId ||
+      pending.sessionEpoch !== expected.sessionEpoch ||
+      record.proc?.hostInstanceId !== expected.hostInstanceId ||
+      record.proc.sessionEpoch !== expected.sessionEpoch ||
+      pending.claimedGeneration !== undefined
+    ) {
+      return { claimed: false };
+    }
+    const claimId = crypto.randomUUID();
+    const timeoutMs = Math.max(
+      1,
+      this.options.unifiedClaimTimeoutMs ?? DEFAULT_UNIFIED_CLAIM_TIMEOUT_MS,
+    );
+    const expiresAt = Date.now() + timeoutMs;
+    pending.claimedGeneration = rendererGeneration;
+    pending.claimId = claimId;
+    pending.claimExpiresAt = expiresAt;
+    const timer = setTimeout(
+      () => this.expireUnifiedClaim(sessionId, id, claimId, rendererGeneration),
+      timeoutMs,
+    );
+    timer.unref?.();
+    record._unifiedClaimTimers.set(id, timer);
+    record._mutationSequence++;
+    return { claimed: true, claimId, expiresAt };
+  }
+
+  respondToUnifiedSubmit(
+    sessionId: SessionId,
+    id: string,
+    claim: { rendererGeneration: number; claimId: string },
+    expected: { hostInstanceId: string; sessionEpoch: number },
+    result: { ok: boolean; bailed?: boolean; error?: string },
+  ): { accepted: boolean } {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    const pending = record?._pendingUnifiedSubmits.get(id);
+    if (!record || !pending) return { accepted: false };
+    const claimMatches =
+      pending.claimedGeneration === claim.rendererGeneration &&
+      pending.claimId === claim.claimId &&
+      record._rendererGeneration === claim.rendererGeneration &&
+      (pending.claimExpiresAt ?? 0) > Date.now();
+    if (!claimMatches) return { accepted: false };
+    const identityMatches =
+      pending.hostInstanceId === expected.hostInstanceId &&
+      pending.sessionEpoch === expected.sessionEpoch &&
+      record.proc?.hostInstanceId === expected.hostInstanceId &&
+      record.proc.sessionEpoch === expected.sessionEpoch &&
+      record.availability === "available";
+    if (!identityMatches) {
+      this.retireUnifiedAsAmbiguous(
+        record,
+        pending,
+        "Unified submission may have executed before acknowledgement was lost",
+        false,
+      );
+      return { accepted: false };
+    }
+    record._mutationSequence++;
+    record.proc?.sendUnifiedSubmitResponse(id, result.ok, result.bailed, result.error);
+    record._retiredUnifiedRequests.add(
+      `${pending.hostInstanceId}\0${pending.sessionEpoch}\0${pending.id}`,
+    );
+    this.clearUnifiedClaimTimer(record, id);
+    record._pendingUnifiedSubmits.delete(id);
+    return { accepted: true };
+  }
+
+  private awaitUiAcknowledgement(
+    record: SessionRecord,
+    operationId: string,
+    sendOperation: () => void,
+  ): Promise<boolean> {
+    const prior = record._pendingUiAcks.get(operationId);
+    if (prior) return prior.promise;
+    let resolvePromise: (value: boolean) => void = () => {};
+    const promise = new Promise<boolean>((resolve) => {
+      resolvePromise = resolve;
+    });
+    const timer = setTimeout(() => {
+      record._pendingUiAcks.delete(operationId);
+      if (this.sessions.get(record.sessionId) === record && !record._closing && !record._dead) {
+        this.publishUnavailable(record, `UI acknowledgement timed out: ${operationId}`);
+      }
+      resolvePromise(false);
+    }, 2_000);
+    timer.unref?.();
+    record._pendingUiAcks.set(operationId, { promise, resolve: resolvePromise, timer });
+    sendOperation();
+    return promise;
+  }
+
+  private matchesExpectedRuntime(
+    record: SessionRecord | undefined,
+    hostInstanceId: string,
+    sessionEpoch: number,
+  ): record is SessionRecord & { proc: SessionHost } {
+    return Boolean(
+      record?.proc &&
+        record.proc.hostInstanceId === hostInstanceId &&
+        record.proc.sessionEpoch === sessionEpoch,
+    );
+  }
+
+  async respondToUiRequest(
+    sessionId: SessionId,
+    rendererGeneration: number,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    operationId: string,
+    response: ExtensionUiResponse,
+  ): Promise<boolean> {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    if (
+      !this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) ||
+      rendererGeneration !== record._rendererGeneration
+    )
+      return false;
+    const proc = record.proc;
+    const admittedTransitionId = record._hostTransition?.transitionId;
+    record._mutationSequence++;
+    const acknowledged = await this.awaitUiAcknowledgement(record, operationId, () => {
+      proc.sendUiResponse(JSON.stringify(response));
+    });
+    const ownerIsCurrent =
+      this.sessions.get(sessionId) === record &&
+      !record._closing &&
+      !record._dead &&
+      record.proc === proc &&
+      rendererGeneration === record._rendererGeneration &&
+      this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) &&
+      record._hostTransition?.transitionId === admittedTransitionId;
+    if (acknowledged && ownerIsCurrent) record._mutationSequence++;
+    return acknowledged && ownerIsCurrent;
+  }
+
+  async closePanel(
+    sessionId: SessionId,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    panelId: number,
+    operationId: string,
+  ): Promise<boolean> {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    if (!this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch))
+      return false;
+    const proc = record.proc;
+    const admittedTransitionId = record._hostTransition?.transitionId;
+    record._mutationSequence++;
+    const acknowledged = await this.awaitUiAcknowledgement(record, operationId, () => {
+      proc.sendPanelClose(panelId, operationId);
+    });
+    const ownerIsCurrent =
+      this.sessions.get(sessionId) === record &&
+      !record._closing &&
+      !record._dead &&
+      record.proc === proc &&
+      this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) &&
+      record._hostTransition?.transitionId === admittedTransitionId;
+    if (acknowledged && ownerIsCurrent) record._mutationSequence++;
+    return acknowledged && ownerIsCurrent;
+  }
+
+  async applyEditorPatch(
+    sessionId: SessionId,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    patch: { baseRevision: number; revision: number; text: string; attachments: unknown[] },
+  ): Promise<{
+    accepted: boolean;
+    revision: number;
+    text: string;
+    attachments: unknown[];
+    conflictText?: string;
+    conflictAttachments?: unknown[];
+  }> {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    if (
+      !this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) ||
+      !record._procReady ||
+      record.availability !== "available" ||
+      record._hostTransition !== undefined
+    )
+      throw new Error("Runtime unavailable or replaced");
+    const admittedProc = record.proc;
+    record._mutationSequence++;
+    const response = await admittedProc.sendEditorPatch(patch);
+    if (
+      this.sessions.get(sessionId) !== record ||
+      record._closing ||
+      record._dead ||
+      record.proc !== admittedProc ||
+      !this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) ||
+      record.availability !== "available" ||
+      record._hostTransition !== undefined
+    )
+      throw new Error("Runtime replaced before editor patch acknowledgement");
+    if (!response.success || !response.data)
+      throw new Error(response.error ?? "Editor patch failed");
+    if ((response.data as { accepted?: boolean }).accepted) record._mutationSequence++;
+    return response.data as {
+      accepted: boolean;
+      revision: number;
+      text: string;
+      attachments: unknown[];
+      conflictText?: string;
+      conflictAttachments?: unknown[];
+    };
+  }
+
+  async sendPanelInput(
+    sessionId: SessionId,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    panelId: number,
+    sequence: number,
+    data: string,
+  ): Promise<{ acknowledgedThrough: number; gap?: { expected: number; received: number } }> {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    if (!this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch))
+      return { acknowledgedThrough: 0 };
+    const prior =
+      record._panelInputChains.get(panelId) ?? Promise.resolve({ acknowledgedThrough: 0 });
+    const current = prior
+      .catch(() => ({ acknowledgedThrough: record._panelInputSequence.get(panelId) ?? 0 }))
+      .then(() =>
+        this.forwardPanelInput(
+          record,
+          expectedHostInstanceId,
+          expectedSessionEpoch,
+          panelId,
+          sequence,
+          data,
+        ),
+      );
+    record._panelInputChains.set(panelId, current);
+    try {
+      return await current;
+    } finally {
+      if (record._panelInputChains.get(panelId) === current) {
+        record._panelInputChains.delete(panelId);
+      }
+    }
+  }
+
+  private async forwardPanelInput(
+    record: SessionRecord,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    panelId: number,
+    sequence: number,
+    data: string,
+  ): Promise<{ acknowledgedThrough: number; gap?: { expected: number; received: number } }> {
+    const acknowledged = record._panelInputSequence.get(panelId) ?? 0;
+    const expected = acknowledged + 1;
+    if (sequence > acknowledged && sequence !== expected) {
+      return { acknowledgedThrough: acknowledged, gap: { expected, received: sequence } };
+    }
+    if (
+      !this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch) ||
+      sequence <= acknowledged
+    )
+      return { acknowledgedThrough: acknowledged };
+    const proc = record.proc;
+    const result = await proc.sendPanelInput(panelId, sequence, data);
+    if (
+      this.sessions.get(record.sessionId) !== record ||
+      record._closing ||
+      record._dead ||
+      record.proc !== proc ||
+      !this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch)
+    )
+      return { acknowledgedThrough: 0 };
+    if (result.acknowledgedThrough > acknowledged) {
+      record._panelInputSequence.set(panelId, result.acknowledgedThrough);
+      record._mutationSequence++;
+    }
+    return result;
+  }
+
+  resizePanel(
+    sessionId: SessionId,
+    expectedHostInstanceId: string,
+    expectedSessionEpoch: number,
+    panelId: number,
+    cols: number,
+    rows: number,
+    force = false,
+  ): void {
+    const record = this.sessions.get(sessionId);
+    if (record?._closing) throw new Error("Session close preparation is in progress");
+    if (!this.matchesExpectedRuntime(record, expectedHostInstanceId, expectedSessionEpoch)) return;
+    record.proc.sendPanelResize(panelId, cols, rows, force);
+    record._mutationSequence++;
+  }
+
+  async readInternalProbe(
+    sessionId: SessionId,
+    command: PiRpcCommand,
+    expected: { hostInstanceId: string; sessionEpoch: number },
+  ): Promise<PiRpcResponse> {
+    if (commandPolicy(command).class !== "read_only") {
+      throw new Error(`Internal probe cannot execute ${command.type}`);
+    }
+    const record = this.sessions.get(sessionId);
+    if (
+      !record?.proc ||
+      !record._procReady ||
+      record.status !== "ready" ||
+      record.availability !== "available" ||
+      record._hostTransition ||
+      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+    ) {
+      throw new Error("Session changed before internal probe");
+    }
+    const proc = record.proc;
+    const response = await proc.sendCommand(command);
+    if (
+      record.proc !== proc ||
+      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+    ) {
+      throw new Error("Session changed during internal probe");
+    }
+    return response;
   }
 
   /**
-   * Reload a session: restart its pi process so settings, keybindings,
-   * extensions, skills, prompts, and themes are re-read from disk. The
-   * session record (and its sessionFile) is preserved, so pi resumes the
-   * same session; the renderer's transcript is untouched.
-   *
-   * pi's TUI `/reload` calls `session.reload()` in-process, but RPC mode
-   * does not expose `reload` as a sendable command — restarting the
-   * subprocess is the equivalent available over RPC. Refuses while the
-   * session is mid-turn (mirrors pi's "Wait for the current response to
-   * finish before reloading." guard).
+   * Sole renderer-command admission path. Every valid request settles with an
+   * explicit disposition; malformed requests alone throw.
    */
+  async executeRendererCommand(
+    sessionId: SessionId,
+    requestInput: RendererCommandRequest,
+  ): Promise<CommandSettlement> {
+    const parsed = RendererCommandRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new Error(`Invalid command request: ${parsed.error.message}`);
+    const request = parsed.data;
+    const policy = commandPolicy(request.command);
+    const record = this.sessions.get(sessionId);
+    const base = {
+      requestId: request.requestId,
+      ...(request.intentId ? { intentId: request.intentId } : {}),
+      commandType: request.command.type,
+      commandClass: policy.class,
+      hostInstanceId: request.expectedHostInstanceId,
+      sessionEpoch: request.expectedSessionEpoch,
+    } as const;
+    const notExecuted = (message: string): CommandSettlement => ({
+      type: "response",
+      command: request.command.type,
+      success: false,
+      error: message,
+      ...base,
+      disposition: "not_executed",
+    });
+
+    if (policy.submissionOnly) return notExecuted("Text submissions must use session.submit");
+    if (record?._closing) return notExecuted("Session close preparation is in progress");
+    if (
+      !record?.proc ||
+      !record._procReady ||
+      record.status !== "ready" ||
+      record.availability !== "available" ||
+      record._hostTransition
+    ) {
+      return notExecuted(`No available SDK host for session ${sessionId}`);
+    }
+    if (
+      !this.matchesExpectedRuntime(
+        record,
+        request.expectedHostInstanceId,
+        request.expectedSessionEpoch,
+      )
+    ) {
+      return notExecuted("Session changed before command dispatch");
+    }
+
+    const proc = record.proc;
+    const needsIntent = commandNeedsIntent(request.command);
+    let dispatched = false;
+    let retained: RetainedCommandIntent | undefined;
+    if (needsIntent && request.intentId) {
+      const duplicate = record._retainedCommandIntents.get(request.intentId);
+      if (duplicate) {
+        return {
+          ...notExecuted("Command intent is already retained for review"),
+          disposition: duplicate.dispatched ? "outcome_unknown" : "not_executed",
+        };
+      }
+      retained = { request: structuredClone(request), dispatched: false };
+      record._retainedCommandIntents.set(request.intentId, retained);
+      record._mutationSequence++;
+    }
+
+    try {
+      const response = await proc.sendCommand(request.command, {
+        ...(request.uiSurface ? { uiSurface: request.uiSurface } : {}),
+        onDispatched: () => {
+          dispatched = true;
+          if (retained) retained.dispatched = true;
+        },
+      });
+      if (
+        this.sessions.get(sessionId) !== record ||
+        record._closing ||
+        record._dead ||
+        record.proc !== proc ||
+        record.availability !== "available" ||
+        record._hostTransition !== undefined
+      ) {
+        throw new Error("Session lifecycle changed before command settlement");
+      }
+      if (
+        policy.class !== "replacement" &&
+        !this.matchesExpectedRuntime(
+          record,
+          request.expectedHostInstanceId,
+          request.expectedSessionEpoch,
+        )
+      ) {
+        throw new Error("Session epoch changed before command settlement");
+      }
+      if (request.intentId && record._retainedCommandIntents.delete(request.intentId)) {
+        record._mutationSequence++;
+      }
+      const currentIdentity = {
+        hostInstanceId: proc.hostInstanceId ?? request.expectedHostInstanceId,
+        sessionEpoch: proc.sessionEpoch,
+      };
+      return {
+        ...response,
+        command: request.command.type,
+        ...base,
+        disposition: "completed",
+        hostInstanceId: request.expectedHostInstanceId,
+        sessionEpoch: request.expectedSessionEpoch,
+        ...(policy.class === "replacement" && response.success
+          ? { successorIdentity: currentIdentity }
+          : {}),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!dispatched) {
+        if (request.intentId && record._retainedCommandIntents.delete(request.intentId)) {
+          record._mutationSequence++;
+        }
+        return notExecuted(message);
+      }
+      const lifecycleRetired =
+        this.sessions.get(sessionId) !== record || record._closing || record._dead;
+      if (lifecycleRetired) {
+        return {
+          type: "response",
+          command: request.command.type,
+          success: false,
+          error: message,
+          ...base,
+          disposition: "outcome_unknown",
+        };
+      }
+      if (!retained) {
+        return {
+          type: "response",
+          command: request.command.type,
+          success: false,
+          error: message,
+          ...base,
+          disposition: "outcome_unknown",
+        };
+      }
+      const restorationId = `ambiguous-command:${request.intentId}`;
+      if (!retained.recoveryPublished) {
+        retained.recoveryPublished = true;
+        const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+          type: "queue_restoration",
+          restorationId,
+          steering: [],
+          followUp: request.sourceText?.trim() ? [request.sourceText] : [],
+          originalAttachments: [],
+          commandDescription: `${request.command.type} may have completed before its acknowledgement was lost. Review before retrying.`,
+          requiresReview: true,
+        };
+        record._restorations.set(restorationId, structuredClone(restoration));
+        record._mutationSequence++;
+        this.onQueueRestoration(sessionId, restoration);
+      }
+      return {
+        type: "response",
+        command: request.command.type,
+        success: false,
+        error: message,
+        ...base,
+        disposition: "outcome_unknown",
+        restorationId,
+      };
+    }
+  }
+
+  async executeReload(
+    sessionId: SessionId,
+    requestInput: ReloadRequest,
+  ): Promise<ReloadSettlement> {
+    const parsed = ReloadRequestSchema.safeParse(requestInput);
+    if (!parsed.success) throw new Error(`Invalid reload request: ${parsed.error.message}`);
+    const request = parsed.data;
+    const base = {
+      requestId: request.requestId,
+      intentId: request.intentId,
+      operation: "reload" as const,
+      hostInstanceId: request.expectedHostInstanceId,
+      sessionEpoch: request.expectedSessionEpoch,
+    };
+    let dispatched = false;
+    try {
+      const successorIdentity = await this.reloadSession(
+        sessionId,
+        undefined,
+        undefined,
+        {
+          expectedHostInstanceId: request.expectedHostInstanceId,
+          expectedSessionEpoch: request.expectedSessionEpoch,
+        },
+        () => {
+          dispatched = true;
+        },
+      );
+      return {
+        ...base,
+        success: true,
+        disposition: "completed",
+        successorIdentity,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!dispatched) {
+        return {
+          ...base,
+          success: false,
+          disposition: "not_executed",
+          error: message,
+        };
+      }
+      const record = this.sessions.get(sessionId);
+      const restorationId = `ambiguous-reload:${request.intentId}`;
+      if (record && !record._restorations.has(restorationId)) {
+        const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+          type: "queue_restoration",
+          restorationId,
+          steering: [],
+          followUp: request.sourceText?.trim() ? [request.sourceText] : [],
+          originalAttachments: [],
+          commandDescription:
+            "reload may have completed before its acknowledgement was lost. Review before retrying.",
+          requiresReview: true,
+        };
+        record._restorations.set(restorationId, structuredClone(restoration));
+        this.onQueueRestoration(sessionId, restoration);
+      }
+      return {
+        ...base,
+        success: false,
+        disposition: "outcome_unknown",
+        error: message,
+        restorationId,
+      };
+    }
+  }
+
   async reloadSession(
     sessionId: SessionId,
-    piPath: string,
-    env?: Record<string, string>,
-  ): Promise<void> {
+    _piPath?: string,
+    _env?: Record<string, string>,
+    expectedRuntime: {
+      expectedHostInstanceId?: string;
+      expectedSessionEpoch?: number;
+    } = {},
+    onDispatched: () => void = () => {},
+  ): Promise<{ hostInstanceId: string; sessionEpoch: number }> {
     const record = this.sessions.get(sessionId);
-    if (!record) {
-      throw new Error(`Unknown session: ${sessionId}`);
+    if (
+      !record?.proc ||
+      !record._procReady ||
+      record._closing ||
+      record._dead ||
+      record.availability !== "available" ||
+      record._hostTransition !== undefined
+    )
+      throw new Error(`No available SDK host for session ${sessionId}`);
+    const identityBound =
+      expectedRuntime.expectedHostInstanceId !== undefined ||
+      expectedRuntime.expectedSessionEpoch !== undefined;
+    if (
+      identityBound &&
+      (!expectedRuntime.expectedHostInstanceId ||
+        expectedRuntime.expectedSessionEpoch === undefined ||
+        !this.matchesExpectedRuntime(
+          record,
+          expectedRuntime.expectedHostInstanceId,
+          expectedRuntime.expectedSessionEpoch,
+        ))
+    ) {
+      throw new Error("Session changed before reload dispatch");
     }
-    await this._runRestartExclusive(record, async () => {
-      if (record.busy) {
-        throw new Error("Wait for the current response to finish before reloading.");
+    const proc = record.proc;
+    const freshSnapshot = await proc.requestSnapshot();
+    if (record._closing) {
+      throw new Error("Session close preparation began before reload dispatch");
+    }
+    if (
+      this.sessions.get(sessionId) !== record ||
+      record._closing ||
+      record._dead ||
+      record.proc !== proc ||
+      !record._procReady ||
+      record.availability !== "available" ||
+      record._hostTransition !== undefined ||
+      (identityBound &&
+        !this.matchesExpectedRuntime(
+          record,
+          expectedRuntime.expectedHostInstanceId!,
+          expectedRuntime.expectedSessionEpoch!,
+        ))
+    ) {
+      throw new Error("Session changed before reload dispatch");
+    }
+    this.installSnapshot(record, freshSnapshot);
+    if (
+      !freshSnapshot.isIdle ||
+      freshSnapshot.hostFacts.submitting ||
+      freshSnapshot.hostFacts.custodyCount > 0
+    )
+      throw new Error("Wait for the current response to finish before reloading.");
+    if (record._closing || this.sessions.get(sessionId) !== record) {
+      throw new Error("Session close preparation began before reload dispatch");
+    }
+    record.availability = "transitioning";
+    this.publishRuntime(record, "transitioning", "Reloading session runtime");
+    try {
+      onDispatched();
+      await proc.reloadInPlace();
+      if (
+        this.sessions.get(sessionId) !== record ||
+        record._closing ||
+        record._dead ||
+        record.proc !== proc ||
+        !record._procReady
+      ) {
+        throw new Error("Session changed while reload was in progress");
       }
-      await this._waitForActivationIfNeeded(record);
-      if (!this.sessions.has(sessionId)) {
-        throw new Error(`Unknown session: ${sessionId}`);
+      const runtime = await this.resyncSession(sessionId);
+      if (!runtime.hostInstanceId || runtime.sessionEpoch === undefined) {
+        throw new Error("Reload completed without a correlated runtime identity");
       }
-      // Stop the current process. Clearing record.proc first means the
-      // generation guard in the exit/error handlers swallows the upcoming
-      // events, and activateSession sees no live proc and re-spawns.
-      const proc = record.proc;
-      record.proc = undefined;
-      record._procReady = false;
-      proc?.stop();
-      // P2-b: re-try the host on /reload iff the caller originally requested
-      // host mode. /reload re-reads everything from disk, and the user may have
-      // just upgraded pi specifically to get panel support — a transient prior
-      // failure shouldn't permanently disable the feature. A session the caller
-      // never wanted in host mode (_hostRequested false) stays rpc.
-      // (setWorktreeAndRespawn preserves the ACTUAL _useHost, since the pi
-      // install hasn't changed across a worktree respawn.)
-      record._suppressNextActivationFlush = true;
-      await this.activateSession(sessionId, piPath, env, record._hostRequested ?? false);
-      if (record.proc) record._procReady = true;
-      await this._throwIfRestartFailed(sessionId);
-    });
+      return {
+        hostInstanceId: runtime.hostInstanceId,
+        sessionEpoch: runtime.sessionEpoch,
+      };
+    } catch (error) {
+      if (
+        this.sessions.get(sessionId) === record &&
+        !record._closing &&
+        !record._dead &&
+        record.proc === proc
+      ) {
+        this.publishUnavailable(record, error instanceof Error ? error.message : String(error));
+      }
+      throw error;
+    }
   }
 
-  /**
-   * Reload every running session. Used when a global input the host bakes in
-   * at spawn changes — specifically the color scheme, which selects the pi
-   * theme the host loads (PIVIS_PI_THEME). Respawning re-themes every
-   * host-rendered surface (extension widgets/status, the unified TUI, custom
-   * panels) and makes extensions re-emit their widgets with the new colors.
-   *
-   * Best-effort: a busy (mid-turn) session throws from reloadSession and is
-   * skipped — it re-themes on its next reload/spawn — and one failure never
-   * aborts the rest.
-   */
-  async reloadRunningSessions(piPath: string, env?: Record<string, string>): Promise<void> {
-    const ids = [...this.sessions.entries()]
-      .filter(([, rec]) => rec.proc && !rec.busy)
-      .map(([id]) => id);
-    for (const id of ids) {
-      try {
-        await this.reloadSession(id, piPath, env);
-      } catch {
-        // Busy or failed session — leave it; it re-themes on its next spawn.
-      }
+  private assertWorktreeRespawnEligible(record: SessionRecord): void {
+    if (
+      this.sessions.get(record.sessionId) !== record ||
+      record._closing ||
+      record._dead ||
+      record.availability !== "available" ||
+      record._hostTransition !== undefined ||
+      record.snapshot?.isIdle === false ||
+      record.snapshot?.hostFacts.submitting === true ||
+      (record.snapshot?.hostFacts.custodyCount ?? 0) > 0 ||
+      record._retainedIntents.size > 0 ||
+      record._retainedCommandIntents.size > 0 ||
+      record._pendingUnifiedSubmits.size > 0
+    ) {
+      throw new Error("Wait for active and retained work before moving the session to a worktree");
     }
   }
 
-  /**
-   * Re-point the session to a worktree and re-spawn its pi process.
-   * Stops the current process (same guard pattern as reloadSession),
-   * sets the worktree path, and re-activates (which spawns a fresh
-   * process in the worktree cwd). Safe for fresh sessions (empty
-   * transcript, no session file — so no data loss on kill).
-   */
   async setWorktreeAndRespawn(
     sessionId: SessionId,
     worktreePath: string,
@@ -1122,81 +2287,324 @@ export class SessionRegistry {
     env?: Record<string, string>,
   ): Promise<void> {
     const record = this.sessions.get(sessionId);
-    if (!record) {
-      throw new Error(`Unknown session: ${sessionId}`);
-    }
-    await this._runRestartExclusive(record, async () => {
-      await this._waitForActivationIfNeeded(record);
-      if (!this.sessions.has(sessionId)) {
-        throw new Error(`Unknown session: ${sessionId}`);
-      }
-      // Stop the current process with the generation guard.
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    this.assertWorktreeRespawnEligible(record);
+    await this.runRestart(record, async () => {
+      this.assertWorktreeRespawnEligible(record);
+      const old = record.worktreePath;
       const proc = record.proc;
-      const oldWorktreePath = record.worktreePath;
+      if (proc && record._procReady) {
+        const freshSnapshot = await proc.requestSnapshot();
+        if (record.proc !== proc) throw new Error("Session changed before worktree respawn");
+        this.assertWorktreeRespawnEligible(record);
+        this.installSnapshot(record, freshSnapshot);
+        this.assertWorktreeRespawnEligible(record);
+      }
+      this.assertWorktreeRespawnEligible(record);
+      this.captureEditorRecovery(record);
       record.proc = undefined;
       record._procReady = false;
+      this.retireHostUi(record);
+      this.onPanelEvent(record.sessionId, { type: "panel_clear_all" });
+      this.onPanelEvent(record.sessionId, { type: "unified_panel_reset" });
+      record._mutationSequence++;
       proc?.stop();
       record.worktreePath = worktreePath;
       try {
-        // Preserve the ACTUAL running mode across a worktree respawn: the pi
-        // install hasn't changed (same binary), so re-trying the host here would
-        // just re-fail the same way. Use _useHost (the outcome), not _hostRequested
-        // (the intent). Contrast with reloadSession, which re-tries the host via
-        // _hostRequested because /reload implies a pi upgrade is possible. See P2-b.
-        record._suppressNextActivationFlush = true;
-        await this.activateSession(sessionId, piPath, env, record._useHost ?? false);
-        if (record.proc) record._procReady = true;
-        await this._throwIfRestartFailed(sessionId);
-      } catch (err) {
-        if (this.sessions.get(sessionId) === record) {
-          record.worktreePath = oldWorktreePath;
+        await this.activateSession(sessionId, piPath, env);
+        if (
+          this.sessions.get(sessionId) !== record ||
+          record._closing ||
+          record._dead ||
+          record.availability !== "available"
+        ) {
+          throw new Error("Session lifecycle changed while worktree respawn was activating");
         }
-        throw err;
+      } catch (error) {
+        if (this.sessions.get(sessionId) === record && !record._closing) {
+          record.worktreePath = old;
+        }
+        throw error;
       }
     });
   }
 
-  /**
-   * Deactivate a session: stop its pi process and set status to "cold"
-   * while keeping the record and byFile mapping intact so the session
-   * stays resumable (re-activation spawns a fresh process).
-   */
-  deactivateSession(sessionId: SessionId): void {
-    const rec = this.sessions.get(sessionId);
-    if (!rec) return;
-    const proc = rec.proc;
-    rec.proc = undefined;
-    rec._procReady = false;
+  private async runRestart(record: SessionRecord, operation: () => Promise<void>): Promise<void> {
+    const prior = record._restartChain ?? Promise.resolve();
+    const current = prior.catch(() => {}).then(operation);
+    record._restartChain = current;
+    try {
+      await current;
+    } finally {
+      if (record._restartChain === current) record._restartChain = undefined;
+    }
+  }
+
+  reloadRunningSessions(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async prepareClose(
+    sessionId: SessionId,
+    force = false,
+  ): Promise<{ reviewToken: string; checkpoint: unknown }> {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    record._closing = true;
+    if (!record.proc || !record._procReady) {
+      // Failed/cold sessions have no live authority to freeze. A local token is
+      // sufficient because every renderer ingress path is already fenced by
+      // `_closing`; this keeps failed tabs explicitly closeable.
+      const reviewToken = crypto.randomUUID();
+      record._closeToken = {
+        value: reviewToken,
+        mutationSequence: record._mutationSequence,
+        force,
+      };
+      return {
+        reviewToken,
+        checkpoint: {
+          force,
+          snapshot: record.snapshot,
+          editor: record.snapshot?.editor,
+          catalog: record.snapshot?.catalog,
+          intents: [...record._retainedIntents.values()].map((item) => structuredClone(item)),
+          commandIntents: [...record._retainedCommandIntents.values()].map((item) =>
+            structuredClone(item),
+          ),
+          restorations: [...record._restorations.values()].map((item) => structuredClone(item)),
+          dialogs: [...record._pendingUiRequests.values()].map((item) => structuredClone(item)),
+          unifiedSubmissions: [...record._pendingUnifiedSubmits.values()].map((item) =>
+            structuredClone(item),
+          ),
+          panels: [...record._openPanels.values()].map((item) => structuredClone(item)),
+          rendererGeneration: record._rendererGeneration,
+        },
+      };
+    }
+    const closeProc = record.proc;
+    let hostReviewToken: string | undefined;
+    try {
+      // Freeze ingress in both main and the authoritative host before exposing
+      // review state. The host checkpoint is therefore the causal boundary.
+      const hostCheckpoint = await closeProc.prepareClose(force);
+      const reviewToken = hostCheckpoint["token"];
+      if (typeof reviewToken !== "string") throw new Error("Invalid host close checkpoint");
+      hostReviewToken = reviewToken;
+      if (force) {
+        for (const retained of record._retainedIntents.values()) {
+          if (["in_custody", "consumed"].includes(retained.disposition)) {
+            retained.disposition = "outcome_unknown";
+            retained.updatedAt = Date.now();
+          }
+        }
+      }
+      record._closeToken = {
+        value: reviewToken,
+        mutationSequence: record._mutationSequence,
+        force,
+      };
+      const panels = [...record._openPanels.values()].map((open) => {
+        if (open.type !== "panel_open") return structuredClone(open);
+        const panel = record._panelCheckpoints.get(open.panelId);
+        return {
+          ...structuredClone(open),
+          ...(panel?.mode ? { mode: panel.mode } : {}),
+          ...(panel?.lastData ? { lastData: panel.lastData } : {}),
+        };
+      });
+      return {
+        reviewToken,
+        checkpoint: {
+          force,
+          host: structuredClone(hostCheckpoint),
+          snapshot: record.snapshot,
+          editor: record.snapshot?.editor,
+          catalog: record.snapshot?.catalog,
+          intents: [...record._retainedIntents.values()].map((item) => structuredClone(item)),
+          commandIntents: [...record._retainedCommandIntents.values()].map((item) =>
+            structuredClone(item),
+          ),
+          restorations: [...record._restorations.values()].map((item) => structuredClone(item)),
+          dialogs: [...record._pendingUiRequests.values()].map((item) => structuredClone(item)),
+          unifiedSubmissions: [...record._pendingUnifiedSubmits.values()].map((item) =>
+            structuredClone(item),
+          ),
+          panels,
+          rendererGeneration: record._rendererGeneration,
+        },
+      };
+    } catch (error) {
+      if (hostReviewToken) await closeProc.cancelClose(hostReviewToken).catch(() => false);
+      record._closing = false;
+      record._closeToken = undefined;
+      throw error;
+    }
+  }
+
+  async cancelClose(sessionId: SessionId, token: string): Promise<{ cancelled: boolean }> {
+    const record = this.sessions.get(sessionId);
+    if (!record?._closeToken || record._closeToken.value !== token) return { cancelled: false };
+    const cancelled = record.proc ? await record.proc.cancelClose(token) : true;
+    if (!cancelled) return { cancelled: false };
+    record._closeToken = undefined;
+    record._closing = false;
+    return { cancelled: true };
+  }
+
+  async confirmClose(
+    sessionId: SessionId,
+    token: string,
+  ): Promise<{ closed: boolean; reason?: string }> {
+    const record = this.sessions.get(sessionId);
+    if (!record) return { closed: true };
+    if (!record._closeToken || record._closeToken.value !== token) {
+      return { closed: false, reason: "Close checkpoint token is no longer current" };
+    }
+    if (record._closeToken.mutationSequence !== record._mutationSequence) {
+      if (record.proc) await record.proc.cancelClose(token).catch(() => false);
+      record._closeToken = undefined;
+      record._closing = false;
+      return { closed: false, reason: "Session changed after the close checkpoint" };
+    }
+    if (record.proc) {
+      let confirmed: { valid: boolean };
+      try {
+        confirmed = await record.proc.confirmClose(token);
+      } catch (error) {
+        await record.proc.cancelClose(token).catch(() => false);
+        record._closeToken = undefined;
+        record._closing = false;
+        return { closed: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+      if (!confirmed.valid) {
+        await record.proc.cancelClose(token).catch(() => false);
+        record._closeToken = undefined;
+        record._closing = false;
+        return { closed: false, reason: "Host state changed after the close checkpoint" };
+      }
+    }
+    this.closeSession(sessionId);
+    return { closed: true };
+  }
+
+  closeSession(sessionId: SessionId): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) return;
+    record._dead = true;
+    if (record._leaseTimer) clearTimeout(record._leaseTimer);
+    for (const timer of record._unifiedClaimTimers.values()) clearTimeout(timer);
+    record._unifiedClaimTimers.clear();
+    for (const pending of record._pendingUiAcks.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve(false);
+    }
+    record._pendingUiAcks.clear();
+    if (record._pendingRendererCancellation) {
+      clearTimeout(record._pendingRendererCancellation.timer);
+      record._pendingRendererCancellation.resolve(false);
+      record._pendingRendererCancellation = undefined;
+    }
+    const proc = record.proc;
+    record.proc = undefined;
     proc?.stop();
-    rec.status = "cold";
-    rec.error = undefined;
-    rec.busy = false;
-    rec._agentStreaming = false;
-    rec.retryPending = false;
-    this._clearInterruptOperations(rec);
+    this.releaseLock(record);
+    this.sessions.delete(sessionId);
+    if (record.sessionFile && this.byFile.get(path.resolve(record.sessionFile)) === sessionId) {
+      this.byFile.delete(path.resolve(record.sessionFile));
+    }
+  }
+
+  deactivateSession(sessionId: SessionId): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) return;
+    for (const pending of [...record._pendingUnifiedSubmits.values()]) {
+      if (pending.claimedGeneration !== undefined) {
+        this.retireUnifiedAsAmbiguous(
+          record,
+          pending,
+          "Unified submission may have executed before session deactivation",
+          true,
+        );
+      } else {
+        const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+          type: "queue_restoration",
+          restorationId: `interrupted-unified:${pending.id}`,
+          steering: [],
+          followUp: [pending.text],
+          originalAttachments: [],
+          requiresReview: true,
+        };
+        record._restorations.set(restoration.restorationId, structuredClone(restoration));
+        this.onQueueRestoration(sessionId, restoration);
+        record.proc?.sendUnifiedSubmitResponse(
+          pending.id,
+          false,
+          true,
+          "Session deactivated before unified action execution",
+        );
+        record._pendingUnifiedSubmits.delete(pending.id);
+      }
+    }
+    const proc = record.proc;
+    record.proc = undefined;
+    proc?.stop();
+    record._procReady = false;
+    record.status = "cold";
+    this.publishUnavailable(record, "Session deactivated explicitly");
     this.onStatusChanged(sessionId, "cold");
   }
 
-  /**
-   * Enforce the maximum number of idle (non-busy, live-proc) sessions.
-   * Kills the oldest idle processes until at most MAX_IDLE_PROCESSES
-   * remain. The session identified by `exceptId` is never killed.
-   */
-  enforceIdleLimit(exceptId: SessionId): void {
-    const liveIdle: Array<{ id: SessionId; lastActiveAt: number }> = [];
-    for (const [id, rec] of this.sessions) {
-      if (id === exceptId) continue;
-      if (rec.proc && (rec.status === "ready" || rec.status === "starting") && !rec.busy) {
-        liveIdle.push({ id, lastActiveAt: rec.lastActiveAt });
-      }
-    }
-    // Sort oldest-first so we kill the least-recently-used
-    liveIdle.sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+  noteSessionFile(sessionId: SessionId, sessionFile: string): void {
+    const record = this.sessions.get(sessionId);
+    if (!record || record.sessionFile) return;
+    const resolved = path.resolve(sessionFile);
+    if (this.byFile.has(resolved)) return;
+    record.sessionFile = sessionFile;
+    this.byFile.set(resolved, sessionId);
+  }
 
-    while (liveIdle.length > MAX_IDLE_PROCESSES) {
-      const { id } = liveIdle.shift()!;
-      this.deactivateSession(id);
+  updateSessionFile(sessionId: SessionId, sessionFile: string | undefined): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) return;
+    if (record.sessionFile && this.byFile.get(path.resolve(record.sessionFile)) === sessionId) {
+      this.byFile.delete(path.resolve(record.sessionFile));
     }
+    record.sessionFile = sessionFile;
+    if (sessionFile) this.byFile.set(path.resolve(sessionFile), sessionId);
+  }
+
+  private async acquireLock(record: SessionRecord): Promise<void> {
+    if (!record.sessionFile || record._hasLock) return;
+    try {
+      await lockfile.lock(record.sessionFile, {
+        retries: 0,
+        realpath: false,
+        lockfilePath: `${record.sessionFile}.lock`,
+        onCompromised: (error: Error) => {
+          console.warn(`[session-registry] Session lock compromised: ${error.message}`);
+          record._hasLock = false;
+        },
+      });
+      record._hasLock = true;
+    } catch {
+      record._hasLock = false;
+      this.onPanelEvent(record.sessionId, {
+        type: "session_warning",
+        message: "Session file is open in another pi instance. Changes may conflict.",
+      });
+    }
+  }
+
+  private releaseLock(record: SessionRecord): void {
+    if (!record._hasLock || !record.sessionFile) return;
+    void lockfile
+      .unlock(record.sessionFile, {
+        lockfilePath: `${record.sessionFile}.lock`,
+        realpath: false,
+      })
+      .catch(() => {});
+    record._hasLock = false;
   }
 
   getSession(sessionId: SessionId): SessionRecord | undefined {
@@ -1209,20 +2617,10 @@ export class SessionRegistry {
   }
 
   stopAll(): void {
-    for (const rec of this.sessions.values()) {
-      const proc = rec.proc;
-      rec.proc = undefined;
-      rec._procReady = false;
-      rec.busy = false;
-      rec._agentStreaming = false;
-      rec.retryPending = false;
-      this._clearInterruptOperations(rec);
-      proc?.stop();
-      this._releaseLockIfHeld(rec.sessionId);
-    }
+    for (const record of [...this.sessions.values()]) this.closeSession(record.sessionId);
   }
 
   getAll(): SessionRecord[] {
-    return Array.from(this.sessions.values());
+    return [...this.sessions.values()];
   }
 }

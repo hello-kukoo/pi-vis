@@ -41,18 +41,12 @@ function setSession(): void {
   const session = {
     sessionId,
     workspacePath: "/tmp/project",
-    status: "exited",
+    status: "ready",
     transcript: createTranscriptState(),
-    isStreaming: false,
-    promptsInFlight: 0,
-    bashInFlight: 0,
-    interruptible: false,
-    retryPending: false,
-    agentGeneration: 0,
-    lastEndedAgentGeneration: 0,
-    streamingEpoch: 0,
-    queueEpoch: 0,
-    identityEpoch: 0,
+    availability: "available",
+    hostInstanceId: "host-controls",
+    sessionEpoch: 1,
+    editorRevision: 0,
     turnErrored: false,
     pendingDialogs: [],
     statusSegments: new Map(),
@@ -65,9 +59,13 @@ function setSession(): void {
     commands: [],
     resumed: false,
     modelInitialized: true,
-  } as SessionViewState;
+  } as unknown as SessionViewState;
 
   useSessionsStore.setState({ sessions: new Map([[sessionId, session]]) });
+  (globalThis.window as unknown as { pivis?: unknown }).pivis = {
+    invoke: vi.fn(async () => ({ success: true, data: {} })),
+    on: vi.fn(() => () => {}),
+  };
   useSettingsStore.setState({
     settings: { ...defaultSettings, groupModelsByProvider: false },
   });
@@ -155,7 +153,10 @@ describe("SessionControls dropdown toggles", () => {
       }
       return { success: true, data: {} };
     });
-    (globalThis.window as unknown as { pivis?: unknown }).pivis = { invoke };
+    (globalThis.window as unknown as { pivis?: unknown }).pivis = {
+      invoke,
+      on: vi.fn(() => () => {}),
+    };
 
     const { container, unmount } = mount(<SessionControls sessionId={sessionId} />);
     const button = container.querySelector<HTMLButtonElement>(".session-header__model-btn");

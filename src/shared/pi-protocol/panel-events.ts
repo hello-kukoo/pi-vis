@@ -18,6 +18,8 @@ export const PanelOpenEventSchema = z.object({
   type: z.literal("panel_open"),
   panelId: z.number(),
   overlay: z.boolean(),
+  hostInstanceId: z.string().uuid().optional(),
+  sessionEpoch: z.number().int().nonnegative().optional(),
   /** True for the persistent unified-TUI panel (factory `setWidget`); false/absent
    *  for a transient custom() overlay panel. */
   unified: z.boolean().optional(),
@@ -72,16 +74,10 @@ export const UnifiedPanelResetEventSchema = z.object({
   type: z.literal("unified_panel_reset"),
 });
 
-export const HostFallbackEventSchema = z.object({
-  type: z.literal("host_fallback"),
-  reason: z.string(),
-});
-
 /**
  * A non-fatal warning that should surface to the user (e.g. a toast) but does
- * NOT indicate the host fell back to pi --mode rpc. Distinct from
- * `host_fallback` so the renderer can render an upgrade prompt for a fallback
- * but a plain warning for mere contention.
+ * NOT indicate that the runtime is unavailable. It surfaces ordinary
+ * non-fatal conditions such as advisory lock contention.
  */
 export const SessionWarningEventSchema = z.object({
   type: z.literal("session_warning"),
@@ -95,7 +91,6 @@ export const PanelEventSchema = z.discriminatedUnion("type", [
   PanelModeEventSchema,
   PanelClearAllEventSchema,
   UnifiedPanelResetEventSchema,
-  HostFallbackEventSchema,
   SessionWarningEventSchema,
 ]);
 
@@ -105,6 +100,5 @@ export type PanelCloseEvent = z.infer<typeof PanelCloseEventSchema>;
 export type PanelModeEvent = z.infer<typeof PanelModeEventSchema>;
 export type PanelClearAllEvent = z.infer<typeof PanelClearAllEventSchema>;
 export type UnifiedPanelResetEvent = z.infer<typeof UnifiedPanelResetEventSchema>;
-export type HostFallbackEvent = z.infer<typeof HostFallbackEventSchema>;
 export type SessionWarningEvent = z.infer<typeof SessionWarningEventSchema>;
 export type PanelEvent = z.infer<typeof PanelEventSchema>;

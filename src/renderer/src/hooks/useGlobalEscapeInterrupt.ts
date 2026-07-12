@@ -16,7 +16,7 @@
 
 import { useEffect } from "react";
 import { hasClaim } from "../stores/overlay-store.js";
-import { isSessionAbortable, useSessionsStore } from "../stores/sessions-store.js";
+import { useSessionsStore } from "../stores/sessions-store.js";
 
 export function useGlobalEscapeInterrupt(): void {
   useEffect(() => {
@@ -28,10 +28,10 @@ export function useGlobalEscapeInterrupt(): void {
       const store = useSessionsStore.getState();
       const sid = store.activeSessionId; // G5
       if (!sid) return;
-      const s = store.sessions.get(sid);
-      if (!isSessionAbortable(s)) return; // G3
+      // Cached renderer liveness is never an ESC routing authority. The host
+      // checks fresh AgentSession getters and acknowledges the honest branch.
       e.preventDefault();
-      e.stopImmediatePropagation(); // G2 preempt Composer + same-node capture listeners
+      e.stopImmediatePropagation();
       void store.abortSession(sid);
     };
     window.addEventListener("keydown", onKey, true); // capture

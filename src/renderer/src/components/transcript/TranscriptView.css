@@ -769,6 +769,93 @@ button.tool-card__header {
   white-space: pre-wrap;
 }
 
+.restored-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-1);
+}
+
+.restored-attachments__header,
+.restored-attachments__heading {
+  display: flex;
+  align-items: flex-start;
+}
+
+.restored-attachments__header {
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.restored-attachments__heading {
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.restored-attachments__heading strong {
+  font-weight: 600;
+}
+
+.restored-attachments__marker {
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: 0.36rem;
+  flex: none;
+  background: var(--warning);
+  border-radius: var(--radius-pill);
+}
+
+.restored-attachments__dismiss,
+.restored-attachments__restore {
+  width: fit-content;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.restored-attachments__dismiss {
+  flex: none;
+}
+
+.restored-attachments__dismiss:hover,
+.restored-attachments__restore:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.restored-attachments__text {
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  background: var(--surface-inset);
+  border-radius: var(--radius-md);
+}
+
+.restored-attachments__text > span {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.restored-attachments__warning {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-body);
+}
+
 .compact-transcript-group {
   display: flex;
   flex-direction: column;

@@ -8,6 +8,7 @@ import { launchElectron } from "./electron-launch.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FAKE_PI = join(__dirname, "../fixtures/fake-pi.mjs");
+const FAKE_SESSION_HOST = join(__dirname, "../fixtures/fake-session-host.mjs");
 
 test.describe("Pi-Vis e2e", () => {
   test("app boots, add workspace, new session, type hello, see streamed text", async () => {
@@ -32,6 +33,7 @@ test.describe("Pi-Vis e2e", () => {
       env: {
         ...process.env,
         PIVIS_SETTINGS_DIR: settingsDir,
+        PIVIS_TEST_HOST_SCRIPT: FAKE_SESSION_HOST,
         ELECTRON_RENDERER_URL: undefined,
       },
     });
@@ -40,8 +42,8 @@ test.describe("Pi-Vis e2e", () => {
     await window.waitForLoadState("domcontentloaded");
 
     // The app should render (not show PiNotFound since piBinaryPath is set)
-    // Note: fake-pi is node script, so pi.locate would call `node fake-pi.mjs --version`
-    // which won't return a version. For real e2e we'd set up fake-pi to handle --version.
+    // fake-pi supplies only executable discovery/version behavior; live
+    // sessions use the direct child-IPC fake host configured above.
     // Check the app loaded
     await expect(window.locator(".app, .pi-not-found")).toBeVisible({ timeout: 10000 });
 

@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createStateAuthority } from "./state-authority.mjs";
+
 /**
  * pi-session-host: Command/event bridge between Electron main and pi SDK.
  *
@@ -6,10 +9,9 @@
  * 2. Forwards AgentSession events → main process via process.send()
  * 3. Handles session lifecycle (newSession, fork, switchSession) with rebind
  *
- * Response shapes mirror `pi --mode rpc` (modes/rpc/rpc-mode.js) exactly, so
- * the renderer cannot tell the SDK host apart from the RPC subprocess and the
- * `pi --mode rpc` fallback behaves identically. Every command the renderer
- * emits is handled here; method signatures are verified against the installed
+ * Response shapes remain compatible with the renderer's typed command surface.
+ * Every command the renderer emits is handled here; method signatures are
+ * verified against the installed
  * pi's .d.ts (AgentSession getters/methods, ExtensionRunner.getRegisteredCommands,
  * SessionManager.getLeafId, ModelRegistry.getAvailable).
  */
@@ -20,8 +22,8 @@
  * The host is plain .mjs (not type-checked against pi's .d.ts), so a method
  * pi renames in a future release would otherwise surface as a cryptic crash
  * mid-session. Verifying the surface at startup turns that into a clean throw
- * during init → the registry falls back to `pi --mode rpc` with a clear reason.
- * Keep this list in sync with the methods/getters used below + in host.mjs.
+ * during initialization. Keep this list in sync with the methods/getters used
+ * below and in host.mjs.
  */
 export function assertHostCapabilities(session, runtime) {
   const missing = [];
@@ -34,6 +36,12 @@ export function assertHostCapabilities(session, runtime) {
     "steer",
     "followUp",
     "abort",
+    "abortCompaction",
+    "abortBranchSummary",
+    "abortRetry",
+    "abortBash",
+    "clearQueue",
+    "navigateTree",
     "setModel",
     "setThinkingLevel",
     "executeBash",
@@ -52,6 +60,7 @@ export function assertHostCapabilities(session, runtime) {
     fn(session, m, `session.${m}`);
   }
   fn(session?.modelRegistry, "getAvailable", "session.modelRegistry.getAvailable");
+  fn(session?.extensionRunner, "getCommand", "session.extensionRunner.getCommand");
   fn(
     session?.extensionRunner,
     "getRegisteredCommands",
@@ -76,7 +85,11 @@ export function assertHostCapabilities(session, runtime) {
     "model",
     "thinkingLevel",
     "isStreaming",
+    "isIdle",
     "isCompacting",
+    "isRetrying",
+    "retryAttempt",
+    "isBashRunning",
     "steeringMode",
     "followUpMode",
     "sessionFile",
@@ -124,71 +137,94 @@ export function setupCommandBridge({
   send,
   panelBridge,
   disposeUnifiedTui,
+  cancelDialogs = () => {},
   runWithInvocationSurface,
   pi,
   agentDir,
   cwd,
+  hostInstanceId = "test-host",
+  sendControl = () => {},
+  initialBinding = false,
+  lifecycleUiTracker = { track: (promise) => promise },
+  uiState = {
+    catalogSnapshot: () => ({}),
+    editorSnapshot: () => ({ revision: 0, text: "" }),
+    acceptEditorSubmission: () => false,
+    applyEditorPatch: () => ({ accepted: false }),
+  },
 }) {
   let _session = session;
   let _unsubscribe = null;
-  let retryPending = false;
-  let agentGeneration = 0;
-  let lastEndedAgentGeneration = 0;
-  let lastStreamingState;
   const activeInterrupts = new Map();
+  let activeCommands = 0;
   let nextInterruptId = 1;
-  let lastInterruptStateKey;
-
-  function logicalStreamingState() {
-    return !!(_session?.isStreaming || retryPending);
-  }
-
-  function currentInterruptState() {
-    const latest = [...activeInterrupts.values()].at(-1);
-    return {
-      interruptible: activeInterrupts.size > 0,
-      operation: latest?.kind,
-    };
-  }
-
-  function emitInterruptStateIfChanged() {
-    const state = currentInterruptState();
-    const key = `${state.interruptible}:${state.operation ?? ""}`;
-    if (key === lastInterruptStateKey) return;
-    lastInterruptStateKey = key;
-    send({
-      type: "event",
-      event: {
-        type: "interrupt_state",
-        interruptible: state.interruptible,
-        ...(state.operation ? { operation: state.operation } : {}),
-      },
+  const lifecycleContext = new AsyncLocalStorage();
+  const admissionContext = new AsyncLocalStorage();
+  const lifecycleBlockers = new Map();
+  let nextLifecycleId = 0;
+  lifecycleUiTracker.track = (promise) => {
+    const lifecycleId = lifecycleContext.getStore();
+    if (lifecycleId === undefined) return promise;
+    lifecycleBlockers.set(lifecycleId, (lifecycleBlockers.get(lifecycleId) ?? 0) + 1);
+    return Promise.resolve(promise).finally(() => {
+      const remaining = (lifecycleBlockers.get(lifecycleId) ?? 1) - 1;
+      if (remaining > 0) lifecycleBlockers.set(lifecycleId, remaining);
+      else lifecycleBlockers.delete(lifecycleId);
     });
-  }
+  };
+
+  const authority = createStateAuthority({
+    hostInstanceId,
+    initialSession: session,
+    sendControl,
+    sendRecord: (record) => {
+      if (record.type === "event") send({ type: "event", event: record.event });
+      else if (record.type === "submission")
+        send({ type: "submission_disposition", result: record.result });
+      else if (record.type === "queue_restoration") send(record);
+      // Escape dispositions are represented in an atomic transition batch.
+      // Outside one, the request/response path is its authoritative delivery.
+    },
+    getCatalog: () => ({
+      ...uiState.catalogSnapshot(),
+      pendingDialogs: uiState.pendingDialogCount?.() ?? 0,
+    }),
+    getEditor: () => uiState.editorSnapshot(),
+    acceptEditorSubmission: (request) => uiState.acceptEditorSubmission?.(request) ?? false,
+    onAdmissionStuck: ({ intentId }) => {
+      send({
+        type: "fatal_transition_error",
+        message: `Prompt admission remained unresolved for intent ${intentId}`,
+      });
+    },
+    getCheckpoint: () => ({
+      catalog: uiState.catalogSnapshot(),
+      editor: uiState.editorSnapshot(),
+      unifiedSubmissions: uiState.pendingUnifiedSubmissions?.() ?? [],
+      panels: panelBridge.checkpoint?.() ?? [],
+    }),
+    runWithSurface: (surface, operation, intentId) =>
+      admissionContext.run(intentId, () =>
+        typeof runWithInvocationSurface === "function"
+          ? runWithInvocationSurface(surface, operation)
+          : operation(),
+      ),
+  });
+
+  if (initialBinding) authority.beginTransition(authority.sessionEpoch, false);
 
   function trackInterruptibleOperation(kind, interrupt, run) {
     const id = nextInterruptId++;
-    const agentGenerationAtStart = agentGeneration;
     activeInterrupts.set(id, { kind, interrupt });
-    emitInterruptStateIfChanged();
     let promise;
     try {
       promise = run();
     } catch (err) {
-      if (activeInterrupts.delete(id)) emitInterruptStateIfChanged();
+      activeInterrupts.delete(id);
       throw err;
     }
     return Promise.resolve(promise).finally(() => {
-      // An agent_settled extension handler can start a fresh run before the
-      // originating prompt promise resolves. Keep this abort hook until that
-      // newer run settles; it calls the live session's abort() and remains
-      // valid for the continuation. Prompts queued into an already-active run
-      // do not advance the generation, so their completed hooks are removed.
-      const handedOffToNewAgentRun =
-        kind === "agent" && agentGeneration > agentGenerationAtStart && logicalStreamingState();
-      if (!handedOffToNewAgentRun && activeInterrupts.delete(id)) {
-        emitInterruptStateIfChanged();
-      }
+      activeInterrupts.delete(id);
     });
   }
 
@@ -207,75 +243,26 @@ export function setupCommandBridge({
   }
 
   function endInterruptibleOperationsByKind(kind) {
-    let changed = false;
     for (const [id, op] of activeInterrupts) {
-      if (op.kind !== kind) continue;
-      activeInterrupts.delete(id);
-      changed = true;
+      if (op.kind === kind) activeInterrupts.delete(id);
     }
-    if (changed) emitInterruptStateIfChanged();
-  }
-
-  function settlementAppliesToLatestAgent() {
-    return lastEndedAgentGeneration === agentGeneration;
-  }
-
-  function updateRetryPending(event) {
-    if (event?.type === "agent_start") {
-      agentGeneration += 1;
-      retryPending = false;
-    } else if (event?.type === "agent_end") {
-      lastEndedAgentGeneration = agentGeneration;
-      retryPending = !!event.willRetry;
-    } else if (event?.type === "agent_settled" && settlementAppliesToLatestAgent()) {
-      retryPending = false;
-    } else if (event?.type === "auto_retry_start") retryPending = true;
-    else if (event?.type === "auto_retry_end" && event.success === false) retryPending = false;
-  }
-
-  function emitStreamingIfChanged() {
-    const value = logicalStreamingState();
-    if (value === lastStreamingState) return;
-    lastStreamingState = value;
-    send({ type: "event", event: { type: "streaming_state", isStreaming: value } });
   }
 
   // ─── Event forwarding ──────────────────────────────────────────────────
 
   function subscribeSession(s) {
     _unsubscribe?.();
-    retryPending = false;
-    agentGeneration = 0;
-    lastEndedAgentGeneration = 0;
-    lastStreamingState = undefined;
-    lastInterruptStateKey = undefined;
     _unsubscribe = s.subscribe((event) => {
-      // Forward raw event to main process (structured clone over process.send).
-      // AgentSessionEvent is a plain serializable object.
-      send({ type: "event", event });
+      // Events repair transcript/UI detail; direct snapshots own runtime state.
+      authority.observeEvent(event);
       // Pi 0.80.4's cache-miss notices normally live in InteractiveMode, which
       // the SDK host does not instantiate. Re-derive the same opt-in notice
       // from public session/message data so showCacheMissNotices still works.
       const cacheMissNotice = buildCacheMissNotice(s, event);
-      if (cacheMissNotice) send({ type: "event", event: cacheMissNotice });
-      updateRetryPending(event);
-      // Pi invokes extension agent_settled handlers before publishing the
-      // session event. A handler can start another run first, yielding
-      // agent_start(new) → agent_settled(old). Only clear the operation when
-      // no newer agent generation has started since the last agent_end.
-      if (event?.type === "agent_settled" && settlementAppliesToLatestAgent()) {
-        endInterruptibleOperationsByKind("agent");
-      }
-      emitStreamingIfChanged();
-      if (event?.type === "agent_end" || event?.type === "auto_retry_end") {
-        const bound = s;
-        setImmediate(() => {
-          if (_session === bound) emitStreamingIfChanged();
-        });
-      }
+      if (cacheMissNotice) authority.observeEvent(cacheMissNotice);
+      if (event?.type === "agent_settled") endInterruptibleOperationsByKind("agent");
     });
-    emitStreamingIfChanged();
-    emitInterruptStateIfChanged();
+    authority.publishSnapshot(true);
   }
 
   subscribeSession(_session);
@@ -292,7 +279,13 @@ export function setupCommandBridge({
     return s.bindExtensions({
       uiContext,
       mode: "tui",
-      commandContextActions: buildCommandContextActions(runtime),
+      commandContextActions: buildCommandContextActions({
+        runtime,
+        authority,
+        reload: () => handleReload(),
+        replace: (operation) => runReplacement(operation),
+        waitForIdle: () => waitForSessionIdle(),
+      }),
       // An extension requested app shutdown (e.g. a TUI-style /exit). In a GUI
       // the user — not an extension — owns session lifecycle, so this is a
       // deliberate no-op: we don't tear down the user's session (and its
@@ -317,11 +310,17 @@ export function setupCommandBridge({
 
   runtime.setRebindSession(async (newSession) => {
     _session = newSession;
-    await bindExtensions(newSession);
+    authority.adoptSession(newSession);
+    // Subscribe before binding so binding/session_start events cannot be lost.
     subscribeSession(newSession);
+    await bindExtensions(newSession);
   });
 
   runtime.setBeforeSessionInvalidate(() => {
+    // Pi has crossed the last boundary at which the old AgentSession is proven
+    // usable. Any later replacement failure must retire this host rather than
+    // publish a rolled-back epoch around a potentially disposed session.
+    authority.markTransitionBoundaryCrossed();
     // P3-c: tear down any open custom() panels before the session is replaced:
     // closeAll() settles each panel's custom() promise and stops its TUI
     // render loop on the HOST side. Only emit panel_clear_all to the renderer
@@ -329,12 +328,15 @@ export function setupCommandBridge({
     // to spam a no-op event the renderer handled as a no-op.
     const hadPanels = panelBridge.closeAll();
     if (hadPanels) send({ type: "panel_clear_all" });
+    // Dialogs that survived until invalidation belong to the old extension
+    // generation. Causally awaited lifecycle dialogs have already settled;
+    // fire-and-forget dialogs must not remain answerable after rebind.
+    cancelDialogs();
     // Also dispose the unified TUI if a factory widget left one mounted. The
     // controller is passed in explicitly (not via globalThis) so the wiring is
     // testable and there's no implicit host-global coupling.
     disposeUnifiedTui?.();
     activeInterrupts.clear();
-    emitInterruptStateIfChanged();
   });
 
   // ─── State helpers (mirror RpcSessionState / RPC get_commands) ─────────
@@ -347,8 +349,12 @@ export function setupCommandBridge({
       // structured-clone-safe over IPC. `?? null` matches the nullable schema.
       model: s.model ?? null,
       thinkingLevel: s.thinkingLevel,
-      isStreaming: logicalStreamingState(),
+      isStreaming: s.isStreaming,
+      isIdle: s.isIdle,
       isCompacting: s.isCompacting,
+      isRetrying: s.isRetrying,
+      retryAttempt: s.retryAttempt,
+      isBashRunning: s.isBashRunning,
       steeringMode: s.steeringMode,
       followUpMode: s.followUpMode,
       sessionFile: s.sessionFile,
@@ -437,8 +443,170 @@ export function setupCommandBridge({
 
   // ─── Command handler ───────────────────────────────────────────────────
 
+  const LIFECYCLE_TIMEOUT_MS = 60_000;
+  function runLifecycle(operation, label) {
+    const lifecycleId = ++nextLifecycleId;
+    let ticker;
+    let remaining = LIFECYCLE_TIMEOUT_MS;
+    let lastTick = Date.now();
+    const timeout = new Promise((_, reject) => {
+      ticker = setInterval(() => {
+        const now = Date.now();
+        // Only promises opened under this lifecycle's async context suspend
+        // its watchdog. Persistent panels and unrelated dialogs cannot wedge
+        // it, while a lifecycle hook awaiting its own dialog/custom panel gets
+        // a genuine user-custody lease.
+        if ((lifecycleBlockers.get(lifecycleId) ?? 0) === 0) remaining -= now - lastTick;
+        lastTick = now;
+        if (remaining <= 0) {
+          clearInterval(ticker);
+          const error = new Error(`${label} lifecycle timed out`);
+          error.lifecycleTimeout = true;
+          reject(error);
+        }
+      }, 100);
+      ticker.unref?.();
+    });
+    const operationPromise = lifecycleContext.run(lifecycleId, () =>
+      Promise.resolve().then(operation),
+    );
+    return Promise.race([operationPromise, timeout]).finally(() => {
+      if (ticker) clearInterval(ticker);
+      lifecycleBlockers.delete(lifecycleId);
+    });
+  }
+
+  async function waitForSessionIdle() {
+    const deadline = Date.now() + LIFECYCLE_TIMEOUT_MS;
+    while (!authority.currentSession.isIdle) {
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for session idle");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 10);
+        timer.unref?.();
+      });
+    }
+  }
+
+  function bindInitialExtensions(s) {
+    return initialBinding
+      ? runLifecycle(() => bindExtensions(s), "Initial extension binding")
+      : bindExtensions(s);
+  }
+
+  async function runReplacement(operation) {
+    const current = authority.snapshot();
+    const owningIntentId = admissionContext.getStore();
+    const ownsOnlyActiveSubmission =
+      typeof owningIntentId === "string" && authority.canReplaceFromIntent(owningIntentId);
+    // A renderer replacement command itself owns one active command slot. An
+    // extension command-context replacement may own exactly one admission;
+    // unrelated commands, intents, custody, navigation, and compaction still
+    // block it.
+    const unsafe = ownsOnlyActiveSubmission
+      ? activeCommands > 0
+      : !current.isIdle ||
+        current.hostFacts.submitting ||
+        current.hostFacts.custodyCount > 0 ||
+        authority.hasActiveWork ||
+        activeCommands > 1;
+    if (unsafe) {
+      throw new Error("Wait for current session work to finish before replacing the session.");
+    }
+    const oldSession = _session;
+    authority.beginTransition(authority.sessionEpoch + 1);
+    try {
+      const result = await runLifecycle(operation, "Session replacement");
+      if (result?.cancelled) {
+        if (authority.transitionBoundaryCrossed) {
+          throw new Error("Session replacement cancelled after invalidation boundary");
+        }
+        authority.cancelTransition(oldSession);
+      } else authority.commitTransition();
+      return result;
+    } catch (err) {
+      // A failure before rebind leaves the old public session valid. Once
+      // rebind adopted a new session, the caller must retire the host rather
+      // than pretending disposed state is usable.
+      if (
+        _session === oldSession &&
+        !authority.transitionBoundaryCrossed &&
+        !err?.lifecycleTimeout
+      ) {
+        authority.cancelTransition(oldSession);
+      } else {
+        send({
+          type: "fatal_transition_error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      throw err;
+    }
+  }
+
+  async function handleSubmit(msg) {
+    return authority.submit(msg.submission);
+  }
+
+  async function handleEscape(requestId) {
+    return authority.requestEscape(requestId);
+  }
+
+  async function handleReload() {
+    const current = authority.snapshot();
+    if (
+      !current.isIdle ||
+      current.hostFacts.submitting ||
+      current.hostFacts.custodyCount > 0 ||
+      authority.hasActiveWork ||
+      activeCommands > 0
+    ) {
+      throw new Error("Wait for the current response to finish before reloading.");
+    }
+    const oldSession = _session;
+    authority.beginTransition(authority.sessionEpoch + 1);
+    try {
+      await runLifecycle(
+        () =>
+          _session.reload({
+            beforeSessionStart: async () => {
+              authority.markTransitionBoundaryCrossed();
+              panelBridge.closeAll();
+              disposeUnifiedTui?.();
+              cancelDialogs();
+              authority.adoptSession(_session, authority.sessionEpoch + 1);
+            },
+          }),
+        "Reload",
+      );
+      // reload keeps the AgentSession object and subscription but replaces
+      // extension bindings; publish all buffered events with one terminal read.
+      authority.commitTransition();
+    } catch (err) {
+      if (!err?.lifecycleTimeout && !authority.transitionBoundaryCrossed) {
+        authority.cancelTransition(oldSession);
+      } else {
+        send({
+          type: "fatal_transition_error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      throw err;
+    }
+  }
+
   async function handleCommand(msg) {
     const { id, command } = msg;
+    if (authority.isTransitioning) {
+      send({
+        type: "response",
+        id,
+        success: false,
+        error: "Session replacement is in progress",
+      });
+      authority.publishSnapshot();
+      return;
+    }
+    activeCommands++;
     const runForSurface = (fn) =>
       typeof runWithInvocationSurface === "function"
         ? runWithInvocationSurface(msg.uiSurface, fn)
@@ -457,6 +625,7 @@ export function setupCommandBridge({
           const respond = (ok, errMsg) => {
             if (responded) return;
             responded = true;
+            authority.publishSnapshot();
             send({
               type: "response",
               id,
@@ -481,7 +650,9 @@ export function setupCommandBridge({
                   },
                 }),
               ),
-          ).catch((err) => respond(false, err instanceof Error ? err.message : String(err)));
+          )
+            .catch((err) => respond(false, err instanceof Error ? err.message : String(err)))
+            .finally(() => authority.publishSnapshot());
           break;
         }
 
@@ -532,8 +703,37 @@ export function setupCommandBridge({
           break;
         }
 
+        case "cycle_model": {
+          const result = await _session.cycleModel();
+          send({ type: "response", id, success: true, data: result ?? null });
+          break;
+        }
+
         case "set_thinking_level": {
           _session.setThinkingLevel(command.level);
+          send({ type: "response", id, success: true });
+          break;
+        }
+
+        case "cycle_thinking_level": {
+          const level = _session.cycleThinkingLevel();
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: level ? { level } : null,
+          });
+          break;
+        }
+
+        case "set_steering_mode": {
+          _session.setSteeringMode(command.mode);
+          send({ type: "response", id, success: true });
+          break;
+        }
+
+        case "set_follow_up_mode": {
+          _session.setFollowUpMode(command.mode);
           send({ type: "response", id, success: true });
           break;
         }
@@ -582,10 +782,8 @@ export function setupCommandBridge({
         }
 
         // ── Scoped models / login state ──────────────────────────────────
-        // These mirror pi's TUI /scoped-models and /logout flows but over
-        // the SDK host. They are NOT supported by the `pi --mode rpc` fallback
-        // (no RPC command exists), so a host_fallback session surfaces the
-        // failure as an error toast at session.sendCommand time.
+        // These mirror pi's TUI /scoped-models and /logout flows through
+        // the SDK host's public session APIs.
         case "get_scoped_models": {
           // Refresh so a freshly-added credential (e.g. /login) is reflected
           // immediately — mirrors pi's showModelsSelector, which calls
@@ -670,11 +868,29 @@ export function setupCommandBridge({
         // object. The old bridge passed { customInstructions } and pi silently
         // stringified it to "[object Object]".
         case "compact": {
-          await trackInterruptibleOperation(
+          const result = await trackInterruptibleOperation(
             "compact",
             () => _session.abort(),
             () => _session.compact(command.customInstructions),
           );
+          send({ type: "response", id, success: true, data: result });
+          break;
+        }
+
+        case "set_auto_compaction": {
+          _session.setAutoCompactionEnabled(command.enabled);
+          send({ type: "response", id, success: true });
+          break;
+        }
+
+        case "set_auto_retry": {
+          _session.setAutoRetryEnabled(command.enabled);
+          send({ type: "response", id, success: true });
+          break;
+        }
+
+        case "abort_retry": {
+          _session.abortRetry();
           send({ type: "response", id, success: true });
           break;
         }
@@ -692,6 +908,16 @@ export function setupCommandBridge({
 
         case "get_state": {
           send({ type: "response", id, success: true, data: getState() });
+          break;
+        }
+
+        case "get_messages": {
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: { messages: _session.messages },
+          });
           break;
         }
 
@@ -814,7 +1040,7 @@ export function setupCommandBridge({
         // _session is already the new session when we send the response. ipc.ts
         // then harvests the new sessionFile via a follow-up get_state.
         case "new_session": {
-          const result = await runtime.newSession();
+          const result = await runReplacement(() => runtime.newSession());
           send({
             type: "response",
             id,
@@ -825,7 +1051,7 @@ export function setupCommandBridge({
         }
 
         case "fork": {
-          const result = await runtime.fork(command.entryId);
+          const result = await runReplacement(() => runtime.fork(command.entryId));
           send({
             type: "response",
             id,
@@ -836,7 +1062,7 @@ export function setupCommandBridge({
         }
 
         case "switch_session": {
-          const result = await runtime.switchSession(command.sessionPath);
+          const result = await runReplacement(() => runtime.switchSession(command.sessionPath));
           send({
             type: "response",
             id,
@@ -860,7 +1086,7 @@ export function setupCommandBridge({
             });
             return;
           }
-          const result = await runtime.fork(leafId, { position: "at" });
+          const result = await runReplacement(() => runtime.fork(leafId, { position: "at" }));
           send({
             type: "response",
             id,
@@ -874,8 +1100,7 @@ export function setupCommandBridge({
         // NOT gated by assertHostCapabilities so older pi versions that
         // lack session.sessionManager.getTree()/getBranch() or
         // session.navigateTree() degrade per-command (TypeError → success:false
-        // from the outer try/catch) without forcing the entire host to fall
-        // back to `pi --mode rpc` (which would also disable inline panels).
+        // from the outer try/catch) without making the entire host unavailable.
         case "get_tree": {
           // Capability gate (NOT a thrown TypeError). The tree surface is
           // intentionally NOT in assertHostCapabilities (gating it there would
@@ -946,10 +1171,12 @@ export function setupCommandBridge({
           // rebuild the transcript in-place without re-reading the session
           // file (which may be stale for freshly-appended entries such as
           // the synthesized branch_summary).
-          const result = await _session.navigateTree(command.targetId, {
-            summarize: command.summarize,
-            label: command.label,
-          });
+          const result = await authority.runNavigation(() =>
+            _session.navigateTree(command.targetId, {
+              summarize: command.summarize,
+              label: command.label,
+            }),
+          );
           const data = {
             cancelled: result.cancelled,
             editorText: result.editorText,
@@ -995,10 +1222,23 @@ export function setupCommandBridge({
         success: false,
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      activeCommands--;
+      authority.publishSnapshot();
     }
   }
 
-  return { handleCommand, bindExtensions, interruptActiveOperation };
+  return {
+    handleCommand,
+    handleSubmit,
+    handleEscape,
+    handleReload,
+    publishSnapshot: (full = true) => authority.publishSnapshot(full),
+    applyEditorPatch: (patch) => uiState.applyEditorPatch(patch),
+    bindExtensions: bindInitialExtensions,
+    interruptActiveOperation,
+    authority,
+  };
 }
 
 // ── Pi 0.80.4 cache-miss notice parity ──────────────────────────────────
@@ -1321,28 +1561,18 @@ async function collectLogoutProviders(session) {
  * fork/navigateTree/switchSession/reload). navigateTree maps to fork with
  * position "before" (the closest runtime equivalent).
  */
-function buildCommandContextActions(runtime) {
+function buildCommandContextActions({ runtime, authority, reload, replace, waitForIdle }) {
   return {
-    waitForIdle: async () => {
-      // The runtime exposes no public idle-await; pi-vis drives commands
-      // serially over the wire, so this is effectively a no-op here. Kept to
-      // satisfy the interface so extensions that call it don't throw.
-    },
-    newSession: async (options) => runtime.newSession(options),
-    fork: async (entryId, options) => runtime.fork(entryId, options),
+    waitForIdle,
+    newSession: async (options) => replace(() => runtime.newSession(options)),
+    fork: async (entryId, options) => replace(() => runtime.fork(entryId, options)),
     navigateTree: async (targetId, options) =>
-      runtime.fork(targetId, { position: "before", ...options }),
-    switchSession: async (sessionPath, options) => runtime.switchSession(sessionPath, options),
-    reload: async () => {
-      // In-process reload, exactly as pi --mode rpc does (rpc-mode.js calls
-      // session.reload()). It swaps the extension runner in place on the SAME
-      // session object — so it does NOT trigger setRebindSession, our event
-      // subscription stays valid, and our mode:"tui" uiContext binding is
-      // preserved. This is what makes extension flows like `/mcp setup` →
-      // ctx.actions.reload() actually pick up the new config. (The old code
-      // fired a `reload_requested` message that nothing in main consumed, so
-      // extension-initiated reload was a silent no-op.)
-      await runtime.session.reload();
-    },
+      authority.runNavigation(() => authority.currentSession.navigateTree(targetId, options)),
+
+    switchSession: async (sessionPath, options) =>
+      replace(() => runtime.switchSession(sessionPath, options)),
+    // Use the same transition-aware path as the external reload message.
+    // Reload can emit extension/UI events before and after its rebind point.
+    reload: async () => reload(),
   };
 }

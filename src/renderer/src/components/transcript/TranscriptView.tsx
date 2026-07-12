@@ -3,9 +3,14 @@ import type React from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnsiText } from "../../lib/ansi.js";
 import { Markdown } from "../../lib/markdown.js";
+import { invokeSessionCommand } from "../../lib/session-command.js";
 import { htmlToMarkdown } from "../../lib/turndown.js";
 import { useImageViewerStore } from "../../stores/image-viewer-store.js";
-import { shouldShowWorkingIndicator, useSessionsStore } from "../../stores/sessions-store.js";
+import {
+  sessionMatchesRuntime,
+  shouldShowWorkingIndicator,
+  useSessionsStore,
+} from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import {
   type AssistantBlockData,
@@ -232,8 +237,8 @@ function formatDuration(ms: number): string {
 
 /** The working indicator row. Shows a spinner plus a live "Running for …"
  *  countdown driven by `runningSince`. The store starts/stops that timestamp
- *  from logical working transitions (`isStreaming || promptsInFlight > 0`),
- *  so prompt preflight and retries stay on one continuous timer. */
+ *  from the store's logical working transition, so prompt admission and
+ *  retries stay on one continuous timer. */
 function WorkingRow({ sessionId }: { sessionId: SessionId }): React.ReactElement {
   const runningSince = useSessionsStore((s) => s.sessions.get(sessionId)?.runningSince);
   const [, setTick] = useState(0);
@@ -354,6 +359,114 @@ const QueuedBubble = memo(function QueuedBubble({
         <div className="transcript-block__content queued-bubble__content">{text}</div>
       </div>
     </div>
+  );
+});
+
+function restoredImageSource(value: unknown): string | undefined {
+  if (typeof value === "string" && /^(data:image\/|file:|https?:)/.test(value)) return value;
+  if (!value || typeof value !== "object") return undefined;
+  const image = value as { data?: unknown; mimeType?: unknown };
+  if (typeof image.data !== "string") return undefined;
+  if (image.data.startsWith("data:image/")) return image.data;
+  const mimeType = typeof image.mimeType === "string" ? image.mimeType : "image/png";
+  return `data:${mimeType};base64,${image.data}`;
+}
+
+const QueueRestorationReview = memo(function QueueRestorationReview({
+  sessionId,
+  restoration,
+}: {
+  sessionId: SessionId;
+  restoration: {
+    restorationId: string;
+    steering: string[];
+    followUp: string[];
+    originalAttachments: Array<{ intentId: string; images: unknown[] }>;
+    commandDescription?: string | undefined;
+  };
+}): React.ReactElement {
+  const dismiss = useSessionsStore((state) => state.dismissQueueRestoration);
+  const restoreText = useSessionsStore((state) => state.restoreQueueRestorationText);
+  const openImages = useImageViewerStore((state) => state.openImages);
+  const text = [...restoration.steering, ...restoration.followUp].join("\n\n");
+  const images = restoration.originalAttachments.flatMap((item) => item.images);
+  const hasText = text.trim().length > 0;
+  const sources = useMemo(
+    () => images.map(restoredImageSource).filter((value): value is string => !!value),
+    [images],
+  );
+  return (
+    <section className="restored-attachments" aria-label="Interrupted message review">
+      <div className="restored-attachments__header">
+        <div className="restored-attachments__heading">
+          <span className="restored-attachments__marker" aria-hidden="true" />
+          <div>
+            <strong>
+              {restoration.commandDescription
+                ? "Review interrupted command"
+                : "Review interrupted message"}
+            </strong>
+            <div className="restored-attachments__warning">
+              {restoration.commandDescription ??
+                "Pi stopped before confirming whether this queued input was processed. Review it before sending again to avoid a duplicate."}
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="restored-attachments__dismiss"
+          onClick={() => void dismiss(sessionId, restoration.restorationId)}
+        >
+          Dismiss
+        </button>
+      </div>
+      {hasText && (
+        <div className="restored-attachments__text">
+          <span>Queued text</span>
+          <div>{text}</div>
+        </div>
+      )}
+      {hasText && !restoration.commandDescription && (
+        <button
+          type="button"
+          className="restored-attachments__restore"
+          onClick={() => restoreText(sessionId, restoration.restorationId)}
+        >
+          Restore to Composer
+        </button>
+      )}
+      {restoration.originalAttachments
+        .filter((item) => item.images.length > 0)
+        .map((item) => (
+          <div key={item.intentId} className="restored-attachments__warning">
+            {item.images.length} possible original attachment{item.images.length === 1 ? "" : "s"}—
+            shown separately because an extension may have transformed or consumed the queued input.
+          </div>
+        ))}
+      {sources.length > 0 && (
+        <div className="transcript-block__images">
+          {sources.map((source, index) => (
+            <button
+              // biome-ignore lint/suspicious/noArrayIndexKey: attachment order is authoritative
+              key={index}
+              type="button"
+              className="transcript-block__image-button"
+              onClick={() =>
+                openImages(
+                  sources.map((src, imageIndex) => ({
+                    src,
+                    alt: `Original queued attachment ${imageIndex + 1}`,
+                  })),
+                  index,
+                )
+              }
+            >
+              <img src={source} alt={`Original queued attachment ${index + 1}`} />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
 });
 
@@ -501,7 +614,7 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
 
   const copyOutput = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await window.pivis.invoke("clipboard.writeText", { text });
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
     } catch {
@@ -829,7 +942,12 @@ const CompactionBlock = memo(function CompactionBlock({
   const tokens = typeof data.tokensBefore === "number" ? data.tokensBefore.toLocaleString() : null;
   const reason = data.reason ? data.reason : null;
   const badge = data.aborted ? "aborted" : data.errorMessage ? "error" : undefined;
-  const subjectParts = ["Context compacted", reason, tokens ? `${tokens} tokens summarized` : null];
+  const outcome = data.errorMessage
+    ? "Compaction failed"
+    : data.aborted
+      ? "Compaction aborted"
+      : "Context compacted";
+  const subjectParts = [outcome, reason, tokens ? `${tokens} tokens summarized` : null];
   const subject = subjectParts.filter(Boolean).join(" · ");
   const content = data.errorMessage ? data.errorMessage : data.summary;
 
@@ -874,10 +992,18 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
   data: CustomEntryBlockData;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const identityEpoch = useSessionsStore(
-    (state) => state.sessions.get(sessionId)?.identityEpoch ?? 0,
+  const hostInstanceId = useSessionsStore((state) => {
+    const session = state.sessions.get(sessionId);
+    return session?.availability === "available" ? session.hostInstanceId : undefined;
+  });
+  const sessionEpoch = useSessionsStore(
+    (state) => state.sessions.get(sessionId)?.sessionEpoch ?? 0,
   );
-  const renderedEpochRef = useRef(identityEpoch);
+  const runtime = useMemo(
+    () => (hostInstanceId ? { hostInstanceId, sessionEpoch } : undefined),
+    [hostInstanceId, sessionEpoch],
+  );
+  const renderedEpochRef = useRef(sessionEpoch);
   const hostRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLPreElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
@@ -911,38 +1037,50 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
   }, []);
 
   useEffect(() => {
-    renderedEpochRef.current = identityEpoch;
+    renderedEpochRef.current = sessionEpoch;
     setRendered(undefined);
-  }, [identityEpoch]);
+  }, [sessionEpoch]);
 
   useEffect(() => {
     let cancelled = false;
-    void window.pivis
-      .invoke("session.sendCommand", {
-        sessionId,
-        command: {
-          type: "render_entry",
-          entryId: data.entryId,
-          cols,
-          expanded,
-        },
-      })
+    if (!runtime) {
+      setRendered(undefined);
+      return;
+    }
+    void invokeSessionCommand(
+      sessionId,
+      {
+        type: "render_entry",
+        entryId: data.entryId,
+        cols,
+        expanded,
+      },
+      runtime,
+    )
       .then((response) => {
-        if (cancelled || renderedEpochRef.current !== identityEpoch) return;
+        if (
+          cancelled ||
+          renderedEpochRef.current !== sessionEpoch ||
+          !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+        )
+          return;
         const result = response.success ? (response.data as RenderedEntry | undefined) : undefined;
         setRendered(result && typeof result.rendered === "boolean" ? result : undefined);
       })
       .catch(() => {
-        if (cancelled || renderedEpochRef.current !== identityEpoch) return;
-        // RPC fallback and an older SDK host do not support entry renderers.
-        // Pi hides custom entries without a renderer, so the compatible
-        // degradation is an invisible block rather than stale extension data.
+        if (
+          cancelled ||
+          renderedEpochRef.current !== sessionEpoch ||
+          !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+        )
+          return;
+        // Hide entries without a renderer rather than showing stale extension data.
         setRendered(undefined);
       });
     return () => {
       cancelled = true;
     };
-  }, [sessionId, data.entryId, cols, expanded, identityEpoch]);
+  }, [sessionId, data.entryId, cols, expanded, sessionEpoch, runtime]);
 
   const visible = rendered?.rendered === true;
   return (
@@ -1268,6 +1406,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
 
   const allBlocks: TypedTranscriptBlock[] = session?.transcript.blocks ?? [];
   const queuedMessages = session?.queuedMessages;
+  const queueRestorations = session?.queueRestorations ?? [];
   // Show the "Running for …" indicator for real agent work. Prompt-backed
   // extension UI can set isStreaming while merely waiting on the user, so the
   // store helper applies the UI-vs-tool-work distinction.
@@ -1562,6 +1701,13 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
         ))}
         {queuedMessages?.followUp.map((message) => (
           <QueuedBubble key={message.id} text={message.text} kind="followUp" />
+        ))}
+        {queueRestorations.map((restoration) => (
+          <QueueRestorationReview
+            key={restoration.restorationId}
+            sessionId={sessionId}
+            restoration={restoration}
+          />
         ))}
         {showWorking && <WorkingRow sessionId={sessionId} />}
       </div>

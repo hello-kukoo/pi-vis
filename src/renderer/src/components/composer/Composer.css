@@ -324,6 +324,29 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+.composer__editor-conflict {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  color: var(--text-secondary);
+  font-size: var(--font-size-small);
+  border-bottom: 1px solid var(--border);
+}
+
+.composer__editor-conflict span {
+  flex: 1;
+}
+
+.composer__editor-conflict button {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+}
+
 .composer__entry-row {
   display: flex;
   align-items: flex-end;

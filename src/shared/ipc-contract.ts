@@ -14,7 +14,16 @@ import type { PiRpcCommand } from "./pi-protocol/commands.js";
 import type { PiEvent } from "./pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "./pi-protocol/extension-ui.js";
 import type { PanelEvent } from "./pi-protocol/panel-events.js";
-import type { PiRpcResponse } from "./pi-protocol/responses.js";
+import type {
+  CommandSettlement,
+  EscapeResult,
+  ReloadRequest,
+  ReloadSettlement,
+  RuntimeRecord,
+  RuntimeStateUpdate,
+  SessionSubmission,
+  SubmissionResult,
+} from "./pi-protocol/runtime-state.js";
 import type { AppSettings } from "./settings.js";
 import type { Theme } from "./theme/index.js";
 import type { UpdateStatus } from "./updates.js";
@@ -86,8 +95,8 @@ export interface IpcInvokeContract {
   };
   "session.activate": { req: { sessionId: SessionId }; res: undefined };
   "session.reload": {
-    req: { sessionId: SessionId };
-    res: { success: true } | { success: false; error: string };
+    req: { sessionId: SessionId; request: ReloadRequest };
+    res: ReloadSettlement;
   };
   // /share: export the session to a secret GitHub gist (via `gh`) and
   // return the pi.dev share viewer URL. Implemented in main because it
@@ -95,7 +104,12 @@ export interface IpcInvokeContract {
   // the host's export_html bridge command. Error strings match pi's TUI
   // messages verbatim for the gh-missing / gh-not-logged-in cases.
   "session.share": {
-    req: { sessionId: SessionId };
+    req: {
+      sessionId: SessionId;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      exportIntentId: string;
+    };
     res: { ok: true; url: string; gistUrl: string } | { ok: false; error: string };
   };
   // /changelog: read pi's shipped CHANGELOG.md from the located pi
@@ -140,10 +154,19 @@ export interface IpcInvokeContract {
   // Open the OS directory picker for attaching to an existing worktree.
   // Returns the chosen path or `null` if the user cancelled.
   "worktree.pickDirectory": { req: { workspacePath: string }; res: string | null };
-  "session.close": { req: { sessionId: SessionId }; res: undefined };
   "session.loadHistory": {
-    req: { sessionId: SessionId; limit?: number | undefined; before?: number | undefined };
-    res: HistoryPage;
+    req: {
+      sessionId: SessionId;
+      expectedSessionFile: string;
+      historyGeneration: number;
+      expectedHostInstanceId: string | null;
+      expectedSessionEpoch: number | null;
+      limit?: number | undefined;
+      before?: number | undefined;
+    };
+    res:
+      | { status: "loaded"; historyGeneration: number; page: HistoryPage }
+      | { status: "stale"; historyGeneration: number };
   };
   // Replay a branch (an ordered array of SessionTreeEntry) from the host's
   // in-memory state into the same TranscriptBlock[] shape the renderer
@@ -156,46 +179,159 @@ export interface IpcInvokeContract {
     res: TranscriptBlock[];
   };
   "session.sendCommand": {
-    req: { sessionId: SessionId; command: PiRpcCommand; uiSurface?: "composer" | "unified" };
-    res: PiRpcResponse;
+    req: {
+      sessionId: SessionId;
+      command: PiRpcCommand;
+      requestId: string;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      /** Required for effectful and replacement commands. */
+      intentId?: string;
+      uiSurface?: "composer" | "unified";
+      /** Exact editor text that originated this command, for ambiguity review. */
+      sourceText?: string;
+      editorRevision?: number;
+    };
+    res: CommandSettlement;
   };
-  /** Interrupt the active runtime operation for a session. This is deliberately
-   *  not transcript-derived: main/host decide whether the live operation is an
-   *  agent turn, MCP/tool call, standalone bash, or compaction and route to the
-   *  correct abort primitive. Safe no-op when idle. */
-  "session.interrupt": { req: { sessionId: SessionId }; res: undefined };
+  /** The only text/image submission path. Pi chooses idle prompt vs queued delivery. */
+  "session.submit": {
+    req: { sessionId: SessionId; submission: SessionSubmission };
+    res: SubmissionResult;
+  };
+  /** Every unclaimed bare Escape is acknowledged by the live host. */
+  "session.acknowledgeRestoration": {
+    req: { sessionId: SessionId; restorationId: string };
+    res: { acknowledged: boolean };
+  };
+  "session.escape": {
+    req: {
+      sessionId: SessionId;
+      requestId: string;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+    };
+    res: EscapeResult;
+  };
+  /** Request a full snapshot after attach/focus/reload or a detected transport gap. */
+  "session.runtimeResync": { req: { sessionId: SessionId }; res: RuntimeStateUpdate };
+  /** Renderer lifecycle handshake. Loss increments generation and cancels blocking host UI. */
+  "session.rendererAttach": {
+    req: { sessionId: SessionId; rendererGeneration: number };
+    res: RuntimeStateUpdate;
+  };
+  "session.editorPatch": {
+    req: {
+      sessionId: SessionId;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      baseRevision: number;
+      revision: number;
+      text: string;
+      attachments: unknown[];
+    };
+    res: {
+      accepted: boolean;
+      revision: number;
+      text: string;
+      attachments: unknown[];
+      conflictText?: string;
+      conflictAttachments?: unknown[];
+    };
+  };
   "session.respondToUiRequest": {
-    req: { sessionId: SessionId; response: ExtensionUiResponse };
-    res: undefined;
+    req: {
+      sessionId: SessionId;
+      rendererGeneration: number;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      operationId: string;
+      response: ExtensionUiResponse;
+    };
+    res: { acknowledged: boolean };
   };
   /** Send keystroke input to an open custom panel (xterm.js overlay). */
   "session.panelInput": {
-    req: { sessionId: SessionId; panelId: number; data: string };
-    res: undefined;
+    req: {
+      sessionId: SessionId;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      panelId: number;
+      sequence: number;
+      data: string;
+    };
+    res: { acknowledgedThrough: number; gap?: { expected: number; received: number } };
   };
   /** Notify the host of a new xterm.js panel size (cols/rows), so the TUI
    *  layout matches the actual panel dimensions. `force` asks the host to
    *  discard its diff-render state and repaint a complete frame; UnifiedTuiHost
    *  uses it on xterm remount after session/view switches. */
   "session.panelResize": {
-    req: { sessionId: SessionId; panelId: number; cols: number; rows: number; force?: boolean };
+    req: {
+      sessionId: SessionId;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      panelId: number;
+      cols: number;
+      rows: number;
+      force?: boolean;
+    };
     res: undefined;
   };
   /** Force-close an open custom panel (escape hatch for a panel whose
    *  extension never calls done()). Resolves the extension's custom() promise
    *  with undefined and tears the panel down on both sides. */
   "session.panelClose": {
-    req: { sessionId: SessionId; panelId: number };
-    res: undefined;
+    req: {
+      sessionId: SessionId;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      panelId: number;
+      operationId: string;
+    };
+    res: { acknowledged: boolean };
+  };
+  /** Two-phase close: checkpoint first, then confirm the current mutation token. */
+  "session.prepareClose": {
+    req: { sessionId: SessionId; force?: boolean };
+    res: { reviewToken: string; checkpoint: unknown };
+  };
+  "session.cancelClose": {
+    req: { sessionId: SessionId; reviewToken: string };
+    res: { cancelled: boolean };
+  };
+  "session.confirmClose": {
+    req: { sessionId: SessionId; reviewToken: string };
+    res: { closed: boolean; reason?: string };
   };
   /** Respond to a unified-TUI editor submit (host→renderer round-trip).
    *  The host's `editor.onSubmit` sends the text to the renderer, which runs
    *  the shared submit pipeline (`submitFromText`). `ok:false` + `bailed:true`
    *  means a pre-send guard rejected the submit (e.g. no model) — the host
    *  restores the editor text. */
+  "session.claimUnifiedSubmit": {
+    req: {
+      sessionId: SessionId;
+      id: string;
+      rendererGeneration: number;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+    };
+    res: { claimed: false } | { claimed: true; claimId: string; expiresAt: number };
+  };
   "session.unifiedSubmitResponse": {
-    req: { sessionId: SessionId; id: string; ok: boolean; bailed?: boolean; error?: string };
-    res: { ok: true };
+    req: {
+      sessionId: SessionId;
+      id: string;
+      rendererGeneration: number;
+      claimId: string;
+      expectedHostInstanceId: string;
+      expectedSessionEpoch: number;
+      ok: boolean;
+      bailed?: boolean;
+      error?: string;
+    };
+    res: { ok: boolean };
   };
   "settings.get": { req: undefined; res: AppSettings };
   "settings.set": { req: Partial<AppSettings>; res: AppSettings };
@@ -276,12 +412,31 @@ export interface IpcInvokeContract {
 // Every event channel: payload type (main → renderer)
 export interface IpcEventContract {
   "session.events": { sessionId: SessionId; events: PiEvent[] };
+  /** Atomic direct-getter runtime state; Unavailable is neither running nor idle. */
+  "session.runtimeState": { sessionId: SessionId; state: RuntimeStateUpdate };
+  /** One renderer-visible commit for a lifecycle epoch transition. */
+  "session.transitionBatch": {
+    sessionId: SessionId;
+    records: RuntimeRecord[];
+    state: RuntimeStateUpdate;
+  };
+  "session.submissionDisposition": { sessionId: SessionId; result: SubmissionResult };
+  "session.queueRestoration": {
+    sessionId: SessionId;
+    restorationId: string;
+    steering: string[];
+    followUp: string[];
+    originalAttachments: Array<{ intentId: string; images: unknown[] }>;
+    commandDescription?: string;
+    requiresReview: true;
+  };
+  "session.uiAcknowledged": { sessionId: SessionId; operationId: string };
   "session.uiRequest": { sessionId: SessionId; request: ExtensionUiRequest };
   "session.statusChanged": {
     sessionId: SessionId;
     status: SessionStatus;
     error?: string | undefined;
-    /** pi version when using SDK-host; undefined for --mode rpc */
+    /** pi version reported by the active SDK host. */
     piVersion?: string | undefined;
   };
   // Emitted after new_session / switch_session / fork / clone when the
@@ -290,6 +445,8 @@ export interface IpcEventContract {
   // reseeds the transcript, and refreshes the workspace session list.
   "session.fileChanged": {
     sessionId: SessionId;
+    hostInstanceId: string;
+    sessionEpoch: number;
     sessionFile?: string | undefined;
     sessionName?: string | undefined;
   };
@@ -319,7 +476,15 @@ export interface IpcEventContract {
   /** The unified-TUI editor submitted a prompt (host→renderer). The renderer
    *  runs the shared submit pipeline and replies via
    *  `session.unifiedSubmitResponse` (correlated by `id`). */
-  "session.unifiedSubmitRequest": { sessionId: SessionId; id: string; text: string };
+  "session.unifiedSubmitRequest": {
+    sessionId: SessionId;
+    id: string;
+    text: string;
+    editorRevision: number;
+    submissionIntentId: string;
+    hostInstanceId: string;
+    sessionEpoch: number;
+  };
 }
 
 export type IpcInvokeChannel = keyof IpcInvokeContract;

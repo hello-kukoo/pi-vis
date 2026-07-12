@@ -1,4 +1,5 @@
 import type { SessionId } from "@shared/ids.js";
+import { type PiRpcCommand, commandNeedsIntent } from "@shared/pi-protocol/commands.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -15,9 +16,12 @@ import { findCurrentModel } from "../../lib/model-utils.js";
 import { useChangelogStore } from "../../stores/changelog-store.js";
 import { openDiffForSession } from "../../stores/diff-store.js";
 import { useImageViewerStore } from "../../stores/image-viewer-store.js";
+import { useOverlayStore } from "../../stores/overlay-store.js";
 import {
   isNewSessionPending,
+  isSessionWorking,
   sessionHasHistory,
+  sessionMatchesRuntime,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { useTreeStore } from "../../stores/tree-store.js";
@@ -40,6 +44,10 @@ interface FileAttachment {
   path: string;
 }
 
+type ReplicatedComposerAttachment =
+  | { kind: "image"; name: string; path: string; dataUrl: string }
+  | { kind: "file"; name: string; path: string };
+
 type FileWithLegacyPath = File & { path?: string };
 
 const IMAGE_FILE_EXTENSION = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i;
@@ -57,6 +65,35 @@ function pathForPickedFile(file: File): string {
     // as a defensive fallback if contextBridge cannot proxy the File object.
   }
   return (file as FileWithLegacyPath).path || file.name;
+}
+
+function serializeComposerAttachments(
+  images: ImageAttachment[],
+  files: FileAttachment[],
+): ReplicatedComposerAttachment[] {
+  return [
+    ...images.map((item) => ({ kind: "image" as const, ...item })),
+    ...files.map((item) => ({ kind: "file" as const, ...item })),
+  ];
+}
+
+function parseReplicatedAttachments(values: unknown[]): {
+  images: ImageAttachment[];
+  files: FileAttachment[];
+} {
+  const images: ImageAttachment[] = [];
+  const files: FileAttachment[] = [];
+  for (const value of values) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as Partial<ReplicatedComposerAttachment>;
+    if (typeof item.name !== "string" || typeof item.path !== "string") continue;
+    if (item.kind === "image" && typeof item.dataUrl === "string") {
+      images.push({ name: item.name, path: item.path, dataUrl: item.dataUrl });
+    } else if (item.kind === "file") {
+      files.push({ name: item.name, path: item.path });
+    }
+  }
+  return { images, files };
 }
 
 function textWithPrependedFilePaths(current: string, paths: string[]): string {
@@ -114,7 +151,20 @@ interface SuggestionEntry {
 export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const renderedSessionIdRef = useRef(sessionId);
+  renderedSessionIdRef.current = sessionId;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [text, setText] = useState("");
+  const textRef = useRef("");
+  useEffect(() => {
+    textRef.current = text;
+  }, [text]);
   const [slashIndex, setSlashIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   // Container for the slash-suggestion list. Used to scroll the
@@ -124,22 +174,184 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const suggestionListRef = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
-  // Re-entrancy guard for `handleSubmit`. Without this, a rapid/auto-repeat
-  // keydown can read the stale `text` closure before `setText("")` commits
-  // and dispatch two submissions (two optimistic bubbles + two prompts).
-  // Set to true for the duration of the submit, reset in `finally` so a
-  // rejected/throwing call doesn't lock the composer permanently.
-  const submittingRef = useRef(false);
+  // Re-entrancy guard for `handleSubmit`. De-duplicate only the same content:
+  // a distinct command/prompt typed while an earlier operation is finishing is
+  // a legitimate rapid submission and must still reach host custody.
+  const submissionsInFlightRef = useRef(new Set<string>());
+  const editorRevisionRef = useRef(0);
+  // Host snapshots may advance the editor revision when an accepted submit
+  // clears custody. Track renderer-originated edits separately so that
+  // acknowledgement cannot be confused with newer user typing/attachments.
+  const localEditGenerationRef = useRef(0);
+  const editorPatchTailRef = useRef<Promise<"accepted" | "rejected" | "failed">>(
+    Promise.resolve("accepted"),
+  );
+  const editorPatchEpochRef = useRef(0);
+  const editorPatchRetryNeededRef = useRef(false);
+  const replicatedAttachmentsRef = useRef<ReplicatedComposerAttachment[]>([]);
 
   // Pull the active session's state. We read everything we might need at
   // submit time from the same snapshot to avoid a render-during-update race.
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
+  const escapeClaimCount = useOverlayStore((s) => s.count);
   const commands = session?.commands ?? [];
   const discovered = useMemo(() => new Map(commands.map((c) => [c.name, c])), [commands]);
   // The nonce is a monotonic counter; the effect below re-runs whenever
   // it changes (even if the text is identical) so the user can re-inject
   // the same prefix on demand.
   const editorInjectionNonce = session?.editorInjection?.nonce;
+
+  useEffect(() => {
+    replicatedAttachmentsRef.current = serializeComposerAttachments(attachments, fileAttachments);
+  }, [attachments, fileAttachments]);
+
+  const editorHostInstanceId = session?.hostInstanceId;
+  const editorSessionEpoch = session?.sessionEpoch;
+  useEffect(() => {
+    // Re-seed from the latest replicated value whenever composer custody moves
+    // to another session/host generation. Reading through the store avoids
+    // resetting the serialized patch chain on every snapshot revision.
+    const current = useSessionsStore.getState().sessions.get(sessionId);
+    editorRevisionRef.current = current?.editorRevision ?? 0;
+    editorPatchEpochRef.current++;
+    editorPatchRetryNeededRef.current = false;
+    editorPatchTailRef.current = Promise.resolve("accepted");
+    const restored = parseReplicatedAttachments(current?.editorAttachments ?? []);
+    replicatedAttachmentsRef.current = serializeComposerAttachments(
+      restored.images,
+      restored.files,
+    );
+    setAttachments(restored.images);
+    setFileAttachments(restored.files);
+    void editorHostInstanceId;
+    void editorSessionEpoch;
+  }, [sessionId, editorHostInstanceId, editorSessionEpoch]);
+
+  const authoritativeEditorRevision = session?.editorRevision;
+  useEffect(() => {
+    // External host edits (extensions/unified TUI) advance the revision. Local
+    // optimistic patches already advance the ref first, so only move forward.
+    if (
+      authoritativeEditorRevision !== undefined &&
+      authoritativeEditorRevision > editorRevisionRef.current
+    ) {
+      editorRevisionRef.current = authoritativeEditorRevision;
+    }
+  }, [authoritativeEditorRevision]);
+
+  const synchronizeEditorText = useCallback(
+    (nextText: string, nextAttachments = replicatedAttachmentsRef.current): number => {
+      localEditGenerationRef.current++;
+      const baseRevision = editorRevisionRef.current;
+      const revision = baseRevision + 1;
+      const patchEpoch = editorPatchEpochRef.current;
+      const runtimeIdentity = useSessionsStore.getState().sessions.get(sessionId);
+      if (!runtimeIdentity?.hostInstanceId) return baseRevision;
+      const expectedHostInstanceId = runtimeIdentity.hostInstanceId;
+      const expectedSessionEpoch = runtimeIdentity.sessionEpoch;
+      editorRevisionRef.current = revision;
+      // Component-local file/image objects are a retention root immediately,
+      // before the async host acknowledgement, so a rapid session switch
+      // cannot reap an attachment-only pending composer.
+      useSessionsStore.getState().stageEditorAttachments(sessionId, nextAttachments);
+      useSessionsStore.getState().beginEditorPatch(sessionId);
+      editorPatchTailRef.current = editorPatchTailRef.current.then(async () => {
+        try {
+          // A rejection fences every patch that was already queued from the
+          // rejected optimistic revision chain. Only a subsequent user edit,
+          // created in the new epoch and rebased to the host revision, may
+          // resolve the preserved conflict.
+          if (patchEpoch !== editorPatchEpochRef.current) return "rejected";
+          const result = await window.pivis.invoke("session.editorPatch", {
+            sessionId,
+            expectedHostInstanceId,
+            expectedSessionEpoch,
+            baseRevision,
+            revision,
+            text: nextText,
+            attachments: nextAttachments,
+          });
+          if (patchEpoch !== editorPatchEpochRef.current) return "rejected";
+          if (result.accepted) {
+            useSessionsStore.getState().acknowledgeEditorPatch(sessionId, result.revision);
+            // A snapshot sent just before this acknowledgement may have
+            // scheduled an older editor injection. Re-assert the accepted
+            // local value, but never overwrite typing at a newer revision.
+            if (editorRevisionRef.current === result.revision) setText(nextText);
+            editorPatchRetryNeededRef.current = false;
+            return "accepted";
+          }
+          editorPatchEpochRef.current++;
+          editorRevisionRef.current = result.revision;
+          // Preserve both values. The host snapshot carries conflictText and
+          // the local textarea remains untouched for explicit user review.
+          useSessionsStore
+            .getState()
+            .addToast(
+              sessionId,
+              "Editor changed in an extension; both versions were preserved.",
+              "warning",
+            );
+          return "rejected";
+        } catch (error) {
+          if (patchEpoch === editorPatchEpochRef.current) {
+            editorPatchEpochRef.current++;
+            editorRevisionRef.current =
+              useSessionsStore.getState().sessions.get(sessionId)?.editorRevision ?? baseRevision;
+            editorPatchRetryNeededRef.current = true;
+            useSessionsStore
+              .getState()
+              .addToast(
+                sessionId,
+                `Editor synchronization failed; input was not sent: ${String(error)}`,
+                "error",
+              );
+          }
+          return "failed";
+        } finally {
+          useSessionsStore.getState().endEditorPatch(sessionId);
+        }
+      });
+      return revision;
+    },
+    [sessionId],
+  );
+
+  const editorConflict = session?.editorConflict;
+  const resolveEditorConflict = useCallback(
+    (choice: "authoritative" | "local" | "alternate" | "additional", index = 0) => {
+      if (!editorConflict) return;
+      const additional = editorConflict.additionalCandidates?.[index];
+      const value =
+        choice === "authoritative"
+          ? editorConflict.authoritativeText
+          : choice === "alternate"
+            ? (editorConflict.alternateText ?? editorConflict.localText)
+            : choice === "additional"
+              ? (additional?.text ?? editorConflict.localText)
+              : editorConflict.localText;
+      const chosenAttachments =
+        choice === "authoritative"
+          ? editorConflict.authoritativeAttachments
+          : choice === "alternate"
+            ? (editorConflict.alternateAttachments ?? editorConflict.localAttachments)
+            : choice === "additional"
+              ? (additional?.attachments ?? editorConflict.localAttachments)
+              : editorConflict.localAttachments;
+      const parsedAttachments = parseReplicatedAttachments(chosenAttachments);
+      const replicated = serializeComposerAttachments(
+        parsedAttachments.images,
+        parsedAttachments.files,
+      );
+      replicatedAttachmentsRef.current = replicated;
+      setText(value);
+      setAttachments(parsedAttachments.images);
+      setFileAttachments(parsedAttachments.files);
+      synchronizeEditorText(value, replicated);
+      useSessionsStore.getState().clearEditorConflict(sessionId);
+    },
+    [editorConflict, sessionId, synchronizeEditorText],
+  );
 
   // Whether the active session is a brand-new (still-empty) one. For such
   // sessions the unsent composer text is mirrored into a per-workspace store
@@ -178,8 +390,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         const draft = useSessionsStore.getState().newSessionDrafts.get(workspacePath);
         setText(draft ?? "");
         setSlashIndex(0);
-        setAttachments([]);
-        setFileAttachments([]);
       }
     } else {
       seededWorkspaceRef.current = null;
@@ -192,10 +402,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const addUserMessage = useSessionsStore((s) => s.addUserMessage);
   const addBashCommand = useSessionsStore((s) => s.addBashCommand);
   const finishBashCommand = useSessionsStore((s) => s.finishBashCommand);
-  const beginPromptInFlight = useSessionsStore((s) => s.beginPromptInFlight);
-  const endPromptInFlight = useSessionsStore((s) => s.endPromptInFlight);
-  const enqueueOptimisticSteer = useSessionsStore((s) => s.enqueueOptimisticSteer);
-  const removeOptimisticQueuedMessage = useSessionsStore((s) => s.removeOptimisticQueuedMessage);
   const addToast = useSessionsStore((s) => s.addToast);
   const applyModelChange = useSessionsStore((s) => s.applyModelChange);
   const addCustomMessage = useSessionsStore((s) => s.addCustomMessage);
@@ -221,7 +427,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // The composer is interactive only when the session is live AND we're not
   // mid worktree-creation (the submit is already in flight — the input is
   // frozen so it reads as "sending", not "still unsubmitted text").
-  const live = (session?.status === "starting" || session?.status === "ready") && !worktreeCreating;
+  const live =
+    session?.status === "ready" && session.availability === "available" && !worktreeCreating;
 
   // Image-attach capability. Pi only forwards image content to models whose
   // registry record lists "image" as an input modality; for a text-only
@@ -248,7 +455,20 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // same text without thrashing on identical payloads.
   useEffect(() => {
     if (editorInjectionNonce === undefined || editorInjectionText === undefined) return;
-    const injectedFiles = fileAttachmentsFromEditorText(editorInjectionText);
+    const injectedAction = parseComposerInput(editorInjectionText, { discovered });
+    // An extension command may arrive before the refreshed catalog entry.
+    // Treat any single-component slash token as command text: Pi does not
+    // restrict extension command names to identifier syntax. Normal absolute
+    // paths such as /tmp/file.txt contain another separator and retain the
+    // existing file-tile restoration behavior.
+    const slashCommandShaped = /^\/[^/\n\s]+(?:\s.*)?$/.test(editorInjectionText);
+    const injectedTextIsCommand =
+      slashCommandShaped ||
+      injectedAction.kind !== "send-prompt" ||
+      injectedAction.commandSource !== undefined;
+    const injectedFiles = injectedTextIsCommand
+      ? undefined
+      : fileAttachmentsFromEditorText(editorInjectionText);
     const nextText = injectedFiles ? "" : editorInjectionText;
     setText(nextText);
     // Mirror the injected text into the per-workspace draft when the session
@@ -261,10 +481,20 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       setSessionDraft(sessionId, nextText);
     }
     setSlashIndex(0);
-    setAttachments([]);
-    setFileAttachments(injectedFiles ?? []);
+    const restored = parseReplicatedAttachments(
+      useSessionsStore.getState().sessions.get(sessionId)?.editorAttachments ?? [],
+    );
+    setAttachments(restored.images);
+    setFileAttachments(injectedFiles ?? restored.files);
     textareaRef.current?.focus();
-  }, [editorInjectionNonce, editorInjectionText, setNewSessionDraft, setSessionDraft, sessionId]);
+  }, [
+    editorInjectionNonce,
+    editorInjectionText,
+    discovered,
+    setNewSessionDraft,
+    setSessionDraft,
+    sessionId,
+  ]);
 
   // Focus the composer so the user can type right away on app open, session
   // switch, and new-session — all of which mount a fresh Composer (the
@@ -284,6 +514,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   useEffect(() => {
     if (didAutofocusRef.current) return;
     if (!live) return; // textarea still disabled — focus() would be a no-op
+    // A dialog/dropdown/overlay owns focus and ESC precedence. Never steal
+    // focus merely because the session became live behind that surface.
+    if (escapeClaimCount > 0) return;
     const el = textareaRef.current;
     if (!el) return;
     const active = document.activeElement;
@@ -294,7 +527,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     didAutofocusRef.current = true;
     if (typingElsewhere) return;
     el.focus();
-  }, [live]);
+  }, [live, escapeClaimCount]);
 
   // ── Attachment handling ─────────────────────────────────────────────
 
@@ -325,7 +558,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
 
       if (genericFiles.length > 0) {
-        setFileAttachments((prev) => [...prev, ...genericFiles]);
+        const next = [
+          ...replicatedAttachmentsRef.current,
+          ...genericFiles.map((item) => ({ kind: "file" as const, ...item })),
+        ];
+        replicatedAttachmentsRef.current = next;
+        setFileAttachments(parseReplicatedAttachments(next).files);
+        synchronizeEditorText(text, next);
         textareaRef.current?.focus();
       }
 
@@ -344,24 +583,96 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         }
         slots--;
         const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result as string;
-          setAttachments((prev) => [...prev, { name: file.name, path, dataUrl }]);
+        const readSessionId = sessionId;
+        const readEditorEpoch = editorPatchEpochRef.current;
+        useSessionsStore.getState().beginEditorAttachmentRead(readSessionId);
+        let readFinished = false;
+        const finishRead = (): void => {
+          if (readFinished) return;
+          readFinished = true;
+          useSessionsStore.getState().endEditorAttachmentRead(readSessionId);
         };
-        reader.readAsDataURL(file);
+        reader.onload = () => {
+          try {
+            if (
+              renderedSessionIdRef.current !== readSessionId ||
+              editorPatchEpochRef.current !== readEditorEpoch
+            ) {
+              useSessionsStore
+                .getState()
+                .addToast(
+                  readSessionId,
+                  `Discarded ${file.name} after the session changed`,
+                  "warning",
+                );
+              return;
+            }
+            const dataUrl = reader.result as string;
+            const next = [
+              ...replicatedAttachmentsRef.current,
+              { kind: "image" as const, name: file.name, path, dataUrl },
+            ];
+            replicatedAttachmentsRef.current = next;
+            setAttachments(parseReplicatedAttachments(next).images);
+            synchronizeEditorText(textRef.current, next);
+          } finally {
+            finishRead();
+          }
+        };
+        reader.onerror = () => {
+          addToast(sessionId, `Could not read ${file.name}`, "error");
+          finishRead();
+        };
+        reader.onabort = finishRead;
+        try {
+          reader.readAsDataURL(file);
+        } catch (error) {
+          finishRead();
+          addToast(sessionId, error instanceof Error ? error.message : String(error), "error");
+        }
       }
       e.target.value = "";
     },
-    [addToast, attachments, sessionId, modelSupportsImages, modelLabel],
+    [
+      addToast,
+      attachments,
+      sessionId,
+      modelSupportsImages,
+      modelLabel,
+      synchronizeEditorText,
+      text,
+    ],
   );
 
-  const removeAttachment = useCallback((index: number) => {
-    setAttachments((prev) => prev.filter((_, i) => i !== index));
-  }, []);
+  const removeAttachment = useCallback(
+    (index: number) => {
+      let imageIndex = -1;
+      const next = replicatedAttachmentsRef.current.filter((item) => {
+        if (item.kind !== "image") return true;
+        imageIndex++;
+        return imageIndex !== index;
+      });
+      replicatedAttachmentsRef.current = next;
+      setAttachments(parseReplicatedAttachments(next).images);
+      synchronizeEditorText(text, next);
+    },
+    [synchronizeEditorText, text],
+  );
 
-  const removeFileAttachment = useCallback((index: number) => {
-    setFileAttachments((prev) => prev.filter((_, i) => i !== index));
-  }, []);
+  const removeFileAttachment = useCallback(
+    (index: number) => {
+      let fileIndex = -1;
+      const next = replicatedAttachmentsRef.current.filter((item) => {
+        if (item.kind !== "file") return true;
+        fileIndex++;
+        return fileIndex !== index;
+      });
+      replicatedAttachmentsRef.current = next;
+      setFileAttachments(parseReplicatedAttachments(next).files);
+      synchronizeEditorText(text, next);
+    },
+    [synchronizeEditorText, text],
+  );
 
   const viewAttachment = useCallback(
     (index: number) => {
@@ -497,14 +808,76 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const handleSubmit = useCallback(
     async (overrideContent?: string) => {
       const content = overrideContent ?? text;
-      const pendingDiffComments = useSessionsStore.getState().getDiffCommentsForPrompt(sessionId);
+      if (overrideContent !== undefined) textRef.current = overrideContent;
+      const store = useSessionsStore.getState();
+      if (store.sessions.get(sessionId)?.availability !== "available") {
+        store.addToast(sessionId, "Session runtime is not currently available", "warning");
+        return;
+      }
+      if ((store.sessions.get(sessionId)?.editorAttachmentReads ?? 0) > 0) {
+        store.addToast(sessionId, "Wait for image attachments to finish loading", "warning");
+        return;
+      }
+      const pendingDiffComments = store.getDiffCommentsForPrompt(sessionId);
       if (!content.trim() && fileAttachments.length === 0 && pendingDiffComments.length === 0)
         return;
-      // Drop a second concurrent invocation: a held/auto-repeat Enter can
-      // re-fire this before the `text` state below commits, which would
-      // otherwise read the same `content` twice and dispatch two sends.
-      if (submittingRef.current) return;
-      submittingRef.current = true;
+      const parsedAction = parseComposerInput(content, { discovered });
+      let effectiveImages = attachments;
+      const attachedFilePaths = fileAttachments.map((attachment) => attachment.path);
+      let effectivePromptText = parsedAction.kind === "send-prompt" ? parsedAction.text : content;
+      if (parsedAction.kind !== "send-prompt" && attachedFilePaths.length > 0) {
+        addToast(sessionId, "File attachments can only be sent with prompts", "error");
+        return;
+      }
+      if (parsedAction.kind === "send-prompt" && attachedFilePaths.length > 0) {
+        effectivePromptText = textWithPrependedFilePaths(parsedAction.text, attachedFilePaths);
+      }
+      if (parsedAction.kind === "send-prompt" && pendingDiffComments.length > 0) {
+        effectivePromptText = prependCodeCommentsToPrompt(effectivePromptText, pendingDiffComments);
+      }
+      if (
+        parsedAction.kind === "send-prompt" &&
+        effectiveImages.length > 0 &&
+        !modelSupportsImages
+      ) {
+        addToast(
+          sessionId,
+          `${modelLabel} doesn't support image input — sending image file paths instead`,
+          "warning",
+        );
+        effectivePromptText = textWithAppendedFilePaths(
+          effectivePromptText,
+          effectiveImages.map((attachment) => attachment.path),
+        );
+        effectiveImages = [];
+      }
+      const finalAction =
+        parsedAction.kind === "send-prompt"
+          ? {
+              ...parsedAction,
+              text: effectivePromptText,
+              ...(effectiveImages.length > 0
+                ? {
+                    images: effectiveImages.map((attachment) => {
+                      const comma = attachment.dataUrl.indexOf(",");
+                      const header = attachment.dataUrl.slice(0, comma);
+                      const mimeType = /^data:([^;]+)/.exec(header)?.[1] ?? "image/png";
+                      return {
+                        data: attachment.dataUrl.slice(comma + 1),
+                        mimeType,
+                        dataUrl: attachment.dataUrl,
+                      };
+                    }),
+                  }
+                : {}),
+            }
+          : parsedAction;
+      // Drop only an exact duplicate effective payload. Same text with
+      // different files/images remains a distinct intent and reaches host
+      // custody with its own explicit disposition.
+      const submissionInFlightKey = JSON.stringify(finalAction);
+      if (submissionsInFlightRef.current.has(submissionInFlightKey)) return;
+      submissionsInFlightRef.current.add(submissionInFlightKey);
 
       // ── Worktree creation / attachment on first send ──
       // Only run when this session has not already been placed in a
@@ -534,12 +907,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       ) {
         // Empty path in "attach" mode is a client-side gate (the input
         // is just a text field — easy to send with nothing in it). Show
-        // the inline error and reset `submittingRef` so the composer
+        // the inline error and retire this in-flight content so the composer
         // doesn't wedge behind the re-entrancy guard at the top of this
         // callback.
         if (worktreeMode === "attach" && !session.worktreeAttachPath?.trim()) {
           setWorktreeError(sessionId, "Choose a worktree directory first.");
-          submittingRef.current = false;
+          submissionsInFlightRef.current.delete(submissionInFlightKey);
           return;
         }
         try {
@@ -573,7 +946,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             // user can retry or switch modes and send without a
             // worktree — nothing is lost.
             setWorktreeError(sessionId, res.error ?? "Worktree operation failed");
-            submittingRef.current = false;
+            submissionsInFlightRef.current.delete(submissionInFlightKey);
             return;
           }
           // Past the narrowing: `res` is `{ok:true, ...}` here. Compose
@@ -596,7 +969,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           addToast(sessionId, successToast, "success");
         } catch (err) {
           setWorktreeError(sessionId, String(err));
-          submittingRef.current = false;
+          submissionsInFlightRef.current.delete(submissionInFlightKey);
           return;
         } finally {
           setWorktreeCreating(sessionId, false);
@@ -604,58 +977,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
 
       try {
-        const action = parseComposerInput(content, { discovered });
-        let imgs = attachments;
-        const attachedFilePaths = fileAttachments.map((a) => a.path);
-        let promptText = action.kind === "send-prompt" ? action.text : content;
-        if (action.kind !== "send-prompt" && attachedFilePaths.length > 0) {
-          addToast(sessionId, "File attachments can only be sent with prompts", "error");
-          return;
-        }
-        if (action.kind === "send-prompt" && attachedFilePaths.length > 0) {
-          promptText = textWithPrependedFilePaths(action.text, attachedFilePaths);
-        }
-        if (action.kind === "send-prompt" && pendingDiffComments.length > 0) {
-          promptText = prependCodeCommentsToPrompt(promptText, pendingDiffComments);
-        }
-        // If the user attached enhanced image previews and then switched to a
-        // text-only model, preserve TUI parity by sending the image paths in
-        // the prompt instead of silently dropping the attachments.
-        if (action.kind === "send-prompt" && imgs.length > 0 && !modelSupportsImages) {
-          addToast(
-            sessionId,
-            `${modelLabel} doesn't support image input — sending image file paths instead`,
-            "warning",
-          );
-          promptText = textWithAppendedFilePaths(
-            promptText,
-            imgs.map((a) => a.path),
-          );
-          imgs = [];
-        }
-
-        const finalAction =
-          action.kind === "send-prompt"
-            ? {
-                ...action,
-                text: promptText,
-                ...(imgs.length > 0
-                  ? {
-                      images: imgs.map((a) => {
-                        const comma = a.dataUrl.indexOf(",");
-                        const header = a.dataUrl.slice(0, comma);
-                        const mimeType = /^data:([^;]+)/.exec(header)?.[1] ?? "image/png";
-                        return {
-                          data: a.dataUrl.slice(comma + 1),
-                          mimeType,
-                          dataUrl: a.dataUrl,
-                        };
-                      }),
-                    }
-                  : {}),
-              }
-            : action;
-
         // No-model guard: only for plain user prompts. /model (which fixes
         // the guard!) and bash bypass it. Must run inside `try` so the
         // `finally` below still resets `submittingRef`.
@@ -668,17 +989,54 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           return;
         }
 
-        // Clear the composer only after the send is past every early-return
-        // guard above. Clearing earlier (before the no-model guard) wiped the
-        // visible text on a bail while the per-workspace draft silently held
-        // it — leaving the user staring at an empty composer with no obvious
-        // way to recover their prompt. The draft itself is cleared in the
-        // store actions (addUserMessage / addBashCommand / addCustomMessage)
-        // the moment content lands, so an aborted send still preserves it.
-        setText("");
-        setAttachments([]);
-        setFileAttachments([]);
-        setSlashIndex(0);
+        // Serialize command dispatch behind the editor patch that produced its
+        // text. Otherwise a fast built-in response can race the host's own
+        // `/command` editor acknowledgement, mistake that acknowledgement for
+        // a later extension injection, and leave the Composer uncleared.
+        let dispatchIdentity = useSessionsStore.getState().sessions.get(sessionId);
+        if (editorPatchRetryNeededRef.current) {
+          editorPatchRetryNeededRef.current = false;
+          try {
+            const resynced = await window.pivis.invoke("session.runtimeResync", { sessionId });
+            if (
+              !dispatchIdentity?.hostInstanceId ||
+              resynced.availability !== "available" ||
+              !resynced.snapshot ||
+              resynced.hostInstanceId !== dispatchIdentity.hostInstanceId ||
+              resynced.sessionEpoch !== dispatchIdentity.sessionEpoch
+            ) {
+              addToast(sessionId, "Session changed before editor retry", "warning");
+              return;
+            }
+            useSessionsStore.getState().applyRuntimeState(sessionId, resynced);
+            editorRevisionRef.current = resynced.snapshot.editor.revision;
+            dispatchIdentity = useSessionsStore.getState().sessions.get(sessionId);
+            synchronizeEditorText(textRef.current, replicatedAttachmentsRef.current);
+          } catch (error) {
+            editorPatchRetryNeededRef.current = true;
+            addToast(sessionId, `Could not resynchronize editor: ${String(error)}`, "error");
+            return;
+          }
+        }
+        const patchOutcome = await editorPatchTailRef.current;
+        const currentDispatchIdentity = useSessionsStore.getState().sessions.get(sessionId);
+        if (patchOutcome !== "accepted") return;
+        if (
+          !dispatchIdentity?.hostInstanceId ||
+          dispatchIdentity.hostInstanceId !== currentDispatchIdentity?.hostInstanceId ||
+          dispatchIdentity.sessionEpoch !== currentDispatchIdentity?.sessionEpoch
+        ) {
+          addToast(sessionId, "Session changed before input could be dispatched", "warning");
+          return;
+        }
+        // Keep editor custody until the host returns a matching explicit
+        // disposition. New typing during the round trip advances this revision
+        // and is therefore never cleared by the older submit.
+        const submittedEditorRevision = editorRevisionRef.current;
+        const submittedEditorInjectionNonce = session?.editorInjection?.nonce;
+        const submittedLocalText = content;
+        const submittedAttachmentsKey = JSON.stringify(replicatedAttachmentsRef.current);
+        const submittedLocalEditGeneration = localEditGenerationRef.current;
 
         const deps = {
           // The executeAction interface is intentionally generic-string for
@@ -686,18 +1044,100 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           // runtime call sites pass the right channel so the runtime contract
           // is honored. We narrow at the boundary by giving the casted
           // wrapper the right call signature.
-          invoke: <T = unknown>(channel: string, payload: unknown) =>
-            window.pivis.invoke(
+          invoke: async <T = unknown>(channel: string, payload: unknown) => {
+            let identityBoundPayload =
+              channel === "session.sendCommand" && payload && typeof payload === "object"
+                ? {
+                    ...payload,
+                    expectedHostInstanceId: dispatchIdentity.hostInstanceId,
+                    expectedSessionEpoch: dispatchIdentity.sessionEpoch,
+                  }
+                : payload;
+            if (channel === "session.sendCommand") {
+              const command = (payload as { command: PiRpcCommand }).command;
+              identityBoundPayload = {
+                ...(identityBoundPayload as object),
+                requestId: crypto.randomUUID(),
+                ...(commandNeedsIntent(command) ? { intentId: crypto.randomUUID() } : {}),
+                sourceText: submittedLocalText,
+                editorRevision: submittedEditorRevision,
+                uiSurface: "composer",
+              };
+            } else if (channel === "session.reload") {
+              identityBoundPayload = {
+                sessionId,
+                request: {
+                  requestId: crypto.randomUUID(),
+                  intentId: crypto.randomUUID(),
+                  expectedHostInstanceId: dispatchIdentity.hostInstanceId,
+                  expectedSessionEpoch: dispatchIdentity.sessionEpoch,
+                  sourceText: submittedLocalText,
+                },
+              };
+            } else if (channel === "session.share") {
+              identityBoundPayload = {
+                ...(payload as object),
+                expectedHostInstanceId: dispatchIdentity.hostInstanceId,
+                expectedSessionEpoch: dispatchIdentity.sessionEpoch,
+                exportIntentId: crypto.randomUUID(),
+              };
+            }
+            const result = (await window.pivis.invoke(
               channel as Parameters<typeof window.pivis.invoke>[0],
-              payload as Parameters<typeof window.pivis.invoke>[1],
-            ) as unknown as Promise<{ success: boolean; data?: T; error?: string }>,
+              identityBoundPayload as Parameters<typeof window.pivis.invoke>[1],
+            )) as unknown as {
+              success: boolean;
+              data?: T;
+              error?: string;
+              disposition?: "not_executed" | "completed" | "outcome_unknown";
+              successorIdentity?: { hostInstanceId: string; sessionEpoch: number };
+            };
+            if (
+              (channel === "session.sendCommand" || channel === "session.reload") &&
+              result.disposition &&
+              result.disposition !== "completed"
+            ) {
+              throw new InputNotConsumedError(result.error ?? `Command ${result.disposition}`);
+            }
+            if (
+              channel === "session.sendCommand" &&
+              !result.successorIdentity &&
+              !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), {
+                hostInstanceId: dispatchIdentity.hostInstanceId!,
+                sessionEpoch: dispatchIdentity.sessionEpoch,
+              })
+            ) {
+              throw new InputNotConsumedError("Session changed before command continuation");
+            }
+            return result;
+          },
           uiSurface: "composer" as const,
-          beginPromptInFlight,
-          endPromptInFlight,
-          enqueueOptimisticSteer,
-          removeOptimisticQueuedMessage,
+          submit: async (
+            sid: SessionId,
+            submission: import("@shared/pi-protocol/runtime-state.js").SessionSubmission,
+          ) => {
+            await editorPatchTailRef.current;
+            return window.pivis.invoke("session.submit", {
+              sessionId: sid,
+              submission,
+            });
+          },
+          getSubmissionContext: (sid: SessionId) => {
+            const runtime = useSessionsStore.getState().sessions.get(sid);
+            if (!runtime?.hostInstanceId || runtime.availability !== "available") return undefined;
+            return {
+              hostInstanceId: runtime.hostInstanceId,
+              sessionEpoch: runtime.sessionEpoch,
+              editorRevision: editorRevisionRef.current,
+            };
+          },
           addToast,
-          addUserMessage,
+          addUserMessage: (
+            sid: SessionId,
+            message: string,
+            images?: string[],
+            opts?: { registerEcho?: boolean; clearDraft?: boolean },
+          ) => addUserMessage(sid, message, images, { ...opts, clearDraft: false }),
           clearPendingUserEcho: useSessionsStore.getState().clearPendingUserEcho,
           addBashCommand,
           finishBashCommand,
@@ -709,7 +1149,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             // the action — same pattern as openDiffViewer / openLogin.
             useChangelogStore.getState().openChangelog(markdown);
           },
-          openPicker: (sid: SessionId, picker: PickerRequest) => openPicker(sid, picker),
+          openPicker: (sid: SessionId, picker: PickerRequest) =>
+            openPicker(sid, {
+              ...picker,
+              expectedHostInstanceId: dispatchIdentity.hostInstanceId!,
+              expectedSessionEpoch: dispatchIdentity.sessionEpoch,
+            }),
           adoptSessionFile: (sid: SessionId, file?: string, name?: string) =>
             adoptSessionFileAndHydrate(sid, file, name),
           closeSessionTab: async (sid: SessionId) => closeSessionTab(sid),
@@ -746,10 +1191,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           setSessionName: useSessionsStore.getState().setSessionName,
           getCurrentModel: (sid: SessionId) =>
             useSessionsStore.getState().sessions.get(sid)?.currentModel,
-          isWorking: (sid: SessionId) => {
-            const sess = useSessionsStore.getState().sessions.get(sid);
-            return !!sess && (sess.isStreaming || sess.promptsInFlight > 0);
-          },
+          isWorking: (sid: SessionId) =>
+            isSessionWorking(useSessionsStore.getState().sessions.get(sid)),
           getSessionWorkspacePath: (sid: SessionId) =>
             useSessionsStore.getState().sessions.get(sid)?.workspacePath,
           listSessions: (p: string) =>
@@ -761,7 +1204,99 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           },
         };
 
-        await executeAction(sessionId, finalAction, deps);
+        const actionResult = await executeAction(sessionId, finalAction, deps);
+        const submissionResult =
+          actionResult && "disposition" in actionResult ? actionResult : undefined;
+        const commandCompletion =
+          actionResult && "completionRuntime" in actionResult ? actionResult : undefined;
+        if (commandCompletion) {
+          try {
+            const resynced = await window.pivis.invoke("session.runtimeResync", { sessionId });
+            if (
+              resynced.hostInstanceId === commandCompletion.completionRuntime.hostInstanceId &&
+              resynced.sessionEpoch === commandCompletion.completionRuntime.sessionEpoch
+            ) {
+              useSessionsStore.getState().applyRuntimeState(sessionId, resynced);
+              if (resynced.snapshot) editorRevisionRef.current = resynced.snapshot.editor.revision;
+            }
+          } catch {
+            // Without the acknowledged successor snapshot, preserve the command;
+            // clearing it against the retired epoch would lose editor custody.
+          }
+        }
+        const acceptedDisposition =
+          submissionResult &&
+          ["in_custody", "consumed", "completed", "extension_error"].includes(
+            submissionResult.disposition,
+          );
+        const sameCustody =
+          submissionResult?.hostInstanceId === session?.hostInstanceId &&
+          submissionResult?.sessionEpoch === session?.sessionEpoch &&
+          submissionResult?.editorRevision === submittedEditorRevision;
+        const currentSession = useSessionsStore.getState().sessions.get(sessionId);
+        const originatingComposerStillMounted =
+          mountedRef.current && renderedSessionIdRef.current === sessionId;
+        const dispatchRuntimeStillCurrent =
+          currentSession?.availability === "available" &&
+          currentSession.status === "ready" &&
+          dispatchIdentity.hostInstanceId === currentSession.hostInstanceId &&
+          dispatchIdentity.sessionEpoch === currentSession.sessionEpoch;
+        const completionIdentity = commandCompletion?.completionRuntime;
+        const completionRuntimeStillCurrent =
+          !!completionIdentity &&
+          currentSession?.availability === "available" &&
+          currentSession.status === "ready" &&
+          completionIdentity.hostInstanceId === currentSession.hostInstanceId &&
+          completionIdentity.sessionEpoch === currentSession.sessionEpoch;
+        const commandRuntimeStillCurrent = commandCompletion
+          ? completionRuntimeStillCurrent
+          : dispatchRuntimeStillCurrent;
+        const currentAttachmentsKey = JSON.stringify(replicatedAttachmentsRef.current);
+        const noNewLocalEdit = localEditGenerationRef.current === submittedLocalEditGeneration;
+        const noLaterHostEditorMutation =
+          (currentSession?.editorRevision ?? submittedEditorRevision) <=
+          submittedEditorRevision + 1;
+        const currentInjection = currentSession?.editorInjection;
+        const noLaterHostInjection =
+          currentInjection === undefined ||
+          currentInjection.nonce === submittedEditorInjectionNonce ||
+          (currentInjection.text === "" &&
+            (currentInjection.revision ?? submittedEditorRevision + 1) <=
+              submittedEditorRevision + 1);
+        const localPayloadUnchanged =
+          noNewLocalEdit &&
+          textRef.current === submittedLocalText &&
+          currentAttachmentsKey === submittedAttachmentsKey;
+        const hostAlreadyClearedPayload =
+          noNewLocalEdit && textRef.current === "" && currentAttachmentsKey === "[]";
+        const acceptedPromptCanClear =
+          finalAction.kind === "send-prompt" &&
+          originatingComposerStillMounted &&
+          dispatchRuntimeStillCurrent &&
+          acceptedDisposition &&
+          sameCustody &&
+          noLaterHostEditorMutation &&
+          noLaterHostInjection &&
+          (localPayloadUnchanged || hostAlreadyClearedPayload);
+        const completedCommandCanClear =
+          finalAction.kind !== "send-prompt" &&
+          originatingComposerStillMounted &&
+          commandRuntimeStillCurrent &&
+          finalAction.kind !== "unsupported" &&
+          localPayloadUnchanged;
+        // Prompt custody may advance the authoritative revision before the RPC
+        // response arrives. Renderer-local edit generation, payload identity,
+        // and runtime identity distinguish that acknowledgement from newer
+        // typing without relying on the now-stale pre-submit revision.
+        if (acceptedPromptCanClear || completedCommandCanClear) {
+          if (completedCommandCanClear) synchronizeEditorText("", []);
+          textRef.current = "";
+          setText("");
+          setAttachments([]);
+          setFileAttachments([]);
+          replicatedAttachmentsRef.current = [];
+          setSlashIndex(0);
+        }
         if (
           finalAction.kind === "send-prompt" &&
           finalAction.commandSource !== "extension" &&
@@ -788,30 +1323,29 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         // only for non-promoting slash commands where isNewPending is
         // unchanged), but reading the store is robust against future
         // mutations added between executeAction and here.
-        const stillPending = !!useSessionsStore.getState().sessions.get(sessionId)?.isNewPending;
-        if (stillPending && workspacePathRef.current) {
-          useSessionsStore.getState().clearNewSessionDraft(workspacePathRef.current);
-        } else {
-          useSessionsStore.getState().setSessionDraft(sessionId, "");
-        }
-        // A send also consumes any editor injection — otherwise the stale
-        // injection would re-fire on the next remount and pollute the draft.
-        useSessionsStore.getState().clearEditorInjection(sessionId);
-      } catch (err) {
-        if (err instanceof InputNotConsumedError) {
-          setText(content);
-          setAttachments(attachments);
-          setFileAttachments(fileAttachments);
-          if (pendingRef.current && workspacePathRef.current) {
-            useSessionsStore.getState().setNewSessionDraft(workspacePathRef.current, content);
+        if (acceptedPromptCanClear || completedCommandCanClear) {
+          const stillPending = !!useSessionsStore.getState().sessions.get(sessionId)?.isNewPending;
+          if (stillPending && workspacePathRef.current) {
+            useSessionsStore.getState().clearNewSessionDraft(workspacePathRef.current);
           } else {
-            useSessionsStore.getState().setSessionDraft(sessionId, content);
+            useSessionsStore.getState().setSessionDraft(sessionId, "");
           }
-          return;
         }
+        // Consume only the injection that existed before this send. An
+        // extension may call setEditorText while its command is executing;
+        // clearing that newer nonce would discard replacement text before the
+        // Composer's effect can apply it.
+        if (
+          originatingComposerStillMounted &&
+          currentInjection?.nonce === submittedEditorInjectionNonce
+        ) {
+          useSessionsStore.getState().clearEditorInjection(sessionId);
+        }
+      } catch (err) {
+        if (err instanceof InputNotConsumedError) return;
         throw err;
       } finally {
-        submittingRef.current = false;
+        submissionsInFlightRef.current.delete(submissionInFlightKey);
       }
     },
     [
@@ -820,10 +1354,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       session,
       sessionId,
       addToast,
-      beginPromptInFlight,
-      endPromptInFlight,
-      enqueueOptimisticSteer,
-      removeOptimisticQueuedMessage,
       addUserMessage,
       addBashCommand,
       finishBashCommand,
@@ -841,6 +1371,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       modelSupportsImages,
       modelLabel,
       clearSubmittedDiffComments,
+      synchronizeEditorText,
     ],
   );
 
@@ -877,8 +1408,16 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             // Built-ins that take args get a trailing space to invite the
             // user to type the argument. Arg-less ones don't.
             const v = completionFor(chosen);
+            textRef.current = v;
             setText(v);
+            synchronizeEditorText(v);
             if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
+            else setSessionDraft(sessionId, v);
+            if (
+              useSessionsStore.getState().sessions.get(sessionId)?.editorInjection !== undefined
+            ) {
+              clearEditorInjection(sessionId);
+            }
             setSlashIndex(0);
           }
           return;
@@ -897,8 +1436,16 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           const chosen = suggestions[slashIndex];
           if (chosen) {
             const completed = completionFor(chosen);
+            textRef.current = completed;
             setText(completed);
+            synchronizeEditorText(completed);
             if (pending && workspacePath) setNewSessionDraft(workspacePath, completed);
+            else setSessionDraft(sessionId, completed);
+            if (
+              useSessionsStore.getState().sessions.get(sessionId)?.editorInjection !== undefined
+            ) {
+              clearEditorInjection(sessionId);
+            }
             setSlashIndex(0);
             void handleSubmit(completed);
           } else {
@@ -933,13 +1480,19 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       pending,
       workspacePath,
       setNewSessionDraft,
+      setSessionDraft,
+      sessionId,
+      clearEditorInjection,
+      synchronizeEditorText,
     ],
   );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const v = e.target.value;
+      textRef.current = v;
       setText(v);
+      synchronizeEditorText(v);
       setDismissed(false); // A3 reset on text change
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
       else setSessionDraft(sessionId, v);
@@ -951,7 +1504,15 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         clearEditorInjection(sessionId);
       }
     },
-    [pending, workspacePath, setNewSessionDraft, setSessionDraft, sessionId, clearEditorInjection],
+    [
+      pending,
+      workspacePath,
+      setNewSessionDraft,
+      setSessionDraft,
+      sessionId,
+      clearEditorInjection,
+      synchronizeEditorText,
+    ],
   );
 
   // ── Click to pick a suggestion ─────────────────────────────────────
@@ -959,7 +1520,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const handleSuggestionClick = useCallback(
     (entry: SuggestionEntry) => {
       const v = completionFor(entry);
+      textRef.current = v;
       setText(v);
+      synchronizeEditorText(v);
       setDismissed(false); // A3 reset on pick
       if (pending && workspacePath) setNewSessionDraft(workspacePath, v);
       else setSessionDraft(sessionId, v);
@@ -978,6 +1541,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       setSessionDraft,
       sessionId,
       clearEditorInjection,
+      synchronizeEditorText,
     ],
   );
 
@@ -1101,6 +1665,31 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+          {editorConflict && (
+            <div className="composer__editor-conflict" role="status">
+              <span>An extension and your local edit changed the composer.</span>
+              <button type="button" onClick={() => resolveEditorConflict("local")}>
+                Keep my edit
+              </button>
+              {editorConflict.alternateText !== undefined && (
+                <button type="button" onClick={() => resolveEditorConflict("alternate")}>
+                  Use retained alternate
+                </button>
+              )}
+              {editorConflict.additionalCandidates?.map((candidate, index) => (
+                <button
+                  type="button"
+                  key={`${candidate.text}:${index}`}
+                  onClick={() => resolveEditorConflict("additional", index)}
+                >
+                  Use retained candidate {index + 2}
+                </button>
+              ))}
+              <button type="button" onClick={() => resolveEditorConflict("authoritative")}>
+                Use extension edit
+              </button>
             </div>
           )}
           <div className="composer__entry-row">

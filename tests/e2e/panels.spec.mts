@@ -9,8 +9,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 test.describe("Extension Panel Rendering", () => {
-  test("host fallback shows notice when pi not found", async () => {
-    const settingsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-fallback-"));
+  test("host-unavailable startup shows setup notice when pi cannot be located", async () => {
+    const settingsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-host-unavailable-"));
     const workspaceDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-ws2-"));
 
     fs.writeFileSync(

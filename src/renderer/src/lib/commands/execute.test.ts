@@ -24,12 +24,14 @@ function makeDeps(overrides: Partial<ExecuteDeps> = {}): {
       (calls["invoke"] ??= []).push([payload]);
       return { success: true, data: {} };
     }) as ExecuteDeps["invoke"],
-    beginPromptInFlight: make("beginPromptInFlight") as ExecuteDeps["beginPromptInFlight"],
-    endPromptInFlight: make("endPromptInFlight") as ExecuteDeps["endPromptInFlight"],
-    enqueueOptimisticSteer: vi.fn(() => "opt-1") as ExecuteDeps["enqueueOptimisticSteer"],
-    removeOptimisticQueuedMessage: make(
-      "removeOptimisticQueuedMessage",
-    ) as ExecuteDeps["removeOptimisticQueuedMessage"],
+    submit: vi.fn(async () => ({
+      intentId: "intent-1",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 2,
+      disposition: "consumed" as const,
+    })) as NonNullable<ExecuteDeps["submit"]>,
+    getSubmissionContext: () => ({ hostInstanceId: "host-1", sessionEpoch: 1, editorRevision: 2 }),
     addToast: make("addToast") as ExecuteDeps["addToast"],
     addUserMessage: make("addUserMessage") as ExecuteDeps["addUserMessage"],
     clearPendingUserEcho: make("clearPendingUserEcho") as ExecuteDeps["clearPendingUserEcho"],
@@ -81,7 +83,11 @@ describe("executeAction — model", () => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "model", search: "anthropic/claude-haiku" }, deps);
     expect(calls["applyModelChange"]).toEqual([
-      [SID, { id: "claude-haiku", provider: "anthropic", name: "Claude Haiku" }],
+      [
+        SID,
+        { id: "claude-haiku", provider: "anthropic", name: "Claude Haiku" },
+        { hostInstanceId: "host-1", sessionEpoch: 1 },
+      ],
     ]);
     expect(calls["invoke"]).toBeUndefined();
     expect(calls["openPicker"]).toBeUndefined();
@@ -91,7 +97,11 @@ describe("executeAction — model", () => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "model", search: "DEEPSEEK-V3" }, deps);
     expect(calls["applyModelChange"]).toEqual([
-      [SID, { id: "deepseek-v3", provider: "deepseek", name: "DeepSeek V3" }],
+      [
+        SID,
+        { id: "deepseek-v3", provider: "deepseek", name: "DeepSeek V3" },
+        { hostInstanceId: "host-1", sessionEpoch: 1 },
+      ],
     ]);
     expect(calls["invoke"]).toBeUndefined();
   });
@@ -105,7 +115,13 @@ describe("executeAction — model", () => {
         ] as never,
     });
     await executeAction(SID, { kind: "model", search: "local-model" }, deps);
-    expect(calls["applyModelChange"]).toEqual([[SID, { id: "local-model", name: "Local Model" }]]);
+    expect(calls["applyModelChange"]).toEqual([
+      [
+        SID,
+        { id: "local-model", name: "Local Model" },
+        { hostInstanceId: "host-1", sessionEpoch: 1 },
+      ],
+    ]);
     expect(calls["openPicker"]).toBeUndefined();
   });
 
@@ -206,8 +222,14 @@ describe("executeAction — quit / settings / unsupported", () => {
 describe("executeAction — reload", () => {
   it("/reload invokes session.reload and toasts success", async () => {
     const { deps, calls } = makeDeps();
-    await executeAction(SID, { kind: "reload" }, deps);
-    expect(calls["invoke"]).toEqual([[{ sessionId: SID }]]);
+    (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      successorIdentity: { hostInstanceId: "host-1", sessionEpoch: 2 },
+    });
+    await expect(executeAction(SID, { kind: "reload" }, deps)).resolves.toEqual({
+      completionRuntime: { hostInstanceId: "host-1", sessionEpoch: 2 },
+    });
+    expect(deps.invoke).toHaveBeenCalledWith("session.reload", { sessionId: SID });
     expect(calls["addToast"]).toEqual([
       [SID, "Reloaded settings, extensions, skills, prompts, and themes.", "success"],
     ]);
@@ -235,148 +257,113 @@ describe("executeAction — reload", () => {
 });
 
 describe("executeAction — bash", () => {
-  it("adds a bash block and runs the command", async () => {
-    const { deps, calls } = makeDeps();
-    await executeAction(SID, { kind: "bash", command: "ls", excludeFromContext: false }, deps);
+  it("adds a bash block and waits for the command response", async () => {
+    let resolve!: (value: { success: boolean; data: { output: string; exitCode: number } }) => void;
+    const response = new Promise<{ success: boolean; data: { output: string; exitCode: number } }>(
+      (done) => {
+        resolve = done;
+      },
+    );
+    const { deps, calls } = makeDeps({ invoke: vi.fn(() => response) as ExecuteDeps["invoke"] });
+    const execution = executeAction(
+      SID,
+      { kind: "bash", command: "ls", excludeFromContext: false },
+      deps,
+    );
     expect(calls["addBashCommand"]).toEqual([[SID, "ls"]]);
+    expect(calls["finishBashCommand"]).toBeUndefined();
+    resolve({ success: true, data: { output: "done", exitCode: 0 } });
+    await execution;
+    expect(calls["finishBashCommand"]).toEqual([[SID, "done", 0]]);
   });
 });
 
-describe("executeAction — send-prompt vs steer", () => {
-  it("sends a `prompt` command when idle", async () => {
+describe("executeAction — session submission", () => {
+  it("submits the host-custody contract and adds an echo only after consumption", async () => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "send-prompt", text: "hello" }, deps);
-    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
-    const send = invocations.find((c) => c[0] === "session.sendCommand");
-    expect(send).toBeDefined();
-    expect(send![1].command.type).toBe("prompt");
+    expect(deps.submit).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({
+        expectedHostId: "host-1",
+        expectedEpoch: 1,
+        editorRevision: 2,
+        text: "hello",
+        requestedMode: "steer",
+        surface: "composer",
+      }),
+    );
     expect(calls["addUserMessage"]).toEqual([[SID, "hello", undefined, { registerEcho: true }]]);
-    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
   });
 
-  it("toasts and ends in-flight tracking when an idle prompt is rejected", async () => {
+  it("does not clear local input or add an echo for a rejected disposition", async () => {
     const { deps, calls } = makeDeps();
-    (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
-      success: false,
-      error: "provider unavailable",
+    (deps.submit as ReturnType<typeof vi.fn>).mockResolvedValue({
+      intentId: "intent-1",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 2,
+      disposition: "rejected",
+      message: "provider unavailable",
     });
     await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
       /provider unavailable/,
     );
-    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["clearPendingUserEcho"]).toEqual([[SID, "hello"]]);
-    expect(calls["addToast"]).toEqual([[SID, "provider unavailable", "error"]]);
+    expect(calls["addUserMessage"]).toBeUndefined();
+    expect(calls["clearPendingUserEcho"]).toBeUndefined();
   });
 
-  it("toasts and ends in-flight tracking when an idle prompt send throws", async () => {
-    const { deps, calls } = makeDeps();
-    (deps.invoke as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("IPC channel closed"));
+  it("does not submit when the direct runtime context is unavailable", async () => {
+    const { deps, calls } = makeDeps({ getSubmissionContext: () => undefined });
     await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
-      /IPC channel closed/,
+      /snapshot is unavailable/,
     );
-    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["clearPendingUserEcho"]).toEqual([[SID, "hello"]]);
-    expect(calls["addToast"]).toEqual([[SID, "IPC channel closed", "error"]]);
-  });
-
-  it("sends unknown slash passthrough without optimistic text or streaming", async () => {
-    const { deps, calls } = makeDeps();
-    await executeAction(SID, { kind: "send-prompt", text: "/custom-ui" }, deps);
-
-    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
-    const send = invocations.find((c) => c[0] === "session.sendCommand");
-    expect(send).toBeDefined();
-    expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
+    expect(deps.submit).not.toHaveBeenCalled();
     expect(calls["addUserMessage"]).toBeUndefined();
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
   });
 
-  it("does not convert unknown slash passthrough into steer while streaming", async () => {
-    const { deps, calls } = makeDeps({ isWorking: () => true });
-    await executeAction(SID, { kind: "send-prompt", text: "/custom-ui" }, deps);
-
-    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
-    const send = invocations.find((c) => c[0] === "session.sendCommand");
-    expect(send).toBeDefined();
-    expect(send![1].command).toEqual({ type: "prompt", message: "/custom-ui" });
-    expect(calls["addUserMessage"]).toBeUndefined();
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
-  });
-
-  it("throws after toast on unified prompt failure so the host restores editor text", async () => {
-    const { deps, calls } = makeDeps({ uiSurface: "unified" });
-    (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
-      success: false,
-      error: "provider unavailable",
-    });
-
-    await expect(executeAction(SID, { kind: "send-prompt", text: "hello" }, deps)).rejects.toThrow(
-      /provider unavailable/,
+  it("passes extension commands through the same custody contract without an optimistic echo", async () => {
+    const { deps } = makeDeps({ uiSurface: "unified" });
+    await executeAction(
+      SID,
+      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
+      deps,
     );
-    expect(calls["beginPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["endPromptInFlight"]).toEqual([[SID]]);
-    expect(calls["addToast"]).toEqual([[SID, "provider unavailable", "error"]]);
-  });
-
-  it("sends a `steer` command (and does not set streaming) when already streaming", async () => {
-    const { deps, calls } = makeDeps({ isWorking: () => true });
-    await executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps);
-    const invocations = (deps.invoke as ReturnType<typeof vi.fn>).mock.calls;
-    const send = invocations.find((c) => c[0] === "session.sendCommand");
-    expect(send).toBeDefined();
-    expect(send![1].command.type).toBe("steer");
-    expect(send![1].command.message).toBe("actually do X");
-    expect(calls["addUserMessage"]).toBeUndefined();
-    expect(deps.enqueueOptimisticSteer).toHaveBeenCalledWith(SID, "actually do X");
-    // Streaming state must not be re-toggled mid-turn.
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
-  });
-
-  it("toasts when a steer command is rejected", async () => {
-    const { deps, calls } = makeDeps({ isWorking: () => true });
-    (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
-      success: false,
-      error: "cannot steer now",
-    });
-    await expect(
-      executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
-    ).rejects.toThrow(/cannot steer now/);
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
-    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
-    expect(calls["addToast"]).toEqual([[SID, "cannot steer now", "error"]]);
-  });
-
-  it("throws after toast on unified steer failure so the host restores editor text", async () => {
-    const { deps, calls } = makeDeps({ isWorking: () => true, uiSurface: "unified" });
-    (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
-      success: false,
-      error: "cannot steer now",
-    });
-
-    await expect(
-      executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
-    ).rejects.toThrow(/cannot steer now/);
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
-    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
-    expect(calls["addToast"]).toEqual([[SID, "cannot steer now", "error"]]);
-  });
-
-  it("toasts when a steer command throws", async () => {
-    const { deps, calls } = makeDeps({ isWorking: () => true });
-    (deps.invoke as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("session exited"));
-    await expect(
-      executeAction(SID, { kind: "send-prompt", text: "actually do X" }, deps),
-    ).rejects.toThrow(/session exited/);
-    expect(calls["beginPromptInFlight"]).toBeUndefined();
-    expect(calls["removeOptimisticQueuedMessage"]).toEqual([[SID, "opt-1"]]);
-    expect(calls["addToast"]).toEqual([[SID, "session exited", "error"]]);
+    expect(deps.submit).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({ text: "/mcp", surface: "unified" }),
+    );
   });
 });
 
 describe("executeAction — session-info", () => {
+  it("surfaces transport rejection and leaves the command unconsumed", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => {
+        throw new Error("Host exited with signal SIGTERM: fatal provider detail");
+      }) as ExecuteDeps["invoke"],
+    });
+    await expect(executeAction(SID, { kind: "session-info" }, deps)).rejects.toThrow(
+      "Host exited with signal SIGTERM",
+    );
+    expect(calls["addToast"]).toEqual([
+      [SID, "Host exited with signal SIGTERM: fatal provider detail", "error"],
+    ]);
+    expect(calls["addCustomMessage"]).toBeUndefined();
+  });
+
+  it("surfaces a domain error instead of rendering fabricated session data", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: false,
+        error: "stats unavailable",
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "session-info" }, deps);
+    expect(calls["addToast"]).toEqual([[SID, "stats unavailable", "error"]]);
+    expect(calls["addCustomMessage"]).toBeUndefined();
+  });
+
   it("renders a custom_message block (TUI parity for /session)", async () => {
     const { deps, calls } = makeDeps();
     (deps.invoke as ReturnType<typeof vi.fn>).mockImplementation(async (ch: string) => {
@@ -485,13 +472,16 @@ describe("executeAction — share", () => {
 });
 
 describe("executeAction — new-session / fork", () => {
-  it("/new without cancellation toasts; fileChanged handles the rest", async () => {
+  it("/new returns its acknowledged successor runtime", async () => {
     const { deps, calls } = makeDeps();
     (deps.invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       data: { cancelled: false },
+      successorIdentity: { hostInstanceId: "host-1", sessionEpoch: 2 },
     });
-    await executeAction(SID, { kind: "new-session" }, deps);
+    await expect(executeAction(SID, { kind: "new-session" }, deps)).resolves.toEqual({
+      completionRuntime: { hostInstanceId: "host-1", sessionEpoch: 2 },
+    });
     expect(calls["addToast"]).toEqual([[SID, "Started a fresh session"]]);
   });
 
@@ -533,8 +523,119 @@ describe("executeAction — new-session / fork", () => {
   });
 });
 
+describe("executeAction — outcome-specific built-ins", () => {
+  it("/compact surfaces a correlated Pi domain failure", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: false,
+        error: "Nothing to compact",
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "compact" }, deps);
+    expect(calls["addToast"]).toEqual([[SID, "Nothing to compact", "error"]]);
+  });
+
+  it("/export reports the authoritative output path", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: true,
+        data: { path: "/tmp/export.html" },
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "export", outputPath: "/tmp/export.html" }, deps);
+    expect(calls["addToast"]).toEqual([[SID, "Session exported to: /tmp/export.html"]]);
+  });
+
+  it("/clone distinguishes a successful replacement from a domain failure", async () => {
+    const success = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: true,
+        data: { cancelled: false },
+        successorIdentity: { hostInstanceId: "host-1", sessionEpoch: 2 },
+      })) as ExecuteDeps["invoke"],
+    });
+    await expect(executeAction(SID, { kind: "clone" }, success.deps)).resolves.toEqual({
+      completionRuntime: { hostInstanceId: "host-1", sessionEpoch: 2 },
+    });
+    expect(success.calls["addToast"]).toEqual([[SID, "Cloned to new session"]]);
+
+    const failure = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: false,
+        error: "Cannot clone an empty session",
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "clone" }, failure.deps);
+    expect(failure.calls["addToast"]).toEqual([[SID, "Cannot clone an empty session", "error"]]);
+  });
+
+  it("/scoped-models opens only from a successful model-state response", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: true,
+        data: { models: [{ id: "m", provider: "p" }], enabledIds: ["p/m"] },
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "scoped-models" }, deps);
+    expect(calls["openPicker"]).toEqual([
+      [SID, expect.objectContaining({ kind: "scoped-models", enabledIds: ["p/m"] })],
+    ]);
+  });
+
+  it("/logout opens the provider picker from the host result", async () => {
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: true,
+        data: { providers: [{ id: "p", name: "Provider", authType: "api_key" }] },
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "logout" }, deps);
+    expect(calls["openPicker"]).toEqual([
+      [
+        SID,
+        expect.objectContaining({
+          kind: "logout",
+          providers: [expect.objectContaining({ id: "p" })],
+        }),
+      ],
+    ]);
+  });
+
+  it("/trust opens the exact host-provided choice set", async () => {
+    const option = { label: "Trust folder", trusted: true, updates: [] };
+    const { deps, calls } = makeDeps({
+      invoke: vi.fn(async () => ({
+        success: true,
+        data: {
+          cwd: "/tmp/ws",
+          savedDecision: null,
+          projectTrusted: false,
+          hasTrustRequiringResources: true,
+          currentOptions: [option],
+        },
+      })) as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "trust" }, deps);
+    expect(calls["openPicker"]).toEqual([
+      [SID, expect.objectContaining({ kind: "trust", options: [option] })],
+    ]);
+  });
+
+  it.each([
+    [{ kind: "open-app-settings" }, "openAppSettings"],
+    [{ kind: "open-login" }, "openLogin"],
+    [{ kind: "git-diff" }, "openDiffViewer"],
+    [{ kind: "open-tree" }, "openTreeViewer"],
+  ] as const)("dispatches local action %o", async (action, call) => {
+    const { deps, calls } = makeDeps();
+    await executeAction(SID, action, deps);
+    expect(calls[call]).toBeDefined();
+    expect(calls["invoke"]).toBeUndefined();
+  });
+});
+
 describe("executeAction — unsupported exposes nothing via invoke", () => {
-  it.each(["import", "tree", "hotkeys", "debug"])("always toasts for /%s", async (name) => {
+  it.each(["import", "hotkeys", "debug"])("always toasts for /%s", async (name) => {
     const { deps, calls } = makeDeps();
     await executeAction(SID, { kind: "unsupported", name } as ComposerAction, deps);
     expect(calls["invoke"]).toBeUndefined();
@@ -563,121 +664,5 @@ describe("executeAction — picker host receives a well-typed PickerRequest", ()
     const picker = (calls["openPicker"] as Array<[SessionId, PickerRequest]>)[0]![1];
     expect(picker.kind).toBe("resume");
     if (picker.kind === "resume") expect(picker.sessions.length).toBe(1);
-  });
-});
-
-describe("executeAction — extension commands (fire-and-forget)", () => {
-  it("dispatches extension command without awaiting the invoke (composer decoupling)", async () => {
-    // The extension branch must NOT await the invoke — otherwise the composer
-    // blocks until the custom() panel closes (done callback).
-    let invokeResolved = false;
-    let invokeResolve: (() => void) | null = null;
-
-    const { deps, calls } = makeDeps({
-      invoke: vi.fn(() => {
-        return new Promise<unknown>((resolve) => {
-          invokeResolve = () => {
-            invokeResolved = true;
-            resolve({ success: true, data: {} });
-          };
-        });
-      }) as ExecuteDeps["invoke"],
-    });
-
-    const promise = executeAction(
-      SID,
-      {
-        kind: "send-prompt",
-        text: "/mcp",
-        commandSource: "extension",
-      },
-      deps,
-    );
-
-    // The executeAction should return immediately (fire-and-forget)
-    // WITHOUT waiting for the invoke to resolve.
-    await promise;
-
-    // At this point, executeAction has returned but invoke hasn't resolved.
-    // This proves the composer doesn't block on extension commands.
-    expect(invokeResolved).toBe(false);
-
-    // Now resolve the invoke to clean up
-    if (invokeResolve) (invokeResolve as () => void)();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(invokeResolved).toBe(true);
-  });
-
-  it("calls onPromptAccepted only after an extension prompt eventually succeeds", async () => {
-    const onPromptAccepted = vi.fn();
-    const { deps } = makeDeps({ onPromptAccepted });
-
-    await executeAction(
-      SID,
-      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
-      deps,
-    );
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(onPromptAccepted).toHaveBeenCalledWith(SID);
-  });
-
-  it("does not call onPromptAccepted when an extension prompt fails", async () => {
-    const onPromptAccepted = vi.fn();
-    const { deps } = makeDeps({
-      onPromptAccepted,
-      invoke: vi.fn(async () => ({
-        success: false,
-        error: "extension failed",
-      })) as ExecuteDeps["invoke"],
-    });
-
-    await executeAction(
-      SID,
-      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
-      deps,
-    );
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(onPromptAccepted).not.toHaveBeenCalled();
-  });
-
-  it("tags extension prompts with the invoking UI surface", async () => {
-    const { deps, calls } = makeDeps({ uiSurface: "composer" });
-
-    await executeAction(
-      SID,
-      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
-      deps,
-    );
-
-    expect(calls["invoke"]?.[0]).toEqual([
-      {
-        sessionId: SID,
-        command: { type: "prompt", message: "/mcp" },
-        uiSurface: "composer",
-      },
-    ]);
-  });
-
-  it("surfaces a rejected invoke as an error toast (P2-a: no silent failure)", async () => {
-    // If the invoke rejects (session died, "No active process"), the
-    // fire-and-forget catch must toast the error — not just console.error it
-    // — so the user knows their extension invocation did nothing.
-    const { deps, calls } = makeDeps({
-      invoke: vi.fn(() => Promise.reject(new Error("No active process"))) as ExecuteDeps["invoke"],
-    });
-
-    await executeAction(
-      SID,
-      { kind: "send-prompt", text: "/mcp", commandSource: "extension" },
-      deps,
-    );
-    // The catch runs async; let it flush.
-    await new Promise((r) => setTimeout(r, 0));
-
-    const addToastCalls = (calls["addToast"] ?? []) as unknown[];
-    expect(addToastCalls.length).toBe(1);
-    expect(addToastCalls[0]).toEqual([SID, expect.stringMatching(/No active process/), "error"]);
   });
 });

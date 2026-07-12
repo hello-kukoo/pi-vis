@@ -1,5 +1,6 @@
-import type { ProviderAuthStatus } from "@shared/auth.js";
 import type { SessionId } from "@shared/ids.js";
+import { type PiRpcCommand, commandPolicy } from "@shared/pi-protocol/commands.js";
+import type { AgentSessionSnapshot } from "@shared/pi-protocol/runtime-state.js";
 /**
  * Stubs window.pivis for standalone browser preview (not running in Electron).
  *
@@ -23,6 +24,12 @@ let currentThinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh
 let customEntryRendererAvailable = true;
 let customEntryRendererVersion = 1;
 
+const PREVIEW_HOST_ID = "00000000-0000-4000-8000-000000000001";
+const previewRuntime = new Map<
+  SessionId,
+  { isStreaming: boolean; sessionEpoch: number; snapshotSequence: number }
+>();
+
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
 
@@ -35,31 +42,33 @@ const previewHooks = {
   abortCalls: 0,
   /** Log of every panel input string sent to `session.panelInput`. */
   panelInputLog: [] as string[],
-  /** Begin a fake turn (agent_start) on the active session. */
+  /** Begin a fake turn on the active session. */
   startStreaming(): void {
     const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
-    emit("session.events", {
-      sessionId: activeId,
-      events: [
-        { type: "interrupt_state", interruptible: true, operation: "agent" },
-        { type: "agent_start" },
-      ],
-    });
+    emitRuntimeState(activeId, true);
+    emit("session.events", { sessionId: activeId, events: [{ type: "agent_start" }] });
   },
-  /** End a fake turn (final agent_end) on the active session. */
+  /** End a fake turn on the active session. */
   stopStreaming(): void {
     const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
-    emit("session.events", {
-      sessionId: activeId,
-      events: [{ type: "agent_end" }, { type: "interrupt_state", interruptible: false }],
-    });
+    emit("session.events", { sessionId: activeId, events: [{ type: "agent_end" }] });
+    emitRuntimeState(activeId, false);
   },
   /** Replace the fake runtime so render tests can exercise `/reload` semantics. */
   replaceCustomEntryRuntime(available: boolean, version = customEntryRendererVersion): void {
     customEntryRendererAvailable = available;
     customEntryRendererVersion = version;
     const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    const runtime = previewRuntime.get(activeId) ?? {
+      isStreaming: false,
+      sessionEpoch: 0,
+      snapshotSequence: 0,
+    };
+    runtime.sessionEpoch++;
+    runtime.snapshotSequence = 0;
+    previewRuntime.set(activeId, runtime);
     useSessionsStore.getState().setSessionStatus(activeId, "starting");
+    emitRuntimeState(activeId, runtime.isStreaming);
     useSessionsStore.getState().setSessionStatus(activeId, "ready");
   },
 };
@@ -98,7 +107,57 @@ function registerPanelFrame(sessionId: unknown, panelId: number, frame: string):
 const KITTY_HANDSHAKE = "\x1b[?2004h\x1b[>7u\x1b[?u\x1b[c";
 
 function emitEvent(event: Record<string, unknown>): void {
-  emit("session.events", { sessionId: DEMO_SESSION_ID, events: [event] });
+  const sessionId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+  emit("session.events", { sessionId, events: [event] });
+}
+
+function emitRuntimeState(sessionId: SessionId, isStreaming: boolean): void {
+  const runtime = previewRuntime.get(sessionId) ?? {
+    isStreaming: false,
+    sessionEpoch: 0,
+    snapshotSequence: 0,
+  };
+  runtime.isStreaming = isStreaming;
+  runtime.snapshotSequence++;
+  previewRuntime.set(sessionId, runtime);
+  const snapshot: AgentSessionSnapshot = {
+    hostInstanceId: PREVIEW_HOST_ID,
+    sessionEpoch: runtime.sessionEpoch,
+    snapshotSequence: runtime.snapshotSequence,
+    capturedAt: Date.now(),
+    isStreaming,
+    isIdle: !isStreaming,
+    isCompacting: false,
+    isRetrying: false,
+    retryAttempt: 0,
+    isBashRunning: false,
+    model: { id: currentModelId, provider: "openrouter" },
+    thinkingLevel: currentThinkingLevel,
+    sessionId,
+    pendingMessageCount: 0,
+    steering: [],
+    followUp: [],
+    hostFacts: {
+      submitting: false,
+      actualCompaction: false,
+      navigation: false,
+      pendingDialogs: 0,
+      custodyCount: 0,
+    },
+    catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
+    editor: { revision: 0, text: "", attachments: [] },
+  };
+  const state = {
+    availability: "available" as const,
+    hostInstanceId: PREVIEW_HOST_ID,
+    sessionEpoch: runtime.sessionEpoch,
+    receivedAt: Date.now(),
+    snapshot,
+  };
+  // Preview installs before React subscribes to IPC events. Apply directly as
+  // well as emitting so first-render command surfaces have an identity.
+  useSessionsStore.getState().applyRuntimeState(sessionId, state);
+  emit("session.runtimeState", { sessionId, state });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -157,6 +216,7 @@ function seedDemoSession(): void {
   store.createSession(DEMO_SESSION_ID, DEMO_WORKSPACE);
   store.setSessionStatus(DEMO_SESSION_ID, "ready");
   store.setActiveSession(DEMO_SESSION_ID);
+  emitRuntimeState(DEMO_SESSION_ID, false);
 
   store.seedHistory(DEMO_SESSION_ID, {
     blocks: [
@@ -313,7 +373,8 @@ function cancelPreviewStream(): void {
 async function streamPromptResponse(message: string): Promise<void> {
   const generation = ++streamGeneration;
   const cancelled = () => generation !== streamGeneration;
-  emitEvent({ type: "interrupt_state", interruptible: true, operation: "agent" });
+  const sessionId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+  emitRuntimeState(sessionId, true);
   // Simulate the latency before pi's agent_start arrives
   await sleep(600);
   if (cancelled()) return;
@@ -389,7 +450,7 @@ async function streamPromptResponse(message: string): Promise<void> {
   emitEvent({ type: "message_end", message: { role: "assistant" } });
   emitEvent({ type: "turn_end" });
   emitEvent({ type: "agent_end" });
-  emitEvent({ type: "interrupt_state", interruptible: false });
+  emitRuntimeState(sessionId, false);
 }
 
 // ── Command handling ─────────────────────────────────────────────────────
@@ -419,12 +480,6 @@ async function handleSendCommand(req: unknown): Promise<unknown> {
         exitCode: 0,
       });
     }
-    case "abort":
-      previewHooks.abortCalls++;
-      cancelPreviewStream();
-      emitEvent({ type: "agent_end" });
-      emitEvent({ type: "interrupt_state", interruptible: false });
-      return response("abort");
     case "get_commands":
       return response("get_commands", {
         commands: [
@@ -698,16 +753,66 @@ const stub = {
       case "workspace.listSessions":
         return [];
       case "session.loadHistory":
-        return { blocks: [], startIndex: 0, total: 0 };
+        return {
+          status: "loaded",
+          historyGeneration: (req as { historyGeneration: number }).historyGeneration,
+          page: { blocks: [], startIndex: 0, total: 0 },
+        };
       case "session.open":
-        return { sessionId: `demo-${Date.now()}` as SessionId, name: null };
+        return {
+          outcome: "opened",
+          sessionId: `demo-${Date.now()}` as SessionId,
+          name: null,
+          preview: null,
+          sessionStatus: "cold",
+        };
       case "session.activate": {
         const { sessionId } = req as { sessionId: SessionId };
-        setTimeout(() => emit("session.statusChanged", { sessionId, status: "ready" }), 50);
+        setTimeout(() => {
+          emit("session.statusChanged", { sessionId, status: "ready" });
+          emitRuntimeState(sessionId, false);
+        }, 50);
         return undefined;
       }
-      case "session.close":
-        return undefined;
+      case "session.claimUnifiedSubmit":
+        return {
+          claimed: true,
+          claimId: `preview-claim-${Date.now()}`,
+          expiresAt: Date.now() + 60_000,
+        };
+      case "session.runtimeResync":
+      case "session.rendererAttach": {
+        const { sessionId } = req as { sessionId: SessionId };
+        const session = useSessionsStore.getState().sessions.get(sessionId);
+        return {
+          availability: session?.runtimeSnapshot ? "available" : "unavailable",
+          hostInstanceId: session?.hostInstanceId,
+          sessionEpoch: session?.sessionEpoch,
+          receivedAt: Date.now(),
+          snapshot: session?.runtimeSnapshot,
+        };
+      }
+      case "session.prepareClose":
+        return { reviewToken: `preview-close-${Date.now()}`, checkpoint: {} };
+      case "session.cancelClose":
+        return { cancelled: true };
+      case "session.confirmClose":
+        return { closed: true };
+      case "session.acknowledgeRestoration":
+        return { acknowledged: true };
+      case "session.editorPatch": {
+        const patch = req as {
+          revision: number;
+          text: string;
+          attachments: unknown[];
+        };
+        return {
+          accepted: true,
+          revision: patch.revision,
+          text: patch.text,
+          attachments: patch.attachments,
+        };
+      }
       case "session.transcriptForEntries":
         // Render a tiny representative transcript so designers can iterate on
         // the TreeViewer UI without writing fixtures. Reuses demo block ids.
@@ -759,19 +864,47 @@ const stub = {
       case "worktree.pickDirectory":
         // Stub: pretend the user picked a sibling worktree.
         return "/Users/me/code/my-repo-worktrees/swift-otter";
-      case "session.sendCommand":
-        return handleSendCommand(req);
-      case "session.interrupt":
+      case "session.sendCommand": {
+        const request = req as {
+          requestId: string;
+          intentId?: string;
+          command: PiRpcCommand;
+          expectedHostInstanceId: string;
+          expectedSessionEpoch: number;
+        };
+        const raw = (await handleSendCommand(req)) as Record<string, unknown>;
+        return {
+          ...raw,
+          requestId: request.requestId,
+          ...(request.intentId ? { intentId: request.intentId } : {}),
+          commandType: request.command.type,
+          commandClass: commandPolicy(request.command).class,
+          hostInstanceId: request.expectedHostInstanceId,
+          sessionEpoch: request.expectedSessionEpoch,
+          disposition: "completed",
+        };
+      }
+      case "session.escape": {
+        const { sessionId, requestId } = req as { sessionId: SessionId; requestId: string };
         previewHooks.abortCalls++;
         cancelPreviewStream();
-        emitEvent({ type: "agent_end" });
-        emitEvent({ type: "interrupt_state", interruptible: false });
-        return undefined;
+        emit("session.events", { sessionId, events: [{ type: "agent_end" }] });
+        emitRuntimeState(sessionId, false);
+        return {
+          requestId,
+          hostInstanceId: PREVIEW_HOST_ID,
+          sessionEpoch: 0,
+          disposition: "abort_requested",
+          target: "streaming",
+        };
+      }
       // Unified-TUI panel I/O (UnifiedTuiHost calls these). No-op in the stub —
       // the panel is driven by emitted panel_events, not round-tripped.
-      case "session.panelInput":
-        previewHooks.panelInputLog.push(String((req as { data?: unknown }).data ?? ""));
-        return undefined;
+      case "session.panelInput": {
+        const input = req as { data?: unknown; sequence?: number };
+        previewHooks.panelInputLog.push(String(input.data ?? ""));
+        return { acknowledgedThrough: input.sequence ?? 0 };
+      }
       case "session.panelResize": {
         // Mirror the host's fullRender-on-resize: re-emit the panel's frame so
         // the content re-lays-out top-anchored into the new grid (see

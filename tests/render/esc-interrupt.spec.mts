@@ -24,7 +24,7 @@ type PreviewHooks = {
 type PreviewStore = {
   getState: () => {
     activeSessionId: string | null;
-    sessions: Map<string, { isStreaming?: boolean; interruptible?: boolean }>;
+    sessions: Map<string, { runtimeSnapshot?: { isStreaming: boolean } }>;
   };
 };
 
@@ -50,7 +50,7 @@ async function startStreaming(page: import("@playwright/test").Page): Promise<vo
           const state = store?.getState();
           const sid = state?.activeSessionId;
           const session = sid ? state.sessions.get(sid) : undefined;
-          return !!(session?.interruptible || session?.isStreaming);
+          return session?.runtimeSnapshot?.isStreaming === true;
         }),
       { timeout: 10_000 },
     )
@@ -65,7 +65,7 @@ test.describe("ESC-to-interrupt — renderer", () => {
     await page.waitForLoadState("domcontentloaded");
     // Wait for the composer to mount.
     const textarea = page.locator(".composer__textarea");
-    await expect(textarea).toBeVisible({ timeout: 20_000 });
+    await expect(textarea).toBeEnabled({ timeout: 20_000 });
 
     // Start a fake turn so the active session is interruptible.
     await startStreaming(page);

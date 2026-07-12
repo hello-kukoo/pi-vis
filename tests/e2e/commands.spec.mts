@@ -8,24 +8,29 @@ import { type LaunchedElectronApplication, launchElectron } from "./electron-lau
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FAKE_PI = join(__dirname, "../fixtures/fake-pi.mjs");
+const FAKE_SESSION_HOST = join(__dirname, "../fixtures/fake-session-host.mjs");
 const APP_ENTRY = join(__dirname, "../../out/main/index.js");
 
 interface Folders {
   settingsDir: string;
   workspaceDir: string;
   piSessionsDir: string;
+  historyLog: string;
 }
 
 async function makeFolders(): Promise<Folders> {
+  const settingsDir = fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-cmds-")));
   return {
-    settingsDir: fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-cmds-"))),
+    settingsDir,
     workspaceDir: fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-cmds-ws-"))),
     piSessionsDir: fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-cmds-pi-"))),
+    historyLog: join(settingsDir, "history.log"),
   };
 }
 
 async function launchApp(
   folders: Folders,
+  extraEnv: Record<string, string | undefined> = {},
 ): Promise<{ app: LaunchedElectronApplication; window: Page }> {
   const settingsPath = join(folders.settingsDir, "settings.json");
   if (!fs.existsSync(settingsPath)) {
@@ -48,6 +53,8 @@ async function launchApp(
       PIVIS_SETTINGS_DIR: folders.settingsDir,
       FAKE_PI_SESSIONS_DIR: folders.piSessionsDir,
       PIVIS_SESSIONS_DIR: folders.piSessionsDir,
+      PIVIS_TEST_HOST_SCRIPT: FAKE_SESSION_HOST,
+      ...extraEnv,
       ELECTRON_RENDERER_URL: undefined,
     },
   });
@@ -70,23 +77,28 @@ function rmrf(p: string): void {
   }
 }
 
-function countJsonlFiles(root: string): number {
-  let count = 0;
+function jsonlFiles(root: string): string[] {
+  const files: string[] = [];
   const walk = (dir: string): void => {
     if (!fs.existsSync(dir)) return;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && entry.name.endsWith(".jsonl")) count += 1;
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(full);
     }
   };
   walk(root);
-  return count;
+  return files;
+}
+
+function countJsonlFiles(root: string): number {
+  return jsonlFiles(root).length;
 }
 
 test.describe("Slash commands", () => {
   test.beforeAll(() => {
     fs.chmodSync(FAKE_PI, 0o755);
+    fs.chmodSync(FAKE_SESSION_HOST, 0o755);
   });
 
   test("settings put interface controls together while code font remains configurable", async () => {
@@ -145,6 +157,48 @@ test.describe("Slash commands", () => {
     rmrf(folders.piSessionsDir);
   });
 
+  test("/compact clears only after the host persists a successful compaction", async () => {
+    test.setTimeout(60_000);
+    const folders = await makeFolders();
+    const { app, window } = await launchApp(folders);
+
+    await window.getByRole("button", { name: "New session" }).click();
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
+
+    const textarea = window.locator(".composer__textarea");
+    await textarea.fill("/compact");
+    await textarea.press("Enter");
+
+    await expect(textarea).toHaveValue("");
+    await expect(window.getByText("Context compacted", { exact: false })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect
+      .poll(() =>
+        jsonlFiles(folders.piSessionsDir).some((file) =>
+          fs
+            .readFileSync(file, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .some((line) => {
+              try {
+                return (JSON.parse(line) as { type?: unknown }).type === "compaction";
+              } catch {
+                return false;
+              }
+            }),
+        ),
+      )
+      .toBe(true);
+
+    await app.close();
+    rmrf(folders.settingsDir);
+    rmrf(folders.workspaceDir);
+    rmrf(folders.piSessionsDir);
+  });
+
   test("/model picker opens, picks a model, header updates; /model exact-id bypasses picker", async () => {
     test.setTimeout(60_000);
     const folders = await makeFolders();
@@ -174,6 +228,7 @@ test.describe("Slash commands", () => {
 
     // /model <exact-id> bypasses the picker and sets the model directly.
     await textarea.fill("/model fake-model");
+    await expect(textarea).toHaveValue("/model fake-model");
     await textarea.press("Enter");
     await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
       timeout: 5_000,
@@ -420,5 +475,106 @@ test.describe("Slash commands", () => {
     rmrf(folders.settingsDir);
     rmrf(folders.workspaceDir);
     rmrf(folders.piSessionsDir);
+  });
+
+  test("delayed same-file history cannot cross activation and retries against the live owner", async () => {
+    test.setTimeout(90_000);
+    const folders = await makeFolders();
+    const first = await launchApp(folders);
+    try {
+      await first.window.getByRole("button", { name: "New session" }).click();
+      const textarea = first.window.locator(".composer__textarea");
+      await expect(textarea).toBeEnabled({ timeout: 15_000 });
+      await textarea.fill("hello history owner");
+      await textarea.press("Enter");
+      await expect(first.window.locator(".transcript-block--assistant")).toContainText(
+        "your pi coding agent",
+        { timeout: 15_000 },
+      );
+      await expect(first.window.locator(".status-dot--streaming")).toHaveCount(0, {
+        timeout: 5_000,
+      });
+      await expect.poll(() => countJsonlFiles(folders.piSessionsDir)).toBe(1);
+    } finally {
+      await first.app.close();
+    }
+
+    const second = await launchApp(folders, {
+      PIVIS_TEST_HISTORY_DELAY_MS: "300",
+      PIVIS_TEST_HISTORY_LOG: folders.historyLog,
+      PIVIS_TEST_HOST_READY_DELAY_MS: "1800",
+    });
+    try {
+      const sessionFile = jsonlFiles(folders.piSessionsDir)[0]!;
+      const raced = await second.window.evaluate(
+        async ({ workspacePath, file }) => {
+          const invoke = (
+            window as unknown as {
+              pivis: { invoke: (channel: string, payload: unknown) => Promise<unknown> };
+            }
+          ).pivis.invoke;
+          const opened = (await invoke("session.open", {
+            workspacePath,
+            sessionFile: file,
+          })) as { sessionId: string };
+          const predecessorRead = invoke("session.loadHistory", {
+            sessionId: opened.sessionId,
+            expectedSessionFile: file,
+            historyGeneration: 999,
+            expectedHostInstanceId: null,
+            expectedSessionEpoch: null,
+          });
+          const activation = invoke("session.activate", { sessionId: opened.sessionId });
+          const result = await predecessorRead;
+          void activation.catch(() => {});
+          return result;
+        },
+        { workspacePath: folders.workspaceDir, file: sessionFile },
+      );
+      expect(raced).toMatchObject({ status: "stale", historyGeneration: 999 });
+
+      const stored = second.window.getByRole("button", {
+        name: /Not running hello history owner/,
+      });
+      await expect(stored).toBeVisible({ timeout: 15_000 });
+      await stored.click();
+      await expect(second.window.locator(".transcript-block--user")).toHaveCount(1, {
+        timeout: 15_000,
+      });
+      await expect(second.window.locator(".transcript-block--assistant")).toHaveCount(1);
+      await expect(second.window.locator(".transcript-block--assistant")).toContainText(
+        "your pi coding agent",
+      );
+      await expect
+        .poll(() => {
+          if (!fs.existsSync(folders.historyLog)) return [];
+          return fs
+            .readFileSync(folders.historyLog, "utf8")
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map(
+              (line) =>
+                JSON.parse(line) as {
+                  status: string;
+                  expectedHostInstanceId?: string;
+                },
+            );
+        })
+        .toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ status: "stale" }),
+            expect.objectContaining({
+              status: "loaded",
+              expectedHostInstanceId: expect.any(String),
+            }),
+          ]),
+        );
+    } finally {
+      await second.app.close();
+      rmrf(folders.settingsDir);
+      rmrf(folders.workspaceDir);
+      rmrf(folders.piSessionsDir);
+    }
   });
 });

@@ -28,7 +28,7 @@ type PreviewHooks = {
 type PreviewStore = {
   getState: () => {
     activeSessionId: string | null;
-    sessions: Map<string, { isStreaming?: boolean; interruptible?: boolean }>;
+    sessions: Map<string, { runtimeSnapshot?: { isStreaming: boolean } }>;
     addUserMessage: (sessionId: string, content: string, images?: string[]) => void;
   };
 };
@@ -43,12 +43,8 @@ async function startStreaming(page: import("@playwright/test").Page): Promise<vo
   await page.evaluate(() => {
     (window as unknown as { __pivisPreview: PreviewHooks }).__pivisPreview.startStreaming();
   });
-  // The global ESC-interrupt only fires for the ACTIVE session (G5) once it is
-  // abortable. startStreaming targets `activeSessionId ?? DEMO_SESSION_ID`, and
-  // at boot the activation can settle AFTER the composer is visible — dispatching
-  // ESC before the active session reports runtime interruptability was a latent
-  // race that made the abort assertions flaky. Wait for the armed state, not a
-  // timeout.
+  // Wait for the active session's authoritative streaming snapshot. Boot-time
+  // activation can settle after the composer becomes visible.
   await expect
     .poll(
       () =>
@@ -57,7 +53,7 @@ async function startStreaming(page: import("@playwright/test").Page): Promise<vo
           const state = store?.getState();
           const sid = state?.activeSessionId;
           const session = sid ? state.sessions.get(sid) : undefined;
-          return !!(session?.interruptible || session?.isStreaming);
+          return session?.runtimeSnapshot?.isStreaming === true;
         }),
       { timeout: 10_000 },
     )
@@ -68,7 +64,7 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.locator(".composer__textarea")).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator(".composer__textarea")).toBeEnabled({ timeout: 20_000 });
   });
 
   test("Composer autocomplete: ESC closes suggestions, does NOT abort (even streaming)", async ({
@@ -164,6 +160,8 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
     await search.fill("fable");
 
     await startStreaming(page);
+    await expect(dropdown).toBeVisible();
+    await expect(search).toHaveValue("fable");
     const before = await abortCount(page);
 
     // First Escape is owned by the focused search input: clear the query, do

@@ -9,10 +9,10 @@
  *   }
  *
  * It stores `this.borderColor = theme.borderColor` in its constructor and calls
- * `this.borderColor("─")` on every render. pi's full Theme singleton (returned
+ * `this.borderColor("─")` on every render. pi's full Theme instance (returned
  * by `initTheme()` / read by extensions as `ctx.ui.theme`) is NOT an
  * EditorTheme — it has `fg(name, text)` but no `borderColor` function. Passing
- * the singleton makes `Editor.render()` throw `this.borderColor is not a
+ * the full Theme makes `Editor.render()` throw `this.borderColor is not a
  * function` on the FIRST render tick, so the unified-TUI panel opens (replacing
  * the Composer) but never paints — and the throw inside pi-tui's render timer
  * can crash the host process, leaving the renderer with a disabled Composer and
@@ -26,7 +26,7 @@
  * (host-imports.test.ts).
  *
  * @param {object} pi    - pi's public module (from importPi); used for getSelectListTheme.
- * @param {object} theme - pi's Theme singleton (from initHostTheme); used for fg.
+ * @param {object} theme - pi's local Theme instance (from initHostTheme); used for fg.
  * @returns {{ borderColor: (s: string) => string, selectList: unknown }}
  */
 export function buildEditorTheme(pi, theme) {
