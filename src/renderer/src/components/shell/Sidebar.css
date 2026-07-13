@@ -165,10 +165,21 @@
   opacity: 1;
 }
 
-/* Workspace action buttons mirror the session archive/pin behavior. At rest
-   they occupy zero width (and cancel the flex gap with a negative margin), so
-   the label can use the whole row. Hovering or keyboard-focusing the header
-   expands them inline, horizontally: remove then expand/collapse. */
+/* Search is a first-class, always-visible workspace capability. Remove and
+   collapse retain the compact hover-revealed treatment around it. */
+.sidebar__workspace-search {
+  flex: 0 0 auto;
+  color: var(--text-ghost);
+  opacity: 0.7;
+}
+.sidebar__workspace-search:hover,
+.sidebar__workspace-search:focus-visible {
+  color: var(--text);
+  opacity: 1;
+}
+
+/* Remove/collapse mirror the session archive behavior. At rest they occupy
+   zero width; hovering or keyboard-focusing expands them inline. */
 .sidebar__remove-workspace,
 .sidebar__workspace-chevron {
   background: none;

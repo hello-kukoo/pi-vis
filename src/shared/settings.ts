@@ -106,6 +106,10 @@ export const AppSettingsSchema = z.object({
   // Model picker preference. When enabled, the header dropdown groups models
   // by provider unless the user is actively searching (search stays flat).
   groupModelsByProvider: z.boolean().default(false),
+  // Emergency escape hatch for the disposable saved-session search index.
+  // Default-on. Main reads this at launch so disabling it prevents worker and
+  // catalog startup entirely; changes intentionally take effect after restart.
+  sessionSearchEnabled: z.boolean().default(true),
   // Sidebar chrome (user-controlled layout). Persisted so the width and
   // collapsed state survive relaunch. Width is clamped to [160, 500] by the
   // resize handle; the grid additionally caps it to a fraction of the window

@@ -305,6 +305,14 @@ export class SessionHost extends EventEmitter {
      * when the system Node is strictly newer than Electron's.
      */
     nodeExecPath?: string,
+    /**
+     * Optional descriptor pinned by a validated search open. It is inherited as
+     * child fd 4 so SessionManager opens the validated inode, not a pathname
+     * that may have changed during the renderer activation IPC gap.
+     */
+    confinedSessionDescriptor?: number,
+    /** Windows hard-link alias to the descriptor-pinned inode. */
+    confinedSessionAlias?: string,
   ) {
     super();
     this.sessionFile = sessionFile;
@@ -322,7 +330,10 @@ export class SessionHost extends EventEmitter {
     this.proc = forkFn(hostPath, [], {
       cwd: workspacePath,
       env: { ...process.env, ...env },
-      stdio: ["pipe", "pipe", "pipe", "ipc"],
+      stdio:
+        confinedSessionDescriptor === undefined
+          ? ["pipe", "pipe", "pipe", "ipc"]
+          : ["pipe", "pipe", "pipe", "ipc", confinedSessionDescriptor],
       execArgv: [], // Don't pass --inspect-brk etc.
       // When the registry resolved a newer system Node, run the host under it
       // instead of Electron's bundled Node (see locate-node.ts). `fork()`
@@ -396,7 +407,15 @@ export class SessionHost extends EventEmitter {
       piPath,
       cwd: workspacePath,
     };
-    if (sessionFile) initMsg.sessionFile = sessionFile;
+    if (sessionFile) {
+      initMsg.sessionFile = confinedSessionAlias
+        ? confinedSessionAlias
+        : confinedSessionDescriptor === undefined
+          ? sessionFile
+          : process.platform === "linux"
+            ? "/proc/self/fd/4"
+            : "/dev/fd/4";
+    }
 
     this.proc.send(initMsg);
 

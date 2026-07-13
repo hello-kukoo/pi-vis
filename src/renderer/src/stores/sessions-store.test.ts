@@ -5,6 +5,7 @@ import type {
   AgentSessionSnapshot,
   RuntimeStateUpdate,
 } from "@shared/pi-protocol/runtime-state.js";
+import type { SessionSearchOpenResult } from "@shared/session-search.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildDiffModel } from "../lib/diff/diff-model.js";
 import { nextPanelInputSequence } from "../lib/panel-input-sequence.js";
@@ -1304,6 +1305,55 @@ describe("sessions store - workspace expand / reorder model", () => {
     // Clearing the active session clears the active workspace too.
     store.setActiveSession(null);
     expect(useSessionsStore.getState().activeWorkspacePath).toBeNull();
+  });
+
+  it("does not release the previous host when a slow target activation finishes after return", async () => {
+    let resolveActivation!: () => void;
+    const activation = new Promise<void>((resolve) => {
+      resolveActivation = resolve;
+    });
+    const invoke = vi.fn((channel: string, payload: { sessionId?: SessionId }) => {
+      if (channel === "session.activate" && payload.sessionId === SESSION_B) return activation;
+      if (channel === "session.releaseActivationVisit") return Promise.resolve({ released: true });
+      return Promise.resolve(undefined);
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WS_A, "/f/a.jsonl", undefined, undefined, "ready");
+    store.createSession(SESSION_B, WS_B, "/f/b.jsonl", undefined, undefined, "cold");
+    useSessionsStore.setState((state) => {
+      const sessions = new Map(state.sessions);
+      const previous = sessions.get(SESSION_A);
+      if (previous) sessions.set(SESSION_A, { ...previous, activationVisitId: "visit-a" });
+      return { sessions, activeSessionId: SESSION_A, activeWorkspacePath: WS_A };
+    });
+
+    const openTarget = store.setActiveSession(SESSION_B);
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.activate",
+        expect.objectContaining({ sessionId: SESSION_B }),
+      ),
+    );
+    const targetVisit = useSessionsStore.getState().sessions.get(SESSION_B)?.activationVisitId;
+    await store.setActiveSession(SESSION_A);
+    expect(invoke).toHaveBeenCalledWith("session.releaseActivationVisit", {
+      sessionId: SESSION_B,
+      activationVisitId: targetVisit,
+    });
+    resolveActivation();
+    await openTarget;
+
+    expect(useSessionsStore.getState().activeSessionId).toBe(SESSION_A);
+    expect(invoke).not.toHaveBeenCalledWith("session.releaseActivationVisit", {
+      sessionId: SESSION_A,
+      activationVisitId: "visit-a",
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "session.cancelActivationVisitRelease",
+      expect.objectContaining({ sessionId: SESSION_A }),
+    );
+    vi.unstubAllGlobals();
   });
 
   it("releases a view-only cold-session activation and cancels release on a quick return", async () => {
@@ -4267,5 +4317,140 @@ describe("sessions store - clearPendingUserEcho (failed optimistic send)", () =>
     // overwriting the newer text the user had begun typing. Low-frequency and
     // recoverable; pinned here so any change to this behavior is deliberate.
     expect(after.sessionDrafts.get(SESSION_A)).toBe("message A");
+  });
+});
+
+describe("sessions store - explicit search result open", () => {
+  const invokeMock = vi.fn();
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: null,
+      workspaces: new Map(),
+      activeWorkspacePath: null,
+      newSessionDrafts: new Map(),
+      sessionDrafts: new Map(),
+    });
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (channel: string, payload: unknown) => {
+      if (channel === "session.loadHistory") {
+        return loadedHistory(payload, []);
+      }
+      if (channel === "session.activate") return undefined;
+      throw new Error(`unexpected channel ${channel}`);
+    });
+    vi.stubGlobal("window", { pivis: { invoke: invokeMock } });
+  });
+
+  it("adopts the validated main result and preserves normal activation-visit ownership", async () => {
+    const file = "/tmp/search-result.jsonl";
+    const preopened: SessionSearchOpenResult = {
+      outcome: "opened",
+      sessionId: SESSION_A,
+      sessionFile: file,
+      workspacePath: WORKSPACE,
+      name: "Search result",
+      preview: "saved preview",
+      sessionStatus: "cold",
+    };
+
+    await expect(
+      useSessionsStore.getState().openSessionTab(WORKSPACE, file, {
+        focus: true,
+        preopened,
+      }),
+    ).resolves.toBe(SESSION_A);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("session.open", expect.anything());
+    const visitId = useSessionsStore.getState().sessions.get(SESSION_A)?.activationVisitId;
+    expect(visitId).toEqual(expect.any(String));
+    expect(invokeMock).toHaveBeenCalledWith("session.activate", {
+      sessionId: SESSION_A,
+      activationVisitId: visitId,
+    });
+  });
+
+  it("restores the previous active session without releasing its visit when activation fails", async () => {
+    const previousFile = "/tmp/previous.jsonl";
+    const targetFile = "/tmp/search-fails.jsonl";
+    useSessionsStore
+      .getState()
+      .createSession(SESSION_A, WORKSPACE, previousFile, "Previous", undefined, "ready");
+    useSessionsStore.setState((state) => {
+      const sessions = new Map(state.sessions);
+      const previous = sessions.get(SESSION_A);
+      if (previous) sessions.set(SESSION_A, { ...previous, activationVisitId: "previous-visit" });
+      return { sessions, activeSessionId: SESSION_A, activeWorkspacePath: WORKSPACE };
+    });
+    invokeMock.mockImplementation(async (channel: string, payload: unknown) => {
+      if (channel === "session.loadHistory") {
+        return loadedHistory(payload, []);
+      }
+      if (channel === "session.activate") throw new Error("host startup failed");
+      throw new Error(`unexpected channel ${channel}`);
+    });
+    const preopened: SessionSearchOpenResult = {
+      outcome: "opened",
+      sessionId: SESSION_B,
+      sessionFile: targetFile,
+      workspacePath: WORKSPACE,
+      name: "Broken target",
+      preview: null,
+      sessionStatus: "cold",
+    };
+
+    await expect(
+      useSessionsStore.getState().openSessionTab(WORKSPACE, targetFile, {
+        focus: true,
+        preopened,
+      }),
+    ).resolves.toBeNull();
+
+    const state = useSessionsStore.getState();
+    expect(state.activeSessionId).toBe(SESSION_A);
+    expect(state.activeWorkspacePath).toBe(WORKSPACE);
+    expect(state.sessions.get(SESSION_A)?.activationVisitId).toBe("previous-visit");
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "session.releaseActivationVisit",
+      expect.anything(),
+    );
+  });
+
+  it("reconciles a stale failed renderer record before adopting a replacement", async () => {
+    const file = "/tmp/search-result.jsonl";
+    useSessionsStore
+      .getState()
+      .createSession(SESSION_B, WORKSPACE, file, "Failed predecessor", undefined, "failed");
+    useSessionsStore.setState({ activeSessionId: SESSION_B });
+    const preopened: SessionSearchOpenResult = {
+      outcome: "opened",
+      sessionId: SESSION_A,
+      sessionFile: file,
+      workspacePath: WORKSPACE,
+      name: "Replacement",
+      preview: "saved preview",
+      sessionStatus: "cold",
+    };
+
+    await expect(
+      useSessionsStore.getState().openSessionTab(WORKSPACE, file, {
+        focus: true,
+        preopened,
+      }),
+    ).resolves.toBe(SESSION_A);
+
+    const state = useSessionsStore.getState();
+    expect(state.sessions.has(SESSION_B)).toBe(false);
+    expect(state.sessions.get(SESSION_A)?.sessionFile).toBe(file);
+    expect(state.activeSessionId).toBe(SESSION_A);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "session.activate",
+      expect.objectContaining({ sessionId: SESSION_A, activationVisitId: expect.any(String) }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "session.activate",
+      expect.objectContaining({ sessionId: SESSION_B }),
+    );
   });
 });

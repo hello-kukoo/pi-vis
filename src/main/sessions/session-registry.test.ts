@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { SessionId } from "@shared/ids.js";
 import type { AgentSessionSnapshot } from "@shared/pi-protocol/runtime-state.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,10 +31,12 @@ function harness(
   const fakes: FakeHostProcess[] = [];
   const spawnArgs: string[][] = [];
   const spawnCwds: Array<string | undefined> = [];
+  const spawnStdios: unknown[] = [];
   __forkOverride.fn = (_path, args, forkOptions) => {
     const spawnIndex = fakes.length;
     spawnArgs.push(args);
     spawnCwds.push((forkOptions as { cwd?: string }).cwd);
+    spawnStdios.push((forkOptions as { stdio?: unknown }).stdio);
     const fake = new FakeHostProcess();
     options.configureFake?.(fake, spawnIndex);
     fakes.push(fake);
@@ -75,6 +80,7 @@ function harness(
     fakes,
     spawnArgs,
     spawnCwds,
+    spawnStdios,
   };
 }
 
@@ -101,6 +107,57 @@ describe("SessionRegistry direct AgentSession authority", () => {
     expectDirectHostSpawns(h.spawnArgs, 1);
     expect(h.registry.getSession(id)?.proc).toBeDefined();
     h.registry.stopAll();
+  });
+
+  it("pins a validated search file descriptor through cold host activation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pivis-confined-activation-"));
+    const file = path.join(root, "session.jsonl");
+    fs.writeFileSync(file, '{"type":"session","id":"pinned"}\n');
+    const descriptor = fs.openSync(file, "r");
+    const h = harness();
+    try {
+      const id = h.registry.openSession(root, file);
+      expect(h.registry.adoptConfinedSessionDescriptor(id, file, descriptor, root)).toBe(true);
+      await h.registry.activateSession(id, "/tmp/pi", {});
+
+      const hostDescriptor = (h.spawnStdios[0] as Array<string | number> | undefined)?.[4];
+      expect(hostDescriptor).toEqual(expect.any(Number));
+      expect(hostDescriptor).not.toBe(descriptor);
+      expect(h.fakes[0]?.sent[0]).toMatchObject({
+        type: "init",
+        sessionFile: process.platform === "linux" ? "/proc/self/fd/4" : "/dev/fd/4",
+      });
+      expect(h.registry.getSession(id)?.snapshot?.sessionFile).toBe(file);
+      expect(() => fs.fstatSync(descriptor)).toThrow();
+      h.registry.closeSession(id);
+      expect(() => fs.fstatSync(hostDescriptor as number)).toThrow();
+    } finally {
+      h.registry.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a confined search source replaced before cold activation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pivis-confined-race-"));
+    const file = path.join(root, "session.jsonl");
+    const displaced = path.join(root, "displaced.jsonl");
+    fs.writeFileSync(file, '{"type":"session","id":"original"}\n');
+    const descriptor = fs.openSync(file, "r");
+    const h = harness();
+    try {
+      const id = h.registry.openSession(root, file, undefined, descriptor, root);
+      fs.renameSync(file, displaced);
+      fs.writeFileSync(file, '{"type":"session","id":"replacement"}\n');
+
+      await expect(h.registry.activateSession(id, "/tmp/pi", {})).rejects.toThrow(
+        "changed while it was opened",
+      );
+      expect(h.fakes).toHaveLength(0);
+      h.registry.closeSession(id);
+    } finally {
+      h.registry.stopAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("cancels an activation visit released before Pi discovery reaches the registry", async () => {

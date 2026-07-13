@@ -1,4 +1,5 @@
 import type { SessionId } from "@shared/ids.js";
+import type { SearchTargetId } from "@shared/session-search.js";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
@@ -17,6 +18,7 @@ import { UnifiedTuiHost } from "./components/ext-ui/UnifiedTuiHost.js";
 import { NotificationStack } from "./components/notifications/NotificationStack.js";
 import { AppPickerHost } from "./components/pickers/AppPickerHost.js";
 import { SessionSubBar } from "./components/session-header/SessionSubBar.js";
+import { SessionSearchModal } from "./components/session-search/SessionSearchModal.js";
 import { SettingsView } from "./components/settings/SettingsView.js";
 import { PiNotFound } from "./components/setup/PiNotFound.js";
 import { Dock } from "./components/shell/Dock.js";
@@ -58,12 +60,14 @@ export function App(): React.ReactElement {
   const adoptSessionFileAndHydrate = useSessionsStore((s) => s.adoptSessionFileAndHydrate);
   const refreshCommands = useSessionsStore((s) => s.refreshCommands);
   const setActiveSession = useSessionsStore((s) => s.setActiveSession);
+  const openSessionTab = useSessionsStore((s) => s.openSessionTab);
   const loadSettings = useSettingsStore((s) => s.load);
   const statusBarVisible = useSettingsStore((s) => s.settings.statusBarVisible);
   const persistedSidebarWidth = useSettingsStore((s) => s.settings.sidebarWidth);
   const sidebarCollapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
   const updateSettings = useSettingsStore((s) => s.update);
   const [piFound, setPiFound] = useState<boolean | null>(null);
+  const [sessionSearchAvailable, setSessionSearchAvailable] = useState(false);
   // onClose	SettingsView handler
   const [showSettings, setShowSettings] = useState(false);
   // Claim ESC while Settings is open so a background streaming session isn't
@@ -278,6 +282,10 @@ export function App(): React.ReactElement {
         setPiFound(info !== null);
       })
       .catch(() => setPiFound(false));
+    window.pivis
+      .invoke("sessionSearch.available", undefined)
+      .then(setSessionSearchAvailable)
+      .catch(() => setSessionSearchAvailable(false));
   }, [loadSettings]);
 
   // The Composer fires a custom DOM event rather than drilling a callback
@@ -660,6 +668,22 @@ export function App(): React.ReactElement {
     setPiFound(info !== null);
   }, []);
 
+  const handleOpenSearchResult = useCallback(
+    async (targetId: SearchTargetId): Promise<boolean> => {
+      const resolved = await window.pivis.invoke("sessionSearch.open", {
+        rendererGeneration: RENDERER_GENERATION,
+        targetId,
+      });
+      if (!("sessionId" in resolved)) throw new Error(resolved.message);
+      const opened = await openSessionTab(resolved.workspacePath, resolved.sessionFile, {
+        focus: true,
+        preopened: resolved,
+      });
+      return opened !== null;
+    },
+    [openSessionTab],
+  );
+
   if (piFound === null) {
     return (
       <div className="app-loading">
@@ -697,6 +721,7 @@ export function App(): React.ReactElement {
       )}
       <Sidebar
         onOpenSettings={() => setShowSettings(true)}
+        sessionSearchAvailable={sessionSearchAvailable}
         onMouseEnter={peekSidebar}
         onMouseLeave={scheduleHideSidebar}
       />
@@ -828,6 +853,7 @@ export function App(): React.ReactElement {
           initialSection={settingsInitialSection}
         />
       )}
+      {sessionSearchAvailable && <SessionSearchModal onOpenResult={handleOpenSearchResult} />}
       <UpdateProgress />
       <AppUpdatePrompt />
       <ChangelogModal />

@@ -726,6 +726,22 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                 </button>
               </div>
               <div className="settings-row">
+                <span className="settings-label">Saved session search</span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${settings.sessionSearchEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}
+                  onClick={() => update({ sessionSearchEnabled: !settings.sessionSearchEnabled })}
+                  aria-label="Saved session search"
+                  aria-describedby="saved-session-search-restart-hint"
+                  aria-pressed={settings.sessionSearchEnabled}
+                >
+                  <span className="settings-toggle__knob" />
+                </button>
+                <span className="settings-hint" id="saved-session-search-restart-hint">
+                  Takes effect after restarting Pi-Vis.
+                </span>
+              </div>
+              <div className="settings-row">
                 <span className="settings-label">Font Size</span>
                 <div className="settings-stepper">
                   <button

@@ -1,6 +1,7 @@
 import type { SessionId } from "@shared/ids.js";
 import { type PiRpcCommand, commandPolicy } from "@shared/pi-protocol/commands.js";
 import type { AgentSessionSnapshot } from "@shared/pi-protocol/runtime-state.js";
+import type { SearchId, SearchTargetId, SessionSearchResult } from "@shared/session-search.js";
 /**
  * Stubs window.pivis for standalone browser preview (not running in Electron).
  *
@@ -40,6 +41,8 @@ const listeners = new Map<string, Set<Listener>>();
 const previewHooks = {
   /** Count of session interrupt requests dispatched to the stub. */
   abortCalls: 0,
+  /** Explicit search opens; preview selection/context never increments this. */
+  searchOpenCalls: 0,
   /** Log of every panel input string sent to `session.panelInput`. */
   panelInputLog: [] as string[],
   /** Grid reports from panel sizing, used by overflow convergence tests. */
@@ -744,6 +747,7 @@ const settingsState = {
   lastDismissedPiVersion: null,
   sidebarWidth: 220,
   sidebarCollapsed: false,
+  sessionSearchEnabled: true,
   pinnedSessions: [] as string[],
   archivedSessions: [] as string[],
   worktrees: {},
@@ -785,6 +789,123 @@ const stub = {
       }
       case "workspace.listSessions":
         return [];
+      case "sessionSearch.available":
+        return true;
+      case "sessionSearch.start": {
+        const request = req as {
+          rendererGeneration: number;
+          clientQueryId: string;
+          query: string;
+        };
+        const searchId = `preview-search-${Date.now()}-0000` as SearchId;
+        const all: SessionSearchResult[] = [
+          {
+            targetId: "preview-target-lifecycle-0001" as SearchTargetId,
+            sessionName: "Lifecycle investigation",
+            role: "user",
+            timestamp: Date.now() - 86_400_000,
+            snippet: "Preserve the exact activation lifecycle during a rapid switch.",
+            matchRanges: [{ start: 29, end: 38 }],
+            branchKind: "latest-persisted-path",
+            sourceRevision: "preview-revision-1",
+            additionalMatches: 4,
+          },
+          {
+            targetId: "preview-target-branch-0002" as SearchTargetId,
+            sessionName: "Session registry cleanup",
+            worktreeName: "rustic-gnome",
+            role: "assistant",
+            timestamp: Date.now() - 172_800_000,
+            snippet: "The alternate branch keeps pre-compaction saved history.",
+            matchRanges: [{ start: 4, end: 13 }],
+            branchKind: "other-saved-branch",
+            sourceRevision: "preview-revision-2",
+            additionalMatches: 0,
+          },
+        ];
+        const words = request.query.toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+        const results = all.filter((result) =>
+          words.every((word) =>
+            `${result.sessionName} ${result.snippet}`.toLocaleLowerCase().includes(word),
+          ),
+        );
+        setTimeout(() => {
+          emit("sessionSearch.batch", {
+            rendererGeneration: request.rendererGeneration,
+            clientQueryId: request.clientQueryId,
+            searchId,
+            sequence: 0,
+            indexRevision: 2,
+            disposition: "replace",
+            results,
+            count: { value: results.length, exact: true },
+            coverage: { indexedSources: 36, totalSources: 36, skippedSources: 0 },
+            done: true,
+          });
+        }, 0);
+        return { accepted: true, searchId };
+      }
+      case "sessionSearch.cancel":
+        return { cancelled: true };
+      case "sessionSearch.more":
+      case "sessionSearch.expand":
+        return { accepted: true };
+      case "sessionSearch.status":
+      case "sessionSearch.rebuild":
+        return {
+          state: "ready",
+          indexRevision: 2,
+          coverage: { indexedSources: 36, totalSources: 36, skippedSources: 0 },
+        };
+      case "sessionSearch.context": {
+        const { targetId } = req as { targetId: SearchTargetId };
+        const alternate = targetId.includes("branch");
+        return {
+          outcome: "ready",
+          targetId,
+          sourceRevision: alternate ? "preview-revision-2" : "preview-revision-1",
+          sessionName: alternate ? "Session registry cleanup" : "Lifecycle investigation",
+          ...(alternate ? { worktreeName: "rustic-gnome" } : {}),
+          branchKind: alternate ? "other-saved-branch" : "latest-persisted-path",
+          ancestryIncomplete: false,
+          hasEarlier: true,
+          hasLater: true,
+          items: [
+            {
+              entryId: "preview-user",
+              contentPartKey: "text",
+              role: "user",
+              timestamp: Date.now() - 90_000,
+              text: "How should saved session search avoid activating a host?",
+              target: false,
+              matchRanges: [],
+            },
+            {
+              entryId: "preview-target",
+              contentPartKey: "content.0",
+              role: "assistant",
+              timestamp: Date.now() - 80_000,
+              text: alternate
+                ? "The alternate branch keeps pre-compaction saved history."
+                : "Preserve the exact activation lifecycle during a rapid switch.",
+              target: true,
+              matchRanges: alternate ? [{ start: 4, end: 13 }] : [{ start: 19, end: 29 }],
+            },
+          ],
+        };
+      }
+      case "sessionSearch.open": {
+        previewHooks.searchOpenCalls++;
+        return {
+          outcome: "opened",
+          sessionId: `preview-search-open-${Date.now()}` as SessionId,
+          sessionFile: "/preview/sessions/search-result.jsonl",
+          workspacePath: DEMO_WORKSPACE,
+          name: "Lifecycle investigation",
+          preview: "Preserve the exact activation lifecycle",
+          sessionStatus: "cold",
+        };
+      }
       case "session.loadHistory":
         return {
           status: "loaded",

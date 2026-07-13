@@ -759,6 +759,57 @@ describe("nodeExecPath (host runtime retarget)", () => {
     __forkOverride.fn = null;
   });
 
+  it("inherits a confined search descriptor and opens that child fd", () => {
+    const fake = new FakeHostProcess();
+    let capturedOpts: Record<string, unknown> = {};
+    __forkOverride.fn = (_p: string, _a: string[], opts: object) => {
+      capturedOpts = opts as Record<string, unknown>;
+      return fake as unknown as ReturnType<typeof import("node:child_process").fork>;
+    };
+    const host = new SessionHost(
+      "/fake/pi",
+      "/tmp/ws",
+      "/sessions/original.jsonl",
+      {},
+      undefined,
+      42,
+    );
+    host.on("error", () => {});
+
+    expect(capturedOpts.stdio).toEqual(["pipe", "pipe", "pipe", "ipc", 42]);
+    expect(fake.sent[0]).toMatchObject({
+      type: "init",
+      sessionFile: process.platform === "linux" ? "/proc/self/fd/4" : "/dev/fd/4",
+    });
+    host.stop();
+    __forkOverride.fn = null;
+  });
+
+  it("uses a pinned hard-link path without fd filesystems on Windows", () => {
+    const fake = new FakeHostProcess();
+    let capturedOpts: Record<string, unknown> = {};
+    __forkOverride.fn = (_p: string, _a: string[], opts: object) => {
+      capturedOpts = opts as Record<string, unknown>;
+      return fake as unknown as ReturnType<typeof import("node:child_process").fork>;
+    };
+    const alias = "C:\\sessions\\.pivis-session.runtime-pin";
+    const host = new SessionHost(
+      "/fake/pi",
+      "/tmp/ws",
+      "C:\\sessions\\original.jsonl",
+      {},
+      undefined,
+      undefined,
+      alias,
+    );
+    host.on("error", () => {});
+
+    expect(capturedOpts.stdio).toEqual(["pipe", "pipe", "pipe", "ipc"]);
+    expect(fake.sent[0]).toMatchObject({ type: "init", sessionFile: alias });
+    host.stop();
+    __forkOverride.fn = null;
+  });
+
   it("omits execPath when no nodeExecPath is supplied (Electron default)", () => {
     const fake = new FakeHostProcess();
     let capturedOpts: Record<string, unknown> = {};

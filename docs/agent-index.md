@@ -10,6 +10,7 @@ Load only the documentation relevant to the change.
 - Pi release compatibility: `docs/compatibility/pi-0.80.6.md`.
 - Tests, fault injection, fixtures, or verification: `docs/testing.md`.
 - Paths and persisted locations: `docs/important-paths.md`.
+- Workspace saved-session search, its worker/index, result context, or search UI: `docs/architecture/session-search.md`, `docs/decisions/0002-workspace-session-search.md`, `docs/architecture/sidebar-shell-layout.md`, and `docs/ui-conventions.md`; also read `docs/testing.md` for corpus and gates.
 - Worktrees, sidebar, theming, runtime services, release flow, or visual conventions: use their corresponding architecture doc plus `docs/ui-conventions.md` where applicable.
 
-The session runtime is SDK-host-only. Do not document or add a session fallback transport, synthetic liveness adapter, idle-LRU reaper, or prompt counter.
+The session runtime is SDK-host-only. Do not document or add a session fallback transport, synthetic liveness adapter, idle-LRU reaper, or prompt counter. Session search is persisted-JSONL-only: preview never activates a host; explicit opening uses the normal activation-visit lifecycle.

@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import type { Browser, Page } from "@playwright/test";
 import { chromium } from "@playwright/test";
 import { registerElectronPid, terminateElectronProcessTree } from "./electron-process-registry.mjs";
@@ -8,6 +9,7 @@ import { registerElectronPid, terminateElectronProcessTree } from "./electron-pr
 const require = createRequire(import.meta.url);
 
 interface LaunchOptions {
+  executablePath?: string;
   args?: string[];
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -72,6 +74,34 @@ function waitForLine(child: ChildProcess, pattern: RegExp, timeoutMs: number): P
   });
 }
 
+async function reserveLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+async function waitForCdpPort(child: ChildProcess, port: number): Promise<string> {
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    if (child.exitCode !== null) throw new Error("Electron exited before CDP was ready");
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) {
+        const version = (await response.json()) as { webSocketDebuggerUrl?: string };
+        if (version.webSocketDebuggerUrl) return version.webSocketDebuggerUrl;
+      }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for packaged Electron CDP port ${port}`);
+}
+
 export async function launchElectron(options: LaunchOptions): Promise<LaunchedElectronApplication> {
   const appEntry = options.args?.[0];
   if (appEntry && !appEntry.startsWith("-") && !fs.existsSync(appEntry)) {
@@ -80,13 +110,16 @@ export async function launchElectron(options: LaunchOptions): Promise<LaunchedEl
     );
   }
 
-  const electronPath = String(require("electron"));
+  const electronPath = options.executablePath ?? String(require("electron"));
+  const packagedCdpPort = options.executablePath ? await reserveLoopbackPort() : null;
   const env = {
     ...process.env,
     ...options.env,
-    // Electron 43 rejects Playwright's old top-level --remote-debugging-port=0
-    // argument. The app installs this value through app.commandLine instead.
-    PIVIS_TEST_REMOTE_DEBUGGING_PORT: "0",
+    // Packaged Electron suppresses the `DevTools listening` line, so use a
+    // reserved fixed port that the harness can probe. Development keeps port 0
+    // and discovers the selected endpoint from stderr.
+    PIVIS_TEST_REMOTE_DEBUGGING_PORT: String(packagedCdpPort ?? 0),
+    ...(options.executablePath ? { PIVIS_TEST_ALLOW_MULTIPLE_INSTANCES: "1" } : {}),
   };
   env.PIVIS_TEST_HIDE_WINDOW ??= env.PIVIS_TEST_SHOW_WINDOW === "1" ? "0" : "1";
   // pi runs tools under Electron's bundled Node mode. A child Electron app must
@@ -107,7 +140,9 @@ export async function launchElectron(options: LaunchOptions): Promise<LaunchedEl
 
   let browser: Browser;
   try {
-    const cdpUrl = await waitForLine(child, /^DevTools listening on (ws:\/\/.*)$/, 15_000);
+    const cdpUrl = packagedCdpPort
+      ? await waitForCdpPort(child, packagedCdpPort)
+      : await waitForLine(child, /^DevTools listening on (ws:\/\/.*)$/, 15_000);
     // Keep draining both pipes after finding the CDP URL. An unread full pipe
     // can block Electron and make an otherwise healthy test appear hung.
     child.stdout?.resume();

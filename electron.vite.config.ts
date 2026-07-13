@@ -8,6 +8,18 @@ export default defineConfig({
   main: {
     cacheDir: cacheDir("electron-vite-main"),
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve("src/main/index.ts"),
+          "session-search-benchmark-api": resolve(
+            "src/main/sessions/session-search/benchmark-api.ts",
+          ),
+          "session-search-worker": resolve("src/main/sessions/session-search/index-worker.ts"),
+        },
+        output: { entryFileNames: "[name].js" },
+      },
+    },
     resolve: {
       alias: {
         "@shared": resolve("src/shared"),

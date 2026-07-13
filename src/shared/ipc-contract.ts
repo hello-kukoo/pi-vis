@@ -27,6 +27,20 @@ import type {
   SessionSubmission,
   SubmissionResult,
 } from "./pi-protocol/runtime-state.js";
+import type {
+  SessionSearchBatch,
+  SessionSearchCancelRequest,
+  SessionSearchContextRequest,
+  SessionSearchContextResult,
+  SessionSearchExpandRequest,
+  SessionSearchIndexStatus,
+  SessionSearchMoreRequest,
+  SessionSearchOpenRequest,
+  SessionSearchOpenResult,
+  SessionSearchRebuildRequest,
+  SessionSearchStartRequest,
+  SessionSearchStatusRequest,
+} from "./session-search.js";
 import type { AppSettings } from "./settings.js";
 import type { Theme } from "./theme/index.js";
 import type { UpdateStatus } from "./updates.js";
@@ -73,6 +87,31 @@ export interface IpcInvokeContract {
   "workspace.list": { req: undefined; res: string[] };
   "workspace.remove": { req: { workspacePath: string }; res: string[] };
   "workspace.listSessions": { req: { workspacePath: string }; res: SessionSummary[] };
+  /** Launch-scoped availability; the persisted enable flag takes effect after restart. */
+  "sessionSearch.available": { req: undefined; res: boolean };
+  "sessionSearch.start": {
+    req: SessionSearchStartRequest;
+    res: { accepted: true; searchId: import("./session-search.js").SearchId };
+  };
+  "sessionSearch.more": { req: SessionSearchMoreRequest; res: { accepted: boolean } };
+  "sessionSearch.expand": { req: SessionSearchExpandRequest; res: { accepted: boolean } };
+  "sessionSearch.cancel": { req: SessionSearchCancelRequest; res: { cancelled: boolean } };
+  "sessionSearch.context": {
+    req: SessionSearchContextRequest;
+    res: SessionSearchContextResult;
+  };
+  "sessionSearch.open": {
+    req: SessionSearchOpenRequest;
+    res: SessionSearchOpenResult;
+  };
+  "sessionSearch.status": {
+    req: SessionSearchStatusRequest;
+    res: SessionSearchIndexStatus;
+  };
+  "sessionSearch.rebuild": {
+    req: SessionSearchRebuildRequest;
+    res: SessionSearchIndexStatus;
+  };
   // Worktree identity attached to a session.open response when the
   // resumed session file belongs to a known worktree of the workspace.
   // Lets the renderer show the worktree chip and lets the main process
@@ -461,6 +500,7 @@ export interface IpcInvokeContract {
 
 // Every event channel: payload type (main → renderer)
 export interface IpcEventContract {
+  "sessionSearch.batch": SessionSearchBatch;
   "session.events": { sessionId: SessionId; events: PiEvent[] };
   /** Atomic direct-getter runtime state; Unavailable is neither running nor idle. */
   "session.runtimeState": { sessionId: SessionId; state: RuntimeStateUpdate };

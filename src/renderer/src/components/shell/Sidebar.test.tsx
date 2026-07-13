@@ -53,6 +53,35 @@ describe("Sidebar boot workspace restore", () => {
     document.body.innerHTML = "";
   });
 
+  it("hides saved-session search actions when unavailable for this launch", async () => {
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === "workspace.list") return [WS_A];
+      if (channel === "workspace.listSessions") return [];
+      if (channel === "session.open") {
+        return {
+          outcome: "opened",
+          sessionId: "search-disabled-session",
+          name: null,
+          preview: null,
+        };
+      }
+      if (channel === "session.activate") return undefined;
+      if (channel === "settings.set") return defaultSettings;
+      throw new Error(`Unexpected IPC channel ${channel}`);
+    });
+    (globalThis.window as unknown as { pivis?: unknown }).pivis = { invoke };
+    useSettingsStore.setState({ settings: defaultSettings, loaded: true });
+    useSessionsStore.getState().addWorkspace(WS_A);
+
+    const { container, unmount } = mount(
+      <Sidebar onOpenSettings={() => {}} sessionSearchAvailable={false} />,
+    );
+    await flushEffects();
+
+    expect(container.querySelector(".sidebar__workspace-search")).toBeNull();
+    unmount();
+  });
+
   it("persists the last active workspace when a live session row is selected", async () => {
     const invoke = vi.fn(async (channel: string, payload: { workspacePath?: string } = {}) => {
       switch (channel) {

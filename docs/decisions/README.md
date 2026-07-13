@@ -31,3 +31,7 @@ What trade-offs, follow-up work, or invariants does this create?
 ```
 
 Link new ADRs from the relevant `docs/architecture/*.md` file and from `docs/agent-index.md` when agents should read them for future work.
+
+## Decisions
+
+- [0002: Workspace session search](0002-workspace-session-search.md) — persisted-JSONL authority, disposable index, exact read-only context, and lifecycle isolation.

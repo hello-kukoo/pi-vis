@@ -10,6 +10,10 @@ Each active session has exactly one live authority: a `SessionHost` fork of `res
 
 Main owns process lifecycle, session-file advisory locks, IPC validation, activation-visit retirement, and forwarding. The renderer owns presentation and sends typed requests through preload; it never reads Electron APIs directly.
 
+## Workspace session search
+
+Workspace saved-session search is a separate typed, generation-fenced renderer→main→worker path. Its worker catalogs validated persisted JSONL, maintains a disposable SQLite index, and serves workspace/worktree-scoped queries and exact read-only context. It does not call the SDK host or `SessionRegistry`; selecting/previewing a result creates no host or runtime side effect. Opaque targets are scoped to their renderer/workspace, and late batches/context are fenced. Only explicit **Open session** revalidates a target and delegates to the ordinary stored-session open plus activation-visit lifecycle. Thus search adds no process cap, idle/LRU reaper, or ability to retire a pre-existing host. See [workspace session search](session-search.md).
+
 ## Authoritative runtime protocol
 
 The host publishes direct `AgentSession` snapshots rather than synthetic liveness events. Each snapshot includes:

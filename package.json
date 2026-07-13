@@ -25,6 +25,7 @@
     "test:e2e": "npm run build && playwright test -c tests/e2e/playwright.config.mts",
     "test:render": "node scripts/ensure-worktree-dev.mjs && playwright test -c tests/render/playwright.config.mts",
     "test:full": "npm run typecheck && npm run lint && npm test && npm run test:render && npm run test:e2e",
+    "bench:session-search": "npm run build && node scripts/session-search-benchmark.mjs",
     "preview": "node scripts/ensure-worktree-dev.mjs && electron-vite preview",
     "make-icon": "bash scripts/make-icon.sh",
     "site:screenshots": "node scripts/site-screenshots.mjs"

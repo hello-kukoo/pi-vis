@@ -86,6 +86,16 @@ export function IconClose(props: IconProps): React.ReactElement {
   );
 }
 
+/** Search — magnifying glass for workspace and modal search affordances. */
+export function IconSearch(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <circle cx="5.25" cy="5.25" r="3" />
+      <path d="m7.5 7.5 2.25 2.25" />
+    </Icon>
+  );
+}
+
 /** File — generic pending composer attachment. */
 export function IconFile(props: IconProps): React.ReactElement {
   return (

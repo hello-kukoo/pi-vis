@@ -45,8 +45,11 @@ if (process.env["PIVIS_SETTINGS_DIR"]) {
   app.setPath("userData", process.env["PIVIS_SETTINGS_DIR"]);
 }
 
-// Single-instance lock: prevent multiple main processes
-if (!app.requestSingleInstanceLock()) {
+// Single-instance lock: prevent multiple main processes. Packaged E2E may run
+// beside a developer instance and uses an isolated userData directory.
+const hasSingleInstanceLock =
+  process.env["PIVIS_TEST_ALLOW_MULTIPLE_INSTANCES"] === "1" || app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {

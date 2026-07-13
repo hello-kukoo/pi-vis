@@ -858,6 +858,10 @@ async function handleMessage(message) {
         );
       }
       sendControl({ type: "spawned" });
+      if (process.env.PIVIS_TEST_HOST_FAIL_SESSION_ID === sessionId) {
+        setTimeout(() => process.exit(23), 5).unref?.();
+        return;
+      }
       const readyDelayMs = Number.parseInt(process.env.PIVIS_TEST_HOST_READY_DELAY_MS ?? "", 10);
       const publishReady = () => {
         sendControl({ type: "ready", piVersion: "99.0.0", snapshot: snapshot() });

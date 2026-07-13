@@ -58,6 +58,7 @@ import {
   resolveValidatedWorktreeForFile,
 } from "./sessions/session-discovery.js";
 import { SessionRegistry } from "./sessions/session-registry.js";
+import { SessionSearchService } from "./sessions/session-search/session-search-service.js";
 import { getSettings, saveSettings } from "./settings-store.js";
 import { createGistForSession } from "./share.js";
 import {
@@ -86,6 +87,7 @@ let eventBatcher: ReturnType<typeof createEventBatcher> | null = null;
 const activeWorktreeOperations = new Set<SessionId>();
 const lastWorktreeOperationErrors = new Map<SessionId, string>();
 const reservedCreatedWorktrees = new Map<string, SessionId>();
+let sessionSearchService: SessionSearchService | null = null;
 
 // Build the env for spawning a pi process/host. Adds the pi theme signals so
 // every host-rendered terminal/ANSI surface resolves colors consistent with
@@ -181,6 +183,109 @@ async function currentWorktreeSnapshot(
   }
 }
 
+function logTestIpcInvocation(channel: string, payload: unknown): void {
+  const logFile = process.env["PIVIS_TEST_IPC_INVOCATION_LOG"];
+  if (!logFile) return;
+  try {
+    fs.appendFileSync(logFile, `${JSON.stringify({ channel, payload })}\n`);
+  } catch {
+    // Test diagnostics must never affect production IPC behavior.
+  }
+}
+
+async function openSessionRecord(
+  workspacePath: string,
+  sessionFile?: string,
+  validatedMetadata?: {
+    name: string | null;
+    preview: string | null;
+    worktree?: WorktreeIdentity;
+    /** Descriptor remains owned by the registry through host activation. */
+    confinedDescriptor?: number;
+    confinementRoot?: string;
+  },
+) {
+  if (!registry) throw new Error("Registry not initialized");
+  let name: string | null = null;
+  let preview: string | null = null;
+  let worktree: WorktreeIdentity | undefined;
+  if (sessionFile) {
+    if (validatedMetadata) {
+      name = validatedMetadata.name;
+      preview = validatedMetadata.preview;
+      worktree = validatedMetadata.worktree;
+    } else {
+      if (!fs.existsSync(sessionFile)) return { outcome: "missing" as const };
+      const meta = extractSessionMeta(sessionFile);
+      name = meta.name;
+      preview = meta.preview || null;
+    }
+    const existing = registry.getByFile(sessionFile);
+    if (existing && existing.status !== "exited" && existing.status !== "failed") {
+      if (validatedMetadata?.confinedDescriptor !== undefined) {
+        const adopted =
+          validatedMetadata.confinementRoot !== undefined &&
+          registry.adoptConfinedSessionDescriptor(
+            existing.sessionId,
+            sessionFile,
+            validatedMetadata.confinedDescriptor,
+            validatedMetadata.confinementRoot,
+          );
+        if (!adopted) fs.closeSync(validatedMetadata.confinedDescriptor);
+      }
+      // The live registry is authoritative while a switch is in flight;
+      // persisted discovery can lag until after replacement startup.
+      const snapshot = await currentWorktreeSnapshot(existing.sessionId, workspacePath);
+      worktree = snapshot.worktree;
+      return {
+        outcome: "existing" as const,
+        sessionId: existing.sessionId,
+        name,
+        preview,
+        sessionStatus: existing.status,
+        worktreeOperationInProgress: activeWorktreeOperations.has(existing.sessionId),
+        ...(lastWorktreeOperationErrors.get(existing.sessionId)
+          ? { worktreeOperationError: lastWorktreeOperationErrors.get(existing.sessionId) }
+          : {}),
+        worktreeIdentityRevision: snapshot.revision,
+        ...(worktree ? { worktree } : {}),
+      };
+    }
+    if (!validatedMetadata) {
+      // Exited/failed records fall through: openSession clears the stale
+      // byFile mapping and creates a fresh cold record. Cold persisted
+      // locations are never trusted by path alone: revalidate canonical
+      // checkout identity and repository ownership before spawn.
+      worktree = await resolveValidatedWorktreeForFile(sessionFile, workspacePath);
+    }
+  }
+  let sessionId: SessionId;
+  try {
+    sessionId = registry.openSession(
+      workspacePath,
+      sessionFile,
+      worktree?.path,
+      validatedMetadata?.confinedDescriptor,
+      validatedMetadata?.confinementRoot,
+    );
+  } catch (error) {
+    if (validatedMetadata?.confinedDescriptor !== undefined) {
+      fs.closeSync(validatedMetadata.confinedDescriptor);
+    }
+    throw error;
+  }
+  return {
+    outcome: "opened" as const,
+    sessionId,
+    name,
+    preview,
+    sessionStatus: "cold" as const,
+    worktreeOperationInProgress: false,
+    worktreeIdentityRevision: worktreeIdentityRevisions.get(sessionId) ?? 0,
+    ...(worktree ? { worktree } : {}),
+  };
+}
+
 export function initIpc(win: BrowserWindow): void {
   mainWindow = win;
   if (handlersRegistered) return;
@@ -247,6 +352,44 @@ export function initIpc(win: BrowserWindow): void {
     },
   );
 
+  if (getSettings().sessionSearchEnabled) {
+    sessionSearchService = new SessionSearchService({
+      databaseDirectory: path.join(app.getPath("userData"), "session-search", "v1"),
+      getSettings,
+      openValidatedSource: async (source, workspacePath, descriptor) => {
+        // The service opened this descriptor before worker-side exact-content
+        // validation and transfers ownership here. Never reopen the pathname at
+        // the search→runtime boundary.
+        const opened = await openSessionRecord(workspacePath, source.canonicalPath, {
+          name: source.sessionName,
+          preview: null,
+          confinedDescriptor: descriptor,
+          confinementRoot: source.sessionsRoot,
+          ...(source.worktree
+            ? {
+                worktree: {
+                  path: source.worktree.path,
+                  branch: source.worktree.branch,
+                  name: source.worktree.name,
+                  base: source.worktree.base,
+                },
+              }
+            : {}),
+        });
+        if (opened.outcome === "missing") {
+          return { outcome: "missing", message: "The saved session was removed." };
+        }
+        return {
+          ...opened,
+          sessionFile: source.canonicalPath,
+          workspacePath,
+        };
+      },
+    });
+    void sessionSearchService.initialize();
+  }
+  win.on("focus", () => sessionSearchService?.onAppFocus());
+
   // Init PTY and app-update support (must be after safeSend is wired)
   initPty(safeSend);
   initAppUpdates((status) => safeSend("appUpdate.status", status));
@@ -278,57 +421,50 @@ export function initIpc(win: BrowserWindow): void {
     return listSessionsForWorkspace(args.workspacePath);
   });
 
+  ipcMain.handle("sessionSearch.available", () => sessionSearchService !== null);
+  ipcMain.handle("sessionSearch.start", (event, args: unknown) => {
+    if (!sessionSearchService) throw new Error("Session search is not initialized");
+    return sessionSearchService.start(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.more", (event, args: unknown) => {
+    if (!sessionSearchService) throw new Error("Session search is not initialized");
+    return sessionSearchService.more(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.expand", (event, args: unknown) => {
+    if (!sessionSearchService) return { accepted: false };
+    return sessionSearchService.expand(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.cancel", (event, args: unknown) => {
+    if (!sessionSearchService) return { cancelled: false };
+    return sessionSearchService.cancel(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.context", (event, args: unknown) => {
+    if (!sessionSearchService) {
+      return { outcome: "unavailable" as const, message: "Session search is unavailable." };
+    }
+    return sessionSearchService.context(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.open", (event, args: unknown) => {
+    logTestIpcInvocation("sessionSearch.open", args);
+    if (!sessionSearchService) {
+      return { outcome: "unavailable" as const, message: "Session search is unavailable." };
+    }
+    return sessionSearchService.open(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.status", (event, args: unknown) => {
+    if (!sessionSearchService) throw new Error("Session search is not initialized");
+    return sessionSearchService.status(event.sender, args);
+  });
+  ipcMain.handle("sessionSearch.rebuild", (event, args: unknown) => {
+    if (!sessionSearchService) throw new Error("Session search is not initialized");
+    return sessionSearchService.rebuild(event.sender, args);
+  });
+
   ipcMain.handle(
     "session.open",
     async (_evt, args: { workspacePath: string; sessionFile?: string }) => {
-      if (!registry) throw new Error("Registry not initialized");
-      let name: string | null = null;
-      let preview: string | null = null;
-      let worktree: WorktreeIdentity | undefined;
-      if (args.sessionFile) {
-        if (!fs.existsSync(args.sessionFile)) {
-          return { outcome: "missing" as const };
-        }
-        const meta = extractSessionMeta(args.sessionFile);
-        name = meta.name;
-        preview = meta.preview || null;
-        const existing = registry.getByFile(args.sessionFile);
-        if (existing && existing.status !== "exited" && existing.status !== "failed") {
-          // The live registry is authoritative while a switch is in flight;
-          // persisted discovery can lag until after replacement startup.
-          const snapshot = await currentWorktreeSnapshot(existing.sessionId, args.workspacePath);
-          worktree = snapshot.worktree;
-          return {
-            outcome: "existing" as const,
-            sessionId: existing.sessionId,
-            name,
-            preview,
-            sessionStatus: existing.status,
-            worktreeOperationInProgress: activeWorktreeOperations.has(existing.sessionId),
-            ...(lastWorktreeOperationErrors.get(existing.sessionId)
-              ? { worktreeOperationError: lastWorktreeOperationErrors.get(existing.sessionId) }
-              : {}),
-            worktreeIdentityRevision: snapshot.revision,
-            ...(worktree ? { worktree } : {}),
-          };
-        }
-        // exited/failed records fall through: openSession clears the stale
-        // byFile mapping and creates a fresh cold record (existing behavior).
-        // Cold persisted locations are never trusted by path alone: revalidate
-        // canonical checkout identity and repository ownership before spawn.
-        worktree = await resolveValidatedWorktreeForFile(args.sessionFile, args.workspacePath);
-      }
-      const sessionId = registry.openSession(args.workspacePath, args.sessionFile, worktree?.path);
-      return {
-        outcome: "opened" as const,
-        sessionId,
-        name,
-        preview,
-        sessionStatus: "cold" as const,
-        worktreeOperationInProgress: false,
-        worktreeIdentityRevision: worktreeIdentityRevisions.get(sessionId) ?? 0,
-        ...(worktree ? { worktree } : {}),
-      };
+      logTestIpcInvocation("session.open", args);
+      return openSessionRecord(args.workspacePath, args.sessionFile);
     },
   );
 
@@ -345,6 +481,7 @@ export function initIpc(win: BrowserWindow): void {
   ipcMain.handle(
     "session.activate",
     async (_evt, args: { sessionId: SessionId; activationVisitId?: string | undefined }) => {
+      logTestIpcInvocation("session.activate", args);
       const settings = getSettings();
       const piInfo = await locatePi(settings.piBinaryPath);
       if (!piInfo)
@@ -418,6 +555,7 @@ export function initIpc(win: BrowserWindow): void {
   ipcMain.handle(
     "session.releaseActivationVisit",
     async (_evt, args: { sessionId: SessionId; activationVisitId: string }) => {
+      logTestIpcInvocation("session.releaseActivationVisit", args);
       if (!registry) return { released: false };
       return registry.releaseActivationVisit(args.sessionId, args.activationVisitId);
     },
@@ -1483,6 +1621,8 @@ export function stopAllSessions(): void {
     /* best effort */
   }
   eventBatcher?.dispose();
+  void sessionSearchService?.stop();
+  sessionSearchService = null;
   registry?.stopAll();
 }
 

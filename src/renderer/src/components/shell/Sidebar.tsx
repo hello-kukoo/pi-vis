@@ -11,7 +11,8 @@ import {
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
-import { IconChevronRight, IconClose } from "../common/icons.js";
+import { IconChevronRight, IconClose, IconSearch } from "../common/icons.js";
+import { openSessionSearch } from "../session-search/SessionSearchModal.js";
 import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
 
@@ -112,10 +113,12 @@ interface ArchiveConfirmState {
 
 export function Sidebar({
   onOpenSettings,
+  sessionSearchAvailable = true,
   onMouseEnter,
   onMouseLeave,
 }: {
   onOpenSettings: () => void;
+  sessionSearchAvailable?: boolean;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
 }): React.ReactElement {
@@ -600,6 +603,20 @@ export function Sidebar({
                 >
                   <IconClose />
                 </button>
+                {sessionSearchAvailable && (
+                  <button
+                    type="button"
+                    className="icon-btn sidebar__workspace-search"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openSessionSearch(ws.path, event.currentTarget);
+                    }}
+                    title={`Search sessions in ${ws.path.split("/").pop() ?? ws.path}`}
+                    aria-label={`Search sessions in ${ws.path.split("/").pop() ?? ws.path}`}
+                  >
+                    <IconSearch />
+                  </button>
+                )}
                 <button
                   type="button"
                   className={`sidebar__workspace-chevron ${isExpanded ? "sidebar__workspace-chevron--expanded" : ""}`}

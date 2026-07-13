@@ -19,6 +19,7 @@ import type {
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
+import type { SessionSearchOpenResult } from "@shared/session-search.js";
 import { type StateCreator, create } from "zustand";
 import type { PickerRequest } from "../lib/commands/execute.js";
 import { InputNotConsumedError, executeAction } from "../lib/commands/execute.js";
@@ -92,6 +93,7 @@ export interface SessionViewState {
   editorPatchPending: number;
   /** Cold→live activation owned by the current view-only visit, if any. */
   activationVisitId?: string | undefined;
+  activationVisitReleasePending?: boolean | undefined;
   editorConflict?:
     | {
         authoritativeText: string;
@@ -890,7 +892,10 @@ interface SessionsStore {
   openSessionTab: (
     workspacePath: string,
     sessionFile?: string,
-    opts?: { focus?: boolean },
+    opts?: {
+      focus?: boolean;
+      preopened?: Extract<SessionSearchOpenResult, { sessionId: unknown }>;
+    },
   ) => Promise<SessionId | null>;
   closeSessionTab: (
     sessionId: SessionId,
@@ -1111,7 +1116,8 @@ interface SessionsStore {
 
   refreshWorkspaceSessions: (path: string) => Promise<void>;
 
-  setActiveSession: (sessionId: SessionId | null) => void;
+  /** Resolves false only when a visit-triggered activation fails. State selection is synchronous. */
+  setActiveSession: (sessionId: SessionId | null) => Promise<boolean>;
   setActiveWorkspace: (path: string | null) => void;
 }
 
@@ -3546,10 +3552,16 @@ const buildSessionsStore = (
       // (Fast path; main's session.open is also idempotent so this is not load-bearing.)
       if (sessionFile) {
         for (const s of get().sessions.values()) {
-          if (s.sessionFile === sessionFile) {
-            if (focus) get().setActiveSession(s.sessionId);
+          if (s.sessionFile !== sessionFile) continue;
+          if (!opts?.preopened || s.sessionId === opts.preopened.sessionId) {
+            if (focus && !(await get().setActiveSession(s.sessionId))) return null;
             return s.sessionId;
           }
+          // sessionSearch.open may have replaced an exited/failed main record.
+          // Its validated pre-open is authoritative; never focus the stale
+          // renderer ID and report a false success. This is local reconciliation
+          // only—the normal setActiveSession activation-visit path remains below.
+          get().removeSession(s.sessionId, { preservePendingDraft: true });
         }
       }
       // session.open is idempotent and non-throwing: it returns
@@ -3558,17 +3570,21 @@ const buildSessionsStore = (
       // "existing" means the file is already open in the main registry — we
       // adopt the existing record instead of failing, so renderer reloads and
       // double-clicks on a stored row are both lossless.
-      const res = await window.pivis.invoke("session.open", {
-        workspacePath,
-        sessionFile,
-      });
-      if (res.outcome === "missing") return null; // stale tab: skip; the cold-open call site decides whether to surface a new session
+      const res =
+        opts?.preopened ??
+        (await window.pivis.invoke("session.open", {
+          workspacePath,
+          sessionFile,
+        }));
+      if (!("sessionId" in res)) {
+        return null; // stale/invalid tab: the caller keeps any recoverable UI open
+      }
       const { sessionId, name, preview, sessionStatus } = res;
 
       // A concurrent openSessionTab for the same file may have already adopted
       // this id (double-click TOCTOU) — never recreate/reseed an existing record.
       if (get().sessions.has(sessionId)) {
-        if (focus) get().setActiveSession(sessionId);
+        if (focus && !(await get().setActiveSession(sessionId))) return null;
         return sessionId;
       }
 
@@ -3685,7 +3701,7 @@ const buildSessionsStore = (
           /* stale or unavailable history — fine */
         }
       }
-      if (focus) get().setActiveSession(sessionId);
+      if (focus && !(await get().setActiveSession(sessionId))) return null;
       return sessionId;
     } catch (err) {
       console.error("Failed to open session:", err);
@@ -3811,10 +3827,14 @@ const buildSessionsStore = (
     await get().refreshWorkspaceSessions(workspacePath);
   },
 
-  setActiveSession: (sessionId) => {
+  setActiveSession: async (sessionId) => {
     const previousActiveId = get().activeSessionId;
-    const returningVisitId = sessionId
-      ? get().sessions.get(sessionId)?.activationVisitId
+    const previousUnreadStatus = previousActiveId
+      ? get().sessions.get(previousActiveId)?.unreadStatus
+      : undefined;
+    const returningSession = sessionId ? get().sessions.get(sessionId) : undefined;
+    const returningVisitId = returningSession?.activationVisitReleasePending
+      ? returningSession.activationVisitId
       : undefined;
     set((state) => {
       if (sessionId === null) {
@@ -3842,37 +3862,55 @@ const buildSessionsStore = (
       return { activeSessionId: sessionId, activeWorkspacePath: nextWs };
     });
 
-    if (typeof window === "undefined" || !window.pivis) return;
+    if (typeof window === "undefined" || !window.pivis) return true;
 
-    const activateForVisit = (targetId: SessionId): void => {
+    const activateForVisit = async (targetId: SessionId): Promise<boolean> => {
       const activationVisitId = crypto.randomUUID();
       set((state) => {
         const target = state.sessions.get(targetId);
         if (!target) return {};
         const sessions = new Map(state.sessions);
-        sessions.set(targetId, { ...target, activationVisitId });
+        sessions.set(targetId, {
+          ...target,
+          activationVisitId,
+          activationVisitReleasePending: undefined,
+        });
         return { sessions };
       });
-      void window.pivis
-        .invoke("session.activate", { sessionId: targetId, activationVisitId })
-        .catch((err) => {
-          set((state) => {
-            const target = state.sessions.get(targetId);
-            if (!target || target.activationVisitId !== activationVisitId) return {};
-            const sessions = new Map(state.sessions);
-            sessions.set(targetId, { ...target, activationVisitId: undefined });
-            return { sessions };
+      try {
+        await window.pivis.invoke("session.activate", { sessionId: targetId, activationVisitId });
+        return true;
+      } catch (err) {
+        set((state) => {
+          const target = state.sessions.get(targetId);
+          if (!target || target.activationVisitId !== activationVisitId) return {};
+          const sessions = new Map(state.sessions);
+          sessions.set(targetId, {
+            ...target,
+            activationVisitId: undefined,
+            activationVisitReleasePending: undefined,
           });
-          get().setSessionStatus(targetId, "failed", String(err));
+          return { sessions };
         });
+        get().setSessionStatus(targetId, "failed", String(err));
+        return false;
+      }
     };
 
-    if (previousActiveId && previousActiveId !== sessionId) {
+    const releasePrevious = (): void => {
+      if (!previousActiveId || previousActiveId === sessionId) return;
       const previous = get().sessions.get(previousActiveId);
       if (shouldReapPendingNewSession(previous)) {
         void get().closeSessionTab(previousActiveId, { preservePendingDraft: true });
       } else if (previous?.activationVisitId) {
         const activationVisitId = previous.activationVisitId;
+        set((state) => {
+          const current = state.sessions.get(previousActiveId);
+          if (!current || current.activationVisitId !== activationVisitId) return {};
+          const sessions = new Map(state.sessions);
+          sessions.set(previousActiveId, { ...current, activationVisitReleasePending: true });
+          return { sessions };
+        });
         void window.pivis
           .invoke("session.releaseActivationVisit", {
             sessionId: previousActiveId,
@@ -3884,31 +3922,44 @@ const buildSessionsStore = (
               const current = state.sessions.get(previousActiveId);
               if (!current || current.activationVisitId !== activationVisitId) return {};
               const sessions = new Map(state.sessions);
-              sessions.set(previousActiveId, { ...current, activationVisitId: undefined });
+              sessions.set(previousActiveId, {
+                ...current,
+                activationVisitId: undefined,
+                activationVisitReleasePending: undefined,
+              });
               return { sessions };
             });
           });
       }
-    }
+    };
 
-    if (!sessionId || sessionId === previousActiveId) return;
+    if (!sessionId || sessionId === previousActiveId) {
+      releasePrevious();
+      return true;
+    }
     if (returningVisitId) {
       // If the user comes back while the fresh-snapshot release check is in
       // flight, cancel it. If main already completed the release, immediately
       // start a new activation even if the renderer has not received the cold
       // status event yet.
-      void window.pivis
-        .invoke("session.cancelActivationVisitRelease", {
+      try {
+        const { cancelled } = await window.pivis.invoke("session.cancelActivationVisitRelease", {
           sessionId,
           activationVisitId: returningVisitId,
-        })
-        .then(({ cancelled }) => {
-          if (!cancelled && get().activeSessionId === sessionId) activateForVisit(sessionId);
-        })
-        .catch(() => {
-          if (get().activeSessionId === sessionId) activateForVisit(sessionId);
         });
-      return;
+        if (!cancelled && get().activeSessionId === sessionId) {
+          const activated = await activateForVisit(sessionId);
+          if (activated && get().activeSessionId === sessionId) releasePrevious();
+          return activated;
+        }
+        releasePrevious();
+        return true;
+      } catch {
+        if (get().activeSessionId !== sessionId) return true;
+        const activated = await activateForVisit(sessionId);
+        if (activated && get().activeSessionId === sessionId) releasePrevious();
+        return activated;
+      }
     }
     const target = get().sessions.get(sessionId);
     if (
@@ -3918,8 +3969,35 @@ const buildSessionsStore = (
       // Main binds the token only when this visit actually causes activation;
       // an already-live process can therefore never be reaped by a stale UI
       // status or duplicate invoke.
-      activateForVisit(sessionId);
+      const activated = await activateForVisit(sessionId);
+      if (!activated && get().activeSessionId === sessionId) {
+        if (previousActiveId && get().sessions.has(previousActiveId)) {
+          if (previousUnreadStatus) {
+            set((state) => {
+              const previous = state.sessions.get(previousActiveId);
+              if (!previous) return {};
+              const sessions = new Map(state.sessions);
+              sessions.set(previousActiveId, { ...previous, unreadStatus: previousUnreadStatus });
+              return { sessions };
+            });
+          }
+          // Previous release is intentionally deferred until activation
+          // succeeds, so rollback is a local selection restore and must not
+          // start or cancel another activation visit.
+          const previous = get().sessions.get(previousActiveId);
+          set({
+            activeSessionId: previousActiveId,
+            activeWorkspacePath: previous?.workspacePath ?? null,
+          });
+        } else {
+          set({ activeSessionId: null, activeWorkspacePath: null });
+        }
+      }
+      if (activated && get().activeSessionId === sessionId) releasePrevious();
+      return activated;
     }
+    releasePrevious();
+    return true;
   },
 
   setActiveWorkspace: (path) => {

@@ -19,9 +19,12 @@ files:
 asarUnpack:
   - resources/**
   - out/resources/pi-session-host/**
+  - out/main/session-search-worker.js
+  - out/main/chunks/**
   - node_modules/@homebridge/node-pty-prebuilt-multiarch/**/*.node
   - node_modules/@homebridge/node-pty-prebuilt-multiarch/build/**
   - node_modules/proper-lockfile/**
+  - node_modules/zod/**
 mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist

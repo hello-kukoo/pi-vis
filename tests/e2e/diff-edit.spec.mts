@@ -137,11 +137,11 @@ async function openViewer(window: Page, waitForAdd = true): Promise<void> {
   ).toBeVisible({ timeout: 10_000 });
 }
 
-/** Drag-select from the center of the `fromIdx` code cell to the `toIdx` cell. */
+/** Drag-select through rendered code text from the `fromIdx` cell to the `toIdx` cell. */
 async function selectRange(window: Page, fromIdx: number, toIdx: number): Promise<void> {
   const from = window.locator(`.diff-row--add[data-line-idx="${fromIdx}"] .diff-row__code`).first();
   const to = window.locator(`.diff-row--add[data-line-idx="${toIdx}"] .diff-row__code`).first();
-  await dragBetweenCells(window, from, to);
+  await dragThroughCodeText(window, from, to);
 }
 
 /** Drag-select new-side cells in split mode. */
@@ -162,6 +162,23 @@ async function dragBetweenCells(window: Page, from: Locator, to: Locator): Promi
   await window.mouse.move(a.x + a.width / 2, a.y + a.height / 4);
   await window.mouse.down();
   await window.mouse.move(b.x + b.width / 2, b.y + (b.height * 3) / 4, { steps: 8 });
+  await window.mouse.up();
+}
+
+async function dragThroughCodeText(window: Page, from: Locator, to: Locator): Promise<void> {
+  await from.waitFor();
+  await to.waitFor();
+  const a = await from.boundingBox();
+  const b = await to.boundingBox();
+  if (!a || !b) throw new Error("could not resolve selection cells");
+  // Stay inside rendered glyphs rather than the center of the flex code cell.
+  // On a wide diff the center is empty trailing whitespace, where Chromium's
+  // pointer hit-testing does not consistently create a text selection.
+  const textInset = (width: number, preferred: number): number =>
+    Math.max(2, Math.min(width - 2, preferred));
+  await window.mouse.move(a.x + textInset(a.width, 32), a.y + a.height / 4);
+  await window.mouse.down();
+  await window.mouse.move(b.x + textInset(b.width, 160), b.y + (b.height * 3) / 4, { steps: 8 });
   await window.mouse.up();
 }
 

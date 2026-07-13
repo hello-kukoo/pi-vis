@@ -7,7 +7,8 @@
 | `resources/pi-session-host/state-authority.test.mjs` | Fault-injection regression coverage for authority protocol. |
 | `resources/pi-session-host/bridge.mjs` | Public SDK command/event bridge and runtime rebind wiring. |
 | `src/main/pi/session-host.ts` | Child-IPC wrapper, host envelope identity/sequence validation, and resync fencing. |
-| `src/main/sessions/session-registry.ts` | Snapshot lease/availability, process-cap refusal, lifecycle, acknowledgements, and two-phase close. |
+| `src/main/sessions/session-registry.ts` | Snapshot lease/availability, lifecycle, activation-visit retirement, acknowledgements, and two-phase close; it has no fixed process-cap refusal. |
+| `src/main/sessions/session-search/` | Planned worker-owned persisted-JSONL catalog, disposable SQLite index, query, and exact read-only context implementation. |
 | `src/main/ipc.ts` | Typed renderer↔main handler registration and host event forwarding. |
 | `src/shared/ipc-contract.ts` | Typed IPC boundary. |
 | `src/shared/pi-protocol/runtime-state.ts` | Snapshot, disposition, transition, escape, and runtime-state schemas. |
@@ -18,5 +19,8 @@
 | `tests/fixtures/fake-pi.mjs` | Version/update test executable; not a session runtime. |
 | `~/.pi/agent/sessions/` | Persisted session JSONL history. |
 | `~/Library/Application Support/pi-vis/settings.json` | Pi-Vis settings. |
+| `<userData>/session-search/v1/` | Disposable private SQLite search index; JSONL remains authoritative. |
 | `tests/e2e/electron-launch.mts` | Electron E2E launcher and cleanup integration. |
 | `RELEASING.md` | Packaging, signing, and release instructions. |
+| `docs/architecture/session-search.md` | Persisted workspace-search boundaries, context, worker lifecycle, corpus, and performance gates. |
+| `docs/decisions/0002-workspace-session-search.md` | Binding workspace-search decision and 17 invariants. |

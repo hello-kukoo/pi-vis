@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { closeSync, fstatSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { newSessionId } from "@shared/ids.js";
@@ -35,6 +36,11 @@ import {
 import lockfile from "proper-lockfile";
 import { resolveHostExecPath } from "../pi/locate-node.js";
 import { SessionHost } from "../pi/session-host.js";
+import {
+  assertConfinedRegularFileDescriptor,
+  createPinnedSessionHardLink,
+  openConfinedRegularFileForHost,
+} from "./session-search/entry-extractor.js";
 
 interface RetainedIntent {
   payload: SessionSubmission;
@@ -68,6 +74,11 @@ export interface SessionRecord {
   workspacePath: string;
   worktreePath?: string | undefined;
   sessionFile?: string | undefined;
+  /** Search-open file identity pinned across the cold activation IPC gap. */
+  _confinedSessionDescriptor?: number | undefined;
+  _confinedSessionRoot?: string | undefined;
+  /** Windows-only hard link that names the descriptor-pinned runtime inode. */
+  _confinedSessionAlias?: string | undefined;
   status: SessionStatus;
   error?: string | undefined;
   proc?: SessionHost | undefined;
@@ -141,6 +152,16 @@ export interface SessionRecord {
 }
 
 const RAPID_FAILURE_WINDOW_MS = 30_000;
+
+function removeRuntimePinWithRetry(alias: string, attemptsRemaining = 60): void {
+  try {
+    unlinkSync(alias);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || attemptsRemaining <= 0) return;
+    const timer = setTimeout(() => removeRuntimePinWithRetry(alias, attemptsRemaining - 1), 1_000);
+    timer.unref?.();
+  }
+}
 /** A visit release is startup cancellation, never a later idle-host policy. */
 const ACTIVATION_VISIT_RELEASE_WINDOW_MS = 2_000;
 const DEFAULT_UNIFIED_CLAIM_TIMEOUT_MS = 60_000;
@@ -193,7 +214,13 @@ export class SessionRegistry {
     private options: { unifiedClaimTimeoutMs?: number } = {},
   ) {}
 
-  openSession(workspacePath: string, sessionFile?: string, worktreePath?: string): SessionId {
+  openSession(
+    workspacePath: string,
+    sessionFile?: string,
+    worktreePath?: string,
+    confinedSessionDescriptor?: number,
+    confinedSessionRoot?: string,
+  ): SessionId {
     if (sessionFile) {
       const resolved = path.resolve(sessionFile);
       const existing = this.byFile.get(resolved);
@@ -202,6 +229,7 @@ export class SessionRegistry {
         if (record && record.status !== "exited" && record.status !== "failed") {
           throw new Error(`Session file already open: ${resolved}`);
         }
+        if (record) this.releaseConfinedSource(record);
         this.sessions.delete(existing);
         this.byFile.delete(resolved);
       }
@@ -212,6 +240,12 @@ export class SessionRegistry {
       workspacePath,
       worktreePath,
       sessionFile,
+      ...(confinedSessionDescriptor !== undefined
+        ? {
+            _confinedSessionDescriptor: confinedSessionDescriptor,
+            _confinedSessionRoot: confinedSessionRoot,
+          }
+        : {}),
       status: "cold",
       lastActiveAt: Date.now(),
       availability: "unavailable",
@@ -286,12 +320,55 @@ export class SessionRegistry {
       if (record._dead) return;
       const { execPath } = await resolveHostExecPath();
       if (record._dead) return;
+      if (
+        record.sessionFile &&
+        record._confinedSessionDescriptor !== undefined &&
+        record._confinedSessionRoot
+      ) {
+        // Rebind the pathname to the still-open descriptor at the actual host
+        // activation boundary. The child inherits this descriptor, so a path
+        // replacement after validation cannot redirect SessionManager.open().
+        assertConfinedRegularFileDescriptor(
+          record.sessionFile,
+          record._confinedSessionRoot,
+          record._confinedSessionDescriptor,
+        );
+        if (process.platform === "win32") {
+          // Windows has no descriptor filesystem. A verified hard link gives
+          // SessionManager a stable path to the pinned inode while preserving
+          // normal append behavior on the original file.
+          record._confinedSessionAlias = createPinnedSessionHardLink(
+            record.sessionFile,
+            record._confinedSessionDescriptor,
+          );
+          closeSync(record._confinedSessionDescriptor);
+          record._confinedSessionDescriptor = undefined;
+        } else {
+          // Use a fresh offset-zero O_APPEND file description for every spawn.
+          // Retaining a prior description would share its EOF read offset
+          // across reactivation, while read-only would reject appends.
+          const hostDescriptor = openConfinedRegularFileForHost(
+            record.sessionFile,
+            record._confinedSessionRoot,
+          );
+          const pinnedStat = fstatSync(record._confinedSessionDescriptor);
+          const hostStat = fstatSync(hostDescriptor);
+          if (pinnedStat.dev !== hostStat.dev || pinnedStat.ino !== hostStat.ino) {
+            closeSync(hostDescriptor);
+            throw new Error("Session search source changed before host activation");
+          }
+          closeSync(record._confinedSessionDescriptor);
+          record._confinedSessionDescriptor = hostDescriptor;
+        }
+      }
       const proc = new SessionHost(
         piPath,
         record.worktreePath ?? record.workspacePath,
         record.sessionFile,
         env,
         execPath,
+        record._confinedSessionDescriptor,
+        record._confinedSessionAlias,
       );
       record.proc = proc;
       this.attachHost(record, proc);
@@ -587,7 +664,11 @@ export class SessionRegistry {
       this.publishUnavailable(record, `Invalid runtime snapshot: ${parsed.error.message}`);
       return;
     }
-    const snapshot = parsed.data;
+    const snapshot =
+      (record._confinedSessionDescriptor !== undefined || record._confinedSessionAlias) &&
+      record.sessionFile
+        ? { ...parsed.data, sessionFile: record.sessionFile }
+        : parsed.data;
     const prior = record.snapshot;
     if (record.proc?.hostInstanceId && snapshot.hostInstanceId !== record.proc.hostInstanceId)
       return;
@@ -2658,6 +2739,7 @@ export class SessionRegistry {
     record.proc = undefined;
     proc?.stop();
     this.releaseLock(record);
+    this.releaseConfinedSource(record);
     this.sessions.delete(sessionId);
     if (record.sessionFile && this.byFile.get(path.resolve(record.sessionFile)) === sessionId) {
       this.byFile.delete(path.resolve(record.sessionFile));
@@ -2881,11 +2963,24 @@ export class SessionRegistry {
   updateSessionFile(sessionId: SessionId, sessionFile: string | undefined): void {
     const record = this.sessions.get(sessionId);
     if (!record) return;
+    this.releaseConfinedSource(record);
     if (record.sessionFile && this.byFile.get(path.resolve(record.sessionFile)) === sessionId) {
       this.byFile.delete(path.resolve(record.sessionFile));
     }
     record.sessionFile = sessionFile;
     if (sessionFile) this.byFile.set(path.resolve(sessionFile), sessionId);
+  }
+
+  private releaseConfinedSource(record: SessionRecord): void {
+    if (record._confinedSessionDescriptor !== undefined) {
+      closeSync(record._confinedSessionDescriptor);
+      record._confinedSessionDescriptor = undefined;
+    }
+    if (record._confinedSessionAlias) {
+      removeRuntimePinWithRetry(record._confinedSessionAlias);
+      record._confinedSessionAlias = undefined;
+    }
+    record._confinedSessionRoot = undefined;
   }
 
   private async acquireLock(record: SessionRecord): Promise<void> {
@@ -2919,6 +3014,29 @@ export class SessionRegistry {
       })
       .catch(() => {});
     record._hasLock = false;
+  }
+
+  /** Transfer a search-validated file identity onto an existing cold record. */
+  adoptConfinedSessionDescriptor(
+    sessionId: SessionId,
+    sessionFile: string,
+    descriptor: number,
+    confinementRoot: string,
+  ): boolean {
+    const record = this.sessions.get(sessionId);
+    if (
+      !record ||
+      record.proc ||
+      (record.status !== "cold" && record.status !== "starting") ||
+      !record.sessionFile ||
+      path.resolve(record.sessionFile) !== path.resolve(sessionFile)
+    ) {
+      return false;
+    }
+    this.releaseConfinedSource(record);
+    record._confinedSessionDescriptor = descriptor;
+    record._confinedSessionRoot = confinementRoot;
+    return true;
   }
 
   getSession(sessionId: SessionId): SessionRecord | undefined {
