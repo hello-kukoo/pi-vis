@@ -130,6 +130,17 @@ export interface SessionRecord {
   snapshotReceivedAt?: number | undefined;
   leaseExpiresAt?: number | undefined;
   _hasLock?: boolean | undefined;
+  /** The file represented by the primary held lock; never infer this from sessionFile. */
+  _lockPath?: string | undefined;
+  /** A replacement retains the predecessor lock while holding this successor lock. */
+  _transitionLock?:
+    | {
+        transitionId: string;
+        oldLockPath?: string;
+        targetFile?: string;
+        successorLocked: boolean;
+      }
+    | undefined;
   _activating?: boolean | undefined;
   _activationDone?: Promise<void> | undefined;
   _resolveActivationDone?: (() => void) | undefined;
@@ -629,8 +640,21 @@ export class SessionRegistry {
       record.availability = "transitioning";
       this.publishRuntime(record, "transitioning", "Session replacement in progress");
     });
+    proc.on("transitionPrepare", (request) => {
+      if (!current()) return;
+      void this.permitTransition(record, proc, request).then(
+        () => proc.sendTransitionPermit(request.transitionId, true),
+        (error) =>
+          proc.sendTransitionPermit(
+            request.transitionId,
+            false,
+            error instanceof Error ? error.message : String(error),
+          ),
+      );
+    });
     proc.on("transitionCancelled", (transitionId) => {
       if (!current() || record._hostTransition?.transitionId !== transitionId) return;
+      this.abortTransitionLock(record, transitionId);
       record._hostTransition = undefined;
       record.availability = "available";
       if (record.snapshot) {
@@ -846,7 +870,20 @@ export class SessionRegistry {
       this.publishUnavailable(record, "Invalid transition batch identity");
       return false;
     }
-    if (options.expectedTransition !== undefined) record._hostTransition = undefined;
+    if (options.expectedTransition !== undefined) {
+      const lock = record._transitionLock;
+      const terminalFile = terminal.sessionFile ? path.resolve(terminal.sessionFile) : undefined;
+      if (
+        !lock ||
+        lock.transitionId !== batch.transitionId ||
+        !lock.successorLocked ||
+        (lock.targetFile !== undefined && terminalFile !== lock.targetFile)
+      ) {
+        this.publishUnavailable(record, "Successor transition batch arrived without its held lock");
+        return false;
+      }
+      record._hostTransition = undefined;
+    }
     // Reduce every record privately in wire order. Nothing is renderer-visible
     // until the terminal direct snapshot is installed and one combined IPC
     // update is published.
@@ -901,6 +938,10 @@ export class SessionRegistry {
     }
     this.installSnapshot(record, terminal, false);
     const state = this.publishRuntime(record, "available", undefined, false);
+    // Routing is now committed and the successor lock is still held. Only at
+    // this point may the predecessor advisory lock be released.
+    if (options.expectedTransition !== undefined)
+      this.commitTransitionLock(record, batch.transitionId);
     this.onTransitionBatch(record.sessionId, batch.records, state);
     return true;
   }
@@ -1217,6 +1258,8 @@ export class SessionRegistry {
   private handleRuntimeFailure(record: SessionRecord, proc: SessionHost, reason: string): void {
     if (record.proc !== proc) return;
     this.captureEditorRecovery(record);
+    if (record._hostTransition)
+      this.abortTransitionLock(record, record._hostTransition.transitionId);
     record.proc = undefined;
     this.retireHostUi(record);
     record._procReady = false;
@@ -3351,6 +3394,11 @@ export class SessionRegistry {
     if (!record || record.sessionFile) return;
     const resolved = path.resolve(sessionFile);
     if (this.byFile.has(resolved)) return;
+    // A live host may only discover a new file while its transition permit
+    // already holds that exact successor lock.
+    if (record._hasLock && record._lockPath !== resolved) {
+      throw new Error("A held session lock cannot silently move to a discovered file");
+    }
     record.sessionFile = sessionFile;
     this.byFile.set(resolved, sessionId);
   }
@@ -3358,6 +3406,10 @@ export class SessionRegistry {
   updateSessionFile(sessionId: SessionId, sessionFile: string | undefined): void {
     const record = this.sessions.get(sessionId);
     if (!record) return;
+    const next = sessionFile ? path.resolve(sessionFile) : undefined;
+    if (record._hasLock && next !== record._lockPath) {
+      throw new Error("updateSessionFile cannot move a held advisory lock");
+    }
     this.releaseConfinedSource(record);
     if (record.sessionFile && this.byFile.get(path.resolve(record.sessionFile)) === sessionId) {
       this.byFile.delete(path.resolve(record.sessionFile));
@@ -3378,37 +3430,131 @@ export class SessionRegistry {
     record._confinedSessionRoot = undefined;
   }
 
+  private async lockPath(record: SessionRecord, file: string): Promise<void> {
+    const resolved = path.resolve(file);
+    if (record._lockPath === resolved && record._hasLock) return;
+    await lockfile.lock(resolved, {
+      retries: 0,
+      realpath: false,
+      lockfilePath: `${resolved}.lock`,
+      onCompromised: () => {
+        // Compromise is a hard activation failure, never a warning.
+        record._hasLock = false;
+      },
+    });
+  }
+
   private async acquireLock(record: SessionRecord): Promise<void> {
     if (!record.sessionFile || record._hasLock) return;
+    const resolved = path.resolve(record.sessionFile);
     try {
-      await lockfile.lock(record.sessionFile, {
-        retries: 0,
-        realpath: false,
-        lockfilePath: `${record.sessionFile}.lock`,
-        onCompromised: (error: Error) => {
-          console.warn(`[session-registry] Session lock compromised: ${error.message}`);
-          record._hasLock = false;
-        },
-      });
+      await this.lockPath(record, resolved);
       record._hasLock = true;
-    } catch {
+      record._lockPath = resolved;
+    } catch (error) {
       record._hasLock = false;
-      this.onPanelEvent(record.sessionId, {
-        type: "session_warning",
-        message: "Session file is open in another pi instance. Changes may conflict.",
-      });
+      throw new Error(
+        `Session file lock contention prevented activation: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
+  private unlockPath(file: string | undefined): void {
+    if (!file) return;
+    void lockfile.unlock(file, { lockfilePath: `${file}.lock`, realpath: false }).catch(() => {});
+  }
+
   private releaseLock(record: SessionRecord): void {
-    if (!record._hasLock || !record.sessionFile) return;
-    void lockfile
-      .unlock(record.sessionFile, {
-        lockfilePath: `${record.sessionFile}.lock`,
-        realpath: false,
-      })
-      .catch(() => {});
+    this.unlockPath(record._lockPath);
+    this.unlockPath(record._transitionLock?.targetFile);
     record._hasLock = false;
+    record._lockPath = undefined;
+    record._transitionLock = undefined;
+  }
+
+  private async permitTransition(
+    record: SessionRecord,
+    proc: SessionHost,
+    request: {
+      transitionId: string;
+      phase: "prepare" | "successor";
+      kind: string;
+      targetFile?: string;
+    },
+  ): Promise<void> {
+    if (
+      this.sessions.get(record.sessionId) !== record ||
+      record.proc !== proc ||
+      record._closing ||
+      record._dead ||
+      !record._procReady
+    ) {
+      throw new Error("Session lifecycle rejected transition permit");
+    }
+    const active = record._hostTransition;
+    if (!active || active.transitionId !== request.transitionId) {
+      throw new Error("Uncorrelated transition prepare");
+    }
+    if (!record._transitionLock) {
+      record._transitionLock = {
+        transitionId: request.transitionId,
+        ...(record._lockPath ? { oldLockPath: record._lockPath } : {}),
+        successorLocked: false,
+      };
+    }
+    const lock = record._transitionLock;
+    if (lock.transitionId !== request.transitionId)
+      throw new Error("Another transition owns the lock reservation");
+    if (request.phase === "prepare" && request.targetFile === undefined) return;
+    if (request.phase === "successor" && request.targetFile === undefined) {
+      throw new Error("Successor session file was not provided for lock reservation");
+    }
+    const target = path.resolve(request.targetFile!);
+    const occupied = this.byFile.get(target);
+    if (occupied && occupied !== record.sessionId)
+      throw new Error("Target session file is already active");
+    if (lock.targetFile && lock.targetFile !== target)
+      throw new Error("Transition target changed after reservation");
+    lock.targetFile = target;
+    if (target === record._lockPath && record._hasLock) {
+      lock.successorLocked = true;
+      return;
+    }
+    try {
+      await this.lockPath(record, target);
+      lock.successorLocked = true;
+    } catch (error) {
+      throw new Error(
+        `Session file lock contention prevented transition: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private abortTransitionLock(record: SessionRecord, transitionId: string): void {
+    const lock = record._transitionLock;
+    if (!lock || lock.transitionId !== transitionId) return;
+    if (lock.targetFile && lock.targetFile !== lock.oldLockPath) this.unlockPath(lock.targetFile);
+    record._transitionLock = undefined;
+  }
+
+  private commitTransitionLock(record: SessionRecord, transitionId: string): void {
+    const lock = record._transitionLock;
+    if (!lock || lock.transitionId !== transitionId || !lock.successorLocked || !lock.targetFile) {
+      throw new Error("Cannot commit transition routing without successor lock");
+    }
+    const old = lock.oldLockPath;
+    const priorSessionFile = record.sessionFile;
+    record._lockPath = lock.targetFile;
+    record._hasLock = true;
+    // The routing map changes only as part of the same commit that transfers
+    // lock ownership. No helper may silently point a held lock at a new file.
+    if (priorSessionFile && this.byFile.get(path.resolve(priorSessionFile)) === record.sessionId) {
+      this.byFile.delete(path.resolve(priorSessionFile));
+    }
+    record.sessionFile = lock.targetFile;
+    this.byFile.set(lock.targetFile, record.sessionId);
+    if (old && old !== lock.targetFile) this.unlockPath(old);
+    record._transitionLock = undefined;
   }
 
   /** Transfer a search-validated file identity onto an existing cold record. */

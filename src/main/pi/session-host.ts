@@ -204,6 +204,13 @@ export interface SessionHostEvents {
   transitionBatch: (batch: TransitionBatch) => void;
   transitionStarted: (transitionId: string, provisionalEpoch: number) => void;
   transitionCancelled: (transitionId: string) => void;
+  /** Child froze semantic ingress and requires main lock/trust authorization. */
+  transitionPrepare: (request: {
+    transitionId: string;
+    phase: "prepare" | "successor";
+    kind: string;
+    targetFile?: string;
+  }) => void;
   transportGap: (expected: number, received: number) => void;
   controlSilence: () => void;
   submissionDisposition: (result: SubmissionResult) => void;
@@ -269,6 +276,13 @@ type HostWireMessage =
   | { type: "queue_restoration"; restorationId: string; [key: string]: unknown }
   | { type: "ui_ack"; operationId: string }
   | { type: "renderer_cancelled"; rendererGeneration: number }
+  | {
+      type: "transition_prepare";
+      transitionId: string;
+      phase: "prepare" | "successor";
+      kind: string;
+      targetFile?: string;
+    }
   | { type: "fatal_transition_error"; message: string };
 
 // biome-ignore lint/suspicious/noUnsafeDeclarationMerging: typed EventEmitter
@@ -1021,6 +1035,24 @@ export class SessionHost extends EventEmitter {
         break;
       }
 
+      case "transition_prepare": {
+        const request = z
+          .object({
+            transitionId: z.string().min(1),
+            phase: z.enum(["prepare", "successor"]),
+            kind: z.string().min(1),
+            targetFile: z.string().min(1).optional(),
+          })
+          .safeParse(msg);
+        if (request.success) {
+          // The EventEmitter declaration merge below is intentionally narrow;
+          // dispatch this newly introduced protocol event without widening the
+          // generic emitter surface for arbitrary wire messages.
+          (this.emit as (...args: unknown[]) => boolean)("transitionPrepare", request.data);
+        }
+        break;
+      }
+
       case "authority_frame": {
         const frame = AuthorityFrameSchema.safeParse(msg.frame);
         if (!frame.success) {
@@ -1138,7 +1170,13 @@ export class SessionHost extends EventEmitter {
       | { type: "dialog_response"; response: unknown }
       | { type: "interrupt" }
       | { type: "panel_resize"; panelId: number; cols: number; rows: number; force?: true }
-      | { type: "panel_close_request"; panelId: number; operationId: string },
+      | { type: "panel_close_request"; panelId: number; operationId: string }
+      | {
+          type: "transition_permit";
+          transitionId: string;
+          allowed: boolean;
+          reason?: string;
+        },
   ): void {
     if (this.proc.exitCode !== null || this.proc.killed || !this.proc.connected) return;
     try {
@@ -1373,6 +1411,15 @@ export class SessionHost extends EventEmitter {
     if (!response.success) throw new Error(response.error ?? "Reload failed");
   }
 
+  sendTransitionPermit(transitionId: string, allowed: boolean, reason?: string): void {
+    this.sendToHost({
+      type: "transition_permit",
+      transitionId,
+      allowed,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+  }
+
   sendRendererDetached(rendererGeneration: number): void {
     if (!this.proc.connected) return;
     this.proc.send({ type: "renderer_detached", rendererGeneration });
@@ -1560,6 +1607,15 @@ export interface SessionHost {
     listener: (transitionId: string, provisionalEpoch: number) => void,
   ): this;
   on(event: "transitionCancelled", listener: (transitionId: string) => void): this;
+  on(
+    event: "transitionPrepare",
+    listener: (request: {
+      transitionId: string;
+      phase: "prepare" | "successor";
+      kind: string;
+      targetFile?: string;
+    }) => void,
+  ): this;
   on(event: "transportGap", listener: (expected: number, received: number) => void): this;
   on(event: "controlSilence", listener: () => void): this;
   on(event: "submissionDisposition", listener: (result: SubmissionResult) => void): this;
@@ -1594,6 +1650,15 @@ export interface SessionHost {
   emit(event: "transitionBatch", batch: TransitionBatch): boolean;
   emit(event: "transitionStarted", transitionId: string, provisionalEpoch: number): boolean;
   emit(event: "transitionCancelled", transitionId: string): boolean;
+  emit(
+    event: "transitionPrepare",
+    request: {
+      transitionId: string;
+      phase: "prepare" | "successor";
+      kind: string;
+      targetFile?: string;
+    },
+  ): boolean;
   emit(event: "transportGap", expected: number, received: number): boolean;
   emit(event: "controlSilence"): boolean;
   emit(event: "submissionDisposition", result: SubmissionResult): boolean;

@@ -74,6 +74,29 @@ const panelReconstruction = createPanelReconstruction();
 const hostInstanceId = crypto.randomUUID();
 let transportSequence = 0;
 const activeEpoch = 0;
+const transitionPermitWaiters = new Map();
+
+function requestMainTransitionPermit(request) {
+  const transitionId = request?.transitionId;
+  if (typeof transitionId !== "string" || transitionId.length === 0) {
+    return Promise.reject(new Error("Transition permit requires a transition ID"));
+  }
+  const prior = transitionPermitWaiters.get(transitionId);
+  if (prior) return prior.promise;
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  const timer = setTimeout(() => {
+    if (transitionPermitWaiters.get(transitionId)?.promise !== promise) return;
+    transitionPermitWaiters.delete(transitionId);
+    resolve({ allowed: false, reason: "transition permit lost" });
+  }, 5_000);
+  timer.unref?.();
+  transitionPermitWaiters.set(transitionId, { promise, resolve, timer });
+  send({ type: "transition_prepare", ...request });
+  return promise;
+}
 
 function send(msg) {
   // Transition-sensitive records are retained by state-authority until its
@@ -503,6 +526,7 @@ async function handleInit(msg) {
       publishSnapshot: publish,
       requestAuthorityAttach: attachAuthority,
       requestLifecyclePermit: lifecyclePermit,
+      requestTransitionPermit: requestMainTransitionPermit,
       applyEditorPatch: patchEditor,
       authority,
       bindExtensions: bindExt,
@@ -671,6 +695,18 @@ process.on("message", async (msg) => {
           ? await requestLifecyclePermit(msg.operation)
           : { allowed: false, reason: "transport_unavailable" };
         send({ type: "response", id: msg.id, success: true, data: verdict });
+        break;
+      }
+
+      case "transition_permit": {
+        const waiter = transitionPermitWaiters.get(msg.transitionId);
+        if (!waiter) break;
+        clearTimeout(waiter.timer);
+        transitionPermitWaiters.delete(msg.transitionId);
+        waiter.resolve({
+          allowed: msg.allowed === true,
+          reason: typeof msg.reason === "string" ? msg.reason : "transition denied",
+        });
         break;
       }
 

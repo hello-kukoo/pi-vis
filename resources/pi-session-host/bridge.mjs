@@ -148,6 +148,11 @@ export function setupCommandBridge({
   // serializes these only after prior ingress commits.
   authorityPresentation = {},
   sendFrame = null,
+  // Main owns target validation and advisory locks. The child uses this only
+  // after freezing its serialized semantic ingress.
+  // Unit-level bridge consumers without a parent transport retain the legacy
+  // in-process behavior; host.mjs always supplies the real main handshake.
+  requestTransitionPermit = async () => ({ allowed: true, reason: "test/local permit" }),
   initialBinding = false,
   lifecycleUiTracker = { track: (promise) => promise },
   uiState = {
@@ -290,7 +295,7 @@ export function setupCommandBridge({
         runtime,
         authority,
         reload: () => handleReload(),
-        replace: (operation) => runReplacement(operation),
+        replace: (operation, details) => runReplacement(operation, details),
         waitForIdle: () => waitForSessionIdle(),
       }),
       // An extension requested app shutdown (e.g. a TUI-style /exit). In a GUI
@@ -500,7 +505,19 @@ export function setupCommandBridge({
       : bindExtensions(s);
   }
 
-  async function runReplacement(operation) {
+  async function requestReplacementPermit(transitionId, phase, kind, targetFile) {
+    const verdict = await requestTransitionPermit({
+      transitionId,
+      phase,
+      kind,
+      ...(typeof targetFile === "string" && targetFile.length > 0 ? { targetFile } : {}),
+    });
+    if (!verdict?.allowed) {
+      throw new Error(verdict?.reason || "Session transition was not permitted");
+    }
+  }
+
+  async function runReplacement(operation, details = {}) {
     const current = authority.snapshot();
     const owningIntentId = admissionContext.getStore();
     const ownsOnlyActiveSubmission =
@@ -520,15 +537,34 @@ export function setupCommandBridge({
       throw new Error("Wait for current session work to finish before replacing the session.");
     }
     const oldSession = _session;
-    authority.beginTransition(authority.sessionEpoch + 1);
+    const transitionId = authority.beginTransition(authority.sessionEpoch + 1);
     try {
+      // Freezing happens in beginTransition before this request is sent. Main
+      // may now validate a known switch target and reserve its lock.
+      await requestReplacementPermit(
+        transitionId,
+        "prepare",
+        details.kind ?? "replacement",
+        details.targetFile,
+      );
       const result = await runLifecycle(operation, "Session replacement");
       if (result?.cancelled) {
         if (authority.transitionBoundaryCrossed) {
           throw new Error("Session replacement cancelled after invalidation boundary");
         }
         authority.cancelTransition(oldSession);
-      } else authority.commitTransition();
+      } else {
+        // /new and /fork discover their file only after SDK preparation. This
+        // second permit acquires that successor lock before any batch can be
+        // published as following.
+        await requestReplacementPermit(
+          transitionId,
+          "successor",
+          details.kind ?? "replacement",
+          _session.sessionFile,
+        );
+        authority.commitTransition();
+      }
       return result;
     } catch (err) {
       // A failure before rebind leaves the old public session valid. Once
@@ -574,7 +610,9 @@ export function setupCommandBridge({
       throw new Error("Wait for the current response to finish before reloading.");
     }
     const oldSession = _session;
+    const transitionId = authority.transitionId;
     try {
+      await requestReplacementPermit(transitionId, "prepare", "reload", _session.sessionFile);
       await runLifecycle(
         () =>
           _session.reload({
@@ -590,6 +628,7 @@ export function setupCommandBridge({
       );
       // reload keeps the AgentSession object and subscription but replaces
       // extension bindings; publish all buffered events with one terminal read.
+      await requestReplacementPermit(transitionId, "successor", "reload", _session.sessionFile);
       authority.commitTransition();
     } catch (err) {
       if (!err?.lifecycleTimeout && !authority.transitionBoundaryCrossed) {
@@ -1163,7 +1202,7 @@ export function setupCommandBridge({
         // _session is already the new session when we send the response. ipc.ts
         // then harvests the new sessionFile via a follow-up get_state.
         case "new_session": {
-          const result = await runReplacement(() => runtime.newSession());
+          const result = await runReplacement(() => runtime.newSession(), { kind: "new" });
           send({
             type: "response",
             id,
@@ -1174,7 +1213,9 @@ export function setupCommandBridge({
         }
 
         case "fork": {
-          const result = await runReplacement(() => runtime.fork(command.entryId));
+          const result = await runReplacement(() => runtime.fork(command.entryId), {
+            kind: "fork",
+          });
           send({
             type: "response",
             id,
@@ -1185,7 +1226,10 @@ export function setupCommandBridge({
         }
 
         case "switch_session": {
-          const result = await runReplacement(() => runtime.switchSession(command.sessionPath));
+          const result = await runReplacement(() => runtime.switchSession(command.sessionPath), {
+            kind: "switch",
+            targetFile: command.sessionPath,
+          });
           send({
             type: "response",
             id,
@@ -1209,7 +1253,9 @@ export function setupCommandBridge({
             });
             return;
           }
-          const result = await runReplacement(() => runtime.fork(leafId, { position: "at" }));
+          const result = await runReplacement(() => runtime.fork(leafId, { position: "at" }), {
+            kind: "clone",
+          });
           send({
             type: "response",
             id,
@@ -1691,13 +1737,17 @@ async function collectLogoutProviders(session) {
 function buildCommandContextActions({ runtime, authority, reload, replace, waitForIdle }) {
   return {
     waitForIdle,
-    newSession: async (options) => replace(() => runtime.newSession(options)),
-    fork: async (entryId, options) => replace(() => runtime.fork(entryId, options)),
+    newSession: async (options) => replace(() => runtime.newSession(options), { kind: "new" }),
+    fork: async (entryId, options) =>
+      replace(() => runtime.fork(entryId, options), { kind: "fork" }),
     navigateTree: async (targetId, options) =>
       authority.runNavigation(() => authority.currentSession.navigateTree(targetId, options)),
 
     switchSession: async (sessionPath, options) =>
-      replace(() => runtime.switchSession(sessionPath, options)),
+      replace(() => runtime.switchSession(sessionPath, options), {
+        kind: "switch",
+        targetFile: sessionPath,
+      }),
     // Use the same transition-aware path as the external reload message.
     // Reload can emit extension/UI events before and after its rebind point.
     reload: async () => reload(),

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { SessionId } from "@shared/ids.js";
@@ -357,6 +358,51 @@ describe("SessionRegistry direct AgentSession authority", () => {
     expect(h.registry.getSession(id)?.status).toBe("failed");
     expect(h.registry.getSession(id)?.proc).toBeUndefined();
     h.registry.stopAll();
+  });
+
+  it("keeps the predecessor lock when a permitted successor rolls back", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pivis-transition-lock-"));
+    const oldFile = path.join(dir, "old.jsonl");
+    const nextFile = path.join(dir, "next.jsonl");
+    await Promise.all([writeFile(oldFile, ""), writeFile(nextFile, "")]);
+    const h = harness();
+    const id = h.registry.openSession(dir, oldFile);
+    try {
+      await h.registry.activateSession(id, "/tmp/pi", {});
+      const fake = h.fakes[0]!;
+      fake.emitControl({
+        type: "transition_started",
+        transitionId: "rollback-lock",
+        provisionalEpoch: 1,
+      });
+      fake.emitWire({
+        type: "transition_prepare",
+        transitionId: "rollback-lock",
+        phase: "prepare",
+        kind: "switch",
+        targetFile: nextFile,
+      });
+      await vi.waitFor(() =>
+        expect(
+          fake.sent.some(
+            (message) =>
+              message.type === "transition_permit" &&
+              message.transitionId === "rollback-lock" &&
+              message.allowed === true,
+          ),
+        ).toBe(true),
+      );
+      fake.emitControl({ type: "transition_cancelled", transitionId: "rollback-lock" });
+
+      // The reservation for nextFile is gone, while the old primary lock is
+      // still held and therefore cannot be silently moved by bookkeeping.
+      expect(() => h.registry.updateSessionFile(id, nextFile)).toThrow("held advisory lock");
+      expect(h.registry.getSession(id)?._lockPath).toBe(path.resolve(oldFile));
+    } finally {
+      h.registry.stopAll();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not dispatch reload without a child lifecycle permit", async () => {

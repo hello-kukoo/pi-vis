@@ -1892,6 +1892,9 @@ export function createStateAuthority({
     get isTransitioning() {
       return transition !== null;
     },
+    get transitionId() {
+      return transition?.transitionId;
+    },
     get hasActiveWork() {
       return (
         submitting > 0 ||
