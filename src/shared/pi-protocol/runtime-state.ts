@@ -139,6 +139,19 @@ export const ReloadSettlementSchema = z.object({
 });
 export type ReloadSettlement = z.infer<typeof ReloadSettlementSchema>;
 
+/** Opaque child-owned lifecycle admission; main must not infer this from snapshots. */
+export const LifecyclePermitOperationSchema = z.enum([
+  "reload",
+  "worktree_respawn",
+  "activation_visit_release",
+]);
+export type LifecyclePermitOperation = z.infer<typeof LifecyclePermitOperationSchema>;
+export const LifecyclePermitVerdictSchema = z.object({
+  allowed: z.boolean(),
+  reason: z.string(),
+});
+export type LifecyclePermitVerdict = z.infer<typeof LifecyclePermitVerdictSchema>;
+
 export const RuntimeImageSchema = z.object({
   type: z.literal("image"),
   data: z.string(),

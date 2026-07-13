@@ -35,6 +35,9 @@ import {
   AuthorityFrameSchema,
   type EscapeResult,
   HostEnvelopeSchema,
+  type LifecyclePermitOperation,
+  type LifecyclePermitVerdict,
+  LifecyclePermitVerdictSchema,
   type SessionSubmission,
   type SubmissionResult,
   SubmissionResultSchema,
@@ -1150,7 +1153,7 @@ export class SessionHost extends EventEmitter {
   // ─── Public SDK-host interface ─────────────────────────────────────────
 
   /** Low-level child command transport. Higher layers use the capability-specific public methods. */
-  private async sendCommand(
+  private async sendHostCommand(
     command: PiRpcCommand,
     options: {
       uiSurface?: "composer" | "unified" | undefined;
@@ -1203,12 +1206,12 @@ export class SessionHost extends EventEmitter {
       onDispatched?: (() => void) | undefined;
     } = {},
   ): Promise<PiRpcResponse> {
-    return this.sendCommand(command, options);
+    return this.sendHostCommand(command, options);
   }
 
   /** Execute an explicitly read-only query without exposing generic child command transport. */
   async query(command: PiReadOnlyCommand): Promise<PiRpcResponse> {
-    const response = await this.sendCommand(command);
+    const response = await this.sendHostCommand(command);
     // The child response is opaque; only restore its request correlation at
     // this transport boundary for the typed query result contract.
     return { ...response, command: command.type };
@@ -1316,6 +1319,17 @@ export class SessionHost extends EventEmitter {
       throw new Error("Authority attach baseline runtime identity mismatch");
     }
     return baseline.data;
+  }
+
+  async requestLifecyclePermit(
+    operation: LifecyclePermitOperation,
+  ): Promise<LifecyclePermitVerdict> {
+    const response = await this.requestHost({ type: "lifecycle_permit", operation }, 2_000);
+    if (!response.success) throw new Error(response.error ?? "Lifecycle admission failed");
+    const verdict = LifecyclePermitVerdictSchema.safeParse(response.data);
+    if (!verdict.success)
+      throw new Error(`Invalid lifecycle admission verdict: ${verdict.error.message}`);
+    return verdict.data;
   }
 
   async requestSnapshot(): Promise<AgentSessionSnapshot> {

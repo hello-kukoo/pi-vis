@@ -57,6 +57,7 @@ let handleReload = null;
 let dispatchIntent = null;
 let publishSnapshot = null;
 let requestAuthorityAttach = null;
+let requestLifecyclePermit = null;
 let applyEditorPatch = null;
 let runtimeAuthority = null;
 let interruptActiveOperation = null;
@@ -501,6 +502,7 @@ async function handleInit(msg) {
       dispatchIntent: dispatch,
       publishSnapshot: publish,
       requestAuthorityAttach: attachAuthority,
+      requestLifecyclePermit: lifecyclePermit,
       applyEditorPatch: patchEditor,
       authority,
       bindExtensions: bindExt,
@@ -554,6 +556,7 @@ async function handleInit(msg) {
     dispatchIntent = dispatch;
     publishSnapshot = publish;
     requestAuthorityAttach = attachAuthority;
+    requestLifecyclePermit = lifecyclePermit;
     applyEditorPatch = patchEditor;
     interruptActiveOperation = interrupt;
     const initialBatch = authority.commitInitialBinding();
@@ -660,6 +663,14 @@ process.on("message", async (msg) => {
       case "authority_attach": {
         const baseline = await requestAuthorityAttach?.(msg.rendererGeneration);
         send({ type: "response", id: msg.id, success: true, data: baseline });
+        break;
+      }
+
+      case "lifecycle_permit": {
+        const verdict = requestLifecyclePermit
+          ? await requestLifecyclePermit(msg.operation)
+          : { allowed: false, reason: "transport_unavailable" };
+        send({ type: "response", id: msg.id, success: true, data: verdict });
         break;
       }
 

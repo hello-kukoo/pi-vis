@@ -1574,6 +1574,77 @@ export function createStateAuthority({
     return publishSnapshot(true);
   }
 
+  // Lifecycle admission is deliberately evaluated in this child, on the same
+  // scheduler as Pi mutation ingress. Main receives no semantic facts: just an
+  // opaque allow/deny verdict it can combine with transport identity.
+  function lifecyclePermit(kind) {
+    if (stopped || closePreparation?.confirmed) return { allowed: false, reason: "closing" };
+    if (transition) return { allowed: false, reason: "transitioning" };
+    const catalog = getCatalog() ?? {};
+    const editor = getEditor() ?? {};
+    const { steering, followUp } = readQueues();
+    const sdkBusy =
+      session.isIdle !== true ||
+      session.isStreaming === true ||
+      session.isCompacting === true ||
+      session.isRetrying === true ||
+      session.isBashRunning === true ||
+      Number(session.pendingMessageCount ?? 0) > 0;
+    const childWork =
+      submitting > 0 ||
+      unresolvedAdmissions > 0 ||
+      activeIntents.size > 0 ||
+      custody.length > 0 ||
+      promptFence !== null ||
+      navigationDepth > 0 ||
+      compactionBarrierOpen();
+    const pendingOtherIntent = [...dispatchedIntents.values()].some(
+      (entry) => !entry.outcome && entry.kind !== kind,
+    );
+    const editorOrUi =
+      editor.text !== "" ||
+      (editor.attachments?.length ?? 0) > 0 ||
+      editor.conflictText !== undefined ||
+      editor.alternateConflictText !== undefined ||
+      (editor.additionalConflictCandidates?.length ?? 0) > 0 ||
+      Number(catalog.pendingDialogs ?? 0) > 0 ||
+      (catalog.notifications?.length ?? 0) > 0 ||
+      Object.keys(catalog.statuses ?? {}).length > 0 ||
+      Object.keys(catalog.widgets ?? {}).length > 0 ||
+      catalog.workingVisible === true ||
+      catalog.workingMessage !== undefined;
+    if (sdkBusy || childWork || pendingOtherIntent || steering.length > 0 || followUp.length > 0) {
+      return { allowed: false, reason: "active" };
+    }
+    // Worktree respawn/reload preserve revisioned editor state during their
+    // controlled transition. An unused activation visit is the only lifecycle
+    // that must prove presentation emptiness before terminating its host.
+    if (kind === "activation_visit_release" && editorOrUi) {
+      return { allowed: false, reason: "presentation_active" };
+    }
+    return { allowed: true, reason: "allowed" };
+  }
+
+  function requestLifecyclePermit(kind) {
+    return schedule("ingress", () => lifecyclePermit(kind));
+  }
+
+  // Atomically repeat lifecycle admission immediately before a child begins a
+  // transition. A main permit is advisory transport authorization; this closes
+  // the race between its response and the eventual reload message.
+  function beginLifecycleTransition(
+    kind,
+    provisionalEpoch = sessionEpoch + 1,
+    alreadySerialized = false,
+  ) {
+    const admit = () => {
+      const verdict = lifecyclePermit(kind);
+      if (verdict.allowed) beginTransition(provisionalEpoch);
+      return verdict;
+    };
+    return alreadySerialized ? Promise.resolve(admit()) : schedule("ingress", admit);
+  }
+
   // Runs through the same scheduler as mutation ingress. Thus an attach that
   // races a compaction end or replacement observes the terminal commit, never
   // an arbitrary interleaving. Presentation planes deliberately use independent
@@ -1772,6 +1843,8 @@ export function createStateAuthority({
     createSemanticFrame,
     commitSemanticFrame,
     requestFullSnapshot,
+    requestLifecyclePermit,
+    beginLifecycleTransition,
     requestAuthorityAttach,
     semanticSnapshot,
     observeEvent,

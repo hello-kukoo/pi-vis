@@ -91,6 +91,34 @@ afterEach(() => {
 });
 
 describe("state authority", () => {
+  it("rechecks lifecycle admission on the serialized child queue after a race", async () => {
+    const { authority, session } = setup(
+      {},
+      {
+        getCatalog: () => ({ pendingDialogs: 0 }),
+        getEditor: () => ({ revision: 0, text: "", attachments: [] }),
+      },
+    );
+
+    const queuedPermit = authority.requestLifecyclePermit("reload");
+    session.isIdle = false;
+    session.isStreaming = true;
+    await expect(queuedPermit).resolves.toEqual({ allowed: false, reason: "active" });
+
+    session.isIdle = true;
+    session.isStreaming = false;
+    await expect(authority.requestLifecyclePermit("reload")).resolves.toEqual({
+      allowed: true,
+      reason: "allowed",
+    });
+    session.isIdle = false;
+    await expect(authority.beginLifecycleTransition("reload")).resolves.toEqual({
+      allowed: false,
+      reason: "active",
+    });
+    expect(authority.isTransitioning).toBe(false);
+  });
+
   it("copies direct SDK getters into snapshots and forwards raw events without inference", () => {
     const { authority, session, sendControl, sendRecord } = setup({
       isStreaming: false,

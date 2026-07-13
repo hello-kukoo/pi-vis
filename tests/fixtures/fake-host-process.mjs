@@ -150,6 +150,23 @@ export class FakeHostProcess extends EventEmitter {
         this.emitControl({ type: "snapshot", snapshot: this.snapshot(), full: true });
         this.emitWire({ type: "response", id: msg.id, success: true, data: this.snapshot() });
       });
+    } else if (msg?.type === "lifecycle_permit" && this.initialized) {
+      queueMicrotask(() => {
+        const allowed =
+          this.runtime.isIdle === true &&
+          this.runtime.isStreaming !== true &&
+          this.runtime.isCompacting !== true &&
+          this.runtime.isRetrying !== true &&
+          this.runtime.isBashRunning !== true &&
+          (msg.operation !== "activation_visit_release" ||
+            (this.editor.text === "" && this.editor.attachments.length === 0));
+        this.emitWire({
+          type: "response",
+          id: msg.id,
+          success: true,
+          data: { allowed, reason: allowed ? "allowed" : "active" },
+        });
+      });
     } else if (msg?.type === "submit" && this.initialized) {
       queueMicrotask(() => {
         this.emitWire({

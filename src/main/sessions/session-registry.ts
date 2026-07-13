@@ -180,7 +180,6 @@ export interface SessionRecord {
 }
 
 const RAPID_FAILURE_WINDOW_MS = 30_000;
-
 function removeRuntimePinWithRetry(alias: string, attemptsRemaining = 60): void {
   try {
     unlinkSync(alias);
@@ -190,6 +189,10 @@ function removeRuntimePinWithRetry(alias: string, attemptsRemaining = 60): void 
     timer.unref?.();
   }
 }
+
+// Transport freshness is independent of child Pi liveness. Semantic admission
+// is delegated to the serialized child lifecycle-permit transaction.
+const TRANSPORT_LEASE_MS = 2_000;
 /** A visit release is startup cancellation, never a later idle-host policy. */
 const ACTIVATION_VISIT_RELEASE_WINDOW_MS = 2_000;
 const DEFAULT_UNIFIED_CLAIM_TIMEOUT_MS = 60_000;
@@ -514,9 +517,8 @@ export class SessionRegistry {
       if (active) {
         record.leaseExpiresAt = undefined;
       } else if (record.snapshot) {
-        const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
-        record.leaseExpiresAt = Date.now() + leaseMs;
-        this.armLease(record, leaseMs);
+        record.leaseExpiresAt = Date.now() + TRANSPORT_LEASE_MS;
+        this.armLease(record, TRANSPORT_LEASE_MS);
       }
       this.publishRuntime(record, record.availability);
     });
@@ -620,9 +622,8 @@ export class SessionRegistry {
       record.availability = "available";
       if (record.snapshot) {
         record.snapshotReceivedAt = Date.now();
-        const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
-        record.leaseExpiresAt = record.snapshotReceivedAt + leaseMs;
-        this.armLease(record, leaseMs);
+        record.leaseExpiresAt = record.snapshotReceivedAt + TRANSPORT_LEASE_MS;
+        this.armLease(record, TRANSPORT_LEASE_MS);
       }
       this.publishRuntime(record, "available");
     });
@@ -769,18 +770,14 @@ export class SessionRegistry {
       hostInstanceId: snapshot.hostInstanceId,
       sessionEpoch: snapshot.sessionEpoch,
     });
-    if (snapshot.isIdle && snapshot.pendingMessageCount === 0) {
-      for (const [intentId, retained] of record._retainedIntents) {
-        if (["completed", "extension_error"].includes(retained.disposition)) {
-          record._retainedIntents.delete(intentId);
-        }
-      }
-    }
+    // Retained intent retirement follows explicit child dispositions/outcomes,
+    // never a main-process inference from an apparently idle snapshot.
     record.snapshotReceivedAt = Date.now();
-    const leaseMs = snapshot.isIdle ? 5_000 : 1_000;
     const transitionPending =
       record._hostTransition !== undefined || record._worktreeTransition === true;
-    record.leaseExpiresAt = transitionPending ? undefined : record.snapshotReceivedAt + leaseMs;
+    record.leaseExpiresAt = transitionPending
+      ? undefined
+      : record.snapshotReceivedAt + TRANSPORT_LEASE_MS;
     record.availability = transitionPending ? "transitioning" : "available";
     record.lastActiveAt = Date.now();
     if (snapshot.sessionFile) this.noteSessionFile(record.sessionId, snapshot.sessionFile);
@@ -788,7 +785,7 @@ export class SessionRegistry {
       if (record._leaseTimer) clearTimeout(record._leaseTimer);
       record._leaseTimer = undefined;
     } else {
-      this.armLease(record, leaseMs);
+      this.armLease(record, TRANSPORT_LEASE_MS);
     }
     if (publish) this.publishRuntime(record, record.availability);
   }
@@ -2646,13 +2643,22 @@ export class SessionRegistry {
       throw new Error("Session changed before reload dispatch");
     }
     const proc = record.proc;
-    const freshSnapshot = await proc.requestSnapshot();
+    // This probe is transport-only. It deliberately does not let main inspect
+    // Pi liveness; the following child permit owns semantic admission.
+    await proc.requestSnapshot();
+    if (record._closing) {
+      throw new Error("Session close preparation began before reload dispatch");
+    }
+    // The host serializes this fresh SDK/custody/intent/editor/UI admission.
+    // Main sees only an opaque verdict and revalidates transport ownership.
+    const permit = await proc.requestLifecyclePermit("reload");
+    if (!permit.allowed)
+      throw new Error("Wait for the current response to finish before reloading.");
     if (record._closing) {
       throw new Error("Session close preparation began before reload dispatch");
     }
     if (
       this.sessions.get(sessionId) !== record ||
-      record._closing ||
       record._dead ||
       record.proc !== proc ||
       !record._procReady ||
@@ -2666,16 +2672,6 @@ export class SessionRegistry {
         ))
     ) {
       throw new Error("Session changed before reload dispatch");
-    }
-    this.installSnapshot(record, freshSnapshot);
-    if (
-      !freshSnapshot.isIdle ||
-      freshSnapshot.hostFacts.submitting ||
-      freshSnapshot.hostFacts.custodyCount > 0
-    )
-      throw new Error("Wait for the current response to finish before reloading.");
-    if (record._closing || this.sessions.get(sessionId) !== record) {
-      throw new Error("Session close preparation began before reload dispatch");
     }
     record.availability = "transitioning";
     this.publishRuntime(record, "transitioning", "Reloading session runtime");
@@ -2738,9 +2734,6 @@ export class SessionRegistry {
       (record.availability !== "available" &&
         !(allowWorktreeTransition && record.availability === "transitioning")) ||
       record._hostTransition !== undefined ||
-      record.snapshot?.isIdle === false ||
-      record.snapshot?.hostFacts.submitting === true ||
-      (record.snapshot?.hostFacts.custodyCount ?? 0) > 0 ||
       record._retainedIntents.size > 0 ||
       record._retainedCommandIntents.size > 0 ||
       record._pendingUnifiedSubmits.size > 0
@@ -2796,19 +2789,24 @@ export class SessionRegistry {
       this.publishRuntime(record, "transitioning", "Worktree replacement in progress");
       try {
         if (proc && record._procReady) {
-          // The transition fence is installed before requesting this snapshot:
-          // already-admitted host messages settle ahead of the request, while
-          // new renderer/editor ingress is rejected until replacement ends.
+          // The snapshot is a correlated transport/editor checkpoint only.
+          // Child liveness and semantic eligibility come from the serialized permit.
           const freshSnapshot = await proc.requestSnapshot();
           if (record.proc !== proc) throw new Error("Session changed before worktree respawn");
           this.installSnapshot(record, freshSnapshot);
+          const permit = await proc.requestLifecyclePermit("worktree_respawn");
+          if (!permit.allowed) {
+            throw new Error(
+              "Wait for active and retained work before moving the session to a worktree",
+            );
+          }
+          if (record.proc !== proc) throw new Error("Session changed before worktree respawn");
           this.assertWorktreeRespawnEligible(record, true);
         }
         this.assertWorktreeRespawnEligible(record, true);
         this.captureEditorRecovery(record);
         // Callers can finish asynchronous pre-detach work before the final
-        // host snapshot. Destructive cleanup remains safe until
-        // onDetachCommitted runs below.
+        // child permit. Destructive cleanup remains safe until commit below.
         await lifecycle?.onBeforeDetach?.();
         if (this.sessions.get(sessionId) !== record || record.proc !== proc) {
           throw new Error("Session changed before worktree respawn detachment");
@@ -2819,6 +2817,15 @@ export class SessionRegistry {
             throw new Error("Session changed before worktree respawn detachment");
           }
           this.installSnapshot(record, finalSnapshot);
+          const finalPermit = await proc.requestLifecyclePermit("worktree_respawn");
+          if (!finalPermit.allowed) {
+            throw new Error(
+              "Wait for active and retained work before moving the session to a worktree",
+            );
+          }
+          if (this.sessions.get(sessionId) !== record || record.proc !== proc) {
+            throw new Error("Session changed before worktree respawn detachment");
+          }
         }
         // Source-checkout validation belongs here: no await may intervene
         // between this callback and the committed detachment boundary.
@@ -3158,40 +3165,20 @@ export class SessionRegistry {
     ) {
       return abandonVisit();
     }
+    // A state probe establishes only transport continuity. The child performs
+    // the fresh semantic/editor/UI admission in its serialized permit.
     this.installSnapshot(record, freshSnapshot, false);
-    const snapshot = record.snapshot;
-    const editor = snapshot?.editor;
+    let permit: Awaited<ReturnType<SessionHost["requestLifecyclePermit"]>>;
+    try {
+      permit = await proc.requestLifecyclePermit("activation_visit_release");
+    } catch {
+      return abandonVisit();
+    }
     const hasOpenPanel = [...record._openPanels.values()].some(
       (event) => event.type === "panel_open",
     );
     const safe =
-      snapshot !== undefined &&
-      editor !== undefined &&
-      snapshot.hostInstanceId === proc.hostInstanceId &&
-      snapshot.sessionEpoch === proc.sessionEpoch &&
-      snapshot.isIdle &&
-      !snapshot.isStreaming &&
-      !snapshot.isCompacting &&
-      !snapshot.isRetrying &&
-      !snapshot.isBashRunning &&
-      snapshot.pendingMessageCount === 0 &&
-      snapshot.steering.length === 0 &&
-      snapshot.followUp.length === 0 &&
-      !snapshot.hostFacts.submitting &&
-      !snapshot.hostFacts.actualCompaction &&
-      !snapshot.hostFacts.navigation &&
-      snapshot.hostFacts.pendingDialogs === 0 &&
-      snapshot.hostFacts.custodyCount === 0 &&
-      snapshot.catalog.notifications.length === 0 &&
-      Object.keys(snapshot.catalog.statuses).length === 0 &&
-      Object.keys(snapshot.catalog.widgets).length === 0 &&
-      !snapshot.catalog.workingVisible &&
-      snapshot.catalog.workingMessage === undefined &&
-      editor.text === "" &&
-      editor.attachments.length === 0 &&
-      editor.conflictText === undefined &&
-      editor.alternateConflictText === undefined &&
-      (editor.additionalConflictCandidates?.length ?? 0) === 0 &&
+      permit.allowed &&
       !record._closing &&
       !record._dead &&
       !record._hostTransition &&

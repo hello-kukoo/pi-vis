@@ -359,6 +359,26 @@ describe("SessionRegistry direct AgentSession authority", () => {
     h.registry.stopAll();
   });
 
+  it("does not dispatch reload without a child lifecycle permit", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    h.fakes[0]!.runtime = { ...h.fakes[0]!.runtime, isIdle: false, isStreaming: true };
+
+    await expect(
+      h.registry.executeReload(id, {
+        requestId: "reload-denied",
+        intentId: "reload-denied-intent",
+        expectedHostInstanceId: record.proc!.hostInstanceId!,
+        expectedSessionEpoch: record.proc!.sessionEpoch,
+      }),
+    ).resolves.toMatchObject({ disposition: "not_executed" });
+    expect(h.fakes[0]!.sent.some((message) => message.type === "reload")).toBe(false);
+    expect(h.fakes[0]!.sent.some((message) => message.type === "lifecycle_permit")).toBe(true);
+    h.registry.stopAll();
+  });
+
   it("rejects identity-bound commands instead of rebinding them to the current host", async () => {
     const h = harness();
     const id = h.registry.openSession("/tmp/project");

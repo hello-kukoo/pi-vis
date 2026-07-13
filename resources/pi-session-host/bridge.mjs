@@ -558,19 +558,22 @@ export function setupCommandBridge({
     return authority.requestEscape(requestId);
   }
 
-  async function handleReload() {
-    const current = authority.snapshot();
-    if (
-      !current.isIdle ||
-      current.hostFacts.submitting ||
-      current.hostFacts.custodyCount > 0 ||
-      authority.hasActiveWork ||
-      activeCommands > 0
-    ) {
+  async function handleReload(alreadySerialized = false) {
+    // Repeat child-owned admission immediately before transition creation. The
+    // main-process permit only authorizes transport; it never makes this
+    // semantic decision from a retained snapshot.
+    if (activeCommands > 0) {
+      throw new Error("Wait for the current response to finish before reloading.");
+    }
+    const permit = await authority.beginLifecycleTransition(
+      "reload",
+      authority.sessionEpoch + 1,
+      alreadySerialized,
+    );
+    if (!permit.allowed) {
       throw new Error("Wait for the current response to finish before reloading.");
     }
     const oldSession = _session;
-    authority.beginTransition(authority.sessionEpoch + 1);
     try {
       await runLifecycle(
         () =>
@@ -676,7 +679,7 @@ export function setupCommandBridge({
           _session.setSessionName(intent.name);
           return { name: intent.name };
         case "reload":
-          await handleReload();
+          await handleReload(true);
           return { owner: { hostInstanceId, sessionEpoch: authority.sessionEpoch } };
         default:
           throw new Error(`Unknown intent kind: ${intent.kind}`);
@@ -1331,6 +1334,7 @@ export function setupCommandBridge({
     handleSubmit,
     handleEscape,
     handleReload,
+    requestLifecyclePermit: (kind) => authority.requestLifecyclePermit(kind),
     dispatchIntent,
     publishSnapshot: (full = true) => authority.publishSnapshot(full),
     requestAuthorityAttach: (rendererGeneration) =>

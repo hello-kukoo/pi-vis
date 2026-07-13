@@ -498,6 +498,25 @@ describe("SessionHost", () => {
     });
   });
 
+  describe("lifecycle permits", () => {
+    it("returns only the child lifecycle verdict", async () => {
+      fake.emitReady("0.80.6");
+      await host.waitForReady();
+
+      const permit = host.requestLifecyclePermit("reload");
+      const wire = [...fake.sent].reverse().find((message) => message.type === "lifecycle_permit");
+      if (!wire) throw new Error("missing lifecycle permit request");
+      expect(wire).toMatchObject({ operation: "reload" });
+      fake.emitWire({
+        type: "response",
+        id: wire.id,
+        success: true,
+        data: { allowed: false, reason: "active" },
+      });
+      await expect(permit).resolves.toEqual({ allowed: false, reason: "active" });
+    });
+  });
+
   describe("dispatchIntent", () => {
     const intentEnvelope = {
       intentId: "intent-1",
