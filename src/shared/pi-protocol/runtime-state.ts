@@ -454,7 +454,9 @@ export const CompactionActivitySchema = z
     attempt: NonNegativeIntegerSchema,
     intentId: NonEmptyIdSchema.optional(),
     startedAt: z.number().optional(),
-    anomaly: z.enum(["getter_event_disagreement", "missing_start_event"]).optional(),
+    anomaly: z
+      .enum(["getter_event_disagreement", "missing_start_event", "missing_compaction_start"])
+      .optional(),
   })
   .strict();
 export type CompactionActivity = z.infer<typeof CompactionActivitySchema>;
@@ -829,9 +831,26 @@ export const CompactIntentResultSchema = z
   })
   .strict();
 export const InvokeCommandIntentResultSchema = z
-  .object({ commandType: NonEmptyIdSchema.optional(), response: z.unknown().optional() })
+  .object({
+    commandType: NonEmptyIdSchema.optional(),
+    disposition: SubmissionDispositionSchema.optional(),
+    editorRevision: NonNegativeIntegerSchema.optional(),
+    queued: z.boolean().optional(),
+    custodyId: NonEmptyIdSchema.optional(),
+    message: z.string().optional(),
+    response: z.unknown().optional(),
+  })
   .strict();
-export const RunBashIntentResultSchema = z.object({ started: z.boolean() }).strict();
+/** Public executeBash completion evidence, normalized from Pi's BashResult. */
+export const RunBashIntentResultSchema = z
+  .object({
+    started: z.boolean(),
+    output: z.string().optional(),
+    exitCode: z.number().int().optional(),
+    cancelled: z.boolean().optional(),
+    truncated: z.boolean().optional(),
+  })
+  .strict();
 export const NavigateIntentResultSchema = z
   .object({ targetId: NonEmptyIdSchema, summarized: z.boolean().optional() })
   .strict();

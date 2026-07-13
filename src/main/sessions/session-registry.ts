@@ -20,6 +20,7 @@ import {
   AgentSessionSnapshotSchema,
   type AuthorityAttachBaseline,
   type AuthorityAttachResponse,
+  type AuthorityFrame,
   type CommandSettlement,
   type EscapeResult,
   type IntentEnvelope,
@@ -91,6 +92,8 @@ interface RetainedDispatchIntent {
   envelope: IntentEnvelope;
   possibleDispatch: boolean;
   deliveryUnknown?: boolean | undefined;
+  /** Main emits a review-only unknown escrow once if this owner dies first. */
+  recoveryPublished?: boolean | undefined;
 }
 
 interface PendingUnifiedSubmit {
@@ -1152,6 +1155,65 @@ export class SessionRegistry {
     );
   }
 
+  /**
+   * Receipt escrow is released only by a typed child terminal record with the
+   * same owner and intent ID. This is deliberately the sole semantic peek in
+   * main: it cannot interpret result/error/state or manufacture completion.
+   */
+  private settleDispatchEscrowFromFrame(record: SessionRecord, frame: AuthorityFrame): void {
+    for (const item of frame.records) {
+      if (item.type !== "intent_outcome") continue;
+      const outcome = item.outcome;
+      const escrowKey = `${outcome.owner.hostInstanceId}\0${outcome.owner.sessionEpoch}\0${outcome.intentId}`;
+      const retained = record._retainedDispatchIntents.get(escrowKey);
+      if (!retained) continue;
+      const expected = retained.envelope.expectedOwner;
+      if (
+        expected.hostInstanceId === outcome.owner.hostInstanceId &&
+        expected.sessionEpoch === outcome.owner.sessionEpoch &&
+        retained.envelope.intentId === outcome.intentId
+      ) {
+        record._retainedDispatchIntents.delete(escrowKey);
+      }
+    }
+  }
+
+  private publishDispatchFailureEscrow(
+    record: SessionRecord,
+    proc: SessionHost,
+    reason: string,
+  ): void {
+    for (const [escrowKey, retained] of record._retainedDispatchIntents) {
+      const owner = retained.envelope.expectedOwner;
+      if (
+        owner.hostInstanceId !== proc.hostInstanceId ||
+        owner.sessionEpoch !== proc.sessionEpoch ||
+        retained.recoveryPublished
+      )
+        continue;
+      retained.deliveryUnknown = true;
+      retained.recoveryPublished = true;
+      // This is review/failure escrow, never a replay queue and never a
+      // synthesized success/end outcome. Its payload remains opaque to main.
+      const restorationId = `ambiguous-intent:${owner.hostInstanceId}:${owner.sessionEpoch}:${retained.envelope.intentId}`;
+      if (record._restorations.has(restorationId)) continue;
+      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
+        type: "queue_restoration",
+        restorationId,
+        steering: [],
+        followUp: [],
+        originalAttachments: [],
+        commandDescription: `Intent ${retained.envelope.intentId} has outcome_unknown because its owning host failed: ${reason}`,
+        requiresReview: true,
+      };
+      record._restorations.set(restorationId, structuredClone(restoration));
+      this.onQueueRestoration(record.sessionId, restoration);
+      // Keep the entry as a tombstone. A successor is never allowed to replay
+      // it and an old delayed frame cannot clear a new owner's escrow.
+      record._retainedDispatchIntents.set(escrowKey, retained);
+    }
+  }
+
   private handleRuntimeFailure(record: SessionRecord, proc: SessionHost, reason: string): void {
     if (record.proc !== proc) return;
     this.captureEditorRecovery(record);
@@ -1161,6 +1223,7 @@ export class SessionRegistry {
     proc.stop();
     record.status = "failed";
     record.error = reason;
+    this.publishDispatchFailureEscrow(record, proc, reason);
     for (const retained of record._retainedIntents.values()) {
       const recoverable =
         ["in_custody", "consumed", "outcome_unknown"].includes(retained.disposition) ||
@@ -1336,9 +1399,10 @@ export class SessionRegistry {
         retained.deliveryUnknown = true;
         return receipt;
       }
-      // The child owns duplicate detection and all terminal semantics. A
-      // receipt only closes main's transport escrow for this attempt.
-      record._retainedDispatchIntents.delete(escrowKey);
+      // A receipt proves only admission/deduplication. Keep owner-bound
+      // transport escrow until the matching terminal authority frame arrives.
+      // `not_admitted` is the only receipt that proves no child outcome exists.
+      if (receipt.status === "not_admitted") record._retainedDispatchIntents.delete(escrowKey);
       return receipt;
     } catch {
       // Never retry or reinterpret a possible dispatch. Keep owner-scoped
@@ -1821,6 +1885,11 @@ export class SessionRegistry {
     }
     const router = this.authorityRouter(record);
     router.setExpectedOwner(owner);
+    if (publication.plane === "semantic") {
+      // Main remains opaque to intent semantics. It only releases transport
+      // escrow when this owner supplies a terminal record for this intent.
+      this.settleDispatchEscrowFromFrame(record, publication.payload);
+    }
     return router.route(publication);
   }
 

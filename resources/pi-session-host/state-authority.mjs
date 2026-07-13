@@ -456,16 +456,24 @@ export function createStateAuthority({
         observedAt: entry.observedAt,
         ...(entry.anomaly ? { detail: String(entry.anomaly) } : {}),
       }));
+    // Keep the child-normalized typed outcome intact. Dropping result/error
+    // here made a terminal frame unusable for consumers that correctly wait
+    // for settlement instead of treating a receipt as completion.
     const outcomes = [...dispatchedIntents.values()]
-      .filter((entry) => entry.outcome)
-      .map((entry) => ({
-        intentId: entry.outcome.intentId,
-        owner,
-        kind: entry.kind,
-        state: entry.outcome.state,
-      }));
+      .filter(
+        (entry) =>
+          entry.outcome &&
+          entry.owner.hostInstanceId === owner.hostInstanceId &&
+          entry.owner.sessionEpoch === owner.sessionEpoch,
+      )
+      .map((entry) => structuredClone(entry.outcome));
     const active = [...dispatchedIntents.values()]
-      .filter((entry) => !entry.outcome)
+      .filter(
+        (entry) =>
+          !entry.outcome &&
+          entry.owner.hostInstanceId === owner.hostInstanceId &&
+          entry.owner.sessionEpoch === owner.sessionEpoch,
+      )
       .map((entry) => ({
         intentId: entry.intentId,
         owner,
@@ -542,17 +550,7 @@ export function createStateAuthority({
     return records.flatMap((recordValue) => {
       if (recordValue?.type === "event") return [{ type: "event", event: recordValue.event }];
       if (recordValue?.type === "intent_outcome" && recordValue.outcome) {
-        return [
-          {
-            type: "intent_outcome",
-            outcome: {
-              intentId: recordValue.outcome.intentId,
-              owner,
-              kind: recordValue.outcome.kind,
-              state: recordValue.outcome.state,
-            },
-          },
-        ];
+        return [{ type: "intent_outcome", outcome: structuredClone(recordValue.outcome) }];
       }
       return [];
     });
@@ -590,16 +588,93 @@ export function createStateAuthority({
     return frame;
   }
 
+  // Intent outcomes are public protocol values, not an accidental projection
+  // of arbitrary SDK return objects. Preserve only evidence the corresponding
+  // typed schema names, while retaining error text at the outcome boundary.
+  function typedIntentResult(intent, kind, result) {
+    const value = result && typeof result === "object" ? result : {};
+    switch (kind) {
+      case "interrupt":
+        return {
+          target: value.target ?? "editor",
+          interrupted: value.disposition === "abort_requested",
+        };
+      case "submit":
+        return {
+          disposition: value.disposition ?? "completed",
+          editorRevision: Number.isInteger(value.editorRevision) ? value.editorRevision : 0,
+          ...(typeof value.queued === "boolean" ? { queued: value.queued } : {}),
+          ...(typeof value.custodyId === "string" ? { custodyId: value.custodyId } : {}),
+          ...(typeof value.message === "string" ? { message: value.message } : {}),
+        };
+      case "invokeCommand": {
+        const commandType =
+          typeof intent?.text === "string"
+            ? intent.text.replace(/^\//, "").trim().split(/\s+/, 1)[0]
+            : undefined;
+        return {
+          ...(commandType ? { commandType } : {}),
+          ...(typeof value.disposition === "string" ? { disposition: value.disposition } : {}),
+          ...(Number.isInteger(value.editorRevision)
+            ? { editorRevision: value.editorRevision }
+            : {}),
+          ...(typeof value.queued === "boolean" ? { queued: value.queued } : {}),
+          ...(typeof value.custodyId === "string" ? { custodyId: value.custodyId } : {}),
+          ...(typeof value.message === "string" ? { message: value.message } : {}),
+        };
+      }
+      case "compact":
+        return {
+          ...(typeof value.compactionId === "string" ? { compactionId: value.compactionId } : {}),
+          ...(Number.isInteger(value.attempt) ? { attempt: value.attempt } : {}),
+        };
+      case "runBash":
+        return {
+          started: true,
+          ...(typeof value.output === "string" ? { output: value.output } : {}),
+          ...(Number.isInteger(value.exitCode) ? { exitCode: value.exitCode } : {}),
+          ...(typeof value.cancelled === "boolean" ? { cancelled: value.cancelled } : {}),
+          ...(typeof value.truncated === "boolean" ? { truncated: value.truncated } : {}),
+        };
+      case "navigate":
+        return {
+          targetId: intent?.targetId ?? value.targetId ?? "unknown",
+          ...(typeof value.summarized === "boolean" ? { summarized: value.summarized } : {}),
+        };
+      case "setModel":
+        return {
+          provider: value.provider ?? intent?.provider ?? "",
+          modelId: value.modelId ?? intent?.modelId ?? "unknown",
+        };
+      case "setThinking":
+        return { level: value.level ?? intent?.level ?? "off" };
+      case "rename":
+        return { name: value.name ?? intent?.name ?? "" };
+      case "reload":
+        return value.successorIdentity ? { successorIdentity: value.successorIdentity } : {};
+      default:
+        return undefined;
+    }
+  }
+
   function settleDispatchedIntent(intentId, owner, kind, state, result) {
     const key = intentOwnerKey(owner, intentId);
     const entry = dispatchedIntents.get(key);
     if (!entry || entry.outcome) return entry?.outcome;
+    const normalizedResult = typedIntentResult(entry.intent, kind, result);
+    const error =
+      state === "failed" || state === "outcome_unknown"
+        ? typeof result?.message === "string"
+          ? result.message
+          : undefined
+        : undefined;
     const outcome = {
       intentId,
       owner: structuredClone(owner),
       kind,
       state,
-      ...(result === undefined ? {} : { result: structuredClone(result) }),
+      ...(normalizedResult === undefined ? {} : { result: normalizedResult }),
+      ...(error ? { error } : {}),
     };
     entry.outcome = outcome;
     appendOperation({
@@ -644,7 +719,10 @@ export function createStateAuthority({
     if (transition && result.sessionEpoch !== transition.provisionalEpoch) {
       noteMutation();
       sendRecord(submissionRecord);
-    } else {
+    } else if (typeof sendFrame !== "function") {
+      // The frame path already emitted the terminal intent_outcome above.
+      // Publishing the compatibility submission again would create a second
+      // terminal semantic commit with no typed record.
       record(submissionRecord);
     }
     onSubmissionResult(result);
@@ -1054,6 +1132,7 @@ export function createStateAuthority({
       intentId,
       fingerprint,
       kind: intent.kind,
+      intent: structuredClone(intent),
       owner: structuredClone(owner),
       recordedAt: Date.now(),
       outcome: null,
@@ -1100,7 +1179,9 @@ export function createStateAuthority({
           settleDispatchedIntent(intentId, owner, intent.kind, state, result);
           return;
         }
-        settleDispatchedIntent(intentId, owner, intent.kind, "completed", result);
+        const state =
+          result?.cancelled === true || result?.aborted === true ? "cancelled" : "completed";
+        settleDispatchedIntent(intentId, owner, intent.kind, state, result);
       } catch (error) {
         settleDispatchedIntent(intentId, owner, intent.kind, "failed", {
           message: error instanceof Error ? error.message : String(error),

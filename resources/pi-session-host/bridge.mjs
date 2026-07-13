@@ -638,11 +638,12 @@ export function setupCommandBridge({
         case "compact": {
           const compactIntentId = authority.beginCompactionInvocation(envelope.intentId);
           try {
-            return await trackInterruptibleOperation(
+            await trackInterruptibleOperation(
               "compact",
               () => _session.abort(),
               () => _session.compact(intent.instructions),
             );
+            return { compactionId: compactIntentId };
           } finally {
             authority.settleCompactionInvocation(compactIntentId);
           }
@@ -652,16 +653,35 @@ export function setupCommandBridge({
             "bash",
             () => _session.abortBash(),
             () =>
-              _session.executeBash(intent.command, undefined, {
-                ...(intent.excludeFromContext !== undefined
-                  ? { excludeFromContext: intent.excludeFromContext }
-                  : {}),
-              }),
+              _session
+                .executeBash(intent.command, undefined, {
+                  ...(intent.excludeFromContext !== undefined
+                    ? { excludeFromContext: intent.excludeFromContext }
+                    : {}),
+                })
+                .then((result) => ({
+                  started: true,
+                  ...(typeof result?.output === "string" ? { output: result.output } : {}),
+                  ...(Number.isInteger(result?.exitCode) ? { exitCode: result.exitCode } : {}),
+                  ...(typeof result?.cancelled === "boolean"
+                    ? { cancelled: result.cancelled }
+                    : {}),
+                  ...(typeof result?.truncated === "boolean"
+                    ? { truncated: result.truncated }
+                    : {}),
+                })),
           );
         case "navigate":
-          return authority.runNavigation(() =>
-            _session.navigateTree(intent.targetId, { summarize: intent.summarize }),
-          );
+          return authority
+            .runNavigation(() =>
+              _session.navigateTree(intent.targetId, { summarize: intent.summarize }),
+            )
+            .then((result) => ({
+              targetId: intent.targetId,
+              ...(typeof result?.summaryEntry === "object" ? { summarized: true } : {}),
+              ...(result?.cancelled === true ? { cancelled: true } : {}),
+              ...(result?.aborted === true ? { aborted: true } : {}),
+            }));
         case "setModel": {
           const models = await _session.modelRegistry.getAvailable();
           const model = models.find(
@@ -670,7 +690,7 @@ export function setupCommandBridge({
           );
           if (!model) throw new Error(`Model not found: ${intent.provider}/${intent.modelId}`);
           await _session.setModel(model);
-          return { model };
+          return { provider: model.provider ?? intent.provider, modelId: model.id };
         }
         case "setThinking":
           _session.setThinkingLevel(intent.level);
@@ -680,7 +700,9 @@ export function setupCommandBridge({
           return { name: intent.name };
         case "reload":
           await handleReload(true);
-          return { owner: { hostInstanceId, sessionEpoch: authority.sessionEpoch } };
+          return {
+            successorIdentity: { hostInstanceId, sessionEpoch: authority.sessionEpoch },
+          };
         default:
           throw new Error(`Unknown intent kind: ${intent.kind}`);
       }

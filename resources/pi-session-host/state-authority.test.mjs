@@ -1445,6 +1445,217 @@ describe("state authority", () => {
     );
   });
 
+  it("settles admitted idle and queued submit intents exactly once with typed public evidence", async () => {
+    const idleGate = deferred();
+    const sendFrame = vi.fn();
+    const { authority, session } = setup(
+      {
+        prompt: vi.fn((_text, options) => {
+          options.preflightResult(true);
+          session.isStreaming = true;
+          return idleGate.promise;
+        }),
+      },
+      { sendFrame },
+    );
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    const envelope = (intentId) => ({
+      intentId,
+      expectedOwner: owner,
+      intent: {
+        kind: "submit",
+        editorRevision: 1,
+        text: intentId,
+        images: [],
+        requestedMode: "followUp",
+        surface: "composer",
+      },
+    });
+
+    await expect(
+      authority.dispatchIntent(envelope("idle-complete"), (intent) =>
+        authority.submit(
+          {
+            intentId: "idle-complete",
+            expectedHostId: "host-1",
+            expectedEpoch: 0,
+            ...intent,
+          },
+          true,
+        ),
+      ),
+    ).resolves.toMatchObject({ status: "admitted" });
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(
+      sendFrame.mock.calls
+        .flatMap(([frame]) => frame.records)
+        .filter((record) => record.type === "intent_outcome"),
+    ).toHaveLength(0);
+    idleGate.resolve();
+    await vi.waitFor(() =>
+      expect(
+        sendFrame.mock.calls
+          .flatMap(([frame]) => frame.records)
+          .filter((record) => record.type === "intent_outcome"),
+      ).toHaveLength(1),
+    );
+    const terminal = sendFrame.mock.calls
+      .flatMap(([frame]) => frame.records)
+      .find((record) => record.type === "intent_outcome");
+    expect(terminal).toMatchObject({
+      outcome: {
+        intentId: "idle-complete",
+        kind: "submit",
+        state: "completed",
+        result: { disposition: "completed", editorRevision: 1, queued: false },
+      },
+    });
+
+    session.isStreaming = true;
+    const queuedGate = deferred();
+    session.prompt.mockImplementation((_text, options) => {
+      options.preflightResult(true);
+      return queuedGate.promise;
+    });
+    await authority.dispatchIntent(envelope("queued-complete"), (intent) =>
+      authority.submit(
+        {
+          intentId: "queued-complete",
+          expectedHostId: "host-1",
+          expectedEpoch: 0,
+          ...intent,
+        },
+        true,
+      ),
+    );
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
+    queuedGate.resolve();
+    await vi.waitFor(() =>
+      expect(
+        sendFrame.mock.calls
+          .flatMap(([frame]) => frame.records)
+          .filter(
+            (record) =>
+              record.type === "intent_outcome" && record.outcome.intentId === "queued-complete",
+          ),
+      ).toHaveLength(1),
+    );
+    expect(session.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("settles an admitted extension command failure as one typed failed outcome", async () => {
+    const sendFrame = vi.fn();
+    const { authority } = setup(
+      {
+        extensionRunner: { getCommand: vi.fn(() => ({ invocationName: "explode" })) },
+        prompt: vi.fn((_text, options) => {
+          options.preflightResult(true);
+          return Promise.reject(new Error("extension exploded"));
+        }),
+      },
+      { sendFrame },
+    );
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    await authority.dispatchIntent(
+      {
+        intentId: "extension-failure",
+        expectedOwner: owner,
+        intent: { kind: "invokeCommand", text: "/explode", editorRevision: 1 },
+      },
+      (intent) =>
+        authority.submit(
+          {
+            intentId: "extension-failure",
+            expectedHostId: "host-1",
+            expectedEpoch: 0,
+            editorRevision: intent.editorRevision,
+            text: intent.text,
+            images: [],
+            requestedMode: "followUp",
+            surface: "composer",
+          },
+          true,
+        ),
+    );
+    await vi.waitFor(() =>
+      expect(
+        sendFrame.mock.calls
+          .flatMap(([frame]) => frame.records)
+          .filter((record) => record.type === "intent_outcome"),
+      ).toHaveLength(1),
+    );
+    const outcome = sendFrame.mock.calls
+      .flatMap(([frame]) => frame.records)
+      .find((record) => record.type === "intent_outcome").outcome;
+    expect(outcome).toMatchObject({
+      intentId: "extension-failure",
+      kind: "invokeCommand",
+      state: "failed",
+      error: "extension exploded",
+      result: { commandType: "explode", disposition: "extension_error", editorRevision: 1 },
+    });
+  });
+
+  it("normalizes command, model, and bash outcomes without leaking raw SDK values", async () => {
+    const sendFrame = vi.fn();
+    const { authority } = setup({}, { sendFrame });
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    const dispatch = (intentId, intent, execute) =>
+      authority.dispatchIntent({ intentId, expectedOwner: owner, intent }, execute);
+
+    await dispatch("bash-result", { kind: "runBash", command: "pwd" }, async () => ({
+      output: "/tmp",
+      exitCode: 0,
+      cancelled: false,
+    }));
+    await dispatch(
+      "model-result",
+      { kind: "setModel", provider: "anthropic", modelId: "claude" },
+      async () => ({ model: { private: "ignored" } }),
+    );
+    await dispatch(
+      "command-result",
+      { kind: "invokeCommand", text: "/test", editorRevision: 1 },
+      async () => ({ disposition: "rejected", editorRevision: 1, message: "blocked" }),
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        sendFrame.mock.calls
+          .flatMap(([frame]) => frame.records)
+          .filter((record) => record.type === "intent_outcome"),
+      ).toHaveLength(3),
+    );
+    const outcomes = sendFrame.mock.calls
+      .flatMap(([frame]) => frame.records)
+      .filter((record) => record.type === "intent_outcome")
+      .map((record) => record.outcome);
+    expect(outcomes).toContainEqual(
+      expect.objectContaining({
+        intentId: "bash-result",
+        result: { started: true, output: "/tmp", exitCode: 0, cancelled: false },
+      }),
+    );
+    expect(outcomes).toContainEqual(
+      expect.objectContaining({
+        intentId: "model-result",
+        result: { provider: "anthropic", modelId: "claude" },
+      }),
+    );
+    expect(outcomes).toContainEqual(
+      expect.objectContaining({
+        intentId: "command-result",
+        state: "rejected",
+        result: {
+          commandType: "test",
+          disposition: "rejected",
+          editorRevision: 1,
+          message: "blocked",
+        },
+      }),
+    );
+  });
+
   it("exposes an atomic semantic frame and failure escrow without inventing a compaction end", () => {
     const sendFrame = vi.fn();
     const { authority, sendRecord, sendControl } = setup({}, { sendFrame });

@@ -553,7 +553,16 @@ describe("SessionRegistry direct AgentSession authority", () => {
     expect([...record._retainedDispatchIntents.values()][0]).toMatchObject({
       possibleDispatch: true,
       deliveryUnknown: true,
+      recoveryPublished: true,
     });
+    expect(h.restorations).toContainEqual([
+      id,
+      expect.objectContaining({
+        type: "queue_restoration",
+        requiresReview: true,
+        commandDescription: expect.stringContaining("outcome_unknown"),
+      }),
+    ]);
     await vi.waitFor(() => expect(h.fakes).toHaveLength(2));
     expect(h.fakes[1]!.sent.filter((message) => message.type === "dispatch_intent")).toHaveLength(
       0,
@@ -561,7 +570,7 @@ describe("SessionRegistry direct AgentSession authority", () => {
     h.registry.stopAll();
   });
 
-  it("forwards duplicate and opaque intent payloads to the child without main semantic settlement", async () => {
+  it("retains admitted dispatch escrow across duplicate receipts until a terminal authority frame", async () => {
     const h = harness();
     const id = h.registry.openSession("/tmp/project");
     await h.registry.activateSession(id, "/tmp/pi", {});
@@ -599,6 +608,29 @@ describe("SessionRegistry direct AgentSession authority", () => {
       intent: envelope.intent,
     });
     expect(h.submissions).toEqual([]);
+    expect(record._retainedDispatchIntents).toHaveLength(1);
+    h.registry.routeAuthorityPublication(id, {
+      plane: "semantic",
+      owner,
+      payload: {
+        owner,
+        transportSequence: 1,
+        frameId: "terminal-opaque-duplicate",
+        records: [
+          {
+            type: "intent_outcome",
+            outcome: {
+              intentId: envelope.intentId,
+              owner,
+              kind: "runBash",
+              state: "completed",
+              result: { started: true },
+            },
+          },
+        ],
+        terminalSnapshot: {},
+      },
+    } as never);
     expect(record._retainedDispatchIntents).toHaveLength(0);
     h.registry.stopAll();
   });
