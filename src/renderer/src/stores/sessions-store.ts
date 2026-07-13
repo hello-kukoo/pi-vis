@@ -12,6 +12,8 @@ import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-proto
 import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
 import type {
   AgentSessionSnapshot,
+  AuthorityAttachResponse,
+  RendererPublication,
   RuntimeRecord,
   RuntimeStateUpdate,
   SubmissionResult,
@@ -44,6 +46,13 @@ import { findCurrentModel } from "../lib/model-utils.js";
 import { forgetPanelInputSequence } from "../lib/panel-input-sequence.js";
 import { RENDERER_GENERATION } from "../lib/renderer-generation.js";
 import { invokeSessionCommand } from "../lib/session-command.js";
+import {
+  type RendererAuthorityState,
+  createRendererAuthorityState,
+  reduceAuthorityAttach,
+  reduceAuthorityPublication,
+  unavailableAuthority,
+} from "./authority-reducer.js";
 import { useChangelogStore } from "./changelog-store.js";
 import { openDiffForSession } from "./diff-store.js";
 import { useSettingsStore } from "./settings-store.js";
@@ -85,6 +94,9 @@ export interface SessionViewState {
   /** Runtime booleans are valid only while availability is available. */
   availability: RuntimeStateUpdate["availability"];
   runtimeSnapshot?: AgentSessionSnapshot | undefined;
+  /** Authority-frame migration projection. It is intentionally shadow-only
+   * until consumers migrate at explicit attach baselines. */
+  authorityProjection?: RendererAuthorityState | undefined;
   hostInstanceId?: string | undefined;
   sessionEpoch: number;
   editorRevision: number;
@@ -935,6 +947,10 @@ interface SessionsStore {
   addBashCommand: (sessionId: SessionId, command: string) => void;
   finishBashCommand: (sessionId: SessionId, output: string, exitCode?: number) => void;
   applyRuntimeState: (sessionId: SessionId, state: RuntimeStateUpdate) => void;
+  /** Shadow reducer entry points for the authority-frame protocol. */
+  applyAuthorityAttach: (sessionId: SessionId, response: AuthorityAttachResponse) => void;
+  applyAuthorityPublication: (publication: RendererPublication) => void;
+  markAuthorityUnavailable: (sessionId: SessionId, reason: string) => void;
   applyTransitionBatch: (
     sessionId: SessionId,
     records: RuntimeRecord[],
@@ -1263,6 +1279,7 @@ const buildSessionsStore = (
         transcript: createTranscriptState(),
         availability: "unavailable",
         runtimeSnapshot: undefined,
+        authorityProjection: createRendererAuthorityState(),
         hostInstanceId: undefined,
         sessionEpoch: 0,
         editorRevision: 0,
@@ -1874,6 +1891,51 @@ const buildSessionsStore = (
         toasts: replicatedToasts.length ? [...current.toasts, ...replicatedToasts] : current.toasts,
         sessionTitle: catalog?.title ?? current.sessionTitle,
       });
+      return { sessions };
+    });
+  },
+
+  applyAuthorityAttach: (sessionId, response) => {
+    set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const authorityProjection = reduceAuthorityAttach(
+        current.authorityProjection ?? createRendererAuthorityState(),
+        response,
+      );
+      if (authorityProjection === current.authorityProjection) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...current, authorityProjection });
+      return { sessions };
+    });
+  },
+
+  applyAuthorityPublication: (publication) => {
+    set((state) => {
+      const sessionId = publication.sessionId as SessionId;
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const authorityProjection = reduceAuthorityPublication(
+        current.authorityProjection ?? createRendererAuthorityState(),
+        publication,
+      );
+      if (authorityProjection === current.authorityProjection) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...current, authorityProjection });
+      return { sessions };
+    });
+  },
+
+  markAuthorityUnavailable: (sessionId, reason) => {
+    set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const authorityProjection = unavailableAuthority(
+        current.authorityProjection ?? createRendererAuthorityState(),
+        reason,
+      );
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...current, authorityProjection });
       return { sessions };
     });
   },

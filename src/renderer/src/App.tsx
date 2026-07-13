@@ -47,6 +47,9 @@ export function App(): React.ReactElement {
   const setSessionStatus = useSessionsStore((s) => s.setSessionStatus);
   const applyEvents = useSessionsStore((s) => s.applyEvents);
   const applyRuntimeState = useSessionsStore((s) => s.applyRuntimeState);
+  const applyAuthorityAttach = useSessionsStore((s) => s.applyAuthorityAttach);
+  const applyAuthorityPublication = useSessionsStore((s) => s.applyAuthorityPublication);
+  const markAuthorityUnavailable = useSessionsStore((s) => s.markAuthorityUnavailable);
   const applyTransitionBatch = useSessionsStore((s) => s.applyTransitionBatch);
   const applySubmissionDisposition = useSessionsStore((s) => s.applySubmissionDisposition);
   const applyQueueRestoration = useSessionsStore((s) => s.applyQueueRestoration);
@@ -396,6 +399,13 @@ export function App(): React.ReactElement {
       applyRuntimeState(sessionId as SessionId, state);
     });
 
+    // Authority publications are reduced separately from the legacy snapshot
+    // projection. During migration this is intentionally a shadow path: no
+    // event/promise completion can blend frame state into a legacy cursor.
+    const unsubPublication = window.pivis.on("session.publication", (publication) => {
+      applyAuthorityPublication(publication);
+    });
+
     const unsubTransition = window.pivis.on(
       "session.transitionBatch",
       ({ sessionId, records, state }) => {
@@ -600,6 +610,7 @@ export function App(): React.ReactElement {
     return () => {
       unsubEvent();
       unsubRuntime();
+      unsubPublication();
       unsubTransition();
       unsubSubmission();
       unsubQueueRestoration();
@@ -621,6 +632,7 @@ export function App(): React.ReactElement {
   }, [
     applyEvents,
     applyRuntimeState,
+    applyAuthorityPublication,
     applyTransitionBatch,
     applySubmissionDisposition,
     applyQueueRestoration,
@@ -650,6 +662,15 @@ export function App(): React.ReactElement {
         })
         .then((state) => applyRuntimeState(sid, state))
         .catch(() => {});
+      // authorityAttach is baseline + buffered replay. It is the only path
+      // that can move a shadow plane back to following after a gap.
+      void window.pivis
+        .invoke("session.authorityAttach", {
+          sessionId: sid,
+          rendererGeneration: RENDERER_GENERATION,
+        })
+        .then((response) => applyAuthorityAttach(sid, response))
+        .catch(() => markAuthorityUnavailable(sid, "attach_failed"));
     }
     const onFocus = () => {
       for (const sid of sessionIds) {
@@ -657,11 +678,18 @@ export function App(): React.ReactElement {
           .invoke("session.runtimeResync", { sessionId: sid })
           .then((state) => applyRuntimeState(sid, state))
           .catch(() => {});
+        void window.pivis
+          .invoke("session.authorityAttach", {
+            sessionId: sid,
+            rendererGeneration: RENDERER_GENERATION,
+          })
+          .then((response) => applyAuthorityAttach(sid, response))
+          .catch(() => markAuthorityUnavailable(sid, "attach_failed"));
       }
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [liveSessionIdsKey, applyRuntimeState]);
+  }, [liveSessionIdsKey, applyRuntimeState, applyAuthorityAttach, markAuthorityUnavailable]);
 
   const handlePiRecheck = useCallback(async () => {
     const info = await window.pivis.invoke("pi.locate", undefined);
