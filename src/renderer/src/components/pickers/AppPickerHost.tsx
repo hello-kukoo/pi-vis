@@ -1,7 +1,6 @@
 import type { SessionId } from "@shared/ids.js";
 import type { SessionSummary } from "@shared/ipc-contract.js";
 import type { ModelInfo } from "@shared/pi-protocol/responses.js";
-import type { AuthorityCursor } from "@shared/pi-protocol/runtime-state.js";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
@@ -86,23 +85,12 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
   };
   const pickerSlotIsCurrent = () =>
     useSessionsStore.getState().sessions.get(sessionId)?.pendingPicker === picker;
-  const pickerRuntimeIsCurrent = (cursor: AuthorityCursor | undefined = pickerCursor) => {
+  const pickerRuntimeIsCurrent = () => {
     const current = useSessionsStore.getState().sessions.get(sessionId);
-    if (
-      !pickerRuntime ||
-      !pickerSlotIsCurrent() ||
-      !sessionMatchesRuntime(current, pickerRuntime)
-    ) {
-      return false;
-    }
-    if (!cursor) return true;
-    const semantic = current?.authorityProjection?.semantic;
     return (
-      semantic?.state === "following" &&
-      semantic.cursor.hostInstanceId === cursor.hostInstanceId &&
-      semantic.cursor.sessionEpoch === cursor.sessionEpoch &&
-      semantic.cursor.transportSequence === cursor.transportSequence &&
-      semantic.cursor.snapshotSequence === cursor.snapshotSequence
+      pickerRuntime !== undefined &&
+      pickerSlotIsCurrent() &&
+      sessionMatchesRuntime(current, pickerRuntime)
     );
   };
 
@@ -122,7 +110,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
               { kind: "setModel", provider: model.provider ?? "", modelId: model.id },
               observation,
             );
-            if (!pickerRuntimeIsCurrent(observation.cursor)) return;
+            if (!pickerRuntimeIsCurrent()) return;
             if (receipt.status === "not_admitted" || receipt.status === "delivery_unknown") {
               addToast(sessionId, "Failed to request model change", "error");
               return;
@@ -147,7 +135,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
               },
               observation,
             );
-            if (!pickerRuntimeIsCurrent(observation.cursor)) return;
+            if (!pickerRuntimeIsCurrent()) return;
             if (receipt.status === "not_admitted" || receipt.status === "delivery_unknown") {
               addToast(sessionId, "Failed to request fork", "error");
               return;
@@ -206,7 +194,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
               },
               observation,
             );
-            if (!pickerRuntimeIsCurrent(observation.cursor)) return;
+            if (!pickerRuntimeIsCurrent()) return;
             if (receipt.status === "not_admitted" || receipt.status === "delivery_unknown") {
               addToast(sessionId, "Failed to request model scope update", "error");
               return;
@@ -231,7 +219,7 @@ export function AppPickerHost({ sessionId }: PickerHostProps): React.ReactElemen
               },
               observation,
             );
-            if (!pickerRuntimeIsCurrent(observation.cursor)) return;
+            if (!pickerRuntimeIsCurrent()) return;
             if (receipt.status === "not_admitted" || receipt.status === "delivery_unknown") {
               addToast(sessionId, "Failed to request logout", "error");
               return;
