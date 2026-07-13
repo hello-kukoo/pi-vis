@@ -18,10 +18,15 @@ import type { PiEvent } from "./pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "./pi-protocol/extension-ui.js";
 import type { PanelEvent } from "./pi-protocol/panel-events.js";
 import type {
+  AuthorityAttachRequest,
+  AuthorityAttachResponse,
   CommandSettlement,
   EscapeResult,
+  IntentEnvelope,
+  IntentReceipt,
   ReloadRequest,
   ReloadSettlement,
+  RendererPublication,
   RuntimeRecord,
   RuntimeStateUpdate,
   SessionSubmission,
@@ -275,6 +280,13 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; submission: SessionSubmission };
     res: SubmissionResult;
   };
+  /** New owner-bound mutation protocol. Kept alongside legacy submit/command IPC during migration. */
+  "session.dispatchIntent": { req: IntentEnvelope; res: IntentReceipt };
+  /** Serialized multi-plane baseline plus publications buffered after its high-water mark. */
+  "session.authorityAttach": {
+    req: AuthorityAttachRequest;
+    res: AuthorityAttachResponse;
+  };
   /** Every unclaimed bare Escape is acknowledged by the live host. */
   "session.acknowledgeRestoration": {
     req: { sessionId: SessionId; restorationId: string };
@@ -504,6 +516,8 @@ export interface IpcEventContract {
   "session.events": { sessionId: SessionId; events: PiEvent[] };
   /** Atomic direct-getter runtime state; Unavailable is neither running nor idle. */
   "session.runtimeState": { sessionId: SessionId; state: RuntimeStateUpdate };
+  /** Per-plane sequenced publication for the authority-frame migration. */
+  "session.publication": RendererPublication;
   /** One renderer-visible commit for a lifecycle epoch transition. */
   "session.transitionBatch": {
     sessionId: SessionId;

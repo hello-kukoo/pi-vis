@@ -1,0 +1,281 @@
+import { describe, expect, it } from "vitest";
+import {
+  AuthorityAttachBaselineSchema,
+  AuthorityAttachResponseSchema,
+  AuthorityCursorSchema,
+  AuthorityFrameSchema,
+  IntentEnvelopeSchema,
+  IntentOutcomeSchema,
+  IntentPayloadConflictSchema,
+  PanelPresentationBaselineSchema,
+  RendererPublicationSchema,
+  SemanticSnapshotSchema,
+} from "./runtime-state.js";
+
+const owner = { hostInstanceId: "host-a", sessionEpoch: 4 };
+const otherOwner = { hostInstanceId: "host-b", sessionEpoch: 4 };
+const cursor = { ...owner, transportSequence: 7, snapshotSequence: 11 };
+
+function snapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    owner,
+    snapshotSequence: 11,
+    capturedAt: 1_700_000_000_000,
+    sdk: {
+      isStreaming: false,
+      isIdle: true,
+      isCompacting: false,
+      isRetrying: false,
+      retryAttempt: 0,
+      isBashRunning: false,
+    },
+    activity: {},
+    queues: { steering: [], followUp: [], steeringIntentIds: [], followUpIntentIds: [] },
+    custody: [],
+    editor: { revision: 0, text: "", attachments: [] },
+    activeIntents: [],
+    recentIntentOutcomes: [],
+    recentObservedOperations: [],
+    operationJournalLowWatermark: 0,
+    operationJournalHighWatermark: 0,
+    operationJournalTruncated: false,
+    model: null,
+    thinkingLevel: "off",
+    catalog: {},
+    ...overrides,
+  };
+}
+
+function baseline(overrides: Record<string, unknown> = {}) {
+  return {
+    sessionId: "session-a",
+    rendererGeneration: 2,
+    owner,
+    semantic: { sync: { state: "following", cursor }, snapshot: snapshot() },
+    operationJournal: [],
+    transcript: {
+      sync: { state: "following", cursor },
+      persistedHistoryCursor: null,
+      liveTailCursor: null,
+      overlapBoundary: null,
+    },
+    extensionUi: {
+      sync: { state: "following", cursor },
+      notifications: [],
+      statuses: {},
+      widgets: {},
+      dialogs: [],
+    },
+    panels: [],
+    publicationHighWatermark: 20,
+    ...overrides,
+  };
+}
+
+describe("authority protocol schemas", () => {
+  it("enforces cursor identity and semantic ownership as a property of every projection", () => {
+    expect(AuthorityCursorSchema.safeParse(cursor).success).toBe(true);
+
+    const ownerMismatches = [
+      {
+        custody: [
+          {
+            custodyId: "c",
+            intentId: "i",
+            owner: otherOwner,
+            queueMode: "steer",
+            barrier: "compaction",
+            enteredAt: 1,
+            requiresReview: false,
+          },
+        ],
+      },
+      {
+        activeIntents: [
+          { intentId: "i", owner: otherOwner, kind: "submit", state: "recorded", recordedAt: 1 },
+        ],
+      },
+      {
+        recentIntentOutcomes: [
+          { intentId: "i", owner: otherOwner, kind: "reload", state: "completed", result: {} },
+        ],
+      },
+      {
+        recentObservedOperations: [
+          { operationId: "op", owner: otherOwner, kind: "agent", state: "active", observedAt: 1 },
+        ],
+      },
+    ];
+    for (const mismatch of ownerMismatches) {
+      expect(SemanticSnapshotSchema.safeParse(snapshot(mismatch)).success).toBe(false);
+    }
+
+    expect(
+      SemanticSnapshotSchema.safeParse(
+        snapshot({
+          queues: { steering: ["one"], followUp: [], steeringIntentIds: [], followUpIntentIds: [] },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      SemanticSnapshotSchema.safeParse(
+        snapshot({
+          sdk: {
+            isStreaming: true,
+            isIdle: true,
+            isCompacting: false,
+            isRetrying: false,
+            retryAttempt: 0,
+            isBashRunning: false,
+          },
+        }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it("requires an observed cursor to belong to the intent's expected owner and models conflicting duplicate payloads", () => {
+    const envelope = {
+      sessionId: "session-a",
+      intentId: "intent-a",
+      rendererGeneration: 2,
+      expectedOwner: owner,
+      observedCursor: cursor,
+      intent: {
+        kind: "submit",
+        editorRevision: 0,
+        text: "hello",
+        images: [],
+        requestedMode: "steer",
+        surface: "composer",
+      },
+    };
+    expect(IntentEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    expect(
+      IntentEnvelopeSchema.safeParse({
+        ...envelope,
+        observedCursor: { ...cursor, hostInstanceId: "host-b" },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      IntentPayloadConflictSchema.safeParse({
+        intentId: "intent-a",
+        owner,
+        expectedPayloadFingerprint: "first",
+        receivedPayloadFingerprint: "second",
+      }).success,
+    ).toBe(true);
+    expect(
+      IntentPayloadConflictSchema.safeParse({
+        intentId: "intent-a",
+        owner,
+        expectedPayloadFingerprint: "same",
+        receivedPayloadFingerprint: "same",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps per-intent terminal results discriminated", () => {
+    expect(
+      IntentOutcomeSchema.safeParse({
+        intentId: "intent-a",
+        owner,
+        kind: "submit",
+        state: "completed",
+        result: { disposition: "consumed", editorRevision: 3, queued: true },
+      }).success,
+    ).toBe(true);
+    expect(
+      IntentOutcomeSchema.safeParse({
+        intentId: "intent-a",
+        owner,
+        kind: "setModel",
+        state: "completed",
+        result: { provider: "openai" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts only atomically owner-consistent frames and publication payloads", () => {
+    const frame = {
+      owner,
+      transportSequence: 7,
+      frameId: "frame-7",
+      records: [],
+      terminalSnapshot: snapshot(),
+    };
+    expect(AuthorityFrameSchema.safeParse(frame).success).toBe(true);
+    expect(
+      AuthorityFrameSchema.safeParse({
+        ...frame,
+        terminalSnapshot: snapshot({ owner: otherOwner }),
+      }).success,
+    ).toBe(false);
+
+    const publication = {
+      sessionId: "session-a",
+      rendererGeneration: 2,
+      publicationSequence: 21,
+      plane: "semantic",
+      owner,
+      payload: frame,
+    };
+    expect(RendererPublicationSchema.safeParse(publication).success).toBe(true);
+    expect(RendererPublicationSchema.safeParse({ ...publication, owner: otherOwner }).success).toBe(
+      false,
+    );
+  });
+
+  it("requires attach baselines, panel reconstruction, and replay to be internally coherent", () => {
+    expect(AuthorityAttachBaselineSchema.safeParse(baseline()).success).toBe(true);
+    expect(
+      AuthorityAttachBaselineSchema.safeParse(
+        baseline({
+          semantic: {
+            sync: { state: "following", cursor: { ...cursor, snapshotSequence: 10 } },
+            snapshot: snapshot(),
+          },
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      PanelPresentationBaselineSchema.safeParse({
+        panelKey: "panel-a",
+        panelId: 1,
+        owner,
+        sync: { state: "following", cursor },
+        overlay: true,
+        unified: false,
+        inputAcknowledgedThrough: 0,
+        keyframe: { kind: "repaint_required", renderRevision: 1 },
+      }).success,
+    ).toBe(false);
+
+    const response = {
+      baseline: baseline(),
+      replay: [
+        {
+          sessionId: "session-a",
+          rendererGeneration: 2,
+          publicationSequence: 21,
+          plane: "semantic",
+          owner,
+          payload: {
+            owner,
+            transportSequence: 8,
+            frameId: "frame-8",
+            records: [],
+            terminalSnapshot: snapshot({ snapshotSequence: 12 }),
+          },
+        },
+      ],
+    };
+    expect(AuthorityAttachResponseSchema.safeParse(response).success).toBe(true);
+    expect(
+      AuthorityAttachResponseSchema.safeParse({
+        ...response,
+        replay: [{ ...response.replay[0], publicationSequence: 20 }],
+      }).success,
+    ).toBe(false);
+  });
+});
