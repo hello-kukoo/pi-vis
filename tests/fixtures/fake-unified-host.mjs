@@ -42,6 +42,16 @@ const hostInstanceId = crypto.randomUUID();
 const sessionEpoch = 0;
 let transportSequence = 0;
 let snapshotSequence = 0;
+// Authority-frame cursors are per plane, never aliases of legacy child IPC.
+let semanticTransportSequence = 0;
+let transcriptTransportSequence = 0;
+let extensionUiTransportSequence = 0;
+let panelTransportSequence = 0;
+let lastSemanticSnapshotSequence = 0;
+let panelRenderRevision = 0;
+let panelInputAcknowledgedThrough = 0;
+let panelRepaintAcknowledgedRevision = 0;
+let panelFramebuffer = "";
 let editorRevision = 0;
 let editorText = "";
 let editorAttachments = [];
@@ -81,6 +91,10 @@ function sendControl(payload) {
   send({ type: "control", payload });
 }
 
+function authorityOwner() {
+  return { hostInstanceId, sessionEpoch };
+}
+
 function snapshot() {
   return {
     hostInstanceId,
@@ -114,6 +128,169 @@ function snapshot() {
       capabilityDiagnostics: [],
     },
     editor: { revision: editorRevision, text: editorText, attachments: editorAttachments },
+  };
+}
+
+function semanticSnapshot() {
+  const value = snapshot();
+  lastSemanticSnapshotSequence = value.snapshotSequence;
+  const owner = authorityOwner();
+  return {
+    owner,
+    snapshotSequence: value.snapshotSequence,
+    capturedAt: value.capturedAt,
+    sdk: {
+      isStreaming: value.isStreaming,
+      isIdle: value.isIdle,
+      isCompacting: value.isCompacting,
+      isRetrying: value.isRetrying,
+      retryAttempt: value.retryAttempt,
+      isBashRunning: value.isBashRunning,
+    },
+    activity: {},
+    queues: {
+      steering: [],
+      followUp: [],
+      steeringIntentIds: [],
+      followUpIntentIds: [],
+    },
+    custody: [],
+    editor: value.editor,
+    activeIntents: [],
+    recentIntentOutcomes: [],
+    recentObservedOperations: [],
+    operationJournalLowWatermark: 0,
+    operationJournalHighWatermark: 0,
+    operationJournalTruncated: false,
+    dispatchedIntentLowWatermark: 0,
+    dispatchedIntentHighWatermark: 0,
+    dispatchedIntentTruncated: false,
+    model: value.model,
+    thinkingLevel: value.thinkingLevel,
+    catalog: value.catalog,
+  };
+}
+
+function emitAuthorityFrame(records = []) {
+  const terminalSnapshot = semanticSnapshot();
+  const transportSequence = ++semanticTransportSequence;
+  send({
+    type: "authority_frame",
+    frame: {
+      owner: terminalSnapshot.owner,
+      transportSequence,
+      frameId: `${hostInstanceId}:${sessionEpoch}:${transportSequence}`,
+      records,
+      terminalSnapshot,
+    },
+  });
+  return terminalSnapshot;
+}
+
+function presentationCursor(plane, snapshotSequence = lastSemanticSnapshotSequence || 1) {
+  const transportSequence =
+    plane === "transcript"
+      ? ++transcriptTransportSequence
+      : plane === "extensionUi"
+        ? ++extensionUiTransportSequence
+        : ++panelTransportSequence;
+  return { ...authorityOwner(), transportSequence, snapshotSequence };
+}
+
+function publishPanel(payload) {
+  send({
+    type: "authority_publication",
+    publication: { plane: "panel", owner: authorityOwner(), payload },
+  });
+}
+
+function panelBaseline(cursor, ansi = panelFramebuffer) {
+  return {
+    panelKey: `panel:${PANEL_ID}`,
+    panelId: PANEL_ID,
+    owner: authorityOwner(),
+    sync: { state: "following", cursor },
+    overlay: false,
+    unified: true,
+    inputAcknowledgedThrough: panelInputAcknowledgedThrough,
+    keyframe: { kind: "keyframe", ansi, renderRevision: panelRenderRevision },
+  };
+}
+
+function publishPanelReset() {
+  const cursor = presentationCursor("panel");
+  publishPanel({
+    kind: "reset",
+    cursor,
+    panelKey: `panel:${PANEL_ID}`,
+    renderRevision: panelRenderRevision,
+    panelId: PANEL_ID,
+    overlay: false,
+    unified: true,
+  });
+}
+
+function publishPanelKeyframe() {
+  const cursor = presentationCursor("panel");
+  publishPanel({ kind: "keyframe", cursor, panel: panelBaseline(cursor) });
+}
+
+function publishPanelData(data) {
+  const cursor = presentationCursor("panel");
+  publishPanel({
+    kind: "ansi_delta",
+    cursor,
+    panelKey: `panel:${PANEL_ID}`,
+    data,
+    renderRevision: panelRenderRevision,
+  });
+}
+
+function publishPanelClose() {
+  const cursor = presentationCursor("panel");
+  publishPanel({ kind: "close", cursor, panelKey: `panel:${PANEL_ID}` });
+}
+
+function authorityAttach(rendererGeneration) {
+  const semantic = semanticSnapshot();
+  if (semanticTransportSequence === 0) semanticTransportSequence = 1;
+  if (transcriptTransportSequence === 0) transcriptTransportSequence = 1;
+  if (extensionUiTransportSequence === 0) extensionUiTransportSequence = 1;
+  if (panelOpen && panelTransportSequence === 0) panelTransportSequence = 1;
+  const owner = authorityOwner();
+  const semanticCursor = {
+    ...owner,
+    transportSequence: semanticTransportSequence,
+    snapshotSequence: semantic.snapshotSequence,
+  };
+  const presentationBaseline = (transportSequence) => ({
+    ...owner,
+    transportSequence,
+    snapshotSequence: semantic.snapshotSequence,
+  });
+  const panelCursor = presentationBaseline(panelTransportSequence);
+  return {
+    sessionId: "fake-unified",
+    rendererGeneration,
+    owner,
+    semantic: { sync: { state: "following", cursor: semanticCursor }, snapshot: semantic },
+    operationJournal: [],
+    restorations: [],
+    transcript: {
+      sync: { state: "following", cursor: presentationBaseline(transcriptTransportSequence) },
+      persistedHistoryCursor: null,
+      liveTailCursor: null,
+      overlapBoundary: null,
+    },
+    extensionUi: {
+      sync: { state: "following", cursor: presentationBaseline(extensionUiTransportSequence) },
+      notifications: [],
+      statuses: {},
+      widgets: {},
+      dialogs: [],
+    },
+    panels: panelOpen ? [panelBaseline(panelCursor)] : [],
+    publicationHighWatermark: 0,
   };
 }
 
@@ -279,7 +456,25 @@ function renderRoster() {
 }
 
 function renderFrame() {
-  send({ type: "panel_data", panelId: PANEL_ID, data: renderRoster() });
+  const data = renderRoster();
+  panelFramebuffer = data;
+  send({ type: "panel_data", panelId: PANEL_ID, data });
+  publishPanelData(data);
+}
+
+function requestPanelRepaint() {
+  if (!panelOpen) return;
+  panelRenderRevision++;
+  panelInputAcknowledgedThrough = 0;
+  panelRepaintAcknowledgedRevision = 0;
+  publishPanelReset();
+  publishPanelKeyframe();
+  // The mounted xterm acknowledges only after it has applied the reset. Delay
+  // one turn so panel_open has committed and UnifiedTuiHost has subscribed.
+  setTimeout(() => {
+    if (panelOpen)
+      send({ type: "panel_repaint", panelId: PANEL_ID, revision: panelRenderRevision });
+  }, 0).unref?.();
 }
 
 function openUnifiedPanel() {
@@ -290,11 +485,26 @@ function openUnifiedPanel() {
   editorDraft = "";
   autoClosedAfterDraft = false;
   pendingSubmits.clear();
-  send({ type: "panel_open", panelId: PANEL_ID, overlay: false, unified: true });
+  panelRenderRevision++;
+  panelInputAcknowledgedThrough = 0;
+  panelRepaintAcknowledgedRevision = 0;
+  panelFramebuffer = renderRoster();
+  send({
+    type: "panel_open",
+    panelId: PANEL_ID,
+    overlay: false,
+    unified: true,
+    baseline: { revision: panelRenderRevision, repaintRequired: true },
+  });
+  // A reset plus a full child-owned keyframe gives frame consumers a complete
+  // baseline before independent ANSI deltas begin.
+  publishPanelReset();
+  publishPanelKeyframe();
   // Mirror the real host: push the kitty handshake so xterm answers it. The
   // reply (+ later keystrokes) is captured to PIVIS_TEST_HOST_INPUT_FILE.
   send({ type: "panel_data", panelId: PANEL_ID, data: KITTY_HANDSHAKE });
   renderFrame();
+  requestPanelRepaint();
   // Keep streaming so a remount (e.g. session switch) re-seeds from the buffer.
   panelTimer = setInterval(renderFrame, 1000);
   if (panelTimer?.unref) panelTimer.unref();
@@ -326,6 +536,7 @@ function closeUnifiedPanel() {
     panelTimer = null;
   }
   send({ type: "panel_close", panelId: PANEL_ID });
+  publishPanelClose();
 }
 
 function openCustomPanel(uiSurface) {
@@ -362,6 +573,7 @@ process.on("message", (msg) => {
       case "init":
         sendControl({ type: "spawned" });
         sendControl({ type: "ready", piVersion: "99.0.0", snapshot: snapshot() });
+        emitAuthorityFrame();
         // Open the unified panel shortly after ready, mirroring an extension
         // registering a factory setWidget during its first tool call.
         setTimeout(openUnifiedPanel, 300);
@@ -370,7 +582,12 @@ process.on("message", (msg) => {
         handleCommand(msg.id, msg.command, msg.uiSurface);
         break;
       case "state_request":
+        // Compatibility resync is a direct public-session snapshot, not a
+        // semantic frame or a presentation baseline.
         reply(msg.id, true, snapshot());
+        break;
+      case "authority_attach":
+        reply(msg.id, true, authorityAttach(msg.rendererGeneration));
         break;
       case "prepare_close":
         closeToken = crypto.randomUUID();
@@ -421,15 +638,43 @@ process.on("message", (msg) => {
           attachments: editorAttachments,
         });
         break;
-      case "panel_input":
-        // Keystrokes from UnifiedTuiHost's xterm → record for the input-routing
-        // assertion and update a tiny fake editor draft so this fixture can
-        // model the real host's draft-retained self-close invariant.
-        if (typeof msg?.data === "string") {
-          recordInput(msg.data);
-          updateFakeEditorDraft(msg.data);
+      case "panel_input": {
+        const expected = panelInputAcknowledgedThrough + 1;
+        const repaintRequired =
+          !panelOpen ||
+          msg?.panelId !== PANEL_ID ||
+          msg?.revision !== panelRenderRevision ||
+          panelRepaintAcknowledgedRevision !== panelRenderRevision;
+        if (repaintRequired) {
+          reply(msg.id, true, {
+            acknowledgedThrough: panelInputAcknowledgedThrough,
+            repaintRequired: { revision: panelRenderRevision, repaintRequired: true },
+          });
+        } else if (msg.sequence !== expected) {
+          reply(msg.id, true, {
+            acknowledgedThrough: panelInputAcknowledgedThrough,
+            gap: { expected, received: msg.sequence },
+          });
+        } else {
+          // Keystrokes from UnifiedTuiHost's xterm → record for the input-routing
+          // assertion and update a tiny fake editor draft so this fixture can
+          // model the real host's draft-retained self-close invariant.
+          if (typeof msg?.data === "string") {
+            recordInput(msg.data);
+            updateFakeEditorDraft(msg.data);
+          }
+          panelInputAcknowledgedThrough = msg.sequence;
+          reply(msg.id, true, { acknowledgedThrough: panelInputAcknowledgedThrough });
         }
-        reply(msg.id, true, { acknowledgedThrough: msg.sequence });
+        break;
+      }
+      case "panel_repaint_ack":
+        if (panelOpen && msg?.panelId === PANEL_ID && msg?.revision === panelRenderRevision) {
+          panelRepaintAcknowledgedRevision = panelRenderRevision;
+          reply(msg.id, true, { acknowledged: true });
+        } else {
+          reply(msg.id, true, { acknowledged: false });
+        }
         break;
       case "panel_resize":
         // A force resize = xterm remounted (clean terminal). The real host
@@ -437,6 +682,7 @@ process.on("message", (msg) => {
         // appears in the input file (the session-switch invariant, I6).
         if (msg?.force === true && panelOpen) {
           send({ type: "panel_data", panelId: PANEL_ID, data: KITTY_HANDSHAKE });
+          requestPanelRepaint();
         }
         break;
       case "panel_close_request":
