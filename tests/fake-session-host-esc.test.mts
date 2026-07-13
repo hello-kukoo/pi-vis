@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  AuthorityAttachBaselineSchema,
+  AuthorityFrameSchema,
+  AuthorityPresentationPublicationSchema,
+} from "../src/shared/pi-protocol/runtime-state.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-session-host.mjs", import.meta.url));
 
@@ -147,6 +152,54 @@ describe("fake session host ESC process semantics", () => {
           entry.event === "persisted" && entry.kind === target && entry.token === started.token,
       ),
     ).toBe(false);
+  });
+
+  it("publishes schema-valid authority baselines, frames, and independent presentation cursors", async () => {
+    send({ type: "authority_attach", id: "authority-attach", rendererGeneration: 7 });
+    const attached = await response("authority-attach");
+    const baseline = AuthorityAttachBaselineSchema.parse(attached.data);
+    expect(baseline.rendererGeneration).toBe(7);
+
+    send({
+      type: "dispatch_intent",
+      id: "authority-thinking",
+      envelope: {
+        intentId: "authority-thinking-intent",
+        expectedOwner: baseline.owner,
+        intent: { kind: "setThinking", level: "low" },
+      },
+    });
+    await expect(response("authority-thinking")).resolves.toMatchObject({
+      data: { status: "admitted", intentId: "authority-thinking-intent" },
+    });
+    const terminal = await waitUntil(() =>
+      messages.find(
+        (message) =>
+          message.type === "authority_frame" &&
+          (
+            message.frame as { records?: Array<{ type?: string; outcome?: { intentId?: string } }> }
+          )?.records?.some(
+            (record) =>
+              record.type === "intent_outcome" &&
+              record.outcome?.intentId === "authority-thinking-intent",
+          ),
+      ),
+    );
+    const frame = AuthorityFrameSchema.parse(terminal.frame);
+    expect(frame.terminalSnapshot.owner).toEqual(baseline.owner);
+
+    const transcript = await waitUntil(() =>
+      messages.find(
+        (message) =>
+          message.type === "authority_publication" &&
+          (message.publication as { plane?: string })?.plane === "transcript",
+      ),
+    );
+    const publication = AuthorityPresentationPublicationSchema.parse(transcript.publication);
+    expect(publication.plane).toBe("transcript");
+    if (publication.plane === "transcript") {
+      expect(publication.payload.cursor.transportSequence).toBeGreaterThan(0);
+    }
   });
 
   it("reports editor preflight as outcome unknown without pretending to cancel it", async () => {

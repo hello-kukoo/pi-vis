@@ -18,6 +18,15 @@ const hostInstanceId = crypto.randomUUID();
 let sessionEpoch = 0;
 let snapshotSequence = 0;
 let transportSequence = 0;
+// Authority-frame cursors are independent from the legacy child IPC sequence.
+// Keeping them separate lets transcript/UI traffic never create a semantic gap.
+let semanticTransportSequence = 0;
+const presentationTransportSequence = { transcript: 0, extensionUi: 0, panel: 0 };
+const authorityIntents = new Map();
+const authorityOutcomes = [];
+const authorityJournal = [];
+const authorityRestorations = new Map();
+let authorityJournalSequence = 0;
 let initialized = false;
 let cwd = process.cwd();
 let sessionId = crypto.randomUUID();
@@ -89,6 +98,13 @@ function send(message) {
     sessionEpoch,
     transportSequence: ++transportSequence,
   });
+  // Presentation traffic has its own cursor. Legacy wire messages remain for
+  // existing E2E seams, while frame consumers only use these publications.
+  if (message?.type === "extension_ui_request") {
+    publishExtensionUi(message);
+  } else if (typeof message?.type === "string" && message.type.startsWith("panel_")) {
+    publishPanel(message);
+  }
 }
 
 function sendControl(payload) {
@@ -134,9 +150,139 @@ function snapshot() {
   };
 }
 
+function authorityOwner() {
+  return { hostInstanceId, sessionEpoch };
+}
+
+function semanticSnapshot() {
+  const value = snapshot();
+  const owner = authorityOwner();
+  const outcomes = authorityOutcomes.filter(
+    (outcome) =>
+      outcome.owner.hostInstanceId === owner.hostInstanceId &&
+      outcome.owner.sessionEpoch === owner.sessionEpoch,
+  );
+  const activeIntents = [...authorityIntents.values()]
+    .filter(
+      (entry) =>
+        entry.owner.hostInstanceId === owner.hostInstanceId &&
+        entry.owner.sessionEpoch === owner.sessionEpoch &&
+        !entry.outcome,
+    )
+    .map((entry) => ({
+      intentId: entry.intentId,
+      owner,
+      kind: entry.intent.kind,
+      state: "admitted",
+      recordedAt: entry.recordedAt,
+    }));
+  return {
+    owner,
+    snapshotSequence: value.snapshotSequence,
+    capturedAt: value.capturedAt,
+    sdk: {
+      isStreaming: value.isStreaming,
+      isIdle: value.isIdle,
+      isCompacting: value.isCompacting,
+      isRetrying: value.isRetrying,
+      retryAttempt: value.retryAttempt,
+      isBashRunning: value.isBashRunning,
+    },
+    activity: {},
+    queues: {
+      steering: value.steering,
+      followUp: value.followUp,
+      steeringIntentIds: steeringQueue.map((item) => item.intentId ?? null),
+      followUpIntentIds: followUpQueue.map((item) => item.intentId ?? null),
+    },
+    custody: [],
+    editor: value.editor,
+    activeIntents,
+    recentIntentOutcomes: outcomes,
+    recentObservedOperations: [],
+    operationJournalLowWatermark: authorityJournal[0]?.sequence ?? authorityJournalSequence,
+    operationJournalHighWatermark: authorityJournalSequence,
+    operationJournalTruncated: false,
+    dispatchedIntentLowWatermark: 0,
+    dispatchedIntentHighWatermark: authorityIntents.size,
+    dispatchedIntentTruncated: false,
+    model: value.model,
+    thinkingLevel: value.thinkingLevel,
+    catalog: value.catalog,
+  };
+}
+
+function emitAuthorityFrame(records = []) {
+  const terminalSnapshot = semanticSnapshot();
+  const frameSequence = ++semanticTransportSequence;
+  send({
+    type: "authority_frame",
+    frame: {
+      owner: terminalSnapshot.owner,
+      transportSequence: frameSequence,
+      frameId: `${hostInstanceId}:${sessionEpoch}:${frameSequence}`,
+      records,
+      terminalSnapshot,
+    },
+  });
+}
+
+function presentationCursor(plane) {
+  return {
+    ...authorityOwner(),
+    transportSequence: ++presentationTransportSequence[plane],
+    snapshotSequence: Math.max(1, snapshotSequence),
+  };
+}
+
+function publishTranscript(event) {
+  const cursor = presentationCursor("transcript");
+  send({
+    type: "authority_publication",
+    publication: {
+      plane: "transcript",
+      owner: authorityOwner(),
+      payload: {
+        kind: "delta",
+        cursor,
+        liveTailCursor: String(cursor.transportSequence),
+        entries: [structuredClone(event)],
+      },
+    },
+  });
+}
+
+function publishExtensionUi(request) {
+  const cursor = presentationCursor("extensionUi");
+  send({
+    type: "authority_publication",
+    publication: {
+      plane: "extensionUi",
+      owner: authorityOwner(),
+      payload: { kind: "request", cursor, request: structuredClone(request) },
+    },
+  });
+}
+
+function publishPanel(event) {
+  const cursor = presentationCursor("panel");
+  const panelKey = `panel:${event.panelId ?? "all"}`;
+  const payload =
+    event.type === "panel_close"
+      ? { kind: "close", cursor, panelKey }
+      : event.type === "panel_data"
+        ? { kind: "ansi_delta", cursor, panelKey, data: event.data ?? "", renderRevision: 0 }
+        : { kind: "repaint_required", cursor, panelKey, reason: "fixture_repaint" };
+  send({
+    type: "authority_publication",
+    publication: { plane: "panel", owner: authorityOwner(), payload },
+  });
+}
+
 function publishSnapshot(full = false) {
   const value = snapshot();
   sendControl({ type: "snapshot", snapshot: value, ...(full ? { full: true } : {}) });
+  emitAuthorityFrame();
   return value;
 }
 
@@ -152,6 +298,7 @@ function reply(id, success, data, error) {
 
 function emitEvent(event) {
   send({ type: "event", event });
+  publishTranscript(event);
 }
 
 function newEntryId() {
@@ -419,7 +566,7 @@ async function runLongTool(submission) {
 }
 
 function openSelect(submission, request, onAnswer) {
-  pendingDialogs.set(request.id, { submission, onAnswer });
+  pendingDialogs.set(request.id, { submission, request, onAnswer });
   send(request);
   publishSnapshot();
 }
@@ -705,6 +852,8 @@ function transition(reason, records = []) {
       terminalSnapshot,
     },
   });
+  // This first successor frame is deliberately empty of predecessor records.
+  emitAuthorityFrame();
 }
 
 function startFreshSession() {
@@ -832,6 +981,310 @@ async function handleCommand(id, command) {
   }
 }
 
+function stableAuthorityFingerprint(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableAuthorityFingerprint).join(",")}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableAuthorityFingerprint(value[key])}`)
+    .join(",")}}`;
+}
+
+function finishAuthorityIntent(entry, state, result, error) {
+  if (entry.outcome) return;
+  const outcome = {
+    intentId: entry.intentId,
+    owner: structuredClone(entry.owner),
+    kind: entry.intent.kind,
+    state,
+    ...(result === undefined ? {} : { result }),
+    ...(error ? { error } : {}),
+  };
+  entry.outcome = outcome;
+  authorityOutcomes.push(outcome);
+  authorityJournal.push({ type: "intent_outcome", sequence: ++authorityJournalSequence, outcome });
+  emitAuthorityFrame([{ type: "intent_outcome", outcome }]);
+}
+
+async function executeAuthorityIntent(entry) {
+  const { intent } = entry;
+  switch (intent.kind) {
+    case "submit": {
+      if (intent.editorRevision !== editorRevision) {
+        finishAuthorityIntent(entry, "rejected", {
+          disposition: "not_submitted",
+          editorRevision,
+          message: "Editor revision changed",
+        });
+        return;
+      }
+      const submission = {
+        intentId: entry.intentId,
+        expectedHostId: hostInstanceId,
+        expectedEpoch: sessionEpoch,
+        editorRevision: intent.editorRevision,
+        text: intent.text,
+        images: intent.images,
+        requestedMode: intent.requestedMode,
+        surface: intent.surface,
+      };
+      editorRevision++;
+      editorText = "";
+      editorAttachments = [];
+      if (runtimeStreaming) {
+        const queue = intent.requestedMode === "steer" ? steeringQueue : followUpQueue;
+        queue.push({
+          intentId: entry.intentId,
+          text: intent.text,
+          images: structuredClone(intent.images),
+        });
+        finishAuthorityIntent(entry, "completed", {
+          disposition: "completed",
+          editorRevision: submission.editorRevision,
+          queued: true,
+        });
+        publishSnapshot();
+        return;
+      }
+      await runSubmission(submission);
+      finishAuthorityIntent(entry, "completed", {
+        disposition: "completed",
+        editorRevision: submission.editorRevision,
+        queued: false,
+      });
+      return;
+    }
+    case "invokeCommand": {
+      // Extension slash commands are exercised through the fixture's existing
+      // extension submission seam. Built-ins below never go through prompt.
+      const command = intent.text.trim().replace(/^\//, "").split(/\s+/, 1)[0];
+      if (command === "compact") {
+        await handleCommand(`authority-${entry.intentId}`, { type: "compact" });
+        finishAuthorityIntent(entry, "completed", { commandType: command, response: {} });
+      } else if (command === "reload") {
+        finishAuthorityIntent(entry, "completed", { commandType: command, response: {} });
+        transition("authority-reload");
+      } else if (intent.editorRevision !== editorRevision) {
+        finishAuthorityIntent(entry, "rejected", {
+          ...(command ? { commandType: command } : {}),
+          disposition: "not_submitted",
+          editorRevision,
+          message: "Editor revision changed",
+        });
+      } else {
+        const submission = {
+          intentId: entry.intentId,
+          expectedHostId: hostInstanceId,
+          expectedEpoch: sessionEpoch,
+          editorRevision: intent.editorRevision,
+          text: intent.text,
+          images: [],
+          requestedMode: "followUp",
+          surface: "composer",
+        };
+        editorRevision++;
+        editorText = "";
+        editorAttachments = [];
+        await runSubmission(submission);
+        finishAuthorityIntent(entry, "completed", {
+          ...(command ? { commandType: command } : {}),
+          disposition: "completed",
+          editorRevision: intent.editorRevision,
+        });
+      }
+      return;
+    }
+    case "compact":
+      await handleCommand(`authority-${entry.intentId}`, {
+        type: "compact",
+        instructions: intent.instructions,
+      });
+      finishAuthorityIntent(entry, "completed", {});
+      return;
+    case "runBash":
+      await handleCommand(`authority-${entry.intentId}`, { type: "bash", command: intent.command });
+      finishAuthorityIntent(entry, "completed", {
+        started: true,
+        output: `$ ${intent.command}\nbash output here\n`,
+        exitCode: 0,
+      });
+      return;
+    case "setModel":
+      if (!fakeModels.some((model) => model.id === intent.modelId)) {
+        finishAuthorityIntent(entry, "failed", undefined, `Model not found: ${intent.modelId}`);
+        return;
+      }
+      currentModelId = intent.modelId;
+      publishSnapshot();
+      finishAuthorityIntent(entry, "completed", {
+        provider: intent.provider,
+        modelId: intent.modelId,
+      });
+      return;
+    case "setThinking":
+      currentThinkingLevel = intent.level;
+      emitEvent({ type: "thinking_level_changed", level: currentThinkingLevel });
+      publishSnapshot();
+      finishAuthorityIntent(entry, "completed", { level: intent.level });
+      return;
+    case "rename":
+      sessionName = intent.name;
+      appendEntry({ type: "session_info", name: sessionName });
+      emitEvent({ type: "session_info_changed", name: sessionName });
+      publishSnapshot();
+      finishAuthorityIntent(entry, "completed", { name: intent.name });
+      return;
+    case "export": {
+      const outputPath =
+        intent.outputPath ?? path.join(sessionsRoot(), `export-${Date.now()}.html`);
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, "<html><body>exported</body></html>");
+      finishAuthorityIntent(entry, "completed", { path: outputPath });
+      return;
+    }
+    case "navigate":
+      runtimeNavigation = true;
+      publishSnapshot();
+      runtimeNavigation = false;
+      publishSnapshot();
+      finishAuthorityIntent(entry, "completed", {
+        targetId: intent.targetId,
+        ...(intent.summarize !== undefined ? { summarized: intent.summarize } : {}),
+      });
+      return;
+    case "interrupt": {
+      const target = runtimeNavigation
+        ? "navigation"
+        : runtimeCompacting
+          ? "compaction"
+          : runtimeRetrying
+            ? "retry"
+            : runtimeStreaming
+              ? "streaming"
+              : runtimeBash
+                ? "bash"
+                : "editor";
+      finishAuthorityIntent(entry, "completed", { target, interrupted: target !== "editor" });
+      return;
+    }
+    case "reload":
+      // The terminal predecessor outcome commits before transition() advances
+      // the owner and installs its successor baseline.
+      finishAuthorityIntent(entry, "completed", {});
+      transition("authority-reload");
+      return;
+    default:
+      finishAuthorityIntent(entry, "failed", undefined, "Unsupported fake authority intent");
+  }
+}
+
+function dispatchAuthorityIntent(envelope) {
+  const intentId = envelope?.intentId;
+  const owner = envelope?.expectedOwner;
+  const intent = envelope?.intent;
+  if (!intentId || !owner || !intent || typeof intent.kind !== "string") {
+    return {
+      status: "not_admitted",
+      intentId: intentId ?? "",
+      reason: "invalid",
+      invalidReason: "malformed",
+    };
+  }
+  if (owner.hostInstanceId !== hostInstanceId || owner.sessionEpoch !== sessionEpoch) {
+    return { status: "not_admitted", intentId, reason: "stale_owner" };
+  }
+  const key = `${owner.hostInstanceId}:${owner.sessionEpoch}:${intentId}`;
+  const fingerprint = stableAuthorityFingerprint({ owner, intent });
+  const prior = authorityIntents.get(key);
+  if (prior) {
+    if (prior.fingerprint !== fingerprint) {
+      return {
+        status: "not_admitted",
+        intentId,
+        reason: "invalid",
+        invalidReason: "payload_conflict",
+      };
+    }
+    return { status: "duplicate", intentId, owner: structuredClone(owner) };
+  }
+  const entry = {
+    intentId,
+    owner: structuredClone(owner),
+    intent: structuredClone(intent),
+    fingerprint,
+    recordedAt: Date.now(),
+    outcome: null,
+  };
+  authorityIntents.set(key, entry);
+  emitAuthorityFrame();
+  queueMicrotask(() => {
+    void executeAuthorityIntent(entry).catch((error) =>
+      finishAuthorityIntent(
+        entry,
+        "failed",
+        undefined,
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
+  });
+  return { status: "admitted", intentId, owner: structuredClone(owner) };
+}
+
+function authorityAttach(rendererGeneration) {
+  const semantic = semanticSnapshot();
+  if (semanticTransportSequence === 0) semanticTransportSequence = 1;
+  if (presentationTransportSequence.transcript === 0) presentationTransportSequence.transcript = 1;
+  if (presentationTransportSequence.extensionUi === 0)
+    presentationTransportSequence.extensionUi = 1;
+  if (presentationTransportSequence.panel === 0) presentationTransportSequence.panel = 1;
+  const owner = semantic.owner;
+  const cursor = {
+    ...owner,
+    transportSequence: semanticTransportSequence,
+    snapshotSequence: semantic.snapshotSequence,
+  };
+  const transcriptCursor = {
+    ...owner,
+    transportSequence: presentationTransportSequence.transcript,
+    snapshotSequence: semantic.snapshotSequence,
+  };
+  const extensionUiCursor = {
+    ...owner,
+    transportSequence: presentationTransportSequence.extensionUi,
+    snapshotSequence: semantic.snapshotSequence,
+  };
+  return {
+    sessionId,
+    rendererGeneration,
+    owner,
+    semantic: { sync: { state: "following", cursor }, snapshot: semantic },
+    operationJournal: authorityJournal.filter(
+      (entry) => entry.outcome.owner.sessionEpoch === sessionEpoch,
+    ),
+    restorations: [...authorityRestorations.values()],
+    transcript: {
+      sync: { state: "following", cursor: transcriptCursor },
+      persistedHistoryCursor: sessionFile ?? null,
+      liveTailCursor: null,
+      overlapBoundary: sessionFile ? `persisted:${sessionFile}` : null,
+    },
+    extensionUi: {
+      sync: { state: "following", cursor: extensionUiCursor },
+      notifications: structuredClone(catalog.notifications),
+      statuses: structuredClone(catalog.statuses),
+      widgets: structuredClone(catalog.widgets),
+      dialogs: [...pendingDialogs.values()].map(({ request }) => ({
+        request: structuredClone(request),
+        rendererGeneration,
+        inputPending: false,
+        acknowledged: false,
+      })),
+    },
+    panels: [],
+    publicationHighWatermark: 0,
+  };
+}
+
 async function handleMessage(message) {
   if (process.env.PIVIS_TEST_HOST_MESSAGE_LOG) {
     fs.appendFileSync(
@@ -943,8 +1396,58 @@ async function handleMessage(message) {
       break;
     }
     case "state_request": {
+      // Compatibility resync stays a direct legacy snapshot, never a frame.
       const value = publishSnapshot(true);
       reply(message.id, true, value);
+      break;
+    }
+    case "authority_attach":
+      reply(message.id, true, authorityAttach(message.rendererGeneration));
+      break;
+    case "dispatch_intent":
+      reply(message.id, true, dispatchAuthorityIntent(message.envelope));
+      break;
+    case "query": {
+      const envelope = message.envelope;
+      if (
+        envelope?.expectedOwner?.hostInstanceId !== hostInstanceId ||
+        envelope?.expectedOwner?.sessionEpoch !== sessionEpoch
+      ) {
+        reply(message.id, false, undefined, "Stale authority owner");
+        break;
+      }
+      const query = envelope?.query;
+      const read =
+        query?.type === "get_state"
+          ? stateData()
+          : query?.type === "get_session_stats"
+            ? statsData()
+            : query?.type === "get_commands"
+              ? { commands: commandCatalog() }
+              : query?.type === "get_available_models"
+                ? { models: fakeModels, currentModelId }
+                : query?.type === "get_fork_messages"
+                  ? { messages: userMessagesForForking }
+                  : query?.type === "get_last_assistant_text"
+                    ? { text: lastAssistantText }
+                    : query?.type === "get_messages"
+                      ? { messages: [] }
+                      : query?.type === "get_tree"
+                        ? { nodes: [], leafId: null }
+                        : query?.type === "get_cache_miss_notices"
+                          ? { notices: [] }
+                          : undefined;
+      reply(message.id, true, {
+        queryId: envelope?.queryId,
+        owner: authorityOwner(),
+        queryType: query?.type,
+        response: {
+          type: "response",
+          command: query?.type ?? "unknown",
+          success: read !== undefined,
+          ...(read === undefined ? { error: "Unsupported fake-host query" } : { data: read }),
+        },
+      });
       break;
     }
     case "prepare_close":
@@ -1008,6 +1511,19 @@ async function handleMessage(message) {
             })),
             requiresReview: true,
           });
+          const restoration = {
+            type: "queue_restoration",
+            restorationId,
+            steering: steeringQueue.map((item) => item.text),
+            followUp: followUpQueue.map((item) => item.text),
+            originalAttachments: [...steeringQueue, ...followUpQueue].map((item) => ({
+              intentId: item.intentId,
+              images: structuredClone(item.images),
+            })),
+            requiresReview: true,
+          };
+          authorityRestorations.set(restorationId, restoration);
+          emitAuthorityFrame([restoration]);
           logOperation("restored", {
             kind: "queue",
             restorationId,
