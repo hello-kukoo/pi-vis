@@ -554,7 +554,9 @@ function renderFrame() {
 function requestPanelRepaint() {
   if (!panelOpen) return;
   panelRenderRevision++;
-  panelInputAcknowledgedThrough = 0;
+  // Input sequence is monotonic for the panel identity across repaint/remount.
+  // Only the repaint revision is fenced; resetting the cumulative input ack
+  // would turn the first post-remount terminal reply into an unrecoverable gap.
   panelRepaintAcknowledgedRevision = 0;
   publishPanelReset();
   publishPanelKeyframe();
@@ -770,6 +772,10 @@ process.on("message", (msg) => {
         command: msg?.command?.type,
         text: msg?.submission?.text,
         intent: msg?.envelope?.intent,
+        panelId: msg?.panelId,
+        force: msg?.force,
+        revision: msg?.revision,
+        data: msg?.type === "panel_input" ? msg?.data : undefined,
       })}\n`,
     );
   }
@@ -887,7 +893,7 @@ process.on("message", (msg) => {
           setTimeout(() => {
             if (panelOpen && panelRepaintAcknowledgedRevision === panelRenderRevision)
               send({ type: "panel_data", panelId: PANEL_ID, data: KITTY_HANDSHAKE });
-          }, 0).unref?.();
+          }, 50).unref?.();
         } else {
           reply(msg.id, true, { acknowledged: false });
         }

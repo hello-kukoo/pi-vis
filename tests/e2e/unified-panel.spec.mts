@@ -139,8 +139,9 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
       await expect
         .poll(
           () =>
-            fs.existsSync(folders.inputFile) &&
-            stripKittyReleases(fs.readFileSync(folders.inputFile, "utf8")),
+            fs.existsSync(folders.inputFile)
+              ? stripKittyReleases(fs.readFileSync(folders.inputFile, "utf8"))
+              : "",
           {
             timeout: 10_000,
           },
