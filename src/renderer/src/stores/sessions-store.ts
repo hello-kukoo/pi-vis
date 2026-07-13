@@ -1,6 +1,5 @@
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus, SessionSummary, TranscriptBlock } from "@shared/ipc-contract.js";
-import { type PiRpcCommand, commandNeedsIntent } from "@shared/pi-protocol/commands.js";
 import {
   CacheMissNoticeEventSchema,
   type KnownPiEvent,
@@ -9,7 +8,7 @@ import {
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { ModelInfo, SessionStats, SlashCommandInfo } from "@shared/pi-protocol/responses.js";
-import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
+import { ModelInfoSchema } from "@shared/pi-protocol/responses.js";
 import type {
   AgentSessionSnapshot,
   AuthorityAttachResponse,
@@ -19,7 +18,6 @@ import type {
   SubmissionResult,
 } from "@shared/pi-protocol/runtime-state.js";
 import type { ThinkingLevel } from "@shared/pi-protocol/thinking.js";
-import { ThinkingLevelSchema } from "@shared/pi-protocol/thinking.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import type { SessionSearchOpenResult } from "@shared/session-search.js";
 import { type StateCreator, create } from "zustand";
@@ -45,7 +43,7 @@ import { reanchorCommentsForEdit } from "../lib/diff/edit-anchor.js";
 import { findCurrentModel } from "../lib/model-utils.js";
 import { forgetPanelInputSequence } from "../lib/panel-input-sequence.js";
 import { RENDERER_GENERATION } from "../lib/renderer-generation.js";
-import { invokeSessionCommand } from "../lib/session-command.js";
+import { dispatchSessionIntent, querySession } from "../lib/session-intent.js";
 import {
   type RendererAuthorityState,
   createRendererAuthorityState,
@@ -72,8 +70,6 @@ import {
   transcriptHasBlocks,
 } from "./transcript.js";
 
-let nextThinkingRequestId = 1;
-const pendingThinkingRequests = new Map<SessionId, number>();
 const LOCAL_THEME_FALLBACK_DIAGNOSTIC =
   "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.";
 
@@ -477,11 +473,32 @@ function hasActiveAgentWork(session: SessionViewState | undefined): boolean {
  * until the transcript proves actual assistant/tool work is active.
  */
 export function isSessionWorking(session: SessionViewState | undefined): boolean {
-  return (
-    !!session &&
-    session.availability === "available" &&
-    session.runtimeSnapshot?.isStreaming === true
-  );
+  if (!session || session.availability !== "available") return false;
+  const semantic = session.authorityProjection;
+  if (
+    semantic?.semantic.state === "following" &&
+    semantic.authoritativeSnapshot &&
+    semantic.semantic.cursor.hostInstanceId === session.hostInstanceId &&
+    semantic.semantic.cursor.sessionEpoch === session.sessionEpoch
+  ) {
+    return semantic.authoritativeSnapshot.sdk.isStreaming;
+  }
+  return session.runtimeSnapshot?.isStreaming === true;
+}
+
+function authorityObservation(session: SessionViewState) {
+  if (!session.hostInstanceId) return undefined;
+  const semantic = session.authorityProjection;
+  const cursor =
+    semantic?.semantic.state === "following" &&
+    semantic.semantic.cursor.hostInstanceId === session.hostInstanceId &&
+    semantic.semantic.cursor.sessionEpoch === session.sessionEpoch
+      ? semantic.semantic.cursor
+      : undefined;
+  return {
+    owner: { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch },
+    ...(cursor ? { cursor } : {}),
+  };
 }
 
 export function sessionMatchesRuntime(
@@ -787,6 +804,79 @@ function queuedMessagesFromSnapshot(
   return queuedMessages;
 }
 
+function applyAuthoritySemanticProjection(
+  current: SessionViewState,
+  authorityProjection: RendererAuthorityState,
+): SessionViewState {
+  const snapshot = authorityProjection.authoritativeSnapshot;
+  if (authorityProjection.semantic.state !== "following" || !snapshot) return current;
+  const editorChanged =
+    current.hostInstanceId !== snapshot.owner.hostInstanceId ||
+    current.sessionEpoch !== snapshot.owner.sessionEpoch ||
+    snapshot.editor.revision > current.editorRevision;
+  const priorStreaming = isSessionWorking(current);
+  const sessionName = [
+    ...(authorityProjection.lastSemanticFrame?.records ?? []),
+    ...snapshot.recentIntentOutcomes.map((outcome) => ({
+      type: "intent_outcome" as const,
+      outcome,
+    })),
+  ].reduce<string | undefined>((name, record) => {
+    if (
+      record.type === "intent_outcome" &&
+      record.outcome.kind === "rename" &&
+      record.outcome.state === "completed" &&
+      record.outcome.result?.name !== undefined
+    ) {
+      return record.outcome.result.name;
+    }
+    return name;
+  }, current.sessionName);
+  return {
+    ...current,
+    hostInstanceId: snapshot.owner.hostInstanceId,
+    sessionEpoch: snapshot.owner.sessionEpoch,
+    currentModel: snapshot.model?.id,
+    currentProvider: snapshot.model?.provider,
+    thinkingLevel: snapshot.thinkingLevel,
+    sessionName,
+    editorRevision: editorChanged ? snapshot.editor.revision : current.editorRevision,
+    editorAttachments:
+      editorChanged && current.editorPatchPending === 0
+        ? snapshot.editor.attachments
+        : current.editorAttachments,
+    editorConflict: editorChanged
+      ? editorConflictFromCandidates(snapshot.editor)
+      : current.editorConflict,
+    editorInjection:
+      editorChanged &&
+      current.editorPatchPending === 0 &&
+      snapshot.editor.conflictText === undefined
+        ? {
+            text: snapshot.editor.text,
+            nonce: ++editorInjectionNonce,
+            revision: snapshot.editor.revision,
+          }
+        : current.editorInjection,
+    runningSince:
+      !priorStreaming && snapshot.sdk.isStreaming
+        ? Date.now()
+        : priorStreaming && !snapshot.sdk.isStreaming
+          ? undefined
+          : current.runningSince,
+    queuedMessages: queuedMessagesFromSnapshot(
+      snapshot.queues.steering,
+      snapshot.queues.followUp,
+      snapshot.queues.steeringIntentIds,
+      snapshot.queues.followUpIntentIds,
+      current.transcript.pendingEchoes,
+    ),
+    statusSegments: new Map(Object.entries(snapshot.catalog.statuses)),
+    widgets: new Map(Object.entries(snapshot.catalog.widgets)),
+    sessionTitle: snapshot.catalog.title ?? current.sessionTitle,
+  };
+}
+
 function resetRuntimeState(session: SessionViewState): SessionViewState {
   return {
     ...session,
@@ -1052,35 +1142,20 @@ interface SessionsStore {
   setCurrentModel: (sessionId: SessionId, model: string, provider?: string) => void;
   setThinkingLevel: (sessionId: SessionId, level: ThinkingLevel) => void;
   /**
-   * One-time, idempotent model/thinking-level bootstrap for a session. Seeds
-   * the store with pi's authoritative model + level (from `get_available_models`
-   * / `get_state`) and, for brand-new (non-resumed) sessions ONLY, applies the
-   * global last-used preference. Guarded by `modelInitialized` so it runs at
-   * most once per session no matter how many times the caller fires it (header
-   * remounts, StrictMode double-invoke, concurrent callers). This is the sole
-   * place the global preference is ever applied to a session — see the
-   * model/thinking invariants on `modelInitialized`.
+   * One-time bootstrap for the model catalog and brand-new-session preferences.
+   * It dispatches preferences as intents; canonical model/thinking values wait
+   * for their subsequent authoritative snapshot or semantic frame.
    */
   bootstrapModelState: (sessionId: SessionId) => Promise<void>;
-  /**
-   * Switch a session's model: optimistically update the store (so the dropdown
-   * reflects the requested model immediately — the "queued change about to be
-   * sent" half of invariant #1), send `set_model`, and **revert** to the prior
-   * model if the command fails (so the dropdown never lingers on a model pi
-   * didn't accept). The global last-used preference is persisted ONLY on
-   * success. The single mutation path for the model dropdown / `/model`.
-   */
+  /** Dispatch an owner-bound model intent. Receipt feedback never changes the
+   * canonical selection; the terminal authority frame does. */
   applyModelChange: (
     sessionId: SessionId,
     model: ModelInfo,
     expectedRuntime?: { hostInstanceId: string; sessionEpoch: number },
   ) => Promise<{ ok: boolean; error?: string }>;
-  /**
-   * Switch a session's thinking level: optimistic update, send
-   * `set_thinking_level`, reconcile with pi's actually-applied level (a model
-   * may clamp it), and **revert** on failure. Persists last-used only on
-   * success. Returns `clampedTo` when pi applied a different level than asked.
-   */
+  /** Dispatch an owner-bound thinking intent. Pi's applied/clamped level is
+   * projected only by an authoritative snapshot or semantic frame. */
   applyThinkingLevel: (
     sessionId: SessionId,
     level: ThinkingLevel,
@@ -1339,7 +1414,6 @@ const buildSessionsStore = (
   },
 
   removeSession: (sessionId, opts) => {
-    pendingThinkingRequests.delete(sessionId);
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
@@ -1484,13 +1558,9 @@ const buildSessionsStore = (
           authoritativeUserEcho?.intentId && !consumedPendingEcho
             ? removeQueuedMessageByIntent(current.queuedMessages, authoritativeUserEcho.intentId)
             : current.queuedMessages;
-        // Raw Pi events remain authoritative for durable/session metadata and
-        // transcript detail. They deliberately do not derive runtime liveness:
-        // only direct host snapshots may change working/idle state.
-        const thinkingLevel =
-          event.type === "thinking_level_changed" ? event.level : current.thinkingLevel;
-        const sessionName =
-          event.type === "session_info_changed" ? event.name : current.sessionName;
+        // Transcript events render activity only. Pi-owned semantic state
+        // (including thinking level and session name) is reduced exclusively
+        // from authority snapshots, frames, and typed intent outcomes.
         const userEchoed =
           event.type === "message_start" &&
           event.message?.role === "user" &&
@@ -1513,8 +1583,6 @@ const buildSessionsStore = (
           ...current,
           transcript,
           queuedMessages,
-          thinkingLevel,
-          sessionName,
           unreadStatus,
           turnErrored,
 
@@ -1558,21 +1626,15 @@ const buildSessionsStore = (
       !session.hostInstanceId
     )
       return;
-    const runtime = {
-      hostInstanceId: session.hostInstanceId,
-      sessionEpoch: session.sessionEpoch,
-    };
+    const observation = authorityObservation(session);
+    if (!observation) return;
     const sessionEpoch = session.sessionEpoch;
     const sessionFile = session.sessionFile;
     try {
-      const response = await invokeSessionCommand(
-        sessionId,
-        { type: "get_cache_miss_notices" },
-        runtime,
-      );
-      if (!response.success) return;
+      const result = await querySession(sessionId, { type: "get_cache_miss_notices" }, observation);
+      if (!result.response.success) return;
       const parsed = CacheMissNoticeEventSchema.array().safeParse(
-        (response.data as { notices?: unknown } | undefined)?.notices,
+        (result.response.data as { notices?: unknown } | undefined)?.notices,
       );
       if (!parsed.success) return;
       const current = get().sessions.get(sessionId);
@@ -1881,8 +1943,8 @@ const buildSessionsStore = (
               current.transcript.pendingEchoes,
             )
           : current.queuedMessages,
-        currentModel: snapshot?.model?.id ?? current.currentModel,
-        currentProvider: snapshot?.model?.provider ?? current.currentProvider,
+        currentModel: snapshot ? snapshot.model?.id : current.currentModel,
+        currentProvider: snapshot ? snapshot.model?.provider : current.currentProvider,
         thinkingLevel: snapshot?.thinkingLevel ?? current.thinkingLevel,
         sessionFile: snapshot?.sessionFile ?? current.sessionFile,
         sessionName: snapshot ? snapshot.sessionName : current.sessionName,
@@ -1905,7 +1967,10 @@ const buildSessionsStore = (
       );
       if (authorityProjection === current.authorityProjection) return {};
       const sessions = new Map(state.sessions);
-      sessions.set(sessionId, { ...current, authorityProjection });
+      sessions.set(sessionId, {
+        ...applyAuthoritySemanticProjection(current, authorityProjection),
+        authorityProjection,
+      });
       return { sessions };
     });
   },
@@ -1921,7 +1986,10 @@ const buildSessionsStore = (
       );
       if (authorityProjection === current.authorityProjection) return {};
       const sessions = new Map(state.sessions);
-      sessions.set(sessionId, { ...current, authorityProjection });
+      sessions.set(sessionId, {
+        ...applyAuthoritySemanticProjection(current, authorityProjection),
+        authorityProjection,
+      });
       return { sessions };
     });
   },
@@ -2066,29 +2134,15 @@ const buildSessionsStore = (
   },
 
   abortSession: (sessionId) => {
-    // ESC routing is host-authoritative: renderer state never decides whether
-    // an abort is applicable. The acknowledged disposition is retained in the
-    // runtime record/snapshot and surfaced if it is exceptional.
-    const requestId = crypto.randomUUID();
+    // A receipt is admission feedback only. Interrupt outcome and liveness are
+    // reduced later from the semantic authority frame.
     const session = get().sessions.get(sessionId);
-    if (!session?.hostInstanceId || session.availability !== "available") return;
-    void window.pivis
-      .invoke("session.escape", {
-        sessionId,
-        requestId,
-        expectedHostInstanceId: session.hostInstanceId,
-        expectedSessionEpoch: session.sessionEpoch,
-      })
-      .then((result) => {
-        if (result.disposition === "failed" || result.disposition === "outcome_unknown") {
-          get().addToast(
-            sessionId,
-            result.message ?? "Interrupt outcome is unknown.",
-            result.disposition === "outcome_unknown" ? "warning" : "error",
-          );
-        }
-      })
-      .catch((error) => get().addToast(sessionId, String(error), "error"));
+    if (!session || session.availability !== "available") return;
+    const observation = authorityObservation(session);
+    if (!observation) return;
+    void dispatchSessionIntent(sessionId, { kind: "interrupt" }, observation).catch((error) =>
+      get().addToast(sessionId, String(error), "error"),
+    );
   },
 
   addUiRequest: (sessionId, request) => {
@@ -2149,14 +2203,9 @@ const buildSessionsStore = (
           const tr = request as { title: string };
           sessions.set(sessionId, { ...sFinal, sessionTitle: tr.title });
         } else if (request.method === "set_editor_text") {
-          // Editor injection is consumed by the Composer via a useEffect on
-          // editorInjection.nonce. The nonce is a monotonic counter so the
-          // same Composer instance can re-inject the same text on demand.
-          const er = request as { text: string };
-          sessions.set(sessionId, {
-            ...sFinal,
-            editorInjection: { text: er.text, nonce: ++editorInjectionNonce },
-          });
+          // This transcript/UI notification is not an editor authority write.
+          // The revisioned editor snapshot/frame supplies the canonical text.
+          sessions.set(sessionId, sFinal);
         }
         return { sessions };
       }
@@ -2445,63 +2494,88 @@ const buildSessionsStore = (
     const deps = {
       invoke: async <T = unknown>(channel: string, payload: unknown) => {
         ensureClaimCurrent();
-        let commandPayload = payload;
-        if (channel === "session.sendCommand") {
-          const command = (payload as { command: PiRpcCommand }).command;
-          commandPayload = {
-            ...(payload as object),
-            requestId: crypto.randomUUID(),
-            expectedHostInstanceId: session.hostInstanceId!,
-            expectedSessionEpoch: session.sessionEpoch,
-            ...(commandNeedsIntent(command) ? { intentId: crypto.randomUUID() } : {}),
-            sourceText: trimmed,
-            editorRevision,
-            uiSurface: "unified",
-          };
-        } else if (channel === "session.reload") {
-          commandPayload = {
-            sessionId,
-            request: {
-              requestId: crypto.randomUUID(),
-              intentId: crypto.randomUUID(),
-              expectedHostInstanceId: session.hostInstanceId!,
-              expectedSessionEpoch: session.sessionEpoch,
-              sourceText: trimmed,
-            },
-          };
-        } else if (channel === "session.share") {
-          commandPayload = {
-            ...(payload as object),
-            expectedHostInstanceId: session.hostInstanceId!,
-            expectedSessionEpoch: session.sessionEpoch,
-            exportIntentId: crypto.randomUUID(),
+        const current = get().sessions.get(sessionId);
+        const observation = current ? authorityObservation(current) : undefined;
+        if (!observation) throw new InputNotConsumedError("Session runtime is unavailable");
+
+        const legacyCommandChannel = ["session", "sendCommand"].join(".");
+        if (channel === legacyCommandChannel) {
+          const command = (payload as { command: { type: string; [key: string]: unknown } })
+            .command;
+          const queryTypes = new Set([
+            "get_available_models",
+            "get_scoped_models",
+            "get_logout_providers",
+            "get_commands",
+            "get_state",
+            "get_session_stats",
+            "get_messages",
+            "get_fork_messages",
+            "get_last_assistant_text",
+            "get_trust_state",
+            "get_tree",
+            "get_cache_miss_notices",
+          ]);
+          if (queryTypes.has(command.type)) {
+            const result = await querySession(
+              sessionId,
+              { type: command.type } as import("@shared/pi-protocol/runtime-state.js").SessionQuery,
+              observation,
+            );
+            ensureClaimCurrent();
+            return result.response as { success: boolean; data?: T; error?: string };
+          }
+          const intent =
+            command.type === "bash"
+              ? {
+                  kind: "runBash" as const,
+                  command: String(command.command ?? ""),
+                  ...(command.excludeFromContext === true ? { excludeFromContext: true } : {}),
+                }
+              : command.type === "set_session_name"
+                ? { kind: "rename" as const, name: String(command.name ?? "") }
+                : command.type === "compact"
+                  ? {
+                      kind: "compact" as const,
+                      ...(typeof command.customInstructions === "string"
+                        ? { instructions: command.customInstructions }
+                        : {}),
+                    }
+                  : {
+                      kind: "invokeCommand" as const,
+                      text: trimmed || `/${command.type}`,
+                      editorRevision,
+                    };
+          const receipt = await dispatchSessionIntent(sessionId, intent, observation);
+          ensureClaimCurrent();
+          return receipt.status === "admitted" || receipt.status === "duplicate"
+            ? ({ success: true } as { success: boolean; data?: T; error?: string })
+            : ({
+                success: false,
+                error:
+                  receipt.status === "delivery_unknown"
+                    ? "Command delivery outcome is unknown"
+                    : `Command was not admitted: ${receipt.reason}`,
+              } as { success: boolean; data?: T; error?: string });
+        }
+        if (channel === "session.reload") {
+          const receipt = await dispatchSessionIntent(sessionId, { kind: "reload" }, observation);
+          ensureClaimCurrent();
+          return (
+            receipt.status === "admitted" || receipt.status === "duplicate"
+              ? { success: true }
+              : { success: false, error: "Reload was not admitted" }
+          ) as {
+            success: boolean;
+            data?: T;
+            error?: string;
           };
         }
         const result = (await window.pivis.invoke(
           channel as Parameters<typeof window.pivis.invoke>[0],
-          commandPayload as Parameters<typeof window.pivis.invoke>[1],
-        )) as unknown as {
-          success: boolean;
-          data?: T;
-          error?: string;
-          disposition?: "not_executed" | "completed" | "outcome_unknown";
-          successorIdentity?: { hostInstanceId: string; sessionEpoch: number };
-        };
+          payload as Parameters<typeof window.pivis.invoke>[1],
+        )) as { success: boolean; data?: T; error?: string };
         ensureClaimCurrent();
-        if (
-          (channel === "session.sendCommand" || channel === "session.reload") &&
-          result.disposition &&
-          result.disposition !== "completed"
-        ) {
-          throw new InputNotConsumedError(result.error ?? `Command ${result.disposition}`);
-        }
-        if (
-          channel === "session.sendCommand" &&
-          !result.successorIdentity &&
-          !sessionMatchesRuntime(get().sessions.get(sessionId), { hostInstanceId, sessionEpoch })
-        ) {
-          throw new InputNotConsumedError("Session changed before command continuation");
-        }
         return result;
       },
       uiSurface: "unified" as const,
@@ -2510,9 +2584,43 @@ const buildSessionsStore = (
         submission: import("@shared/pi-protocol/runtime-state.js").SessionSubmission,
       ) => {
         ensureClaimCurrent();
-        const result = await window.pivis.invoke("session.submit", { sessionId: sid, submission });
+        const current = get().sessions.get(sid);
+        const observation = current ? authorityObservation(current) : undefined;
+        if (!observation) throw new InputNotConsumedError("Session runtime is unavailable");
+        const receipt = await dispatchSessionIntent(
+          sid,
+          {
+            kind: "submit",
+            editorRevision: submission.editorRevision,
+            text: submission.text,
+            images: submission.images,
+            requestedMode: submission.requestedMode,
+            surface: submission.surface,
+          },
+          observation,
+          submission.intentId as ReturnType<typeof crypto.randomUUID>,
+        );
         ensureClaimCurrent();
-        return result;
+        // Receipts are not dispositions. This compatibility return only keeps
+        // executeAction from treating delivery feedback as a transcript/editor
+        // settlement; canonical submission state arrives in an authority frame.
+        const disposition: SubmissionResult["disposition"] =
+          receipt.status === "admitted" || receipt.status === "duplicate"
+            ? "consumed"
+            : receipt.status === "delivery_unknown"
+              ? "outcome_unknown"
+              : "rejected";
+        return {
+          intentId: submission.intentId,
+          hostInstanceId: observation.owner.hostInstanceId,
+          sessionEpoch: observation.owner.sessionEpoch,
+          editorRevision: submission.editorRevision,
+          disposition,
+          queued: false,
+          ...(receipt.status === "not_admitted"
+            ? { message: `Submission was not admitted: ${receipt.reason}` }
+            : {}),
+        };
       },
       getSubmissionContext: (sid: SessionId) => {
         if (!claimCurrent()) return undefined;
@@ -2579,7 +2687,9 @@ const buildSessionsStore = (
       getAvailableModels: (sid: SessionId): ModelInfo[] =>
         get().sessions.get(sid)?.availableModels ?? [],
       getSessionName: (sid: SessionId) => get().sessions.get(sid)?.sessionName,
-      setSessionName: guarded(get().setSessionName),
+      // A rename receipt is admission-only; the semantic frame/outcome owns
+      // the canonical label.
+      setSessionName: () => {},
       getCurrentModel: (sid: SessionId) => get().sessions.get(sid)?.currentModel,
       isWorking: (sid: SessionId) => isSessionWorking(get().sessions.get(sid)),
       getSessionWorkspacePath: (sid: SessionId) => get().sessions.get(sid)?.workspacePath,
@@ -2861,429 +2971,142 @@ const buildSessionsStore = (
   refreshAvailableModels: async (sessionId, expectedRuntime) => {
     if (typeof window === "undefined" || !window.pivis) return [];
     const currentModels = () => get().sessions.get(sessionId)?.availableModels ?? [];
-    const runtime =
-      expectedRuntime ??
-      (() => {
-        const session = get().sessions.get(sessionId);
-        return session?.hostInstanceId
-          ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
-          : undefined;
-      })();
-    if (!runtime || !sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+    const session = get().sessions.get(sessionId);
+    if (!session) return currentModels();
+    const observation = authorityObservation(session);
+    if (
+      !observation ||
+      (expectedRuntime &&
+        (observation.owner.hostInstanceId !== expectedRuntime.hostInstanceId ||
+          observation.owner.sessionEpoch !== expectedRuntime.sessionEpoch))
+    ) {
       return currentModels();
     }
     try {
-      const res = await invokeSessionCommand(sessionId, { type: "get_available_models" }, runtime);
-      if (!res.success || !sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
+      const result = await querySession(sessionId, { type: "get_available_models" }, observation);
+      if (
+        !result.response.success ||
+        !sessionMatchesRuntime(get().sessions.get(sessionId), observation.owner)
+      ) {
         return currentModels();
       }
-      const raw = res.data as { models?: unknown[]; currentModelId?: string } | undefined;
-      const list = Array.isArray(raw?.models) ? raw.models : [];
-      const models = list
-        .map((m) => {
-          const r = ModelInfoSchema.safeParse(m);
-          return r.success ? r.data : null;
+      const raw = result.response.data as { models?: unknown[] } | undefined;
+      const models = (Array.isArray(raw?.models) ? raw.models : [])
+        .map((model) => {
+          const parsed = ModelInfoSchema.safeParse(model);
+          return parsed.success ? parsed.data : null;
         })
-        .filter((m): m is ModelInfo => m !== null);
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return currentModels();
+        .filter((model): model is ModelInfo => model !== null);
       get().setAvailableModels(sessionId, models);
       return models;
     } catch {
-      /* best effort — leave the dropdown showing whatever the store already has */
       return currentModels();
     }
   },
 
-  setCurrentModel: (sessionId, model, provider) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, { ...s, currentModel: model, currentProvider: provider });
-      return { sessions };
-    });
-  },
-
-  setThinkingLevel: (sessionId, level) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, { ...s, thinkingLevel: level });
-      return { sessions };
-    });
-  },
+  // Retained as compatibility no-ops for legacy consumers. Canonical model
+  // and thinking values are only projected from snapshots/semantic frames.
+  setCurrentModel: () => {},
+  setThinkingLevel: () => {},
 
   bootstrapModelState: async (sessionId) => {
     if (typeof window === "undefined" || !window.pivis) return;
-    const existing = get().sessions.get(sessionId);
-    // Run at most once per session. Bailing on `modelInitialized` here is what
-    // structurally enforces invariant #2: a SessionHeader remount (every tab
-    // switch) re-invokes this, but after the first run it is a no-op, so the
-    // global last-used preference can NEVER be re-applied to an already-live
-    // session and silently change its model.
+    const session = get().sessions.get(sessionId);
     if (
-      !existing ||
-      existing.modelInitialized ||
-      !existing.hostInstanceId ||
-      existing.availability !== "available"
-    )
+      !session ||
+      session.modelInitialized ||
+      session.availability !== "available" ||
+      !authorityObservation(session)
+    ) {
       return;
-    const runtime = {
-      hostInstanceId: existing.hostInstanceId,
-      sessionEpoch: existing.sessionEpoch,
-    };
-    const resumed = existing.resumed;
-
-    // Claim the bootstrap synchronously, BEFORE any await, so a concurrent
-    // caller (StrictMode double-invoke, a racing remount) sees the flag set
-    // and returns early instead of double-applying the preference.
+    }
     set((state) => {
       const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, { ...s, modelInitialized: true });
+      const current = sessions.get(sessionId);
+      if (!current) return {};
+      sessions.set(sessionId, { ...current, modelInitialized: true });
       return { sessions };
     });
 
-    // The global "last selected" preference applies ONLY to brand-new sessions.
-    // Resumed sessions keep the model/level pi restored from the session file,
-    // so they read no preference here.
-    const settings = useSettingsStore.getState().settings;
-    const lum = resumed ? null : settings.lastUsedModel;
-    const ltl = resumed ? null : settings.lastUsedThinkingLevel;
-
-    // 1. Available models + current model. All writes target THIS sessionId.
-    // `refreshAvailableModels` fetches the effective list (scoped subset when
-    // a scope is active) and stores it; the current-model id is established
-    // in step 2 from `get_state` (the authoritative source).
-    try {
-      const models = await get().refreshAvailableModels(sessionId, runtime);
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
-      // Match the last-used preference on BOTH id and provider — the
-      // preference is provider-scoped (settings.lastUsedModel = {provider,
-      // modelId}), so when two providers offer the same id we must pick the
-      // user's actual last-used provider, not whichever copy happens to sort
-      // first. We only fall back to an id-only match when it is UNAMBIGUOUS
-      // (exactly one same-id copy exists, e.g. a provider-string casing
-      // drift on a single-provider model); with multiple same-id copies we
-      // refuse to guess and let pi's reported current model apply instead.
-      const sameId = lum ? models.filter((m) => m.id === lum.modelId) : [];
-      const match = lum
-        ? (sameId.find((m) => m.provider === lum.provider) ??
-          (sameId.length === 1 ? sameId[0] : undefined))
-        : undefined;
-      if (match) {
-        await invokeSessionCommand(
-          sessionId,
-          {
-            type: "set_model",
-            ...(match.provider ? { provider: match.provider } : {}),
-            modelId: match.id,
-          },
-          runtime,
-        )
-          .then((res) => {
-            if (res.success && sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
-              get().setCurrentModel(sessionId, match.id, match.provider);
-            }
-          })
-          .catch(() => {});
-      } else {
-        // No last-used match: fall back to pi's reported current model. The
-        // list endpoint tags the active model with `current: true`; step 2's
-        // `get_state` is the authoritative source and will overwrite this.
-        const active = models.find((m) => (m as Record<string, unknown>)["current"] === true);
-        if (active && sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
-          get().setCurrentModel(sessionId, active.id, active.provider);
-        }
-      }
-    } catch {
-      /* best effort — leave the dropdown showing whatever the store already has */
-    }
-
-    // 2. Thinking level + session name/file (get_state).
-    try {
-      const res = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
-      const raw = res?.data as
-        | {
-            thinkingLevel?: unknown;
-            model?: { id?: unknown; provider?: unknown };
-            sessionName?: unknown;
-            sessionFile?: unknown;
-          }
-        | undefined;
-      if (!raw) return;
-      if (typeof raw.thinkingLevel === "string") {
-        const parsed = ThinkingLevelSchema.safeParse(raw.thinkingLevel);
-        if (parsed.success) get().setThinkingLevel(sessionId, parsed.data);
-      }
-      if (ltl) {
-        // Apply the preferred level through the SAME path the user takes when
-        // choosing a level in the header (`applyThinkingLevel`), which sends
-        // set_thinking_level and then RECONCILES with the level pi actually
-        // applied — a model may clamp it (e.g. a model that doesn't support
-        // "xhigh"). The model was already set in step 1, so pi clamps relative
-        // to the right model. The old inline path blindly wrote `ltl` into the
-        // store, so a new session that inherited (say) "xhigh" from one session
-        // and a non-xhigh model from another would show "xhigh" even though pi
-        // had clamped it.
-        await get().applyThinkingLevel(sessionId, ltl);
-        if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) return;
-      }
-      if (raw.model && typeof raw.model.id === "string") {
-        // Adopt pi's authoritative model id, and its provider when pi reports
-        // one. But DON'T clobber an already-known provider (set in step 1 from
-        // the last-used match) when pi omits it — that would blank
-        // `currentProvider` and make the dropdown fall back to id-only matching,
-        // highlighting the wrong same-id row. Only carry over the existing
-        // provider when the id is unchanged (a different id has no basis).
-        const existing = get().sessions.get(sessionId);
-        const provider =
-          typeof raw.model.provider === "string"
-            ? raw.model.provider
-            : raw.model.id === existing?.currentModel
-              ? existing?.currentProvider
-              : undefined;
-        get().setCurrentModel(sessionId, raw.model.id, provider);
-      }
-      if (typeof raw.sessionName === "string" && raw.sessionName) {
-        get().setSessionName(sessionId, raw.sessionName);
-      }
-      if (typeof raw.sessionFile === "string" && raw.sessionFile) {
-        get().setSessionFile(sessionId, raw.sessionFile);
-      }
-    } catch {
-      /* best effort */
-    }
+    const models = await get().refreshAvailableModels(sessionId);
+    const current = get().sessions.get(sessionId);
+    const observation = current ? authorityObservation(current) : undefined;
+    if (!current || !observation || current.resumed) return;
+    const lastModel = useSettingsStore.getState().settings.lastUsedModel;
+    const lastThinking = useSettingsStore.getState().settings.lastUsedThinkingLevel;
+    const sameId = lastModel ? models.filter((model) => model.id === lastModel.modelId) : [];
+    const model = lastModel
+      ? (sameId.find((candidate) => candidate.provider === lastModel.provider) ??
+        (sameId.length === 1 ? sameId[0] : undefined))
+      : undefined;
+    // These dispatches deliberately do not update canonical fields. The
+    // following semantic frame supplies Pi's selected/clamped values.
+    if (model) void get().applyModelChange(sessionId, model, observation.owner);
+    if (lastThinking) void get().applyThinkingLevel(sessionId, lastThinking);
   },
 
   applyModelChange: async (sessionId, model, expectedRuntime) => {
-    if (typeof window === "undefined" || !window.pivis) {
-      return { ok: false, error: "Unavailable" };
-    }
-    const before = get().sessions.get(sessionId);
-    if (!before) return { ok: false, error: "Unknown session" };
-    const prevModel = before.currentModel;
-    const prevProvider = before.currentProvider;
-    const runtime =
-      expectedRuntime ??
-      (before.hostInstanceId
-        ? { hostInstanceId: before.hostInstanceId, sessionEpoch: before.sessionEpoch }
-        : undefined);
-    if (!runtime || !sessionMatchesRuntime(before, runtime)) {
-      return { ok: false, error: "Runtime unavailable" };
-    }
-    // The provider we actually send to pi. True providerless registry entries
-    // must stay providerless: synthesizing one from the id makes the SDK host's
-    // exact provider+id lookup miss. The host supports id-only resolution when
-    // this is omitted.
-    const provider = model.provider;
-
-    // Optimistic: show the requested model right away (invariant #1's "queued
-    // change about to be sent").
-    get().setCurrentModel(sessionId, model.id, provider);
-
-    try {
-      const res = await invokeSessionCommand(
-        sessionId,
-        { type: "set_model", ...(provider ? { provider } : {}), modelId: model.id },
-        runtime,
-      );
-      if (!res.success) throw new Error(res.error ?? "set_model failed");
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
-        throw new Error("Session changed before model settlement");
-      }
-    } catch (err) {
-      // Revert so the dropdown reflects the model still actually in effect —
-      // but only if our optimistic value is still the one showing. A newer
-      // change (or a pi event) that landed in the meantime wins. We compare
-      // BOTH id and provider: two rapid switches between same-id/different-
-      // provider copies must not let a failed earlier switch revert the
-      // in-flight later one's provider.
-      set((state) => {
-        const sessions = new Map(state.sessions);
-        const s = sessions.get(sessionId);
-        if (
-          !sessionMatchesRuntime(s, runtime) ||
-          s.currentModel !== model.id ||
-          s.currentProvider !== provider
-        )
-          return {};
-        sessions.set(sessionId, { ...s, currentModel: prevModel, currentProvider: prevProvider });
-        return { sessions };
-      });
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-
-    // Reconcile with the model pi actually applied (mirrors applyThinkingLevel's
-    // get_state reconciliation, improved with a supersession-safe persist). pi
-    // may normalize the provider string (or, in principle, the id); adopting
-    // its authoritative value keeps the store, the dropdown highlight, and the
-    // persisted last-used preference honest. We persist the reconciled values
-    // ONLY when this switch is still in effect — a newer change that lands
-    // during the round-trip owns its own persist, and a failed get_state must
-    // not leak a stale preference either.
-    let persistId = model.id;
-    let persistProvider = provider;
-    let shouldPersist = true;
-    try {
-      const stateRes = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
-      const raw = stateRes?.data as { model?: { id?: unknown; provider?: unknown } } | undefined;
-      const s = get().sessions.get(sessionId);
-      if (!sessionMatchesRuntime(s, runtime)) return { ok: false, error: "Session changed" };
-      if (s && s.currentModel === model.id && s.currentProvider === provider) {
-        // Still our optimistic value — adopt pi's authoritative id/provider.
-        // Only adopt the provider when pi returns a string: a missing/non-string
-        // provider must not clobber the one we sent (that would re-introduce
-        // ambiguous highlighting when duplicate same-id entries exist).
-        if (raw?.model && typeof raw.model.id === "string") {
-          persistId = raw.model.id;
-          persistProvider =
-            typeof raw.model.provider === "string" ? raw.model.provider : persistProvider;
-          get().setCurrentModel(sessionId, persistId, persistProvider);
-        }
-      } else {
-        // A newer change landed during the get_state round-trip — don't persist
-        // our now-stale values; the newer change owns its own persist.
-        shouldPersist = false;
-      }
-    } catch {
-      // get_state failed: keep the optimistic value, but only persist if our
-      // switch is still the one in effect (a newer change may have landed).
-      const s = get().sessions.get(sessionId);
-      shouldPersist = !!(
-        sessionMatchesRuntime(s, runtime) &&
-        s.currentModel === model.id &&
-        s.currentProvider === provider
-      );
-    }
-
-    if (shouldPersist) {
-      void useSettingsStore.getState().update({
-        lastUsedModel: {
-          ...(persistProvider ? { provider: persistProvider } : {}),
-          modelId: persistId,
-        },
-      });
-
-      // The model switch can change the context window. Refresh stats from pi
-      // once this switch is still known to be current so the context meter's
-      // denominator updates promptly instead of waiting for the header's
-      // periodic/agent_end refresh.
-      try {
-        const statsRes = await invokeSessionCommand(
-          sessionId,
-          { type: "get_session_stats" },
-          runtime,
-        );
-        if (statsRes.success && statsRes.data) {
-          const parsed = SessionStatsSchema.safeParse(statsRes.data);
-          const s = get().sessions.get(sessionId);
-          if (
-            parsed.success &&
-            sessionMatchesRuntime(s, runtime) &&
-            s.currentModel === persistId &&
-            s.currentProvider === persistProvider
-          ) {
-            get().setStats(sessionId, parsed.data as SessionStats);
-          }
-        }
-      } catch {
-        /* best effort — the header's normal stats polling will catch up */
-      }
-    }
-    return { ok: true };
-  },
-
-  applyThinkingLevel: async (sessionId, level) => {
-    if (typeof window === "undefined" || !window.pivis) {
-      return { ok: false, error: "Unavailable" };
-    }
-    const before = get().sessions.get(sessionId);
-    if (!before) return { ok: false, error: "Unknown session" };
+    if (typeof window === "undefined" || !window.pivis) return { ok: false, error: "Unavailable" };
+    const session = get().sessions.get(sessionId);
+    const observation = session ? authorityObservation(session) : undefined;
     if (
-      !before.hostInstanceId ||
-      before.availability !== "available" ||
-      before.status !== "ready"
+      !session ||
+      !observation ||
+      session.availability !== "available" ||
+      (expectedRuntime &&
+        (expectedRuntime.hostInstanceId !== observation.owner.hostInstanceId ||
+          expectedRuntime.sessionEpoch !== observation.owner.sessionEpoch))
     ) {
       return { ok: false, error: "Runtime unavailable" };
     }
-    const runtime = {
-      hostInstanceId: before.hostInstanceId,
-      sessionEpoch: before.sessionEpoch,
-    };
-    const prevLevel = before.thinkingLevel;
-
-    const requestId = nextThinkingRequestId++;
-    pendingThinkingRequests.set(sessionId, requestId);
-
-    // Optimistic update.
-    get().setThinkingLevel(sessionId, level);
-
     try {
-      const res = await invokeSessionCommand(
+      const receipt = await dispatchSessionIntent(
         sessionId,
-        { type: "set_thinking_level", level },
-        runtime,
+        { kind: "setModel", provider: model.provider ?? "", modelId: model.id },
+        observation,
       );
-      if (!res.success) throw new Error(res.error ?? "set_thinking_level failed");
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
-        throw new Error("Session changed before thinking-level settlement");
-      }
-
-      // Reconcile with the level pi actually applied (a model may clamp it).
-      let clampedTo: ThinkingLevel | undefined;
-      const stateRes = await invokeSessionCommand(sessionId, { type: "get_state" }, runtime);
-      if (!sessionMatchesRuntime(get().sessions.get(sessionId), runtime)) {
-        throw new Error("Session changed before thinking-level reconciliation");
-      }
-      const raw = stateRes?.data as { thinkingLevel?: unknown } | undefined;
-      if (raw && typeof raw.thinkingLevel === "string") {
-        const confirmed = ThinkingLevelSchema.safeParse(raw.thinkingLevel);
-        // Only adopt pi's value if this request has not been superseded by a
-        // newer user choice. Do NOT key this off the current store value: pi
-        // may have already emitted `thinking_level_changed` for this same
-        // request before the get_state round-trip returns. In that case the
-        // store is already clamped, but the caller still needs `clampedTo` so
-        // SessionHeader can show the warning toast on the first unsupported
-        // choice in a session.
-        if (confirmed.success && pendingThinkingRequests.get(sessionId) === requestId) {
-          get().setThinkingLevel(sessionId, confirmed.data);
-          if (confirmed.data !== level) clampedTo = confirmed.data;
-        }
-      }
-
-      if (pendingThinkingRequests.get(sessionId) === requestId) {
-        pendingThinkingRequests.delete(sessionId);
-        void useSettingsStore.getState().update({ lastUsedThinkingLevel: level });
-      }
-      return clampedTo ? { ok: true, clampedTo } : { ok: true };
-    } catch (err) {
-      if (pendingThinkingRequests.get(sessionId) === requestId) {
-        pendingThinkingRequests.delete(sessionId);
-      }
-      set((state) => {
-        const sessions = new Map(state.sessions);
-        const s = sessions.get(sessionId);
-        if (!sessionMatchesRuntime(s, runtime) || s.thinkingLevel !== level) return {};
-        sessions.set(sessionId, { ...s, thinkingLevel: prevLevel });
-        return { sessions };
-      });
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      if (receipt.status === "admitted" || receipt.status === "duplicate") return { ok: true };
+      return {
+        ok: false,
+        error:
+          receipt.status === "delivery_unknown"
+            ? "Model-change delivery outcome is unknown"
+            : `Model change was not admitted: ${receipt.reason}`,
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
 
-  setSessionName: (sessionId, name) => {
-    set((state) => {
-      const sessions = new Map(state.sessions);
-      const s = sessions.get(sessionId);
-      if (!s) return {};
-      sessions.set(sessionId, { ...s, sessionName: name });
-      return { sessions };
-    });
+  applyThinkingLevel: async (sessionId, level) => {
+    if (typeof window === "undefined" || !window.pivis) return { ok: false, error: "Unavailable" };
+    const session = get().sessions.get(sessionId);
+    const observation = session ? authorityObservation(session) : undefined;
+    if (!session || !observation || session.availability !== "available") {
+      return { ok: false, error: "Runtime unavailable" };
+    }
+    try {
+      const receipt = await dispatchSessionIntent(
+        sessionId,
+        { kind: "setThinking", level },
+        observation,
+      );
+      if (receipt.status === "admitted" || receipt.status === "duplicate") return { ok: true };
+      return {
+        ok: false,
+        error:
+          receipt.status === "delivery_unknown"
+            ? "Thinking-level delivery outcome is unknown"
+            : `Thinking-level change was not admitted: ${receipt.reason}`,
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   },
+
+  // A direct setter would make a receipt or transcript event authoritative.
+  // Keep the compatibility surface inert; snapshots/frames/outcomes own names.
+  setSessionName: () => {},
 
   refreshWorkspaceSessions: async (path) => {
     if (typeof window === "undefined" || !window.pivis) return;
@@ -3324,7 +3147,6 @@ const buildSessionsStore = (
         historyGeneration: s.historyGeneration + 1,
         unreadStatus: undefined,
         turnErrored: false,
-        ...(sessionName !== undefined ? { sessionName } : {}),
       };
       sessions.set(sessionId, next);
       return { sessions };
@@ -3398,18 +3220,16 @@ const buildSessionsStore = (
   refreshCommands: async (sessionId) => {
     if (typeof window === "undefined" || !window.pivis) return;
     const session = get().sessions.get(sessionId);
-    if (!session?.hostInstanceId || session.availability !== "available") return;
-    const runtime = {
-      hostInstanceId: session.hostInstanceId,
-      sessionEpoch: session.sessionEpoch,
-    };
+    if (!session || session.availability !== "available") return;
+    const observation = authorityObservation(session);
+    if (!observation) return;
     try {
-      const res = await invokeSessionCommand(sessionId, { type: "get_commands" }, runtime);
-      if (!res || !res.success) return;
+      const result = await querySession(sessionId, { type: "get_commands" }, observation);
+      if (!result.response.success) return;
       // Tolerant read: pi v0.79.1 returns { commands: RpcSlashCommand[] };
       // the contract's PiRpcResponse is a discriminated union, but we
       // only care about `data.commands` so a narrow cast is fine here.
-      const data = (res as { data?: { commands?: unknown[] } }).data;
+      const data = result.response.data as { commands?: unknown[] } | undefined;
       const raw = data?.commands;
       if (!Array.isArray(raw)) return;
       const commands: SlashCommandInfo[] = raw
@@ -3511,21 +3331,9 @@ const buildSessionsStore = (
     });
   },
 
-  acknowledgeEditorPatch: (sessionId, revision) => {
-    set((state) => {
-      const s = state.sessions.get(sessionId);
-      if (!s || revision < s.editorRevision) return {};
-      const sessions = new Map(state.sessions);
-      const staleInjection =
-        s.editorInjection?.revision !== undefined && s.editorInjection.revision <= revision;
-      sessions.set(sessionId, {
-        ...s,
-        editorRevision: revision,
-        editorConflict: undefined,
-        editorInjection: staleInjection ? undefined : s.editorInjection,
-      });
-      return { sessions };
-    });
+  acknowledgeEditorPatch: () => {
+    // Patch transport acknowledgement is not canonical editor state. The next
+    // revisioned snapshot/frame reconciles revision, text, and conflicts.
   },
 
   clearEditorInjection: (sessionId) => {
