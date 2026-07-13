@@ -226,7 +226,7 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
       await expect(panel).toBeVisible({ timeout: 20_000 });
       await panel.locator(".xterm").click();
 
-      await window.keyboard.type("do not lose me");
+      await window.keyboard.insertText("do not lose me");
       await expect
         .poll(() => stripKittyReleases(readInput(folders)), { timeout: 10_000 })
         .toContain("do not lose me");
