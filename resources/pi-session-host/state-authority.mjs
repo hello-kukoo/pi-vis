@@ -10,6 +10,13 @@ export function createStateAuthority({
   initialSession,
   sendControl = () => {},
   sendRecord = () => {},
+  // New consumers can receive one indivisible semantic frame. The legacy
+  // record/control pair remains the default wire behavior until its protocol
+  // is migrated, so this authority can be introduced without splitting an
+  // existing host epoch.
+  sendFrame = null,
+  operationJournalCapacity = 128,
+  recentOutcomeCapacity = 64,
   getCatalog = () => ({}),
   getEditor = () => ({ revision: 0, text: "", attachments: [] }),
   acceptEditorSubmission = () => false,
@@ -23,7 +30,21 @@ export function createStateAuthority({
   let sessionEpoch = 0;
   let snapshotSequence = 0;
   let stopped = false;
+  // `actualCompaction` is the compatibility projection of the observed
+  // lifecycle below. It is deliberately not a guess that events are complete.
   let actualCompaction = false;
+  let compaction = {
+    phase: "inactive",
+    operationId: null,
+    origin: null,
+    attempt: 0,
+    anomaly: null,
+  };
+  let nextOperationSequence = 0;
+  let operationJournalTruncated = false;
+  const operationJournal = [];
+  const recentIntentOutcomes = [];
+  const intentLedger = new Map();
   let navigationDepth = 0;
   let submitting = 0;
   let unresolvedAdmissions = 0;
@@ -167,7 +188,120 @@ export function createStateAuthority({
     }
   }
 
+  function stableFingerprint(value) {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(stableFingerprint).join(",")}]`;
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableFingerprint(value[key])}`)
+      .join(",")}}`;
+  }
+
+  function intentFingerprint(request) {
+    // Intent IDs identify a semantic operation, not a renderer retry. Include
+    // every admission-relevant field so reusing one for a different payload is
+    // a deterministic rejection rather than a second possible prompt.
+    return stableFingerprint({
+      hostInstanceId: request.expectedHostId,
+      sessionEpoch: request.expectedEpoch,
+      editorRevision: request.editorRevision,
+      text: request.text,
+      images: request.images ?? [],
+      requestedMode: request.requestedMode,
+      surface: request.surface,
+    });
+  }
+
+  function appendOperation(recordValue) {
+    const entry = {
+      operationSequence: ++nextOperationSequence,
+      observedAt: Date.now(),
+      ...recordValue,
+    };
+    operationJournal.push(entry);
+    const capacity = Math.max(1, Number(operationJournalCapacity) || 1);
+    if (operationJournal.length > capacity) {
+      operationJournal.splice(0, operationJournal.length - capacity);
+      operationJournalTruncated = true;
+    }
+    return entry;
+  }
+
+  function journalBounds() {
+    return {
+      low: operationJournal[0]?.operationSequence ?? nextOperationSequence,
+      high: nextOperationSequence,
+      truncated: operationJournalTruncated,
+    };
+  }
+
+  function compactionBarrierOpen() {
+    return (
+      session.isCompacting === true ||
+      ["active", "active_unknown_origin", "cancelling", "retry_wait"].includes(compaction.phase) ||
+      compaction.invocationPending === true
+    );
+  }
+
+  function setCompactionAnomaly(reason) {
+    if (compaction.anomaly === reason) return;
+    compaction = { ...compaction, anomaly: reason };
+    appendOperation({
+      kind: "compaction",
+      phase: compaction.phase,
+      operationId: compaction.operationId,
+      anomaly: reason,
+    });
+  }
+
+  function reconcileCompactionGetter() {
+    const getterActive = session.isCompacting === true;
+    if (
+      getterActive &&
+      ["inactive", "terminal_success", "terminal_aborted", "terminal_failed"].includes(
+        compaction.phase,
+      )
+    ) {
+      compaction = {
+        phase: "active_unknown_origin",
+        operationId: crypto.randomUUID(),
+        origin: "getter",
+        attempt: Math.max(1, compaction.attempt + 1),
+        anomaly: "missing_compaction_start",
+      };
+      appendOperation({
+        kind: "compaction",
+        phase: compaction.phase,
+        operationId: compaction.operationId,
+        origin: compaction.origin,
+        attempt: compaction.attempt,
+        anomaly: compaction.anomaly,
+      });
+    } else if (
+      !getterActive &&
+      ["active", "active_unknown_origin", "cancelling"].includes(compaction.phase)
+    ) {
+      // An end event is the only evidence that closes an observed span. Keep
+      // custody fenced when getters and events disagree instead of inventing
+      // an end from a transient getter read.
+      setCompactionAnomaly("getter_event_disagreement");
+    }
+    actualCompaction = compactionBarrierOpen();
+  }
+
+  function compactionProjection() {
+    return {
+      phase: compaction.phase,
+      operationId: compaction.operationId,
+      origin: compaction.origin,
+      attempt: compaction.attempt,
+      ...(compaction.anomaly ? { anomaly: compaction.anomaly } : {}),
+      barrierOpen: compactionBarrierOpen(),
+    };
+  }
+
   function snapshot() {
+    reconcileCompactionGetter();
     const s = session;
     const { steering, followUp } = readQueues();
     reconcileAttachmentLedger(steering, followUp);
@@ -198,7 +332,21 @@ export function createStateAuthority({
         navigation: navigationDepth > 0,
         pendingDialogs: Number(getCatalog()?.pendingDialogs ?? 0),
         custodyCount: custody.length,
+        ...(compaction.anomaly ? { compactionAnomaly: compaction.anomaly } : {}),
       },
+      // Semantic consumers use these bounded retained projections rather than
+      // reconstructing lifecycle from raw event history.
+      compaction: compactionProjection(),
+      activeIntents: [...activeIntents].map(([intentId, disposition]) => ({
+        intentId,
+        disposition,
+        payloadFingerprint: intentLedger.get(intentId)?.fingerprint,
+      })),
+      recentIntentOutcomes: structuredClone(recentIntentOutcomes),
+      recentObservedOperations: structuredClone(operationJournal),
+      operationJournalLowWatermark: journalBounds().low,
+      operationJournalHighWatermark: journalBounds().high,
+      operationJournalTruncated: journalBounds().truncated,
       catalog: getCatalog(),
       editor: getEditor(),
     };
@@ -238,7 +386,68 @@ export function createStateAuthority({
     else sendRecord(recordValue);
   }
 
+  function terminalDisposition(disposition) {
+    return [
+      "completed",
+      "rejected",
+      "extension_error",
+      "outcome_unknown",
+      "not_submitted",
+    ].includes(disposition);
+  }
+
+  function retainIntentOutcome(result) {
+    if (!terminalDisposition(result.disposition)) return;
+    const ledger = intentLedger.get(result.intentId);
+    if (ledger?.terminalFingerprint === stableFingerprint(result)) return;
+    if (ledger) {
+      ledger.settled = true;
+      ledger.terminal = structuredClone(result);
+      ledger.terminalFingerprint = stableFingerprint(result);
+    }
+    recentIntentOutcomes.push(structuredClone(result));
+    const capacity = Math.max(1, Number(recentOutcomeCapacity) || 1);
+    if (recentIntentOutcomes.length > capacity) {
+      recentIntentOutcomes.splice(0, recentIntentOutcomes.length - capacity);
+    }
+  }
+
+  function createSemanticFrame(records = [], full = false) {
+    const terminalSnapshot = snapshot();
+    observeSnapshotMutation(terminalSnapshot);
+    return {
+      owner: { hostInstanceId, sessionEpoch },
+      frameId: `${hostInstanceId}:${sessionEpoch}:${terminalSnapshot.snapshotSequence}`,
+      records: structuredClone(records),
+      terminalSnapshot,
+      full,
+    };
+  }
+
+  // The public authority API used by a future opaque-frame transport. With no
+  // frame sink it deliberately preserves the established record-then-snapshot
+  // wire format for current main-process compatibility.
+  function commitSemanticFrame(records = [], full = false) {
+    if (transition) {
+      for (const item of records) record(item);
+      return publishSnapshot(full);
+    }
+    // Frame-only consumers do not pass through record(), so account for the
+    // semantic mutation before capturing the terminal snapshot.
+    if (typeof sendFrame === "function") {
+      for (const _item of records) noteMutation();
+      const frame = createSemanticFrame(records, full);
+      sendFrame(frame);
+      return frame;
+    }
+    const frame = createSemanticFrame(records, full);
+    for (const item of records) record(item);
+    sendControl({ type: "snapshot", snapshot: frame.terminalSnapshot, full });
+    return frame;
+  }
+
   function reportSubmission(result) {
+    retainIntentOutcome(result);
     const submissionRecord = { type: "submission", result };
     // A forced predecessor settlement must never be folded into a successor's
     // atomic transition batch. Publish it on the live transition channel so
@@ -377,14 +586,14 @@ export function createStateAuthority({
       });
     }
 
-    if ((actualCompaction || navigationDepth > 0) && !fromCustody) {
+    if ((compactionBarrierOpen() || navigationDepth > 0) && !fromCustody) {
       const custodyId = crypto.randomUUID();
       custody.push({
         custodyId,
         request: structuredClone(request),
         ingressSequence: ++ingressSequence,
         barrierId: `barrier-${barrierSequence}`,
-        phase: actualCompaction ? "compaction" : "navigation",
+        phase: compactionBarrierOpen() ? "compaction" : "navigation",
       });
       activeIntents.set(request.intentId, "custody");
       acknowledgeEditorCustody(request);
@@ -603,13 +812,43 @@ export function createStateAuthority({
     // commands, but the host must never forward an attachment payload if a
     // stale or malformed caller supplies one.
     const normalized = request.text.startsWith("/") ? { ...request, images: [] } : request;
-    return schedule("ingress", () => admit(normalized));
+    const fingerprint = intentFingerprint(normalized);
+    const prior = intentLedger.get(normalized.intentId);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) {
+        return Promise.resolve(
+          resultFor(normalized, "rejected", {
+            message: "Intent ID was reused with a different payload",
+          }),
+        );
+      }
+      // A retransmitted identical envelope is a receipt retry, never a second
+      // SDK call. Once settled, expose the retained terminal outcome.
+      if (prior.settled) return Promise.resolve(structuredClone(prior.terminal ?? prior.initial));
+      return prior.promise;
+    }
+    const ledger = { fingerprint, settled: false, initial: null, terminal: null, promise: null };
+    intentLedger.set(normalized.intentId, ledger);
+    ledger.promise = schedule("ingress", () => admit(normalized)).then(
+      (result) => {
+        ledger.initial = structuredClone(result);
+        retainIntentOutcome(result);
+        return result;
+      },
+      (error) => {
+        // An adapter exception did not produce an authoritative disposition;
+        // allow the caller to observe it but never leave a phantom dedupe key.
+        intentLedger.delete(normalized.intentId);
+        throw error;
+      },
+    );
+    return ledger.promise;
   }
 
   async function drainCustody() {
-    if (actualCompaction || navigationDepth > 0 || custody.length === 0) return;
+    if (compactionBarrierOpen() || navigationDepth > 0 || custody.length === 0) return;
     custody.sort((a, b) => a.ingressSequence - b.ingressSequence);
-    while (custody.length > 0 && !actualCompaction && navigationDepth === 0) {
+    while (custody.length > 0 && !compactionBarrierOpen() && navigationDepth === 0) {
       if (!session.isStreaming && promptFence) {
         // A prior drained prompt crossed admission but has not settled. Never
         // block the single scheduler (and every later IPC) behind that fence;
@@ -647,7 +886,7 @@ export function createStateAuthority({
   }
 
   function scheduleCustodyDrain() {
-    if (actualCompaction || navigationDepth > 0 || custody.length === 0) return;
+    if (compactionBarrierOpen() || navigationDepth > 0 || custody.length === 0) return;
     void schedule("custody", drainCustody);
   }
 
@@ -662,16 +901,60 @@ export function createStateAuthority({
       if (queueIntentId) publishedEvent = { ...event, queueIntentId };
     }
     if (event?.type === "compaction_start") {
-      actualCompaction = true;
+      const retrying = compaction.phase === "retry_wait";
+      compaction = {
+        phase: "active",
+        operationId: retrying ? compaction.operationId : crypto.randomUUID(),
+        origin: "event",
+        attempt: retrying ? compaction.attempt + 1 : Math.max(1, compaction.attempt + 1),
+        anomaly: null,
+      };
       barrierSequence++;
+      appendOperation({
+        kind: "compaction",
+        phase: "active",
+        operationId: compaction.operationId,
+        origin: "event",
+        attempt: compaction.attempt,
+      });
     } else if (event?.type === "compaction_end") {
       const failed = event.aborted === true || typeof event.errorMessage === "string";
       if (event.willRetry === true) {
         // Keep the barrier closed between retry attempts so new ingress joins
         // custody rather than overtaking the retained prefix.
-        actualCompaction = true;
+        compaction = { ...compaction, phase: "retry_wait", anomaly: null };
+        appendOperation({
+          kind: "compaction",
+          phase: "retry_wait",
+          operationId: compaction.operationId,
+          attempt: compaction.attempt,
+        });
       } else {
-        actualCompaction = false;
+        compaction = {
+          ...compaction,
+          phase: failed
+            ? event.aborted === true
+              ? "terminal_aborted"
+              : "terminal_failed"
+            : "terminal_success",
+          anomaly: null,
+          invocationPending: false,
+        };
+        appendOperation({
+          kind: "compaction",
+          phase: compaction.phase,
+          operationId: compaction.operationId,
+          attempt: compaction.attempt,
+          ...(failed && typeof event.errorMessage === "string"
+            ? { error: event.errorMessage }
+            : {}),
+        });
+      }
+      // Direct getter evidence is sampled before custody is released. A stale
+      // false/true disagreement leaves the barrier closed and is visible in
+      // the same semantic frame rather than being resolved by the renderer.
+      reconcileCompactionGetter();
+      if (!compactionBarrierOpen()) {
         if (failed) {
           restoreCustody(
             custody.filter((item) => item.phase === "compaction"),
@@ -682,8 +965,8 @@ export function createStateAuthority({
         }
       }
     }
-    record({ type: "event", event: publishedEvent });
-    publishSnapshot();
+    actualCompaction = compactionBarrierOpen();
+    return commitSemanticFrame([{ type: "event", event: publishedEvent }]);
   }
 
   function restoreCustody(items, message) {
@@ -775,8 +1058,18 @@ export function createStateAuthority({
       if (navigationDepth > 0) {
         session.abortBranchSummary();
         value = { ...base, disposition: "abort_requested", target: "navigation" };
-      } else if (actualCompaction) {
+      } else if (compactionBarrierOpen()) {
         session.abortCompaction();
+        if (["active", "active_unknown_origin", "retry_wait"].includes(compaction.phase)) {
+          compaction = { ...compaction, phase: "cancelling" };
+          appendOperation({
+            kind: "compaction",
+            phase: "cancelling",
+            operationId: compaction.operationId,
+            attempt: compaction.attempt,
+          });
+        }
+        actualCompaction = true;
         value = { ...base, disposition: "abort_requested", target: "compaction" };
       } else if (session.isRetrying) {
         session.abortRetry();
@@ -834,6 +1127,42 @@ export function createStateAuthority({
     return value;
   }
 
+  // A command invocation is admission evidence, not proof that Pi emitted a
+  // start. It still fences submissions until its promise settles or public
+  // lifecycle evidence takes over.
+  function beginCompactionInvocation(intentId = crypto.randomUUID()) {
+    compaction = { ...compaction, invocationPending: true };
+    activeIntents.set(intentId, "invoking");
+    publishSnapshot();
+    return intentId;
+  }
+
+  function settleCompactionInvocation(intentId, result = {}) {
+    activeIntents.delete(intentId);
+    compaction = { ...compaction, invocationPending: false };
+    // Do not synthesize start/end from a command promise. If Pi supplied no
+    // observation, the snapshot remains inactive; if it is open, the journal
+    // remains the last public evidence.
+    publishSnapshot();
+    return result;
+  }
+
+  function failureEscrow() {
+    return {
+      activeIntents: [...activeIntents].map(([intentId, disposition]) => ({
+        intentId,
+        disposition: "outcome_unknown",
+      })),
+      compaction: compactionBarrierOpen()
+        ? { state: "outcome_unknown", lastObserved: compactionProjection() }
+        : null,
+      operationJournal: structuredClone(operationJournal),
+      operationJournalLowWatermark: journalBounds().low,
+      operationJournalHighWatermark: journalBounds().high,
+      operationJournalTruncated: operationJournalTruncated,
+    };
+  }
+
   function beginTransition(provisionalEpoch = sessionEpoch + 1, announce = true) {
     if (transition) throw new Error("A session transition is already active");
     let resolveSettled;
@@ -868,6 +1197,13 @@ export function createStateAuthority({
     session = nextSession;
     sessionEpoch = provisionalEpoch;
     actualCompaction = false;
+    compaction = {
+      phase: "inactive",
+      operationId: null,
+      origin: null,
+      attempt: 0,
+      anomaly: null,
+    };
     navigationDepth = 0;
     resetQueueIdentity();
   }
@@ -1016,7 +1352,7 @@ export function createStateAuthority({
         custody.length === 0 &&
         submitting <= 1 &&
         unresolvedAdmissions === 0 &&
-        !actualCompaction &&
+        !compactionBarrierOpen() &&
         navigationDepth === 0 &&
         !session.isCompacting &&
         !session.isRetrying &&
@@ -1026,9 +1362,16 @@ export function createStateAuthority({
     },
     snapshot,
     publishSnapshot,
+    // Opaque semantic-frame seam. Existing callers may continue consuming
+    // snapshots/records until the host wire protocol adopts `sendFrame`.
+    createSemanticFrame,
+    commitSemanticFrame,
     requestFullSnapshot,
     observeEvent,
     submit,
+    beginCompactionInvocation,
+    settleCompactionInvocation,
+    failureEscrow,
     requestEscape,
     runNavigation,
     beginTransition,

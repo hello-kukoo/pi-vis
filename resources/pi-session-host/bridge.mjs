@@ -868,12 +868,20 @@ export function setupCommandBridge({
         // object. The old bridge passed { customInstructions } and pi silently
         // stringified it to "[object Object]".
         case "compact": {
-          const result = await trackInterruptibleOperation(
-            "compact",
-            () => _session.abort(),
-            () => _session.compact(command.customInstructions),
-          );
-          send({ type: "response", id, success: true, data: result });
+          // Invocation admission itself is a conservative child-side barrier;
+          // it is not treated as proof of a Pi compaction start. Public
+          // start/end events (or getter evidence) own the observed lifecycle.
+          const compactIntentId = authority.beginCompactionInvocation(`compact:${id}`);
+          try {
+            const result = await trackInterruptibleOperation(
+              "compact",
+              () => _session.abort(),
+              () => _session.compact(command.customInstructions),
+            );
+            send({ type: "response", id, success: true, data: result });
+          } finally {
+            authority.settleCompactionInvocation(compactIntentId);
+          }
           break;
         }
 

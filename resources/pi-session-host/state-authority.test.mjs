@@ -1228,4 +1228,111 @@ describe("state authority", () => {
       result: expect.objectContaining({ intentId: "slow", disposition: "completed" }),
     });
   });
+
+  it("observes an independent compaction from direct getter evidence", () => {
+    const { authority } = setup({ isCompacting: true });
+
+    expect(authority.snapshot()).toMatchObject({
+      compaction: {
+        phase: "active_unknown_origin",
+        origin: "getter",
+        barrierOpen: true,
+        anomaly: "missing_compaction_start",
+      },
+      hostFacts: { actualCompaction: true },
+    });
+  });
+
+  it("retains detached compaction boundaries in a bounded journal baseline", () => {
+    const { authority, session } = setup({}, { operationJournalCapacity: 2 });
+    session.isCompacting = true;
+    authority.observeEvent({ type: "compaction_start" });
+    session.isCompacting = false;
+    authority.observeEvent({ type: "compaction_end" });
+    session.isCompacting = true;
+    authority.observeEvent({ type: "compaction_start" });
+
+    const baseline = authority.createSemanticFrame();
+    expect(baseline.terminalSnapshot).toMatchObject({
+      compaction: { phase: "active", barrierOpen: true },
+      operationJournalLowWatermark: 2,
+      operationJournalHighWatermark: 3,
+      operationJournalTruncated: true,
+    });
+    expect(baseline.terminalSnapshot.recentObservedOperations).toHaveLength(2);
+  });
+
+  it("keeps the compaction barrier through retry_wait", async () => {
+    const { authority, session } = setup();
+    authority.observeEvent({ type: "compaction_start" });
+    authority.observeEvent({ type: "compaction_end", willRetry: true });
+
+    await expect(authority.submit(makeRequest("retry-held"))).resolves.toMatchObject({
+      disposition: "in_custody",
+    });
+    expect(authority.snapshot().compaction).toMatchObject({
+      phase: "retry_wait",
+      barrierOpen: true,
+    });
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps custody fenced and reports an anomaly when getter and event disagree", async () => {
+    const { authority, session } = setup({ isCompacting: false });
+    authority.observeEvent({ type: "compaction_start" });
+
+    expect(authority.snapshot()).toMatchObject({
+      compaction: { phase: "active", barrierOpen: true, anomaly: "getter_event_disagreement" },
+    });
+    await expect(authority.submit(makeRequest("anomaly-held"))).resolves.toMatchObject({
+      disposition: "in_custody",
+    });
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates identical settled intent IDs and rejects conflicting payloads", async () => {
+    const { authority, session } = setup();
+    await expect(
+      authority.submit(makeRequest("stable-id", { text: "once" })),
+    ).resolves.toMatchObject({
+      disposition: "consumed",
+    });
+    await flush();
+
+    await expect(
+      authority.submit(makeRequest("stable-id", { text: "once" })),
+    ).resolves.toMatchObject({
+      disposition: "completed",
+    });
+    await expect(
+      authority.submit(makeRequest("stable-id", { text: "different" })),
+    ).resolves.toMatchObject({
+      disposition: "rejected",
+      message: "Intent ID was reused with a different payload",
+    });
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(authority.snapshot().recentIntentOutcomes).toContainEqual(
+      expect.objectContaining({ intentId: "stable-id", disposition: "completed" }),
+    );
+  });
+
+  it("exposes an atomic semantic frame and failure escrow without inventing a compaction end", () => {
+    const sendFrame = vi.fn();
+    const { authority, sendRecord, sendControl } = setup({}, { sendFrame });
+    authority.observeEvent({ type: "compaction_start" });
+
+    expect(sendFrame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        records: [{ type: "event", event: { type: "compaction_start" } }],
+        terminalSnapshot: expect.objectContaining({
+          compaction: expect.objectContaining({ phase: "active" }),
+        }),
+      }),
+    );
+    expect(sendRecord).not.toHaveBeenCalled();
+    expect(sendControl).not.toHaveBeenCalled();
+    expect(authority.failureEscrow()).toMatchObject({
+      compaction: { state: "outcome_unknown", lastObserved: { phase: "active" } },
+    });
+  });
 });
