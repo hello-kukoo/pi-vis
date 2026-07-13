@@ -350,6 +350,10 @@ export function initIpc(win: BrowserWindow): void {
         ? { unifiedClaimTimeoutMs: testUnifiedClaimTimeoutMs }
         : {}),
     },
+    (publication) => {
+      eventBatcher?.flush(publication.sessionId as SessionId);
+      safeSend("session.publication", publication);
+    },
   );
 
   if (getSettings().sessionSearchEnabled) {
@@ -1180,6 +1184,14 @@ export function initIpc(win: BrowserWindow): void {
     if (!registry) throw new Error("Session registry not initialized");
     return registry.resyncSession(args.sessionId);
   });
+
+  ipcMain.handle(
+    "session.authorityAttach",
+    async (_evt, args: { sessionId: SessionId; rendererGeneration: number }) => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.authorityAttach(args.sessionId, args.rendererGeneration);
+    },
+  );
 
   ipcMain.handle(
     "session.rendererAttach",

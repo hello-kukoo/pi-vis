@@ -17,6 +17,8 @@ import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
 import {
   type AgentSessionSnapshot,
   AgentSessionSnapshotSchema,
+  type AuthorityAttachBaseline,
+  type AuthorityAttachResponse,
   type CommandSettlement,
   type EscapeResult,
   type ReloadRequest,
@@ -24,6 +26,8 @@ import {
   type ReloadSettlement,
   type RendererCommandRequest,
   RendererCommandRequestSchema,
+  type RendererPublication,
+  type RuntimeIdentity,
   type RuntimeRecord,
   type RuntimeStateUpdate,
   type SessionSubmission,
@@ -36,6 +40,11 @@ import {
 import lockfile from "proper-lockfile";
 import { resolveHostExecPath } from "../pi/locate-node.js";
 import { SessionHost } from "../pi/session-host.js";
+import {
+  AuthorityAttachError,
+  type AuthorityPublication,
+  RendererPublicationRouter,
+} from "./renderer-publication.js";
 import {
   assertConfinedRegularFileDescriptor,
   createPinnedSessionHardLink,
@@ -142,6 +151,7 @@ export interface SessionRecord {
       timer: ReturnType<typeof setTimeout>;
     }
   >;
+  _authorityPublications?: RendererPublicationRouter | undefined;
   _pendingRendererCancellation?:
     | {
         generation: number;
@@ -195,6 +205,7 @@ type TransitionBatchCallback = (
   records: RuntimeRecord[],
   state: RuntimeStateUpdate,
 ) => void;
+type AuthorityPublicationCallback = (publication: RendererPublication) => void;
 
 export class SessionRegistry {
   private sessions = new Map<SessionId, SessionRecord>();
@@ -211,7 +222,11 @@ export class SessionRegistry {
     private onQueueRestoration: QueueRestorationCallback = () => {},
     private onUiAcknowledged: UiAcknowledgedCallback = () => {},
     private onTransitionBatch: TransitionBatchCallback = () => {},
-    private options: { unifiedClaimTimeoutMs?: number } = {},
+    private options: {
+      unifiedClaimTimeoutMs?: number;
+      authorityPublicationBufferLimit?: number;
+    } = {},
+    private onAuthorityPublication: AuthorityPublicationCallback = () => {},
   ) {}
 
   openSession(
@@ -697,6 +712,10 @@ export class SessionRegistry {
     }
     record._snapshotMutationFingerprint = mutationFingerprint;
     record.snapshot = snapshot;
+    record._authorityPublications?.setExpectedOwner({
+      hostInstanceId: snapshot.hostInstanceId,
+      sessionEpoch: snapshot.sessionEpoch,
+    });
     if (snapshot.isIdle && snapshot.pendingMessageCount === 0) {
       for (const [intentId, retained] of record._retainedIntents) {
         if (["completed", "extension_error"].includes(retained.disposition)) {
@@ -1583,6 +1602,69 @@ export class SessionRegistry {
       "Unified action claim expired before renderer acknowledgement",
       true,
     );
+  }
+
+  /**
+   * Route a child-owned frame without interpreting its semantic payload. The
+   * host-frame transport is being rolled out independently, so this remains a
+   * public registry seam until SessionHost exposes the new wire messages.
+   */
+  routeAuthorityPublication(sessionId: SessionId, publication: AuthorityPublication): boolean {
+    const record = this.sessions.get(sessionId);
+    if (!record || !record.proc?.hostInstanceId) return false;
+    const owner: RuntimeIdentity = {
+      hostInstanceId: record.proc.hostInstanceId,
+      sessionEpoch: record.proc.sessionEpoch,
+    };
+    if (
+      publication.owner.hostInstanceId !== owner.hostInstanceId ||
+      publication.owner.sessionEpoch !== owner.sessionEpoch
+    ) {
+      return false;
+    }
+    const router = this.authorityRouter(record);
+    router.setExpectedOwner(owner);
+    return router.route(publication);
+  }
+
+  /**
+   * Return a child-serialized baseline plus the main-buffered contiguous tail.
+   * Legacy rendererAttach remains untouched while hosts without the new frame
+   * endpoint continue on the compatibility channels.
+   */
+  async authorityAttach(
+    sessionId: SessionId,
+    generation: number,
+  ): Promise<AuthorityAttachResponse> {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    const proc = record.proc as
+      | (SessionHost & {
+          requestAuthorityAttach?: (rendererGeneration: number) => Promise<AuthorityAttachBaseline>;
+        })
+      | undefined;
+    if (!proc?.hostInstanceId || !proc.requestAuthorityAttach) {
+      throw new AuthorityAttachError("Authority-frame baseline is not available from this host");
+    }
+    const router = this.authorityRouter(record);
+    router.setExpectedOwner({
+      hostInstanceId: proc.hostInstanceId,
+      sessionEpoch: proc.sessionEpoch,
+    });
+    return router.attach(generation, () => proc.requestAuthorityAttach!(generation));
+  }
+
+  private authorityRouter(record: SessionRecord): RendererPublicationRouter {
+    const options =
+      this.options.authorityPublicationBufferLimit === undefined
+        ? {}
+        : { maxBufferedPublications: this.options.authorityPublicationBufferLimit };
+    record._authorityPublications ??= new RendererPublicationRouter(
+      record.sessionId,
+      this.onAuthorityPublication,
+      options,
+    );
+    return record._authorityPublications;
   }
 
   async rendererAttach(sessionId: SessionId, generation: number): Promise<RuntimeStateUpdate> {
