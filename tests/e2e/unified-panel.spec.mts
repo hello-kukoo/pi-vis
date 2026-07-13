@@ -183,8 +183,9 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
             .trim()
             .split("\n")
             .filter(Boolean)
-            .map((line) => JSON.parse(line) as { type?: string })
-            .filter((entry) => entry.type === "submit").length;
+            .map((line) => JSON.parse(line) as { type?: string; intent?: { kind?: string } })
+            .filter((entry) => entry.type === "dispatch_intent" && entry.intent?.kind === "submit")
+            .length;
         })
         .toBe(1);
       await window.waitForTimeout(400);
@@ -193,8 +194,10 @@ test.describe("Unified-TUI panel (factory setWidget)", () => {
         .trim()
         .split("\n")
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as { type?: string })
-        .filter((entry) => entry.type === "submit").length;
+        .map((line) => JSON.parse(line) as { type?: string; intent?: { kind?: string } })
+        .filter(
+          (entry) => entry.type === "dispatch_intent" && entry.intent?.kind === "submit",
+        ).length;
       expect(submitCount).toBe(1);
       await window.getByRole("button", { name: "Dismiss", exact: true }).click();
       await expect(review).toHaveCount(0);

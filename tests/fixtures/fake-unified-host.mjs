@@ -63,6 +63,16 @@ let deferredClose = false;
 let editorDraft = "";
 let submitCounter = 0;
 const pendingSubmits = new Map();
+// The authority dispatch journal is intentionally independent from the legacy
+// submit compatibility seam. Receipts only admit; terminal results travel in
+// semantic frames.
+const authorityIntents = new Map();
+const authorityOutcomes = [];
+let customPanelOpen = false;
+const CUSTOM_PANEL_ID = 2;
+const CUSTOM_PANEL_KEY = `panel:${CUSTOM_PANEL_ID}`;
+let customPanelRenderRevision = 0;
+let customPanelFramebuffer = "";
 const AUTO_CLOSE_MS = Number(process.env.PIVIS_TEST_UNIFIED_AUTO_CLOSE_MS || 0);
 const AUTO_CLOSE_AFTER_DRAFT = process.env.PIVIS_TEST_UNIFIED_AUTO_CLOSE_AFTER_DRAFT || "";
 const HANG_UNIFIED_SUBMIT = process.env.PIVIS_TEST_HANG_UNIFIED_SUBMIT === "1";
@@ -156,8 +166,16 @@ function semanticSnapshot() {
     },
     custody: [],
     editor: value.editor,
-    activeIntents: [],
-    recentIntentOutcomes: [],
+    activeIntents: [...authorityIntents.values()]
+      .filter((entry) => !entry.outcome)
+      .map((entry) => ({
+        intentId: entry.intentId,
+        owner: entry.owner,
+        kind: entry.intent.kind,
+        state: "admitted",
+        recordedAt: entry.recordedAt,
+      })),
+    recentIntentOutcomes: authorityOutcomes.slice(-20),
     recentObservedOperations: [],
     operationJournalLowWatermark: 0,
     operationJournalHighWatermark: 0,
@@ -204,7 +222,7 @@ function publishPanel(payload) {
   });
 }
 
-function panelBaseline(cursor, ansi = panelFramebuffer) {
+function panelBaseline(cursor, ansi = `${KITTY_HANDSHAKE}${panelFramebuffer}`) {
   return {
     panelKey: `panel:${PANEL_ID}`,
     panelId: PANEL_ID,
@@ -251,6 +269,57 @@ function publishPanelClose() {
   publishPanel({ kind: "close", cursor, panelKey: `panel:${PANEL_ID}` });
 }
 
+function publishCustomPanelReset() {
+  const cursor = presentationCursor("panel");
+  publishPanel({
+    kind: "reset",
+    cursor,
+    panelKey: CUSTOM_PANEL_KEY,
+    renderRevision: customPanelRenderRevision,
+    panelId: CUSTOM_PANEL_ID,
+    overlay: true,
+    unified: false,
+  });
+}
+
+function publishCustomPanelKeyframe() {
+  const cursor = presentationCursor("panel");
+  publishPanel({
+    kind: "keyframe",
+    cursor,
+    panel: {
+      panelKey: CUSTOM_PANEL_KEY,
+      panelId: CUSTOM_PANEL_ID,
+      owner: authorityOwner(),
+      sync: { state: "following", cursor },
+      overlay: true,
+      unified: false,
+      inputAcknowledgedThrough: 0,
+      keyframe: {
+        kind: "keyframe",
+        ansi: customPanelFramebuffer,
+        renderRevision: customPanelRenderRevision,
+      },
+    },
+  });
+}
+
+function publishCustomPanelData(data) {
+  const cursor = presentationCursor("panel");
+  publishPanel({
+    kind: "ansi_delta",
+    cursor,
+    panelKey: CUSTOM_PANEL_KEY,
+    data,
+    renderRevision: customPanelRenderRevision,
+  });
+}
+
+function publishCustomPanelClose() {
+  const cursor = presentationCursor("panel");
+  publishPanel({ kind: "close", cursor, panelKey: CUSTOM_PANEL_KEY });
+}
+
 function authorityAttach(rendererGeneration) {
   const semantic = semanticSnapshot();
   if (semanticTransportSequence === 0) semanticTransportSequence = 1;
@@ -289,7 +358,27 @@ function authorityAttach(rendererGeneration) {
       widgets: {},
       dialogs: [],
     },
-    panels: panelOpen ? [panelBaseline(panelCursor)] : [],
+    panels: [
+      ...(panelOpen ? [panelBaseline(panelCursor)] : []),
+      ...(customPanelOpen
+        ? [
+            {
+              panelKey: CUSTOM_PANEL_KEY,
+              panelId: CUSTOM_PANEL_ID,
+              owner,
+              sync: { state: "following", cursor: panelCursor },
+              overlay: true,
+              unified: false,
+              inputAcknowledgedThrough: 0,
+              keyframe: {
+                kind: "keyframe",
+                ansi: customPanelFramebuffer,
+                renderRevision: customPanelRenderRevision,
+              },
+            },
+          ]
+        : []),
+    ],
     publicationHighWatermark: 0,
   };
 }
@@ -539,6 +628,109 @@ function closeUnifiedPanel() {
   publishPanelClose();
 }
 
+function stableAuthorityFingerprint(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableAuthorityFingerprint).join(",")}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableAuthorityFingerprint(value[key])}`)
+    .join(",")}}`;
+}
+
+function finishAuthorityIntent(entry, state, result, error) {
+  if (entry.outcome) return;
+  const outcome = {
+    intentId: entry.intentId,
+    owner: structuredClone(entry.owner),
+    kind: entry.intent.kind,
+    state,
+    ...(result === undefined ? {} : { result }),
+    ...(error ? { error } : {}),
+  };
+  entry.outcome = outcome;
+  authorityOutcomes.push(outcome);
+  emitAuthorityFrame([{ type: "intent_outcome", outcome }]);
+}
+
+function executeAuthorityIntent(entry) {
+  const { intent } = entry;
+  if (intent.kind === "submit") {
+    // Preserve the claimed-action timeout seam. Admission is durable, but no
+    // terminal authority evidence is published for this intentionally hung run.
+    if (HANG_UNIFIED_SUBMIT && intent.surface === "unified") return;
+    editorRevision = Math.max(editorRevision, intent.editorRevision) + 1;
+    editorText = "";
+    editorAttachments = [];
+    finishAuthorityIntent(entry, "completed", {
+      disposition: "consumed",
+      editorRevision: intent.editorRevision,
+      queued: false,
+    });
+    return;
+  }
+  if (intent.kind === "invokeCommand") {
+    const command = intent.text.trim().replace(/^\//, "").split(/\s+/, 1)[0];
+    if (command === "custom-panel") openCustomPanel("composer");
+    finishAuthorityIntent(entry, "completed", {
+      ...(command ? { commandType: command } : {}),
+      disposition: "consumed",
+      editorRevision: intent.editorRevision,
+      queued: false,
+    });
+    return;
+  }
+  finishAuthorityIntent(entry, "completed", {});
+}
+
+function dispatchAuthorityIntent(envelope) {
+  const intentId = envelope?.intentId;
+  const owner = envelope?.expectedOwner;
+  const intent = envelope?.intent;
+  if (!intentId || !owner || !intent || typeof intent.kind !== "string") {
+    return {
+      status: "not_admitted",
+      intentId: typeof intentId === "string" && intentId ? intentId : "invalid-intent",
+      reason: "invalid",
+      invalidReason: "malformed",
+    };
+  }
+  if (owner.hostInstanceId !== hostInstanceId || owner.sessionEpoch !== sessionEpoch) {
+    return { status: "not_admitted", intentId, reason: "stale_owner" };
+  }
+  const key = `${owner.hostInstanceId}:${owner.sessionEpoch}:${intentId}`;
+  const fingerprint = stableAuthorityFingerprint({ owner, intent });
+  const prior = authorityIntents.get(key);
+  if (prior) {
+    if (prior.fingerprint !== fingerprint) {
+      return {
+        status: "not_admitted",
+        intentId,
+        reason: "invalid",
+        invalidReason: "payload_conflict",
+      };
+    }
+    return { status: "duplicate", intentId, owner: structuredClone(owner) };
+  }
+  const entry = {
+    intentId,
+    owner: structuredClone(owner),
+    intent: structuredClone(intent),
+    fingerprint,
+    recordedAt: Date.now(),
+    outcome: null,
+  };
+  authorityIntents.set(key, entry);
+  emitAuthorityFrame();
+  queueMicrotask(() => executeAuthorityIntent(entry));
+  return { status: "admitted", intentId, owner: structuredClone(owner) };
+}
+
+function closeCustomPanel() {
+  if (!customPanelOpen) return;
+  customPanelOpen = false;
+  publishCustomPanelClose();
+}
+
 function openCustomPanel(uiSurface) {
   if (uiSurface === "unified") {
     send({ type: "panel_mode", panelId: PANEL_ID, mode: "viewport" });
@@ -550,13 +742,21 @@ function openCustomPanel(uiSurface) {
     return;
   }
 
-  const customPanelId = 2;
-  send({ type: "panel_open", panelId: customPanelId, overlay: true, unified: false });
-  send({
-    type: "panel_data",
-    panelId: customPanelId,
-    data: `\x1b[2J\x1b[H${["Composer custom panel", "opened from the native composer"].join("\n")}\n`,
-  });
+  customPanelOpen = true;
+  customPanelRenderRevision++;
+  customPanelFramebuffer = `\x1b[2J\x1b[H${["Composer custom panel", "opened from the native composer"].join("\n")}\n`;
+  // The canonical panel projection, rather than legacy panel_open/data, owns
+  // replacement of the composer. Keep the unified panel's panelKey alive.
+  publishCustomPanelReset();
+  publishCustomPanelKeyframe();
+  publishCustomPanelData(customPanelFramebuffer);
+  // Authority publications are canonical state, but mounted xterms consume
+  // their live stream through this compatibility event. Delay one turn so a
+  // reset-created CustomPanelHost has installed its subscription.
+  setTimeout(() => {
+    if (customPanelOpen)
+      send({ type: "panel_data", panelId: CUSTOM_PANEL_ID, data: customPanelFramebuffer });
+  }, 0).unref?.();
 }
 
 // ─── Wire protocol handling ────────────────────────────────────────────────
@@ -565,7 +765,12 @@ process.on("message", (msg) => {
   if (process.env.PIVIS_TEST_HOST_MESSAGE_LOG) {
     fs.appendFileSync(
       process.env.PIVIS_TEST_HOST_MESSAGE_LOG,
-      `${JSON.stringify({ type: msg?.type, command: msg?.command?.type, text: msg?.submission?.text })}\n`,
+      `${JSON.stringify({
+        type: msg?.type,
+        command: msg?.command?.type,
+        text: msg?.submission?.text,
+        intent: msg?.envelope?.intent,
+      })}\n`,
     );
   }
   try {
@@ -588,6 +793,9 @@ process.on("message", (msg) => {
         break;
       case "authority_attach":
         reply(msg.id, true, authorityAttach(msg.rendererGeneration));
+        break;
+      case "dispatch_intent":
+        reply(msg.id, true, dispatchAuthorityIntent(msg.envelope));
         break;
       case "prepare_close":
         closeToken = crypto.randomUUID();
@@ -672,6 +880,14 @@ process.on("message", (msg) => {
         if (panelOpen && msg?.panelId === PANEL_ID && msg?.revision === panelRenderRevision) {
           panelRepaintAcknowledgedRevision = panelRenderRevision;
           reply(msg.id, true, { acknowledged: true });
+          // The final authority keyframe already contains the complete kitty
+          // handshake + framebuffer. Re-send just the control handshake after
+          // the renderer's repaint acknowledgement so xterm's reply is not
+          // dropped by its input fence.
+          setTimeout(() => {
+            if (panelOpen && panelRepaintAcknowledgedRevision === panelRenderRevision)
+              send({ type: "panel_data", panelId: PANEL_ID, data: KITTY_HANDSHAKE });
+          }, 0).unref?.();
         } else {
           reply(msg.id, true, { acknowledged: false });
         }
@@ -686,7 +902,8 @@ process.on("message", (msg) => {
         }
         break;
       case "panel_close_request":
-        closeUnifiedPanel();
+        if (msg?.panelId === CUSTOM_PANEL_ID) closeCustomPanel();
+        else closeUnifiedPanel();
         break;
       case "unified_submit_response": {
         const snapshot = pendingSubmits.get(msg.id);
