@@ -159,6 +159,15 @@ describe("authority protocol schemas", () => {
     expect(
       IntentEnvelopeSchema.safeParse({
         ...envelope,
+        intent: {
+          ...envelope.intent,
+          images: [{ type: "image", data: "AA==", mimeType: "image/png", extra: true }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      IntentEnvelopeSchema.safeParse({
+        ...envelope,
         observedCursor: { ...cursor, hostInstanceId: "host-b" },
       }).success,
     ).toBe(false);

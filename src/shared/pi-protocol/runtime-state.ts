@@ -78,11 +78,13 @@ export const LifecyclePermitVerdictSchema = z.object({
 });
 export type LifecyclePermitVerdict = z.infer<typeof LifecyclePermitVerdictSchema>;
 
-export const RuntimeImageSchema = z.object({
-  type: z.literal("image"),
-  data: z.string(),
-  mimeType: z.string(),
-});
+export const RuntimeImageSchema = z
+  .object({
+    type: z.literal("image"),
+    data: z.string(),
+    mimeType: z.string(),
+  })
+  .strict();
 export type RuntimeImage = z.infer<typeof RuntimeImageSchema>;
 
 export const SessionSubmissionSchema = z.object({
@@ -882,6 +884,7 @@ export const ObservedOperationRecordSchema = z
       "started",
       "invoking",
       "active",
+      "cancelling",
       "retry_wait",
       "completed",
       "aborted",
@@ -915,7 +918,12 @@ export const OperationJournalRecordSchema = z.discriminatedUnion("type", [
       type: z.literal("anomaly"),
       sequence: NonNegativeIntegerSchema,
       owner: RuntimeIdentitySchema,
-      code: z.enum(["getter_event_disagreement", "missing_start_event", "queue_correlation_lost"]),
+      code: z.enum([
+        "getter_event_disagreement",
+        "missing_start_event",
+        "missing_compaction_start",
+        "queue_correlation_lost",
+      ]),
       observedAt: z.number(),
       detail: z.string().optional(),
     })
@@ -1030,7 +1038,12 @@ export const AuthorityRecordSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("anomaly"),
       owner: RuntimeIdentitySchema,
-      code: z.enum(["getter_event_disagreement", "missing_start_event", "queue_correlation_lost"]),
+      code: z.enum([
+        "getter_event_disagreement",
+        "missing_start_event",
+        "missing_compaction_start",
+        "queue_correlation_lost",
+      ]),
       detail: z.string().optional(),
     })
     .strict(),

@@ -227,6 +227,97 @@ export function createStateAuthority({
       .join(",")}}`;
   }
 
+  function isStrictObject(value, keys) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const actual = Object.keys(value);
+    return actual.every((key) => keys.includes(key)) && keys.every((key) => key in value);
+  }
+
+  function isOptional(value, predicate) {
+    return value === undefined || predicate(value);
+  }
+
+  // Keep this child boundary strict even when a caller bypasses the typed main
+  // IPC contract. It intentionally mirrors SessionIntentSchema without loading
+  // TypeScript/Zod into the SDK host process.
+  function isValidSessionIntent(intent) {
+    if (!intent || typeof intent !== "object" || Array.isArray(intent)) return false;
+    const image = (value) =>
+      isStrictObject(value, ["type", "data", "mimeType"]) &&
+      value.type === "image" &&
+      typeof value.data === "string" &&
+      typeof value.mimeType === "string";
+    const nonEmpty = (value) => typeof value === "string" && value.length > 0;
+    const nonNegativeInteger = (value) => Number.isInteger(value) && value >= 0;
+    switch (intent.kind) {
+      case "interrupt":
+      case "reload":
+        return isStrictObject(intent, ["kind"]);
+      case "submit":
+        return (
+          isStrictObject(intent, [
+            "kind",
+            "editorRevision",
+            "text",
+            "images",
+            "requestedMode",
+            "surface",
+          ]) &&
+          nonNegativeInteger(intent.editorRevision) &&
+          typeof intent.text === "string" &&
+          Array.isArray(intent.images) &&
+          intent.images.every(image) &&
+          ["steer", "followUp"].includes(intent.requestedMode) &&
+          ["composer", "unified"].includes(intent.surface)
+        );
+      case "compact":
+        return (
+          Object.keys(intent).every((key) => ["kind", "instructions"].includes(key)) &&
+          isOptional(intent.instructions, (value) => typeof value === "string")
+        );
+      case "invokeCommand":
+        return (
+          isStrictObject(intent, ["kind", "text", "editorRevision"]) &&
+          typeof intent.text === "string" &&
+          nonNegativeInteger(intent.editorRevision)
+        );
+      case "runBash":
+        return (
+          Object.keys(intent).every((key) =>
+            ["kind", "command", "excludeFromContext"].includes(key),
+          ) &&
+          typeof intent.command === "string" &&
+          isOptional(intent.excludeFromContext, (value) => typeof value === "boolean")
+        );
+      case "navigate":
+        return (
+          Object.keys(intent).every((key) => ["kind", "targetId", "summarize"].includes(key)) &&
+          nonEmpty(intent.targetId) &&
+          isOptional(intent.summarize, (value) => typeof value === "boolean")
+        );
+      case "setModel":
+        return (
+          isStrictObject(intent, ["kind", "provider", "modelId"]) &&
+          typeof intent.provider === "string" &&
+          nonEmpty(intent.modelId)
+        );
+      case "setThinking":
+        return (
+          isStrictObject(intent, ["kind", "level"]) &&
+          ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(intent.level)
+        );
+      case "rename":
+        return isStrictObject(intent, ["kind", "name"]) && typeof intent.name === "string";
+      case "export":
+        return (
+          Object.keys(intent).every((key) => ["kind", "outputPath"].includes(key)) &&
+          isOptional(intent.outputPath, (value) => typeof value === "string")
+        );
+      default:
+        return false;
+    }
+  }
+
   function intentFingerprint(request) {
     // Intent IDs identify a semantic operation, not a renderer retry. Include
     // every admission-relevant field so reusing one for a different payload is
@@ -267,6 +358,57 @@ export function createStateAuthority({
       high: nextOperationSequence,
       truncated: operationJournalTruncated,
     };
+  }
+
+  function appendAnomaly(code, detail) {
+    return appendOperation({
+      journalType: "anomaly",
+      owner: semanticOwner(),
+      code,
+      ...(detail ? { detail: String(detail) } : {}),
+    });
+  }
+
+  function journalRecords(owner = semanticOwner()) {
+    return operationJournal
+      .filter(
+        (entry) =>
+          entry.owner?.hostInstanceId === owner.hostInstanceId &&
+          entry.owner?.sessionEpoch === owner.sessionEpoch,
+      )
+      .flatMap((entry) => {
+        if (entry.observed === true) {
+          return [
+            {
+              type: "observed_operation",
+              sequence: entry.operationSequence,
+              record: operationProjection(entry),
+            },
+          ];
+        }
+        if (entry.journalType === "intent_outcome" && entry.outcome) {
+          return [
+            {
+              type: "intent_outcome",
+              sequence: entry.operationSequence,
+              outcome: structuredClone(entry.outcome),
+            },
+          ];
+        }
+        if (entry.journalType === "anomaly") {
+          return [
+            {
+              type: "anomaly",
+              sequence: entry.operationSequence,
+              owner: structuredClone(entry.owner),
+              code: entry.code,
+              observedAt: entry.observedAt,
+              ...(entry.detail ? { detail: String(entry.detail) } : {}),
+            },
+          ];
+        }
+        return [];
+      });
   }
 
   function dispatchedIntentBounds() {
@@ -328,7 +470,7 @@ export function createStateAuthority({
   function observedOperation(
     kind,
     state,
-    { operationId = crypto.randomUUID(), intentId, detail } = {},
+    { operationId = crypto.randomUUID(), intentId, detail, command, targetId } = {},
   ) {
     const record = {
       kind,
@@ -338,6 +480,8 @@ export function createStateAuthority({
       owner: semanticOwner(),
       ...(intentId ? { intentId } : {}),
       ...(detail ? { detail: String(detail) } : {}),
+      ...(command ? { command: String(command) } : {}),
+      ...(targetId ? { targetId: String(targetId) } : {}),
     };
     appendOperation(record);
     const key = `${kind}:${operationId}`;
@@ -372,8 +516,12 @@ export function createStateAuthority({
       .map((entry) => operationProjection(entry));
   }
 
+  function activeOperation(kind) {
+    return [...activeObservedOperations.values()].find((entry) => entry.kind === kind);
+  }
+
   function activeOperationId(kind) {
-    return [...activeObservedOperations.values()].find((entry) => entry.kind === kind)?.operationId;
+    return activeOperation(kind)?.operationId;
   }
 
   function reconcileObservedGetters() {
@@ -396,6 +544,7 @@ export function createStateAuthority({
   function setCompactionAnomaly(reason) {
     if (compaction.anomaly === reason) return;
     compaction = { ...compaction, anomaly: reason };
+    appendAnomaly(reason, reason);
     observedOperation("compaction", "unknown", {
       operationId: compaction.operationId,
       detail: reason,
@@ -417,6 +566,7 @@ export function createStateAuthority({
         attempt: Math.max(1, compaction.attempt + 1),
         anomaly: "missing_compaction_start",
       };
+      appendAnomaly("missing_compaction_start", "missing_compaction_start");
       observedOperation("compaction", "active", {
         operationId: compaction.operationId,
         detail: compaction.anomaly,
@@ -595,7 +745,21 @@ export function createStateAuthority({
         state: "admitted",
         recordedAt: entry.recordedAt,
       }));
-    const compactionActivity = compactionBarrierOpen()
+    const agent = activeOperation("agent");
+    const retry = activeOperation("retry");
+    const bash = activeOperation("bash");
+    const navigation = activeOperation("navigation");
+    const command = activeOperation("command");
+    // An admitted compact invocation fences custody, but it is not evidence
+    // that Pi began compacting. Only a public getter or start observation may
+    // project compaction activity.
+    const compactionActive = [
+      "active",
+      "active_unknown_origin",
+      "cancelling",
+      "retry_wait",
+    ].includes(compaction.phase);
+    const compactionActivity = compactionActive
       ? {
           kind: "compaction",
           state:
@@ -624,7 +788,53 @@ export function createStateAuthority({
         isBashRunning: value.isBashRunning,
       },
       activity: {
+        ...(agent
+          ? { agent: { kind: "agent", state: "active", startedAt: agent.observedAt } }
+          : {}),
         ...(compactionActivity ? { compaction: compactionActivity } : {}),
+        ...(retry
+          ? {
+              retry: {
+                kind: "retry",
+                state: retry.phase === "retry_wait" ? "waiting" : "active",
+                attempt: Math.max(0, Number(value.retryAttempt) || 0),
+                startedAt: retry.observedAt,
+              },
+            }
+          : {}),
+        ...(bash
+          ? {
+              bash: {
+                kind: "bash",
+                state: bash.phase === "cancelling" ? "cancelling" : "active",
+                ...(bash.intentId ? { intentId: bash.intentId } : {}),
+                ...(bash.command ? { command: bash.command } : {}),
+                startedAt: bash.observedAt,
+              },
+            }
+          : {}),
+        ...(navigation
+          ? {
+              navigation: {
+                kind: "navigation",
+                state: navigation.phase === "cancelling" ? "cancelling" : "active",
+                ...(navigation.intentId ? { intentId: navigation.intentId } : {}),
+                ...(navigation.targetId ? { targetId: navigation.targetId } : {}),
+                startedAt: navigation.observedAt,
+              },
+            }
+          : {}),
+        ...(command?.intentId
+          ? {
+              command: {
+                kind: "command",
+                state: command.phase === "cancelling" ? "cancelling" : "invoking",
+                intentId: command.intentId,
+                command: command.command ?? "command",
+                startedAt: command.observedAt,
+              },
+            }
+          : {}),
       },
       queues: {
         steering: value.steering,
@@ -837,7 +1047,11 @@ export function createStateAuthority({
       ...(error ? { error } : {}),
     };
     entry.outcome = outcome;
-    if (entry.observedOperationId) {
+    if (
+      entry.observedOperationId &&
+      owner.hostInstanceId === hostInstanceId &&
+      owner.sessionEpoch === sessionEpoch
+    ) {
       observedOperation(
         "command",
         state === "completed"
@@ -853,13 +1067,13 @@ export function createStateAuthority({
     // Terminal receipts must not pin the original command text or image bytes.
     entry.intent = retainedDispatchedIntent(entry.intent);
     pruneDispatchedIntents();
-    appendOperation({
-      kind: "intent",
-      phase: state,
-      intentId,
-      intentKind: kind,
-      owner: structuredClone(owner),
-    });
+    if (owner.hostInstanceId === hostInstanceId && owner.sessionEpoch === sessionEpoch) {
+      appendOperation({
+        journalType: "intent_outcome",
+        owner: structuredClone(owner),
+        outcome: structuredClone(outcome),
+      });
+    }
     // Rebinding changes the child epoch before runtime.newSession/fork return.
     // Emit the initiating predecessor outcome live against the frozen old
     // baseline; folding it into the successor frame violates frame ownership.
@@ -1305,18 +1519,24 @@ export function createStateAuthority({
     const intent = envelope?.intent;
     const owner = envelope?.expectedOwner;
     const intentId = envelope?.intentId;
+    // Validate before fingerprinting, retention, journal admission, or any
+    // scheduler work. The typed renderer/main contract is not a substitute for
+    // this hostile child IPC boundary.
     if (
-      !intent ||
-      typeof intent.kind !== "string" ||
       typeof intentId !== "string" ||
+      intentId.length === 0 ||
       !owner ||
       typeof owner.hostInstanceId !== "string" ||
-      !Number.isInteger(owner.sessionEpoch)
+      owner.hostInstanceId.length === 0 ||
+      !Number.isInteger(owner.sessionEpoch) ||
+      owner.sessionEpoch < 0 ||
+      !isValidSessionIntent(intent)
     ) {
       return Promise.resolve({
         status: "not_admitted",
-        intentId: intentId ?? "",
+        intentId: typeof intentId === "string" ? intentId : "",
         reason: "invalid",
+        invalidReason: "malformed",
       });
     }
     if (owner.hostInstanceId !== hostInstanceId || owner.sessionEpoch !== sessionEpoch) {
@@ -1386,13 +1606,6 @@ export function createStateAuthority({
       outcome: null,
     };
     dispatchedIntents.set(key, entry);
-    appendOperation({
-      kind: "intent",
-      phase: "admitted",
-      intentId,
-      intentKind: intent.kind,
-      owner: structuredClone(owner),
-    });
     commitSemanticFrame([{ type: "intent_admitted", intentId, owner, kind: intent.kind }]);
 
     void schedule("ingress", async () => {
@@ -1410,7 +1623,10 @@ export function createStateAuthority({
           return;
         }
         if (intent.kind === "invokeCommand") {
-          entry.observedOperationId = observedOperation("command", "invoking", { intentId });
+          entry.observedOperationId = observedOperation("command", "invoking", {
+            intentId,
+            command: intent.text,
+          });
         }
         const result = await execute(intent, owner);
         // submit/invokeCommand settle when their existing child admission
@@ -1783,11 +1999,8 @@ export function createStateAuthority({
         session.abortCompaction();
         if (["active", "active_unknown_origin", "retry_wait"].includes(compaction.phase)) {
           compaction = { ...compaction, phase: "cancelling" };
-          appendOperation({
-            kind: "compaction",
-            phase: "cancelling",
+          observedOperation("compaction", "cancelling", {
             operationId: compaction.operationId,
-            attempt: compaction.attempt,
           });
         }
         actualCompaction = true;
@@ -1871,7 +2084,11 @@ export function createStateAuthority({
     activeIntents.set(intentId, "invoking");
     // This is command invocation evidence and a conservative admission
     // barrier, never fabricated proof that Pi observed compaction as active.
-    observedOperation("command", "invoking", { operationId: intentId, intentId });
+    observedOperation("command", "invoking", {
+      operationId: intentId,
+      intentId,
+      command: "compact",
+    });
     publishSnapshot();
     return intentId;
   }
@@ -1994,6 +2211,11 @@ export function createStateAuthority({
   ) {
     session = nextSession;
     sessionEpoch = provisionalEpoch;
+    // Operation-journal coverage is owner-scoped. A successor baseline must
+    // never advertise retained predecessor entries or predecessor watermarks.
+    operationJournal.length = 0;
+    nextOperationSequence = 0;
+    operationJournalTruncated = false;
     actualCompaction = false;
     compaction = {
       phase: "inactive",
@@ -2168,13 +2390,7 @@ export function createStateAuthority({
         snapshotSequence: semantic.snapshotSequence,
       };
       const catalog = semantic.catalog;
-      const journal = operationJournal
-        .filter((entry) => entry.observed === true)
-        .map((entry) => ({
-          type: "observed_operation",
-          sequence: entry.operationSequence,
-          record: operationProjection(entry),
-        }));
+      const journal = journalRecords(owner);
       const panels = (presentation.panels?.() ?? []).map((panel) => ({
         panelKey: `panel:${panel.panelId}`,
         panelId: panel.panelId,

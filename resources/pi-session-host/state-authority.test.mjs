@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentSessionSnapshotSchema,
+  AuthorityAttachBaselineSchema,
   AuthorityFrameSchema,
+  SemanticSnapshotSchema,
 } from "../../src/shared/pi-protocol/runtime-state.ts";
 import { createStateAuthority } from "./state-authority.mjs";
 
@@ -1507,7 +1509,7 @@ describe("state authority", () => {
     };
     let snapshotAtExecution;
     const execute = vi.fn(() => {
-      snapshotAtExecution = authority.snapshot();
+      snapshotAtExecution = authority.semanticSnapshot();
       return gate.promise;
     });
 
@@ -1537,8 +1539,8 @@ describe("state authority", () => {
     ).resolves.toMatchObject({ status: "not_admitted", reason: "stale_owner" });
 
     await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
-    expect(snapshotAtExecution.recentObservedOperations).toContainEqual(
-      expect.objectContaining({ kind: "intent", phase: "admitted", intentId: "wire-intent" }),
+    expect(snapshotAtExecution.activeIntents).toContainEqual(
+      expect.objectContaining({ intentId: "wire-intent", kind: "runBash", state: "admitted" }),
     );
     expect(sendRecord).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "intent_outcome" }),
@@ -1780,15 +1782,36 @@ describe("state authority", () => {
     const commandId = authority.beginObservedOperation("command", "cmd-intent", "invoking");
     const compactId = authority.beginCompactionInvocation("compact-intent");
     const navigating = authority.runNavigation(() => navigation.promise);
+    await expect(authority.submit(makeRequest("held-before-compact-start"))).resolves.toMatchObject(
+      {
+        disposition: "in_custody",
+      },
+    );
 
     const attach = await authority.requestAuthorityAttach(3);
     expect(attach.operationJournal.map((entry) => entry.record.kind)).toEqual(
       expect.arrayContaining(["agent", "retry", "bash", "navigation", "command"]),
     );
     const semantic = authority.createSemanticFrame().terminalSnapshot;
+    expect(semantic.activity).toMatchObject({
+      retry: { kind: "retry", state: "waiting" },
+      bash: { kind: "bash", state: "active" },
+      navigation: { kind: "navigation", state: "active" },
+      command: { kind: "command", state: "invoking" },
+    });
+    // The compact command is an invoking command plus a custody barrier until
+    // Pi emits a public start event (or its direct getter becomes true).
+    expect(semantic.activity.compaction).toBeUndefined();
+    expect(SemanticSnapshotSchema.safeParse(semantic).success).toBe(true);
+    expect(authority.snapshot().hostFacts.actualCompaction).toBe(true);
     expect(semantic.recentObservedOperations).toContainEqual(
       expect.objectContaining({ kind: "command", operationId: compactId, state: "invoking" }),
     );
+    authority.observeEvent({ type: "agent_start" });
+    expect(authority.semanticSnapshot().activity.agent).toMatchObject({
+      kind: "agent",
+      state: "active",
+    });
     expect(semantic.recentObservedOperations).not.toContainEqual(
       expect.objectContaining({ kind: "compaction", state: "active", intentId: "compact-intent" }),
     );
@@ -1847,8 +1870,17 @@ describe("state authority", () => {
           expectedOwner: owner,
           intent: {
             kind: "submit",
+            editorRevision: 1,
             text: "x",
-            images: [{ data: "image bytes that exceed cap ".repeat(20) }],
+            images: [
+              {
+                type: "image",
+                mimeType: "image/png",
+                data: "image bytes that exceed cap ".repeat(20),
+              },
+            ],
+            requestedMode: "followUp",
+            surface: "composer",
           },
         },
         vi.fn(),
@@ -1859,6 +1891,121 @@ describe("state authority", () => {
       reason: "invalid",
       invalidReason: "payload_too_large",
     });
+  });
+
+  it("serializes complete owner-scoped detached operation journals and terminal outcomes", async () => {
+    const { authority, session } = setup({}, { operationJournalCapacity: 64 });
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    const navigation = deferred();
+    authority.observeEvent({ type: "agent_start" });
+    authority.observeEvent({ type: "agent_end", willRetry: true });
+    const bashId = authority.beginObservedOperation("bash", "bash-intent", "active");
+    const navigating = authority.runNavigation(() => navigation.promise);
+    authority.beginCompactionInvocation("compact-intent");
+    // A direct getter/event disagreement is both an operation observation and
+    // a typed anomaly entry, retained for a renderer that was detached.
+    authority.observeEvent({ type: "compaction_start" });
+    session.isCompacting = false;
+    authority.snapshot();
+    await authority.dispatchIntent(
+      {
+        intentId: "outcome-intent",
+        expectedOwner: owner,
+        intent: { kind: "runBash", command: "pwd" },
+      },
+      async () => ({ output: "/tmp", exitCode: 0 }),
+    );
+    await vi.waitFor(() =>
+      expect(authority.createSemanticFrame().terminalSnapshot.recentIntentOutcomes).toContainEqual(
+        expect.objectContaining({ intentId: "outcome-intent", state: "completed" }),
+      ),
+    );
+    authority.settleObservedOperation("bash", bashId, { intentId: "bash-intent" });
+    authority.settleCompactionInvocation("compact-intent");
+    navigation.resolve();
+    await navigating;
+
+    const first = await authority.requestAuthorityAttach(11);
+    const second = await authority.requestAuthorityAttach(12);
+    for (const attach of [first, second]) {
+      expect(AuthorityAttachBaselineSchema.safeParse(attach).success).toBe(true);
+      expect(attach.operationJournal.map((entry) => entry.type)).toEqual(
+        expect.arrayContaining(["observed_operation", "intent_outcome", "anomaly"]),
+      );
+      expect(attach.operationJournal).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "intent_outcome",
+            outcome: expect.objectContaining({ intentId: "outcome-intent", owner }),
+          }),
+          expect.objectContaining({ type: "anomaly", owner }),
+        ]),
+      );
+      expect(
+        attach.operationJournal.every((entry) => {
+          const entryOwner =
+            entry.type === "observed_operation"
+              ? entry.record.owner
+              : entry.type === "intent_outcome"
+                ? entry.outcome.owner
+                : entry.owner;
+          return (
+            entryOwner.hostInstanceId === owner.hostInstanceId &&
+            entryOwner.sessionEpoch === owner.sessionEpoch
+          );
+        }),
+      ).toBe(true);
+      expect(attach.semantic.snapshot.operationJournalLowWatermark).toBe(
+        attach.operationJournal[0].sequence,
+      );
+      expect(attach.semantic.snapshot.operationJournalHighWatermark).toBe(
+        attach.operationJournal.at(-1).sequence,
+      );
+    }
+  });
+
+  it("rejects malformed SessionIntent variants before fingerprinting, journal admission, or SDK execution", async () => {
+    const sendFrame = vi.fn();
+    const { authority } = setup({}, { sendFrame });
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    const execute = vi.fn();
+    const malformed = [
+      { kind: "interrupt", extra: true },
+      {
+        kind: "submit",
+        editorRevision: -1,
+        text: "x",
+        images: [],
+        requestedMode: "later",
+        surface: "composer",
+      },
+      { kind: "compact", instructions: 1 },
+      { kind: "invokeCommand", text: "/x", editorRevision: 1, extra: true },
+      { kind: "runBash", command: "pwd", excludeFromContext: "no" },
+      { kind: "navigate", targetId: "", summarize: "yes" },
+      { kind: "setModel", provider: "p", modelId: "" },
+      { kind: "setThinking", level: "turbo" },
+      { kind: "rename", name: 1 },
+      { kind: "reload", extra: true },
+      { kind: "export", outputPath: 1 },
+      { kind: "unknown" },
+    ];
+    for (const [index, intent] of malformed.entries()) {
+      await expect(
+        authority.dispatchIntent(
+          { intentId: `bad-${index}`, expectedOwner: owner, intent },
+          execute,
+        ),
+      ).resolves.toEqual({
+        status: "not_admitted",
+        intentId: `bad-${index}`,
+        reason: "invalid",
+        invalidReason: "malformed",
+      });
+    }
+    expect(execute).not.toHaveBeenCalled();
+    expect(sendFrame).not.toHaveBeenCalled();
+    expect((await authority.requestAuthorityAttach(1)).operationJournal).toEqual([]);
   });
 
   it("exposes an atomic semantic frame and failure escrow without inventing a compaction end", () => {
