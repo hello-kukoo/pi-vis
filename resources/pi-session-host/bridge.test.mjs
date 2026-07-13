@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { PI_COMMAND_POLICY } from "../../src/shared/pi-protocol/commands.ts";
+import {
+  AuthorityFrameSchema,
+  TransitionBatchSchema,
+} from "../../src/shared/pi-protocol/runtime-state.ts";
 import { assertHostCapabilities, setupCommandBridge } from "./bridge.mjs";
 
 // The bridge translates pi-vis wire commands → pi SDK method calls. It is plain
@@ -226,6 +230,60 @@ describe("setupCommandBridge — wiring", () => {
     expect(runtime.newSession).toHaveBeenCalledTimes(1);
   });
 
+  it("settles an extension-triggered replacement on its predecessor frame before following the successor", async () => {
+    const sendControl = vi.fn();
+    const sendFrame = vi.fn();
+    const { session, runtime, dispatchIntent, bindExtensions } = setup(
+      {
+        extensionRunner: {
+          getCommand: vi.fn((name) => (name === "replace" ? {} : undefined)),
+          getRegisteredCommands: vi.fn(() => []),
+        },
+      },
+      { sendControl, sendFrame },
+    );
+    await bindExtensions(session);
+    const actions = session.bindExtensions.mock.calls[0][0].commandContextActions;
+    const successor = makeSession({ sessionId: "extension-successor" });
+    runtime.newSession.mockImplementationOnce(async () => {
+      await runtime.setRebindSession.mock.calls[0][0](successor);
+      return { cancelled: false };
+    });
+    session.prompt.mockImplementation(async (_text, options) => {
+      await actions.newSession();
+      options.preflightResult(true);
+    });
+    sendControl.mockClear();
+    sendFrame.mockClear();
+
+    await dispatchIntent({
+      intentId: "extension-replacement-intent",
+      expectedOwner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+      intent: { kind: "invokeCommand", text: "/replace", editorRevision: 0 },
+    });
+    await vi.waitFor(() =>
+      expect(sendFrame.mock.calls.flatMap(([frame]) => frame.records)).toContainEqual(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "extension-replacement-intent",
+            owner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+            state: "completed",
+          }),
+        }),
+      ),
+    );
+
+    expect(runtime.newSession).toHaveBeenCalledTimes(1);
+    expect(sendFrame.mock.calls.map(([frame]) => frame).at(-1)).toMatchObject({
+      owner: { hostInstanceId: "test-host", sessionEpoch: 1 },
+      records: [],
+    });
+    expect(TransitionBatchSchema.safeParse(sendControl.mock.calls.at(-1)[0].batch).success).toBe(
+      true,
+    );
+  });
+
   it("retires extension-triggered replacement after post-invalidation failure", async () => {
     const { session, runtime, send, bindExtensions } = setup();
     await bindExtensions(session);
@@ -411,6 +469,106 @@ describe("setupCommandBridge — target intent dispatch", () => {
     // Both text intents use the child public prompt/extension path; no
     // renderer-selected PiRpcCommand type enters this dispatch.
     expect(session.prompt).toHaveBeenCalledWith("/extension arg", expect.any(Object));
+    expect(runtime.newSession).not.toHaveBeenCalled();
+  });
+
+  it("runs replacement built-ins through runtime, emits one predecessor outcome, and follows with a valid successor frame", async () => {
+    const sendControl = vi.fn();
+    const sendFrame = vi.fn();
+    const { session, runtime, dispatchIntent } = setup(undefined, { sendControl, sendFrame });
+    const successor = makeSession({ sessionId: "successor", sessionFile: "/s/successor.jsonl" });
+    runtime.newSession.mockImplementationOnce(async () => {
+      await runtime.setRebindSession.mock.calls[0][0](successor);
+      return { cancelled: false };
+    });
+    // Ignore the startup frame; this assertion is exclusively about /new.
+    sendControl.mockClear();
+    sendFrame.mockClear();
+
+    await expect(
+      dispatchIntent(
+        envelope("replacement-intent", {
+          kind: "invokeCommand",
+          text: "/new",
+          editorRevision: 0,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "admitted" });
+    await vi.waitFor(() =>
+      expect(sendFrame.mock.calls.flatMap(([frame]) => frame.records)).toContainEqual(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "replacement-intent",
+            owner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+            state: "completed",
+          }),
+        }),
+      ),
+    );
+
+    expect(runtime.newSession).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+    const batch = sendControl.mock.calls.find(([message]) => message.type === "transition_batch")[0]
+      .batch;
+    expect(TransitionBatchSchema.safeParse(batch).success).toBe(true);
+    const frames = sendFrame.mock.calls.map(([frame]) => frame);
+    expect(frames.every((frame) => AuthorityFrameSchema.safeParse(frame).success)).toBe(true);
+    expect(
+      frames.filter((frame) => frame.records.some((r) => r.type === "intent_outcome")),
+    ).toHaveLength(1);
+    expect(frames.at(-1)).toMatchObject({
+      owner: { hostInstanceId: "test-host", sessionEpoch: 1 },
+      records: [],
+      terminalSnapshot: { owner: { hostInstanceId: "test-host", sessionEpoch: 1 } },
+    });
+  });
+
+  it("maps app built-ins without falling through to prompt", async () => {
+    const { session, dispatchIntent } = setup({
+      sessionManager: {
+        getLeafId: vi.fn(() => "leaf-9"),
+        appendLabelChange: vi.fn(),
+      },
+      modelRegistry: {
+        getAvailable: vi.fn(async () => [{ provider: "anthropic", id: "claude-x" }]),
+        authStorage: { logout: vi.fn() },
+        refresh: vi.fn(async () => {}),
+      },
+    });
+    const commands = [
+      ["export", "/export /tmp/out.html"],
+      ["models", "/models apply anthropic/claude-x"],
+      ["logout", "/logout anthropic"],
+      ["label", "/label entry-1 checkpoint"],
+    ];
+    for (const [id, text] of commands) {
+      await expect(
+        dispatchIntent(
+          envelope(`builtin-${id}`, {
+            kind: "invokeCommand",
+            text,
+            editorRevision: 0,
+          }),
+        ),
+      ).resolves.toMatchObject({ status: "admitted" });
+    }
+    await vi.waitFor(() => expect(session.sessionManager.appendLabelChange).toHaveBeenCalled());
+    expect(session.exportToHtml).toHaveBeenCalledWith("/tmp/out.html");
+    expect(session.setScopedModels).toHaveBeenCalledTimes(1);
+    expect(session.modelRegistry.authStorage.logout).toHaveBeenCalledWith("anthropic");
+    expect(session.sessionManager.appendLabelChange).toHaveBeenCalledWith("entry-1", "checkpoint");
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("leaves a template that shadows a builtin on Pi's prompt path", async () => {
+    const { session, runtime, dispatchIntent } = setup({ promptTemplates: [{ name: "new" }] });
+    session.prompt.mockImplementation(async (_text, options) => options.preflightResult(true));
+
+    await dispatchIntent(
+      envelope("template-new", { kind: "invokeCommand", text: "/new", editorRevision: 0 }),
+    );
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledWith("/new", expect.any(Object)));
     expect(runtime.newSession).not.toHaveBeenCalled();
   });
 

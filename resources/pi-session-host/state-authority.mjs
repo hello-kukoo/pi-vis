@@ -639,6 +639,7 @@ export function createStateAuthority({
           ...(typeof value.queued === "boolean" ? { queued: value.queued } : {}),
           ...(typeof value.custodyId === "string" ? { custodyId: value.custodyId } : {}),
           ...(typeof value.message === "string" ? { message: value.message } : {}),
+          ...(value.response !== undefined ? { response: structuredClone(value.response) } : {}),
         };
       }
       case "compact":
@@ -675,6 +676,40 @@ export function createStateAuthority({
     }
   }
 
+  function predecessorTerminalSnapshot(outcome) {
+    const base = structuredClone(transition?.priorSemanticSnapshot);
+    if (!base) return undefined;
+    // This snapshot is deliberately a predecessor projection. It is only
+    // enriched with the one terminal record that causally settled after the
+    // replacement began; no successor SDK facts can leak into it.
+    base.snapshotSequence = ++snapshotSequence;
+    base.capturedAt = Date.now();
+    base.activeIntents = base.activeIntents.filter((item) => item.intentId !== outcome.intentId);
+    base.recentIntentOutcomes = [
+      ...base.recentIntentOutcomes.filter((item) => item.intentId !== outcome.intentId),
+      structuredClone(outcome),
+    ].slice(-Math.max(1, Number(recentOutcomeCapacity) || 1));
+    return base;
+  }
+
+  function publishPredecessorOutcome(outcome) {
+    const terminalSnapshot = predecessorTerminalSnapshot(outcome);
+    if (terminalSnapshot && typeof sendFrame === "function") {
+      const transportSequence = ++semanticTransportSequence;
+      sendFrame({
+        owner: structuredClone(outcome.owner),
+        transportSequence,
+        frameId: `${outcome.owner.hostInstanceId}:${outcome.owner.sessionEpoch}:${transportSequence}`,
+        records: [{ type: "intent_outcome", outcome: structuredClone(outcome) }],
+        terminalSnapshot,
+      });
+      return;
+    }
+    // Compatibility consumers cannot accept an old-owner record in a
+    // successor batch either. Keep it live and owner-tagged.
+    sendRecord({ type: "intent_outcome", outcome: structuredClone(outcome) });
+  }
+
   function settleDispatchedIntent(intentId, owner, kind, state, result) {
     const key = intentOwnerKey(owner, intentId);
     const entry = dispatchedIntents.get(key);
@@ -702,9 +737,41 @@ export function createStateAuthority({
       intentKind: kind,
       owner: structuredClone(owner),
     });
-    // Outcomes are semantic records, never IPC-response completion claims.
-    commitSemanticFrame([{ type: "intent_outcome", outcome }]);
+    // Rebinding changes the child epoch before runtime.newSession/fork return.
+    // Emit the initiating predecessor outcome live against the frozen old
+    // baseline; folding it into the successor frame violates frame ownership.
+    if (
+      transition &&
+      owner.hostInstanceId === transition.priorSemanticSnapshot.owner.hostInstanceId &&
+      owner.sessionEpoch === transition.priorSemanticSnapshot.owner.sessionEpoch &&
+      (owner.hostInstanceId !== hostInstanceId || owner.sessionEpoch !== sessionEpoch)
+    ) {
+      publishPredecessorOutcome(outcome);
+    } else if (
+      !transition &&
+      (owner.hostInstanceId !== hostInstanceId || owner.sessionEpoch !== sessionEpoch)
+    ) {
+      // A delayed predecessor callback is no longer routable after successor
+      // installation. Its initiating intent is settled before commit below;
+      // never manufacture an invalid mixed-owner successor frame here.
+      sendRecord({ type: "intent_outcome", outcome: structuredClone(outcome) });
+    } else {
+      commitSemanticFrame([{ type: "intent_outcome", outcome }]);
+    }
     return outcome;
+  }
+
+  function settleTransitionInitiator(intentId, result = {}) {
+    if (!transition || typeof intentId !== "string") return undefined;
+    const owner = {
+      hostInstanceId: transition.priorSemanticSnapshot.owner.hostInstanceId,
+      sessionEpoch: transition.priorSemanticSnapshot.owner.sessionEpoch,
+    };
+    const entry = dispatchedIntents.get(intentOwnerKey(owner, intentId));
+    if (!entry || entry.outcome) return entry?.outcome;
+    const state =
+      result?.cancelled === true || result?.aborted === true ? "cancelled" : "completed";
+    return settleDispatchedIntent(intentId, owner, entry.kind, state, result);
   }
 
   function settleDispatchedSubmission(result) {
@@ -1205,7 +1272,12 @@ export function createStateAuthority({
           message: error instanceof Error ? error.message : String(error),
         });
       } finally {
-        publishSnapshot();
+        // commitTransition already emitted the single successor baseline.
+        // A trailing finally snapshot would create a second empty successor
+        // frame for the predecessor's initiating intent.
+        if (owner.hostInstanceId === hostInstanceId && owner.sessionEpoch === sessionEpoch) {
+          publishSnapshot();
+        }
       }
     });
     return Promise.resolve({ status: "admitted", intentId, owner: structuredClone(owner) });
@@ -1644,11 +1716,17 @@ export function createStateAuthority({
     const settled = new Promise((resolve) => {
       resolveSettled = resolve;
     });
+    // Preserve a schema-shaped predecessor baseline before the SDK can
+    // invalidate it. A replacement initiator is owner-bound to this snapshot;
+    // its terminal outcome must be published on the old authority, never
+    // smuggled into the successor frame.
+    const priorSemanticSnapshot = semanticSnapshot();
     transition = {
       transitionId: crypto.randomUUID(),
       provisionalEpoch,
       priorSession: session,
       priorEpoch: sessionEpoch,
+      priorSemanticSnapshot,
       boundaryCrossed: false,
       records: [],
       lastSnapshot: null,
@@ -1701,6 +1779,11 @@ export function createStateAuthority({
     const batch = takeTransitionBatch();
     if (!batch) return publishSnapshot(true);
     sendControl({ type: "transition_batch", batch });
+    // The compatibility batch installs the lock-held successor baseline in
+    // main. Immediately follow it with exactly one successor-owned semantic
+    // baseline so an already-attached renderer moves back to `following`
+    // without an attach/repaint round trip.
+    if (typeof sendFrame === "function") commitSemanticFrame([]);
     return batch.terminalSnapshot;
   }
 
@@ -2033,6 +2116,7 @@ export function createStateAuthority({
     dispatchIntent,
     beginCompactionInvocation,
     settleCompactionInvocation,
+    settleTransitionInitiator,
     failureEscrow,
     requestEscape,
     runNavigation,

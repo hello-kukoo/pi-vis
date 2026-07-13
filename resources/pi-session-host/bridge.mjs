@@ -297,7 +297,13 @@ export function setupCommandBridge({
         runtime,
         authority,
         reload: () => handleReload(),
-        replace: (operation, details) => runReplacement(operation, details),
+        replace: (operation, details) =>
+          runReplacement(operation, {
+            ...details,
+            // An extension action can be called from a renderer-owned slash
+            // invocation. Preserve that predecessor correlation through rebind.
+            initiatingIntentId: admissionContext.getStore(),
+          }),
         waitForIdle: () => waitForSessionIdle(),
       }),
       // An extension requested app shutdown (e.g. a TUI-style /exit). In a GUI
@@ -521,7 +527,7 @@ export function setupCommandBridge({
 
   async function runReplacement(operation, details = {}) {
     const current = authority.snapshot();
-    const owningIntentId = admissionContext.getStore();
+    const owningIntentId = details.initiatingIntentId ?? admissionContext.getStore();
     const ownsOnlyActiveSubmission =
       typeof owningIntentId === "string" && authority.canReplaceFromIntent(owningIntentId);
     // A renderer replacement command itself owns one active command slot. An
@@ -565,6 +571,14 @@ export function setupCommandBridge({
           details.kind ?? "replacement",
           _session.sessionFile,
         );
+        // Runtime replacement rebinds before its promise resolves. Settle the
+        // renderer/extension intent while the main process still follows its
+        // predecessor epoch, then atomically install the lock-held successor
+        // baseline. The authority prevents this old-owner outcome from ever
+        // appearing in the successor frame.
+        authority.settleTransitionInitiator(owningIntentId, {
+          response: { replacement: details.kind ?? "replacement" },
+        });
         authority.commitTransition();
       }
       return result;
@@ -645,6 +659,202 @@ export function setupCommandBridge({
     }
   }
 
+  /**
+   * Resolve app-owned slash commands before Pi's prompt path. Pi's prompt()
+   * only understands extension/templates/skills (and intentional unknown
+   * prompt text); forwarding a GUI built-in there silently turns it into an
+   * agent message instead of performing its public SDK/runtime operation.
+   */
+  async function invokeBuiltinCommand(text, intentId) {
+    const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(text);
+    if (!match) return { handled: false };
+    const [, name, rawArgs = ""] = match;
+    const args = rawArgs.trim();
+    // Match renderer parsing: every discovered command shadows an app
+    // built-in. Prompt templates/skills and unknown names intentionally
+    // continue to prompt(), where Pi owns their parsing/expansion.
+    const isDiscovered =
+      _session.extensionRunner.getCommand(name) ||
+      _session.promptTemplates.some((template) => template.name === name) ||
+      _session.resourceLoader.getSkills().skills.some((skill) => `skill:${skill.name}` === name);
+    if (isDiscovered) return { handled: false };
+    const words = args ? args.split(/\s+/) : [];
+    const modelResponse = async () => {
+      const models = await _session.modelRegistry.getAvailable();
+      return { response: { models } };
+    };
+    const setModelByReference = async (reference) => {
+      const models = await _session.modelRegistry.getAvailable();
+      const slash = reference.indexOf("/");
+      const provider = slash >= 0 ? reference.slice(0, slash) : "";
+      const modelId = slash >= 0 ? reference.slice(slash + 1) : reference;
+      const matches = models.filter(
+        (model) => model.id === modelId && (provider ? model.provider === provider : true),
+      );
+      if (matches.length !== 1) throw new Error(`Model not found or ambiguous: ${reference}`);
+      await _session.setModel(matches[0]);
+      return { response: { provider: matches[0].provider ?? "", modelId: matches[0].id } };
+    };
+    const replace = async (operation, details) => {
+      const result = await runReplacement(operation, { ...details, initiatingIntentId: intentId });
+      return { response: { cancelled: result?.cancelled === true } };
+    };
+
+    switch (name) {
+      case "new":
+        if (args) throw new Error("Usage: /new");
+        return {
+          handled: true,
+          result: await replace(() => runtime.newSession(), { kind: "new" }),
+        };
+      case "clone": {
+        if (args) throw new Error("Usage: /clone");
+        const leafId = _session.sessionManager.getLeafId();
+        if (!leafId) throw new Error("Cannot clone session: no current entry selected");
+        return {
+          handled: true,
+          result: await replace(() => runtime.fork(leafId, { position: "at" }), { kind: "clone" }),
+        };
+      }
+      case "fork":
+        if (!args)
+          return {
+            handled: true,
+            result: { response: { messages: _session.getUserMessagesForForking() } },
+          };
+        if (words.length !== 1) throw new Error("Usage: /fork <entry-id>");
+        return {
+          handled: true,
+          result: await replace(() => runtime.fork(words[0]), { kind: "fork" }),
+        };
+      case "resume":
+      case "switch":
+        if (!args) throw new Error(`Usage: /${name} <session-path>`);
+        return {
+          handled: true,
+          result: await replace(() => runtime.switchSession(args), {
+            kind: "switch",
+            targetFile: args,
+          }),
+        };
+      case "export":
+        return {
+          handled: true,
+          result: { response: { path: await _session.exportToHtml(args || undefined) } },
+        };
+      case "model":
+        return {
+          handled: true,
+          result: args ? await setModelByReference(args) : await modelResponse(),
+        };
+      case "models": {
+        if (!args) {
+          const models = await _session.modelRegistry.getAvailable();
+          return {
+            handled: true,
+            result: { response: { models, enabledIds: resolveEnabledModelIds(_session, models) } },
+          };
+        }
+        const [verb, csv = ""] = args.split(/\s+/, 2);
+        if (verb !== "apply" && verb !== "save")
+          throw new Error("Usage: /models [apply|save] [provider/model,...]");
+        const models = await _session.modelRegistry.getAvailable();
+        const enabledIds = csv ? csv.split(",").filter(Boolean) : null;
+        const scoped = buildScopedModels(_session, models, enabledIds);
+        _session.setScopedModels(scoped);
+        if (verb === "save") {
+          const isAll =
+            enabledIds === null || enabledIds.length === 0 || enabledIds.length >= models.length;
+          _session.settingsManager.setEnabledModels(isAll ? undefined : enabledIds);
+        }
+        return { handled: true, result: { response: { enabledIds } } };
+      }
+      case "logout":
+        if (!args)
+          return {
+            handled: true,
+            result: { response: { providers: await collectLogoutProviders(_session) } },
+          };
+        if (words.length !== 1) throw new Error("Usage: /logout <provider>");
+        _session.modelRegistry.authStorage.logout(words[0]);
+        await _session.modelRegistry.refresh();
+        return { handled: true, result: { response: { provider: words[0] } } };
+      case "label": {
+        const targetId = words.shift();
+        if (!targetId) throw new Error("Usage: /label <entry-id> [label]");
+        const label = words.join(" ") || undefined;
+        if (typeof _session.sessionManager.appendLabelChange !== "function") {
+          throw new Error("Session labels are not supported by this Pi version");
+        }
+        _session.sessionManager.appendLabelChange(targetId, label);
+        return { handled: true, result: { response: { targetId, ...(label ? { label } : {}) } } };
+      }
+      case "name":
+        if (!args) return { handled: true, result: { response: { name: _session.sessionName } } };
+        _session.setSessionName(args);
+        return { handled: true, result: { response: { name: args } } };
+      case "session":
+        if (args) throw new Error("Usage: /session");
+        return {
+          handled: true,
+          result: { response: { stats: _session.getSessionStats(), state: getState() } },
+        };
+      case "compact": {
+        const compactIntentId = authority.beginCompactionInvocation(`invoke:${intentId}`);
+        try {
+          await trackInterruptibleOperation(
+            "compact",
+            () => _session.abort(),
+            () => _session.compact(args || undefined),
+          );
+          return { handled: true, result: { response: { compactionId: compactIntentId } } };
+        } finally {
+          authority.settleCompactionInvocation(compactIntentId);
+        }
+      }
+      case "reload":
+        if (args) throw new Error("Usage: /reload");
+        await handleReload(true);
+        return {
+          handled: true,
+          result: {
+            response: {
+              successorIdentity: { hostInstanceId, sessionEpoch: authority.sessionEpoch },
+            },
+          },
+        };
+      case "trust": {
+        const { buildProjectTrustOptions } = await import("./bootstrap.mjs");
+        const liveCwd = _session.sessionManager?.getCwd?.() ?? cwd;
+        const options = buildProjectTrustOptions(liveCwd);
+        if (!args) {
+          return { handled: true, result: { response: { cwd: liveCwd, options } } };
+        }
+        if (args !== "trust" && args !== "untrust")
+          throw new Error("Usage: /trust [trust|untrust]");
+        const option = options.find((candidate) => candidate.trusted === (args === "trust"));
+        if (!option) throw new Error("Requested trust choice is unavailable");
+        new pi.ProjectTrustStore(agentDir).setMany(option.updates);
+        return { handled: true, result: { response: { trusted: option.trusted } } };
+      }
+      // Renderer-local commands must still never become agent prompts.
+      case "copy":
+        return { handled: true, result: { response: { text: _session.getLastAssistantText() } } };
+      case "scoped-models":
+        return invokeBuiltinCommand("/models", intentId);
+      case "settings":
+      case "login":
+      case "diff":
+      case "tree":
+      case "quit":
+      case "share":
+      case "changelog":
+        throw new Error(`/${name} is handled by the renderer and cannot run in the session host`);
+      default:
+        return { handled: false };
+    }
+  }
+
   async function dispatchIntent(envelope) {
     return authority.dispatchIntent(envelope, async (intent, owner) => {
       const submission = (text, overrides = {}) =>
@@ -672,8 +882,10 @@ export function setupCommandBridge({
           if (typeof intent.text !== "string" || !intent.text.startsWith("/")) {
             throw new Error("invokeCommand requires slash command text");
           }
-          // Let Pi's public prompt/extension runner parse the exact command
-          // text. The renderer never selects a PiRpcCommand discriminator.
+          const resolved = await invokeBuiltinCommand(intent.text, envelope.intentId);
+          if (resolved.handled) return resolved.result;
+          // Only extension/template/skill commands (and intentional unknown
+          // slash prompt text) reach Pi's public prompt parser.
           return submission(intent.text, { images: [] });
         }
         case "compact": {

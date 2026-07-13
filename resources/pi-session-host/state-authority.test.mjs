@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthorityFrameSchema } from "../../src/shared/pi-protocol/runtime-state.ts";
 import { createStateAuthority } from "./state-authority.mjs";
 
 function deferred() {
@@ -1068,6 +1069,53 @@ describe("state authority", () => {
         terminalSnapshot: expect.objectContaining({ sessionEpoch: 1 }),
       }),
     });
+  });
+
+  it("keeps a delayed predecessor terminal outcome out of a valid successor frame", async () => {
+    const sendFrame = vi.fn();
+    const { authority } = setup({}, { sendFrame });
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+
+    await authority.dispatchIntent(
+      {
+        intentId: "replacement-owner",
+        expectedOwner: owner,
+        intent: { kind: "invokeCommand", text: "/new", editorRevision: 1 },
+      },
+      async () => {
+        authority.beginTransition(1);
+        authority.adoptSession(makeSession({ sessionId: "successor" }), 1);
+        authority.settleTransitionInitiator("replacement-owner", {
+          response: { replacement: "new" },
+        });
+        authority.commitTransition();
+        // A delayed completion from the old callback is deduped and cannot
+        // append an old-owner record to the successor frame.
+        return { response: { replacement: "new" } };
+      },
+    );
+    await vi.waitFor(() =>
+      expect(sendFrame.mock.calls.flatMap(([frame]) => frame.records)).toContainEqual(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "replacement-owner",
+            owner,
+            state: "completed",
+          }),
+        }),
+      ),
+    );
+    const frames = sendFrame.mock.calls.map(([frame]) => frame);
+    expect(frames.every((frame) => AuthorityFrameSchema.safeParse(frame).success)).toBe(true);
+    expect(frames.filter((frame) => frame.owner.sessionEpoch === 1)).toEqual([
+      expect.objectContaining({
+        records: [],
+        terminalSnapshot: expect.objectContaining({
+          owner: expect.objectContaining({ sessionEpoch: 1 }),
+        }),
+      }),
+    ]);
   });
 
   it("defers full state requests until a provisional transition commits", async () => {
