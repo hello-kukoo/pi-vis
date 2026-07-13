@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { PI_COMMAND_POLICY, type PiRpcCommand, PiRpcCommandSchema } from "./commands.js";
 import { PiEventSchema } from "./events.js";
 import { ExtensionUiRequestSchema } from "./extension-ui.js";
 import { PanelEventSchema } from "./panel-events.js";
@@ -38,10 +37,45 @@ export const RuntimeIdentitySchema = z.object({
 });
 export type RuntimeIdentity = z.infer<typeof RuntimeIdentitySchema>;
 
+/**
+ * Transitional payload for the retired renderer command bridge. It intentionally
+ * has no dependency on Pi's command union: new renderer reads use
+ * `SessionQueryEnvelope` and mutations use `IntentEnvelope`.
+ *
+ * `any` quarantines the old bridge while main/renderer callers migrate. The
+ * schema still requires a command discriminant so malformed IPC never reaches
+ * the registry as an untyped value.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Compatibility boundary for callers not migrated to intents/queries.
+export type LegacyCommandPayload = any;
+export const LegacyCommandPayloadSchema: z.ZodType<LegacyCommandPayload> = z
+  .object({ type: z.string().min(1) })
+  .passthrough();
+
+// The legacy bridge retains its effect-intent fence until callers finish
+// migration. This is intentionally a narrow structural check; Pi command
+// validation remains at the host boundary and is not re-exported here.
+const LegacyIntentRequiredCommandTypes = new Set([
+  "abort",
+  "bash",
+  "abort_bash",
+  "cycle_model",
+  "cycle_thinking_level",
+  "new_session",
+  "switch_session",
+  "fork",
+  "clone",
+  "compact",
+  "abort_retry",
+  "export_html",
+  "navigate_tree",
+]);
+
+/** @deprecated Use `IntentEnvelope` for mutations; retained only for migration. */
 export const RendererCommandRequestSchema = z
   .object({
     requestId: z.string().min(1),
-    command: PiRpcCommandSchema,
+    command: LegacyCommandPayloadSchema,
     expectedHostInstanceId: z.string().min(1),
     expectedSessionEpoch: z.number().int().nonnegative(),
     intentId: z.string().min(1).optional(),
@@ -50,12 +84,7 @@ export const RendererCommandRequestSchema = z
     editorRevision: z.number().int().nonnegative().optional(),
   })
   .superRefine((request, ctx) => {
-    const policy = PI_COMMAND_POLICY[request.command.type];
-    if (
-      !("submissionOnly" in policy && policy.submissionOnly) &&
-      (policy.class === "effectful" || policy.class === "replacement") &&
-      !request.intentId
-    ) {
+    if (LegacyIntentRequiredCommandTypes.has(request.command.type) && !request.intentId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["intentId"],
@@ -68,11 +97,8 @@ export type RendererCommandRequest = z.infer<typeof RendererCommandRequestSchema
 export const CommandDispositionSchema = z.enum(["not_executed", "completed", "outcome_unknown"]);
 export type CommandDisposition = z.infer<typeof CommandDispositionSchema>;
 
-const commandTypes = Object.keys(PI_COMMAND_POLICY) as [
-  PiRpcCommand["type"],
-  ...PiRpcCommand["type"][],
-];
-export const PiCommandTypeSchema = z.enum(commandTypes);
+/** @deprecated Command discriminants are no longer part of the shared process API. */
+export const PiCommandTypeSchema = z.string().min(1);
 
 /** Pi response plus authoritative command admission/settlement metadata. */
 export const CommandSettlementSchema = PiRpcResponseSchema.and(
@@ -474,6 +500,128 @@ export const SemanticActivitySchema = z
   })
   .strict();
 export type SemanticActivity = z.infer<typeof SemanticActivitySchema>;
+
+// ── Read-only session queries ───────────────────────────────────────────
+// Queries are deliberately separate from mutation intents and the legacy Pi
+// command bridge. Their discriminants name every currently supported host read
+// and cannot describe an effect.
+export const SessionQuerySchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("get_available_models") }).strict(),
+  z.object({ type: z.literal("get_scoped_models") }).strict(),
+  z.object({ type: z.literal("get_logout_providers") }).strict(),
+  z.object({ type: z.literal("get_commands") }).strict(),
+  z.object({ type: z.literal("get_state") }).strict(),
+  z.object({ type: z.literal("get_session_stats") }).strict(),
+  z.object({ type: z.literal("get_messages") }).strict(),
+  z.object({ type: z.literal("get_fork_messages") }).strict(),
+  z.object({ type: z.literal("get_last_assistant_text") }).strict(),
+  z.object({ type: z.literal("get_trust_state") }).strict(),
+  z.object({ type: z.literal("get_tree") }).strict(),
+  z
+    .object({
+      type: z.literal("render_entry"),
+      entryId: NonEmptyIdSchema,
+      cols: z.number().int().min(20).max(240),
+      expanded: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ type: z.literal("get_cache_miss_notices") }).strict(),
+]);
+export type SessionQuery = z.infer<typeof SessionQuerySchema>;
+
+export const SessionQueryTypeSchema = z.enum([
+  "get_available_models",
+  "get_scoped_models",
+  "get_logout_providers",
+  "get_commands",
+  "get_state",
+  "get_session_stats",
+  "get_messages",
+  "get_fork_messages",
+  "get_last_assistant_text",
+  "get_trust_state",
+  "get_tree",
+  "render_entry",
+  "get_cache_miss_notices",
+]);
+export type SessionQueryType = z.infer<typeof SessionQueryTypeSchema>;
+
+/** Queries may be retried only while their named owner remains authoritative. */
+export const QueryRetryPolicySchema = z.literal("same_owner");
+export type QueryRetryPolicy = z.infer<typeof QueryRetryPolicySchema>;
+export interface QueryPolicy {
+  retry: QueryRetryPolicy;
+}
+
+/** Exhaustive retry policy for every read-only host operation. */
+export const SESSION_QUERY_POLICY = {
+  get_available_models: { retry: "same_owner" },
+  get_scoped_models: { retry: "same_owner" },
+  get_logout_providers: { retry: "same_owner" },
+  get_commands: { retry: "same_owner" },
+  get_state: { retry: "same_owner" },
+  get_session_stats: { retry: "same_owner" },
+  get_messages: { retry: "same_owner" },
+  get_fork_messages: { retry: "same_owner" },
+  get_last_assistant_text: { retry: "same_owner" },
+  get_trust_state: { retry: "same_owner" },
+  get_tree: { retry: "same_owner" },
+  render_entry: { retry: "same_owner" },
+  get_cache_miss_notices: { retry: "same_owner" },
+} as const satisfies Record<SessionQuery["type"], QueryPolicy>;
+
+export function queryPolicy(query: SessionQuery): QueryPolicy {
+  return SESSION_QUERY_POLICY[query.type];
+}
+
+/** Owner-bound read request. `observedCursor` is diagnostic, never a CAS gate. */
+export const SessionQueryEnvelopeSchema = z
+  .object({
+    sessionId: NonEmptyIdSchema,
+    queryId: NonEmptyIdSchema,
+    expectedOwner: RuntimeIdentitySchema,
+    observedCursor: AuthorityCursorSchema.optional(),
+    query: SessionQuerySchema,
+  })
+  .strict()
+  .superRefine((envelope, ctx) => {
+    if (
+      envelope.observedCursor &&
+      (envelope.observedCursor.hostInstanceId !== envelope.expectedOwner.hostInstanceId ||
+        envelope.observedCursor.sessionEpoch !== envelope.expectedOwner.sessionEpoch)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["observedCursor"],
+        message: "observed cursor must belong to the expected owner",
+      });
+    }
+  });
+export type SessionQueryEnvelope = z.infer<typeof SessionQueryEnvelopeSchema>;
+export const QueryEnvelopeSchema = SessionQueryEnvelopeSchema;
+export type QueryEnvelope = SessionQueryEnvelope;
+
+/** A query response is correlated with both its request and authoritative owner. */
+export const SessionQueryResultSchema = z
+  .object({
+    queryId: NonEmptyIdSchema,
+    owner: RuntimeIdentitySchema,
+    queryType: SessionQueryTypeSchema,
+    response: PiRpcResponseSchema,
+  })
+  .strict()
+  .superRefine((result, ctx) => {
+    if (result.response.command !== result.queryType) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["response", "command"],
+        message: "query response command must match its query type",
+      });
+    }
+  });
+export type SessionQueryResult = z.infer<typeof SessionQueryResultSchema>;
+export const QueryResultSchema = SessionQueryResultSchema;
+export type QueryResult = SessionQueryResult;
 
 export const SessionIntentKindSchema = z.enum([
   "interrupt",

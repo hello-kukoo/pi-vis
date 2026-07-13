@@ -70,7 +70,7 @@ describe("Pi command admission policy", () => {
     }
   });
 
-  it("requires an intent for effectful renderer commands", () => {
+  it("marks effectful commands for intent-bearing mutation dispatch", () => {
     const command = PiRpcCommandSchema.parse({ type: "compact" });
     expect(commandNeedsIntent(command)).toBe(true);
     const base = {
@@ -83,21 +83,6 @@ describe("Pi command admission policy", () => {
     expect(RendererCommandRequestSchema.safeParse({ ...base, intentId: "intent" }).success).toBe(
       true,
     );
-  });
-
-  it("does not require replay custody for read-only and explicit-state commands", () => {
-    for (const command of [
-      { type: "get_state" },
-      { type: "set_session_name", name: "name" },
-    ] as const) {
-      expect(
-        RendererCommandRequestSchema.safeParse({
-          requestId: `request-${command.type}`,
-          command,
-          expectedHostInstanceId: "host",
-          expectedSessionEpoch: 0,
-        }).success,
-      ).toBe(true);
-    }
+    expect(commandNeedsIntent(PiRpcCommandSchema.parse({ type: "get_state" }))).toBe(false);
   });
 });

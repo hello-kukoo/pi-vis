@@ -9,7 +9,11 @@ import {
   IntentPayloadConflictSchema,
   PanelPresentationBaselineSchema,
   RendererPublicationSchema,
+  SESSION_QUERY_POLICY,
   SemanticSnapshotSchema,
+  SessionQueryEnvelopeSchema,
+  SessionQueryResultSchema,
+  SessionQuerySchema,
 } from "./runtime-state.js";
 
 const owner = { hostInstanceId: "host-a", sessionEpoch: 4 };
@@ -171,6 +175,66 @@ describe("authority protocol schemas", () => {
         owner,
         expectedPayloadFingerprint: "same",
         receivedPayloadFingerprint: "same",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("admits only explicit read operations as owner-bound queries", () => {
+    const query = { type: "render_entry", entryId: "entry-a", cols: 80, expanded: true };
+    expect(SessionQuerySchema.safeParse(query).success).toBe(true);
+    for (const effect of [
+      { type: "compact" },
+      { type: "set_model", provider: "openai", modelId: "gpt" },
+      { type: "navigate_tree", targetId: "entry-a" },
+      { type: "new_session" },
+      { type: "prompt", message: "must submit" },
+    ]) {
+      expect(SessionQuerySchema.safeParse(effect).success).toBe(false);
+    }
+    expect(Object.keys(SESSION_QUERY_POLICY).sort()).toEqual([
+      "get_available_models",
+      "get_cache_miss_notices",
+      "get_commands",
+      "get_fork_messages",
+      "get_last_assistant_text",
+      "get_logout_providers",
+      "get_messages",
+      "get_scoped_models",
+      "get_session_stats",
+      "get_state",
+      "get_tree",
+      "get_trust_state",
+      "render_entry",
+    ]);
+
+    const envelope = {
+      sessionId: "session-a",
+      queryId: "query-a",
+      expectedOwner: owner,
+      observedCursor: cursor,
+      query,
+    };
+    expect(SessionQueryEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    expect(
+      SessionQueryEnvelopeSchema.safeParse({
+        ...envelope,
+        observedCursor: { ...cursor, hostInstanceId: "host-b" },
+      }).success,
+    ).toBe(false);
+    expect(
+      SessionQueryResultSchema.safeParse({
+        queryId: "query-a",
+        owner,
+        queryType: "render_entry",
+        response: { type: "response", command: "render_entry", success: true },
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionQueryResultSchema.safeParse({
+        queryId: "query-a",
+        owner,
+        queryType: "render_entry",
+        response: { type: "response", command: "compact", success: true },
       }).success,
     ).toBe(false);
   });

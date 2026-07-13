@@ -13,7 +13,6 @@ import type {
   GitWriteFileResult,
 } from "./git.js";
 import type { SessionId } from "./ids.js";
-import type { PiRpcCommand } from "./pi-protocol/commands.js";
 import type { PiEvent } from "./pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "./pi-protocol/extension-ui.js";
 import type { PanelEvent } from "./pi-protocol/panel-events.js";
@@ -24,11 +23,14 @@ import type {
   EscapeResult,
   IntentEnvelope,
   IntentReceipt,
+  LegacyCommandPayload,
   ReloadRequest,
   ReloadSettlement,
   RendererPublication,
   RuntimeRecord,
   RuntimeStateUpdate,
+  SessionQueryEnvelope,
+  SessionQueryResult,
   SessionSubmission,
   SubmissionResult,
 } from "./pi-protocol/runtime-state.js";
@@ -259,22 +261,28 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; entries: import("./pi-protocol/responses.js").SessionTreeEntry[] };
     res: TranscriptBlock[];
   };
+  /**
+   * @deprecated Transitional compatibility bridge. New renderer reads must use
+   * `session.query`; new mutations must use `session.dispatchIntent`.
+   * The payload is opaque so the renderer/main process API no longer exposes
+   * Pi's command union while existing callers migrate.
+   */
   "session.sendCommand": {
     req: {
       sessionId: SessionId;
-      command: PiRpcCommand;
+      command: LegacyCommandPayload;
       requestId: string;
       expectedHostInstanceId: string;
       expectedSessionEpoch: number;
-      /** Required for effectful and replacement commands. */
       intentId?: string;
       uiSurface?: "composer" | "unified";
-      /** Exact editor text that originated this command, for ambiguity review. */
       sourceText?: string;
       editorRevision?: number;
     };
     res: CommandSettlement;
   };
+  /** Owner-bound, retry-policy-governed read-only host API. */
+  "session.query": { req: SessionQueryEnvelope; res: SessionQueryResult };
   /** The only text/image submission path. Pi chooses idle prompt vs queued delivery. */
   "session.submit": {
     req: { sessionId: SessionId; submission: SessionSubmission };
