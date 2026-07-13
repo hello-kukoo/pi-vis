@@ -13,7 +13,9 @@ import type {
   GitChangedFile,
   GitChangesCountResult,
   GitChangesResult,
+  GitCommitRange,
   GitFileDiffResult,
+  GitHistoricalContext,
 } from "@shared/git.js";
 import type { GitBranch } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
@@ -130,6 +132,9 @@ export interface DiffStore {
   /** At most one inline edit session is open at a time (one editor at a time).
    *  While non-null, that file is frozen against refreshes. */
   editSession: EditSession | null;
+  /** Files with an open unsaved comment editor. Comparison changes are fenced
+   *  so local component drafts cannot be unmounted silently. */
+  commentEditorFiles: Set<string>;
   /** Bumped to ask the open edit card to run its cancel flow (confirm if
    *  dirty). Lets the viewer's Esc / backdrop / close route to the card's
    *  ConfirmDialog without the card needing to own those inputs. */
@@ -150,6 +155,10 @@ export interface DiffStore {
   branches: GitBranch[];
   currentBranch: string | null;
   selectedBase: string | null; // null = HEAD
+  /** Ephemeral inclusive historical commit band; null is the working tree. */
+  commitRange: GitCommitRange | null;
+  /** Concrete object IDs issued with the current historical manifest. */
+  historicalContext: GitHistoricalContext | null;
   includeRemoteBranches: boolean;
 
   // header badge (independent of the viewer being open)
@@ -190,6 +199,7 @@ export interface DiffStore {
   refreshBadge: (root: string) => Promise<void>;
   loadBranches: () => Promise<void>;
   setBase: (base: string | null) => void;
+  setCommitRange: (range: GitCommitRange | null) => void;
   setIncludeRemoteBranches: (v: boolean) => void;
 
   // in-diff find
@@ -203,6 +213,7 @@ export interface DiffStore {
   // ── Inline edit session ───────────────────────────────────────────
   /** Open an edit session for a resolved selection. No-op if one is already
    *  open. Requires the file to be `ready` with a `kind:"ok"` model + newText. */
+  setCommentEditorOpen: (path: string, open: boolean) => void;
   openEditSession: (path: string, range: EditRange, cursor?: EditCursorPosition | null) => void;
   /** Mark the open session dirty (a buffer changed). */
   markEditDirty: () => void;
@@ -264,6 +275,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
   // Generation counter: every refresh bumps this; stale async
   // resolutions check the counter and ignore themselves.
   let generation = 0;
+  // Invalidates all file loads even when a successor has not started one yet.
+  let comparisonGeneration = 0;
   // Per-file load tokens for the same protection (a previous load's
   // tokenization landing after a refresh must not overwrite fresh state).
   const fileGenerations = new Map<string, number>();
@@ -298,6 +311,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     fileState: new Map(),
     searchRevision: 0,
     editSession: null,
+    commentEditorFiles: new Set(),
     editCancelNonce: 0,
 
     badge: null,
@@ -312,11 +326,16 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     branches: [],
     currentBranch: null,
     selectedBase: null,
+    commitRange: null,
+    historicalContext: null,
     includeRemoteBranches: false,
 
     // ── mutators ────────────────────────────────────────────────────
 
     openViewer: (sessionId, root) => {
+      generation++;
+      comparisonGeneration++;
+      for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
       const settings = useSettingsStore.getState().settings;
       const viewMode = settings.diffViewMode;
       const includeRemote = settings.diffIncludeRemoteBranches;
@@ -340,9 +359,12 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         fileState: new Map(),
         searchRevision: 0,
         editSession: null,
+        commentEditorFiles: new Set(),
         editCancelNonce: 0,
         // Restore the branch selected for this session during the current app run.
         selectedBase: selectedBaseBySession.get(sessionId) ?? null,
+        commitRange: null,
+        historicalContext: null,
         includeRemoteBranches: includeRemote,
         stale: false,
         baselineFingerprint: null,
@@ -355,6 +377,9 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     closeViewer: () => {
       const root = get().root;
+      generation++;
+      comparisonGeneration++;
+      for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
       set({
         open: false,
         sessionId: null,
@@ -370,8 +395,13 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         fileState: new Map(),
         searchRevision: 0,
         editSession: null,
+        commentEditorFiles: new Set(),
         editCancelNonce: 0,
         refreshing: false,
+        commitRange: null,
+        historicalContext: null,
+        stale: false,
+        baselineFingerprint: null,
         search: { ...EMPTY_SEARCH },
       });
       // Refresh the badge after close so the header count reflects current state.
@@ -381,6 +411,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     refresh: async () => {
       const root = get().root;
       if (root === null) return;
+      const baseAtStart = get().selectedBase;
+      const rangeAtStart = get().commitRange;
+      const historicalContextAtStart = get().historicalContext;
+      const myComparison = comparisonGeneration;
       const myGen = ++generation;
       // Note: `stale` is intentionally NOT cleared here. It is cleared (and
       // the baseline fingerprint re-captured) only on success, in
@@ -400,10 +434,14 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       }
       let res: GitChangesResult;
       try {
-        const base = get().selectedBase ?? undefined;
+        const base = baseAtStart ?? undefined;
         res = await window.pivis.invoke("git.changes", {
           root,
           ...(base !== undefined ? { base } : {}),
+          ...(rangeAtStart !== null ? { range: rangeAtStart } : {}),
+          ...(historicalContextAtStart !== null
+            ? { historicalContext: historicalContextAtStart }
+            : {}),
         });
       } catch (err) {
         if (isStale(generation, myGen)) return;
@@ -414,8 +452,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         });
         return;
       }
-      if (isStale(generation, myGen)) return;
-      handleChangesResult(set, get, res, isFirst);
+      if (isStale(generation, myGen) || comparisonGeneration !== myComparison) return;
+      handleChangesResult(set, get, res, isFirst, rangeAtStart !== null);
       // Keep the spinner going for at least one rotation even if the fetch
       // was near-instant. If a newer refresh has superseded this one, leave
       // `refreshing` alone — the newer call owns the flag.
@@ -435,6 +473,11 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       if (state && state.status !== "idle") return;
 
       const myGen = (fileGenerations.get(path) ?? 0) + 1;
+      const myComparison = comparisonGeneration;
+      const rootAtStart = get().root;
+      const baseAtStart = get().selectedBase;
+      const rangeAtStart = get().commitRange;
+      const historicalContextAtStart = get().historicalContext;
       fileGenerations.set(path, myGen);
 
       const next = new Map(get().fileState);
@@ -446,7 +489,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
       let res: GitFileDiffResult;
       try {
-        const base = get().selectedBase ?? undefined;
+        const base = baseAtStart ?? undefined;
         const params: {
           root: string;
           base?: string;
@@ -454,17 +497,25 @@ export const useDiffStore = create<DiffStore>((set, get) => {
           oldPath?: string;
           status: import("@shared/git.js").GitFileStatus;
           untracked: boolean;
+          binary: boolean;
+          range?: GitCommitRange;
+          historicalContext?: GitHistoricalContext;
         } = {
-          root: get().root ?? "",
+          root: rootAtStart ?? "",
           path: file.path,
           status: file.status,
           untracked: file.untracked,
+          binary: file.binary,
         };
         if (file.oldPath) params.oldPath = file.oldPath;
         if (base !== undefined) params.base = base;
+        if (rangeAtStart !== null) params.range = rangeAtStart;
+        if (historicalContextAtStart !== null) {
+          params.historicalContext = historicalContextAtStart;
+        }
         res = await window.pivis.invoke("git.fileDiff", params);
       } catch (err) {
-        if (myGen !== fileGenerations.get(path)) return;
+        if (myGen !== fileGenerations.get(path) || comparisonGeneration !== myComparison) return;
         const m2 = new Map(get().fileState);
         m2.set(path, {
           ...(state ?? { collapsed: false }),
@@ -474,7 +525,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         set({ fileState: m2 });
         return;
       }
-      if (myGen !== fileGenerations.get(path)) return;
+      if (myGen !== fileGenerations.get(path) || comparisonGeneration !== myComparison) return;
       if (res.kind !== "ok") {
         const m2 = new Map(get().fileState);
         m2.set(path, {
@@ -512,7 +563,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         return;
       }
       const model = await buildDiffModelAsync(res.oldText, res.newText);
-      if (myGen !== fileGenerations.get(path)) return;
+      if (myGen !== fileGenerations.get(path) || comparisonGeneration !== myComparison) return;
       const gapState: GapState[] =
         model.kind === "ok" ? model.gaps.map(() => ({ top: 0, bottom: 0 })) : [];
       // Tokenize in the SAME commit whenever the highlighter is warm (it is,
@@ -653,6 +704,27 @@ export const useDiffStore = create<DiffStore>((set, get) => {
           });
           if (!selectedBaseValid) {
             if (sessionId) selectedBaseBySession.set(sessionId, null);
+            // This is the same comparison invalidation as changing the base:
+            // a range and every comparison-derived UI value belong to the
+            // deleted base and must not survive the replacement refresh.
+            generation++;
+            comparisonGeneration++;
+            for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
+            set({
+              branches: res.branches,
+              currentBranch: res.current,
+              selectedBase: null,
+              commitRange: null,
+              historicalContext: null,
+              files: [],
+              searchFiles: [],
+              truncated: false,
+              selectedPath: null,
+              fileState: new Map(),
+              stale: false,
+              baselineFingerprint: null,
+              search: { ...get().search, activeMatch: null },
+            });
             void get().refresh();
           }
         }
@@ -662,12 +734,46 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     },
 
     setBase: (base) => {
+      if (get().editSession || get().commentEditorFiles.size > 0) return;
       const sessionId = get().sessionId;
       if (sessionId) selectedBaseBySession.set(sessionId, base);
+      generation++;
+      comparisonGeneration++;
+      for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
       set({
         selectedBase: base,
-        // Clear file state so diffs reload against the new base.
+        commitRange: null,
+        historicalContext: null,
+        files: [],
+        searchFiles: [],
+        truncated: false,
+        selectedPath: null,
         fileState: new Map(),
+        stale: false,
+        baselineFingerprint: null,
+        search: { ...get().search, activeMatch: null },
+      });
+      void get().refresh();
+    },
+
+    setCommitRange: (range) => {
+      if (get().editSession || get().commentEditorFiles.size > 0) return;
+      const current = get().commitRange;
+      if (current?.start === range?.start && current?.end === range?.end) return;
+      generation++;
+      comparisonGeneration++;
+      for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
+      set({
+        commitRange: range,
+        historicalContext: null,
+        files: [],
+        searchFiles: [],
+        truncated: false,
+        selectedPath: null,
+        fileState: new Map(),
+        stale: false,
+        baselineFingerprint: null,
+        search: { ...get().search, activeMatch: null },
       });
       void get().refresh();
     },
@@ -717,8 +823,21 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
     // ── Inline edit session ─────────────────────────────────────────
 
+    setCommentEditorOpen: (path, open) => {
+      const next = new Set(get().commentEditorFiles);
+      if (open) next.add(path);
+      else next.delete(path);
+      set({ commentEditorFiles: next });
+    },
+
     openEditSession: (path, range, cursor = null) => {
-      if (get().editSession) return; // one editor at a time
+      if (get().commitRange || get().editSession || get().commentEditorFiles.size > 0) return;
+      const viewerSessionId = get().sessionId;
+      if (
+        viewerSessionId &&
+        useSessionsStore.getState().sessions.get(viewerSessionId)?.worktreeCreating
+      )
+        return;
       const state = get().fileState.get(path);
       if (!state || state.status !== "ready" || !state.model || state.model.kind !== "ok") return;
       if (state.newText === undefined) return;
@@ -886,7 +1005,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
   async function doSave(buffers: string[]): Promise<void> {
     const session = get().editSession;
-    if (!session || session.phase === "saving") return;
+    if (get().commitRange || !session || session.phase === "saving") return;
     const path = session.path;
     const root = get().root;
     const sessionId = get().sessionId;
@@ -941,9 +1060,16 @@ export const useDiffStore = create<DiffStore>((set, get) => {
           path: string;
           status: import("@shared/git.js").GitFileStatus;
           untracked: boolean;
+          binary: boolean;
           oldPath?: string;
           base?: string;
-        } = { root, path: file.path, status: file.status, untracked: file.untracked };
+        } = {
+          root,
+          path: file.path,
+          status: file.status,
+          untracked: file.untracked,
+          binary: file.binary,
+        };
         if (file.oldPath) params.oldPath = file.oldPath;
         if (base !== undefined) params.base = base;
         const res = await window.pivis.invoke("git.fileDiff", params);
@@ -1087,7 +1213,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     // base-independent, so this holds even for a branch-relative diff, and it
     // can also *clear* a false stale (a reverted edit returns to the baseline).
     const s = get();
-    if (s.open) {
+    if (s.open && s.commitRange === null) {
       const stale = s.baselineFingerprint !== null && res.fingerprint !== s.baselineFingerprint;
       if (s.stale !== stale) set({ stale });
     }
@@ -1099,6 +1225,7 @@ function handleChangesResult(
   get: () => DiffStore,
   res: GitChangesResult,
   isFirst: boolean,
+  historical: boolean,
 ): void {
   if (res.kind === "not-a-repo" || res.kind === "git-missing") {
     set({
@@ -1203,7 +1330,8 @@ function handleChangesResult(
     // A full viewer refresh is the user seeing current state: re-baseline the
     // fingerprint and clear staleness. Subsequent badge refreshes compare
     // against this.
-    baselineFingerprint: res.fingerprint,
+    baselineFingerprint: historical ? null : res.fingerprint,
+    historicalContext: historical ? (res.historicalContext ?? null) : null,
     stale: false,
   });
 }
@@ -1214,7 +1342,7 @@ function handleChangesResult(
 // else in the codebase reads `workspacePath` for git purposes.
 export function openDiffForSession(sessionId: SessionId): void {
   const session = useSessionsStore.getState().sessions.get(sessionId);
-  if (!session) return;
+  if (!session || session.worktreeCreating) return;
   const root = gitRootForSession(session);
   if (!root) return;
   useDiffStore.getState().openViewer(sessionId, root);

@@ -118,6 +118,50 @@ function setupRepoWithChanges(workspaceDir: string): void {
   fs.writeFileSync(join(workspaceDir, "b.ts"), "export const b = 1;\n");
 }
 
+function setupRepoWithCommitRange(workspaceDir: string): void {
+  execFileSync("git", ["-c", "init.defaultBranch=main", "init"], { cwd: workspaceDir });
+  execFileSync("git", ["config", "core.hooksPath", "/dev/null"], { cwd: workspaceDir });
+  fs.writeFileSync(join(workspaceDir, "README.md"), "base\n");
+  execFileSync("git", ["add", "README.md"], { cwd: workspaceDir });
+  execFileSync(
+    "git",
+    ["-c", "user.email=t@t", "-c", "user.name=Range Tester", "commit", "-m", "Base"],
+    { cwd: workspaceDir },
+  );
+  execFileSync("git", ["checkout", "-b", "feature/range"], { cwd: workspaceDir });
+  fs.writeFileSync(join(workspaceDir, "first.ts"), "export const first = true;\n");
+  execFileSync("git", ["add", "first.ts"], { cwd: workspaceDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=Range Tester",
+      "commit",
+      "-m",
+      "First feature commit",
+    ],
+    { cwd: workspaceDir },
+  );
+  fs.writeFileSync(join(workspaceDir, "second.ts"), "export const second = true;\n");
+  execFileSync("git", ["add", "second.ts"], { cwd: workspaceDir });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=Range Tester",
+      "commit",
+      "-m",
+      "Second feature commit",
+    ],
+    { cwd: workspaceDir },
+  );
+  fs.writeFileSync(join(workspaceDir, "working-only.ts"), "export const working = true;\n");
+}
+
 function setupRepoWithHugeDiff(workspaceDir: string): void {
   execFileSync("git", ["-c", "init.defaultBranch=main", "init"], { cwd: workspaceDir });
   execFileSync("git", ["config", "core.hooksPath", "/dev/null"], { cwd: workspaceDir });
@@ -320,6 +364,57 @@ test.describe("Diff viewer", () => {
     await expect(userBlock).toContainText("Edited note for the helper.");
     await expect(userBlock).toContainText("Please review this change.");
     await expect(commentTile).toHaveCount(0, { timeout: 10_000 });
+
+    await app.close();
+    rmrf(folders.settingsDir);
+    rmrf(folders.workspaceDir);
+    rmrf(folders.piSessionsDir);
+  });
+
+  test("selects an inclusive base-relative commit range and resets it on close", async () => {
+    test.setTimeout(60_000);
+    const folders = await makeFolders();
+    setupRepoWithCommitRange(folders.workspaceDir);
+    const { app, window } = await launchApp(folders);
+
+    await window.getByRole("button", { name: "New session" }).click();
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
+    const changesBtn = window.locator('[data-testid="changes-button"]');
+    await expect(changesBtn).toContainText("1", { timeout: 10_000 });
+    await changesBtn.click();
+    const viewer = window.locator(".diff-viewer");
+    await expect(viewer).toBeVisible({ timeout: 5_000 });
+
+    // Scope candidate commits to main → feature/range, then select exactly
+    // the older feature commit. The range result must exclude both the newer
+    // committed file and the ambient working-tree file.
+    await viewer.locator(".branch-dropdown__trigger").click();
+    await viewer.getByRole("option", { name: /main/ }).click();
+    await expect(viewer.getByRole("button", { name: "Choose commit range" })).toBeEnabled();
+    await viewer.getByRole("button", { name: "Choose commit range" }).click();
+    await viewer.getByRole("option", { name: /First feature commit/ }).click();
+    await viewer.getByRole("button", { name: "Show 1 commit" }).click();
+
+    await expect(viewer.locator(".diff-tree__row--file")).toHaveCount(1, { timeout: 10_000 });
+    await expect(viewer.locator(".diff-tree__row--file").first()).toContainText("first.ts");
+    await expect(viewer.locator('[data-testid="diff-section-first.ts"]')).toContainText(
+      "export const first = true;",
+      { timeout: 10_000 },
+    );
+    await expect(viewer.locator("[data-testid='diff-comment-button']")).toHaveCount(0);
+    await expect(viewer.getByRole("button", { name: "Choose commit range" })).toContainText(
+      "1 commit",
+    );
+
+    await viewer.getByRole("button", { name: "Close diff viewer" }).click();
+    await expect(viewer).toBeHidden({ timeout: 5_000 });
+    await changesBtn.click();
+    await expect(viewer).toBeVisible({ timeout: 5_000 });
+    await expect(viewer.getByRole("button", { name: "Choose commit range" })).toContainText(
+      "Working tree",
+    );
 
     await app.close();
     rmrf(folders.settingsDir);

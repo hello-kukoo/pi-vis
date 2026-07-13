@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus, WorktreeIdentity } from "@shared/ipc-contract.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
@@ -29,10 +30,17 @@ import {
   stopAuthWatch,
 } from "./auth.js";
 import {
+  type CheckoutChangesSnapshot,
+  applyCheckoutChanges,
+  captureCheckoutChanges,
+  checkoutStillMatchesSnapshot,
+  cleanupCreatedWorktree,
   createWorktree,
+  disposeCheckoutChangesSnapshot,
   getBranches,
   getChanges,
   getChangesCount,
+  getCommits,
   getFileDiff,
   inspectWorktree,
   writeWorkingFile,
@@ -47,7 +55,7 @@ import { entriesToTranscript, loadHistory } from "./sessions/history-loader.js";
 import {
   extractSessionMeta,
   listSessionsForWorkspace,
-  resolveWorktreeForFile,
+  resolveValidatedWorktreeForFile,
 } from "./sessions/session-discovery.js";
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { getSettings, saveSettings } from "./settings-store.js";
@@ -65,12 +73,19 @@ import {
   pickWorktreeDirectory,
   removeWorkspace,
 } from "./workspaces.js";
-import { respawnAndPersistWorktree } from "./worktree-persistence.js";
+import {
+  persistRecoverableWorktree,
+  respawnAndPersistWorkspace,
+  respawnAndPersistWorktree,
+} from "./worktree-persistence.js";
 
 let registry: SessionRegistry | null = null;
 let mainWindow: BrowserWindow | null = null;
 let handlersRegistered = false;
 let eventBatcher: ReturnType<typeof createEventBatcher> | null = null;
+const activeWorktreeOperations = new Set<SessionId>();
+const lastWorktreeOperationErrors = new Map<SessionId, string>();
+const reservedCreatedWorktrees = new Map<string, SessionId>();
 
 // Build the env for spawning a pi process/host. Adds the pi theme signals so
 // every host-rendered terminal/ANSI surface resolves colors consistent with
@@ -110,6 +125,61 @@ const safeSend = (channel: string, payload: unknown): void => {
   if (!w || w.isDestroyed() || w.webContents.isDestroyed()) return;
   w.webContents.send(channel, payload);
 };
+
+async function activeWorktreeIdentity(
+  sessionId: SessionId,
+  workspacePath: string,
+): Promise<WorktreeIdentity | undefined> {
+  for (;;) {
+    const activePath = registry?.getSession(sessionId)?.worktreePath;
+    if (!activePath) return undefined;
+    const association = getSettings().worktrees[activePath];
+    if (association) {
+      return {
+        path: activePath,
+        branch: association.branch,
+        name: association.name,
+        base: association.base,
+      };
+    }
+    const inspected = await inspectWorktree(workspacePath, activePath, workspacePath);
+    if (registry?.getSession(sessionId)?.worktreePath !== activePath) continue;
+    if (inspected.kind === "error") {
+      return {
+        path: activePath,
+        branch: "(unknown)",
+        name: path.basename(activePath),
+        base: "(unknown)",
+      };
+    }
+    return {
+      path: inspected.path,
+      branch: inspected.branch,
+      name: inspected.name,
+      base: inspected.branch,
+    };
+  }
+}
+
+const worktreeIdentityRevisions = new Map<SessionId, number>();
+
+function publishWorktreeIdentity(sessionId: SessionId, worktree?: WorktreeIdentity): void {
+  const revision = (worktreeIdentityRevisions.get(sessionId) ?? 0) + 1;
+  worktreeIdentityRevisions.set(sessionId, revision);
+  safeSend("session.worktreeChanged", { sessionId, revision, ...(worktree ? { worktree } : {}) });
+}
+
+async function currentWorktreeSnapshot(
+  sessionId: SessionId,
+  workspacePath: string,
+): Promise<{ revision: number; worktree?: WorktreeIdentity }> {
+  for (;;) {
+    const before = worktreeIdentityRevisions.get(sessionId) ?? 0;
+    const worktree = await activeWorktreeIdentity(sessionId, workspacePath);
+    if ((worktreeIdentityRevisions.get(sessionId) ?? 0) !== before) continue;
+    return { revision: before, ...(worktree ? { worktree } : {}) };
+  }
+}
 
 export function initIpc(win: BrowserWindow): void {
   mainWindow = win;
@@ -222,22 +292,31 @@ export function initIpc(win: BrowserWindow): void {
         const meta = extractSessionMeta(args.sessionFile);
         name = meta.name;
         preview = meta.preview || null;
-        // Resolve worktree identity for resumed worktree sessions so the
-        // renderer can show the chip and pi spawns in the worktree cwd.
-        worktree = resolveWorktreeForFile(args.sessionFile, args.workspacePath);
         const existing = registry.getByFile(args.sessionFile);
         if (existing && existing.status !== "exited" && existing.status !== "failed") {
+          // The live registry is authoritative while a switch is in flight;
+          // persisted discovery can lag until after replacement startup.
+          const snapshot = await currentWorktreeSnapshot(existing.sessionId, args.workspacePath);
+          worktree = snapshot.worktree;
           return {
             outcome: "existing" as const,
             sessionId: existing.sessionId,
             name,
             preview,
             sessionStatus: existing.status,
+            worktreeOperationInProgress: activeWorktreeOperations.has(existing.sessionId),
+            ...(lastWorktreeOperationErrors.get(existing.sessionId)
+              ? { worktreeOperationError: lastWorktreeOperationErrors.get(existing.sessionId) }
+              : {}),
+            worktreeIdentityRevision: snapshot.revision,
             ...(worktree ? { worktree } : {}),
           };
         }
         // exited/failed records fall through: openSession clears the stale
         // byFile mapping and creates a fresh cold record (existing behavior).
+        // Cold persisted locations are never trusted by path alone: revalidate
+        // canonical checkout identity and repository ownership before spawn.
+        worktree = await resolveValidatedWorktreeForFile(args.sessionFile, args.workspacePath);
       }
       const sessionId = registry.openSession(args.workspacePath, args.sessionFile, worktree?.path);
       return {
@@ -246,10 +325,22 @@ export function initIpc(win: BrowserWindow): void {
         name,
         preview,
         sessionStatus: "cold" as const,
+        worktreeOperationInProgress: false,
+        worktreeIdentityRevision: worktreeIdentityRevisions.get(sessionId) ?? 0,
         ...(worktree ? { worktree } : {}),
       };
     },
   );
+
+  ipcMain.handle("session.worktreeOperationStatus", (_evt, args: { sessionId: SessionId }) =>
+    activeWorktreeOperations.has(args.sessionId),
+  );
+
+  ipcMain.handle("session.worktreeSnapshot", async (_evt, args: { sessionId: SessionId }) => {
+    const record = registry?.getSession(args.sessionId);
+    if (!record) throw new Error("Session not found");
+    return currentWorktreeSnapshot(args.sessionId, record.workspacePath);
+  });
 
   ipcMain.handle(
     "session.activate",
@@ -259,6 +350,62 @@ export function initIpc(win: BrowserWindow): void {
       if (!piInfo)
         throw new Error("pi binary not found. Please install pi or set the path in settings.");
       const loginShellEnv = await getHostEnv();
+      const record = registry?.getSession(args.sessionId);
+      if (record?.status === "cold" && record.worktreePath) {
+        const persistedPath = record.worktreePath;
+        const inspected = await inspectWorktree(
+          record.workspacePath,
+          persistedPath,
+          record.workspacePath,
+          true,
+        );
+        if (inspected.kind === "error" || inspected.path !== persistedPath) {
+          record.worktreePath = undefined;
+          if (record.sessionFile) {
+            try {
+              const latest = getSettings();
+              saveSettings({
+                sessionWorktrees: {
+                  ...latest.sessionWorktrees,
+                  [path.resolve(record.sessionFile)]: path.resolve(record.workspacePath),
+                },
+              });
+            } catch {
+              // Runtime safety does not depend on persisting the fallback.
+            }
+          }
+          publishWorktreeIdentity(args.sessionId);
+        } else {
+          const latest = getSettings();
+          const association = latest.worktrees[persistedPath];
+          const base = association?.base ?? inspected.branch;
+          if (
+            association &&
+            (association.branch !== inspected.branch || association.name !== inspected.name)
+          ) {
+            try {
+              saveSettings({
+                worktrees: {
+                  ...latest.worktrees,
+                  [persistedPath]: {
+                    ...association,
+                    branch: inspected.branch,
+                    name: inspected.name,
+                  },
+                },
+              });
+            } catch {
+              // The validated runtime path remains safe even if metadata refresh fails.
+            }
+          }
+          publishWorktreeIdentity(args.sessionId, {
+            path: inspected.path,
+            branch: inspected.branch,
+            name: inspected.name,
+            base,
+          });
+        }
+      }
       await registry?.activateSession(
         args.sessionId,
         piInfo.path,
@@ -288,48 +435,190 @@ export function initIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     "session.createWorktree",
-    async (_evt, args: { sessionId: SessionId; base: string }) => {
+    async (
+      _evt,
+      args:
+        | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
+        | { sessionId: SessionId; fromCurrentCheckout: true; base?: never },
+    ) => {
       const activeRegistry = registry;
       if (!activeRegistry) return { ok: false, error: "Session not found" };
       const rec = activeRegistry.getSession(args.sessionId);
       if (!rec) return { ok: false, error: "Session not found" };
+      if (args.fromCurrentCheckout && !rec.sessionFile) {
+        return { ok: false, error: "The session has not started yet" };
+      }
+      if (!args.fromCurrentCheckout && rec.sessionFile) {
+        return { ok: false, error: "Established sessions must branch from their current checkout" };
+      }
+      try {
+        activeRegistry.beginWorktreeSwitch(args.sessionId);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
       const settings = getSettings();
       const piInfo = await locatePi(settings.piBinaryPath);
       if (!piInfo) return { ok: false, error: "pi binary not found" };
       const loginShellEnv = await getHostEnv();
+      if (activeWorktreeOperations.has(args.sessionId)) {
+        return { ok: false, error: "A worktree switch is already in progress" };
+      }
+      activeWorktreeOperations.add(args.sessionId);
+      lastWorktreeOperationErrors.delete(args.sessionId);
+      safeSend("session.worktreeOperationChanged", { sessionId: args.sessionId, active: true });
+      let operationError: string | undefined;
+      let checkoutSnapshot: CheckoutChangesSnapshot | undefined;
+      let reservedWorktreePath: string | undefined;
       try {
-        const result = await createWorktree(rec.workspacePath, args.base);
-        if (result.kind === "error") return { ok: false, error: result.message };
+        let base = args.fromCurrentCheckout ? "HEAD" : args.base;
+        if (args.fromCurrentCheckout) {
+          const captured = await captureCheckoutChanges(rec.worktreePath ?? rec.workspacePath);
+          if (captured.kind === "error") throw new Error(captured.message);
+          checkoutSnapshot = captured.snapshot;
+          base = checkoutSnapshot.head;
+        }
+        if (!base) throw new Error("A base branch is required");
+        const result = await createWorktree(
+          rec.workspacePath,
+          base,
+          rec.workspacePath,
+          (worktreePath) => {
+            if (reservedCreatedWorktrees.has(worktreePath)) {
+              throw new Error("The generated worktree path is already reserved.");
+            }
+            reservedCreatedWorktrees.set(worktreePath, args.sessionId);
+            reservedWorktreePath = worktreePath;
+          },
+        );
+        if (result.kind === "error") throw new Error(result.message);
+        if (checkoutSnapshot) result.base = checkoutSnapshot.baseLabel;
         // Persist only after the respawn succeeds, merging at the commit
         // point so overlapping worktree operations cannot drop each other.
-        await respawnAndPersistWorktree({
-          worktreePath: result.worktreePath,
-          association: {
-            workspacePath: rec.workspacePath,
-            branch: result.branch,
-            name: result.name,
-            base: result.base,
-          },
-          respawn: () =>
-            activeRegistry.setWorktreeAndRespawn(
-              args.sessionId,
+        // If eligibility changes during the potentially-long checkout, remove
+        // the just-created worktree while we still know runtime detachment has
+        // not begun. Never force-clean after replacement startup: extensions
+        // may already have written user data there.
+        let detachmentStarted = false;
+        let persistenceWarning: string | undefined;
+        try {
+          if (checkoutSnapshot) {
+            const copied = await applyCheckoutChanges(checkoutSnapshot, result.worktreePath);
+            if (copied.kind === "error") throw new Error(copied.message);
+          }
+          const persistence = await respawnAndPersistWorktree({
+            worktreePath: result.worktreePath,
+            association: {
+              workspacePath: rec.workspacePath,
+              branch: result.branch,
+              name: result.name,
+              base: result.base,
+            },
+            sessionFile: rec.sessionFile,
+            respawn: async () => {
+              await activeRegistry.setWorktreeAndRespawn(
+                args.sessionId,
+                result.worktreePath,
+                piInfo.path,
+                loginShellEnv,
+                {
+                  onImmediatelyBeforeDetach: async () => {
+                    if (checkoutSnapshot) {
+                      const current = await checkoutStillMatchesSnapshot(
+                        rec.worktreePath ?? rec.workspacePath,
+                        checkoutSnapshot,
+                      );
+                      if (current.kind === "error") throw new Error(current.message);
+                    }
+                  },
+                  onDetachCommitted: () => {
+                    detachmentStarted = true;
+                  },
+                },
+              );
+              publishWorktreeIdentity(args.sessionId, {
+                path: result.worktreePath,
+                branch: result.branch,
+                name: result.name,
+                base: result.base,
+              });
+            },
+          });
+          if (!persistence.persisted) {
+            persistenceWarning = `Session moved, but relaunch persistence failed: ${persistence.error}`;
+          }
+        } catch (error) {
+          if (!detachmentStarted) {
+            if (activeRegistry.isWorktreePathInUse(result.worktreePath, args.sessionId)) {
+              const reason = error instanceof Error ? error.message : String(error);
+              throw new Error(
+                `${reason} The generated worktree is in use by another session and was preserved at ${result.worktreePath}.`,
+              );
+            }
+            const cleanup = await cleanupCreatedWorktree(
+              rec.workspacePath,
               result.worktreePath,
-              piInfo.path,
-              loginShellEnv,
-            ),
-        });
+              result.branch,
+            );
+            if (cleanup.kind === "error") {
+              const reason = error instanceof Error ? error.message : String(error);
+              throw new Error(`${reason} Cleanup also failed: ${cleanup.message}`);
+            }
+            throw error;
+          }
+
+          // Replacement startup crossed the safe-cleanup boundary. Preserve
+          // and identify the checkout (it may contain extension writes), then
+          // publish the registry's rolled-back location for any renderer that
+          // reopened while activation was provisional.
+          const recoveryPersistence = await persistRecoverableWorktree({
+            worktreePath: result.worktreePath,
+            association: {
+              workspacePath: rec.workspacePath,
+              branch: result.branch,
+              name: result.name,
+              base: result.base,
+            },
+          });
+          const previous = await activeWorktreeIdentity(args.sessionId, rec.workspacePath);
+          publishWorktreeIdentity(args.sessionId, previous);
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `The worktree was created at ${result.worktreePath}, but the session could not restart there: ${reason} Reattach it with Existing to recover it.${
+              recoveryPersistence.persisted
+                ? ""
+                : ` Its association could not be saved: ${recoveryPersistence.error}`
+            }`,
+          );
+        }
         return {
           ok: true,
           worktreePath: result.worktreePath,
           branch: result.branch,
           name: result.name,
           base: result.base,
+          ...(persistenceWarning ? { warning: persistenceWarning } : {}),
         };
       } catch (err) {
+        operationError = err instanceof Error ? err.message : String(err);
+        lastWorktreeOperationErrors.set(args.sessionId, operationError);
         return {
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: operationError,
         };
+      } finally {
+        if (checkoutSnapshot) await disposeCheckoutChangesSnapshot(checkoutSnapshot);
+        if (
+          reservedWorktreePath &&
+          reservedCreatedWorktrees.get(reservedWorktreePath) === args.sessionId
+        ) {
+          reservedCreatedWorktrees.delete(reservedWorktreePath);
+        }
+        activeWorktreeOperations.delete(args.sessionId);
+        safeSend("session.worktreeOperationChanged", {
+          sessionId: args.sessionId,
+          active: false,
+          ...(operationError ? { error: operationError } : {}),
+        });
       }
     },
   );
@@ -353,17 +642,61 @@ export function initIpc(win: BrowserWindow): void {
       if (!activeRegistry) return { ok: false, error: "Session not found" };
       const rec = activeRegistry.getSession(args.sessionId);
       if (!rec) return { ok: false, error: "Session not found" };
+      try {
+        activeRegistry.beginWorktreeSwitch(args.sessionId);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
       const settings = getSettings();
       const piInfo = await locatePi(settings.piBinaryPath);
       if (!piInfo) return { ok: false, error: "pi binary not found" };
       const loginShellEnv = await getHostEnv();
+      if (activeWorktreeOperations.has(args.sessionId)) {
+        return { ok: false, error: "A worktree switch is already in progress" };
+      }
+      activeWorktreeOperations.add(args.sessionId);
+      lastWorktreeOperationErrors.delete(args.sessionId);
+      safeSend("session.worktreeOperationChanged", { sessionId: args.sessionId, active: true });
+      let operationError: string | undefined;
       try {
-        const result = await inspectWorktree(rec.workspacePath, args.path);
-        if (result.kind === "error") return { ok: false, error: result.message };
+        const result = await inspectWorktree(
+          rec.workspacePath,
+          args.path,
+          rec.worktreePath ?? rec.workspacePath,
+        );
+        if (result.kind === "error") throw new Error(result.message);
+        if (reservedCreatedWorktrees.has(result.path)) {
+          throw new Error("That worktree is still being prepared by another session.");
+        }
+        const returningToWorkspace = result.path === result.workspaceTop;
+        if (returningToWorkspace) {
+          const persistence = await respawnAndPersistWorkspace({
+            sessionFile: rec.sessionFile,
+            workspacePath: rec.workspacePath,
+            respawn: async () => {
+              await activeRegistry.setWorktreeAndRespawn(
+                args.sessionId,
+                undefined,
+                piInfo.path,
+                loginShellEnv,
+              );
+              publishWorktreeIdentity(args.sessionId);
+            },
+          });
+          return {
+            ok: true,
+            workspace: true,
+            ...(!persistence.persisted
+              ? {
+                  warning: `Session moved, but relaunch persistence failed: ${persistence.error}`,
+                }
+              : {}),
+          };
+        }
         // Key by the canonical toplevel, not the raw input — see the
         // `GitWorktreeInspect` doc and the `inspectWorktree` doc. Merge only
         // after respawn so concurrent operations retain both associations.
-        await respawnAndPersistWorktree({
+        const persistence = await respawnAndPersistWorktree({
           worktreePath: result.path,
           association: {
             workspacePath: rec.workspacePath,
@@ -371,13 +704,21 @@ export function initIpc(win: BrowserWindow): void {
             name: result.name,
             base: result.branch, // attached: no "cut from" relationship
           },
-          respawn: () =>
-            activeRegistry.setWorktreeAndRespawn(
+          sessionFile: rec.sessionFile,
+          respawn: async () => {
+            await activeRegistry.setWorktreeAndRespawn(
               args.sessionId,
               result.path,
               piInfo.path,
               loginShellEnv,
-            ),
+            );
+            publishWorktreeIdentity(args.sessionId, {
+              path: result.path,
+              branch: result.branch,
+              name: result.name,
+              base: result.branch,
+            });
+          },
         });
         return {
           ok: true,
@@ -385,12 +726,28 @@ export function initIpc(win: BrowserWindow): void {
           branch: result.branch,
           name: result.name,
           base: result.branch,
+          ...(!persistence.persisted
+            ? {
+                warning: `Session moved, but relaunch persistence failed: ${persistence.error}`,
+              }
+            : {}),
         };
       } catch (err) {
+        const current = await activeWorktreeIdentity(args.sessionId, rec.workspacePath);
+        publishWorktreeIdentity(args.sessionId, current);
+        operationError = err instanceof Error ? err.message : String(err);
+        lastWorktreeOperationErrors.set(args.sessionId, operationError);
         return {
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: operationError,
         };
+      } finally {
+        activeWorktreeOperations.delete(args.sessionId);
+        safeSend("session.worktreeOperationChanged", {
+          sessionId: args.sessionId,
+          active: false,
+          ...(operationError ? { error: operationError } : {}),
+        });
       }
     },
   );
@@ -401,10 +758,17 @@ export function initIpc(win: BrowserWindow): void {
   // re-running `inspectWorktree`.
   ipcMain.handle(
     "worktree.validate",
-    async (_evt, args: { workspacePath: string; path: string }) => {
+    async (_evt, args: { workspacePath: string; path: string; currentCheckoutPath?: string }) => {
       try {
-        const result = await inspectWorktree(args.workspacePath, args.path);
+        const result = await inspectWorktree(
+          args.workspacePath,
+          args.path,
+          args.currentCheckoutPath ?? args.workspacePath,
+        );
         if (result.kind === "error") return { ok: false, error: result.message };
+        if (reservedCreatedWorktrees.has(result.path)) {
+          return { ok: false, error: "That worktree is still being prepared by another session." };
+        }
         return { ok: true, branch: result.branch, name: result.name };
       } catch (err) {
         return {
@@ -928,13 +1292,32 @@ export function initIpc(win: BrowserWindow): void {
   // never participate in the session-registry; the renderer derives the
   // root in exactly one helper. Wrapped in try/catch → `{ kind: "error" }`
   // so a misbehaving main never throws across IPC.
-  ipcMain.handle("git.changes", async (_evt, args: { root: string; base?: string }) => {
+  ipcMain.handle("git.commits", async (_evt, args: { root: string; base: string }) => {
     try {
-      return await getChanges(args.root, args.base);
+      return await getCommits(args.root, args.base);
     } catch (err) {
       return { kind: "error", message: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  ipcMain.handle(
+    "git.changes",
+    async (
+      _evt,
+      args: {
+        root: string;
+        base?: string;
+        range?: import("@shared/git.js").GitCommitRange;
+        historicalContext?: import("@shared/git.js").GitHistoricalContext;
+      },
+    ) => {
+      try {
+        return await getChanges(args.root, args.base, args.range, args.historicalContext);
+      } catch (err) {
+        return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
 
   ipcMain.handle("git.changesCount", async (_evt, args: { root: string }) => {
     try {
@@ -951,10 +1334,13 @@ export function initIpc(win: BrowserWindow): void {
       args: {
         root: string;
         base?: string;
+        range?: import("@shared/git.js").GitCommitRange;
+        historicalContext?: import("@shared/git.js").GitHistoricalContext;
         path: string;
         oldPath?: string | undefined;
         status: import("@shared/git.js").GitFileStatus;
         untracked: boolean;
+        binary: boolean;
       },
     ) => {
       try {
@@ -963,14 +1349,26 @@ export function initIpc(win: BrowserWindow): void {
           args.oldPath !== undefined
             ? {
                 path: args.path,
-                base: args.base,
                 oldPath: args.oldPath,
                 status: args.status,
                 untracked: args.untracked,
+                binary: args.binary,
               }
-            : { path: args.path, base: args.base, status: args.status, untracked: args.untracked };
+            : {
+                path: args.path,
+                status: args.status,
+                untracked: args.untracked,
+                binary: args.binary,
+              };
         const maxBytes = getSettings().diffMaxFileSizeMiB * 1024 * 1024;
-        return await getFileDiff(args.root, payload, args.base, maxBytes);
+        return await getFileDiff(
+          args.root,
+          payload,
+          args.base,
+          maxBytes,
+          args.range,
+          args.historicalContext,
+        );
       } catch (err) {
         return { kind: "error", message: err instanceof Error ? err.message : String(err) };
       }

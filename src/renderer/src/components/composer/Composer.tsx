@@ -23,6 +23,7 @@ import {
 } from "../../lib/composer-attachments.js";
 import { prependCodeCommentsToPrompt } from "../../lib/diff-comments.js";
 import { findCurrentModel } from "../../lib/model-utils.js";
+import { runWorktreeOperation } from "../../lib/worktree-operation.js";
 import { useChangelogStore } from "../../stores/changelog-store.js";
 import { openDiffForSession } from "../../stores/diff-store.js";
 import { useImageViewerStore } from "../../stores/image-viewer-store.js";
@@ -366,10 +367,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // same way regardless of which surface dispatched it.
   const adoptSessionFileAndHydrate = useSessionsStore((s) => s.adoptSessionFileAndHydrate);
   const closeSessionTab = useSessionsStore((s) => s.closeSessionTab);
-  const setWorktreeCreating = useSessionsStore((s) => s.setWorktreeCreating);
-  const setWorktreeError = useSessionsStore((s) => s.setWorktreeError);
-  const applyWorktree = useSessionsStore((s) => s.applyWorktree);
-  const clearWorktreeIntent = useSessionsStore((s) => s.clearWorktreeIntent);
   const setNewSessionDraft = useSessionsStore((s) => s.setNewSessionDraft);
   const setSessionDraft = useSessionsStore((s) => s.setSessionDraft);
   const clearEditorInjection = useSessionsStore((s) => s.clearEditorInjection);
@@ -857,74 +854,18 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         !session.worktreePath &&
         (worktreeMode === "create" || worktreeMode === "attach")
       ) {
-        // Empty path in "attach" mode is a client-side gate (the input
-        // is just a text field — easy to send with nothing in it). Show
-        // the inline error and retire this in-flight content so the composer
-        // doesn't wedge behind the re-entrancy guard at the top of this
-        // callback.
-        if (worktreeMode === "attach" && !session.worktreeAttachPath?.trim()) {
-          setWorktreeError(sessionId, "Choose a worktree directory first.");
+        const operation = await runWorktreeOperation({
+          sessionId,
+          mode: worktreeMode,
+          // HEAD is the safe detached/no-branch fallback; never assume main.
+          ...(worktreeMode === "create"
+            ? { base: session.worktreeBase ?? "HEAD" }
+            : { path: session.worktreeAttachPath }),
+        });
+        if (!operation.ok) {
+          // Keep the submission text and release this intent for a retry.
           submissionsInFlightRef.current.delete(submissionInFlightKey);
           return;
-        }
-        try {
-          // setWorktreeCreating(true) also clears any prior worktreeError.
-          setWorktreeCreating(sessionId, true);
-          let res:
-            | { ok: true; worktreePath: string; branch: string; name: string; base: string }
-            | { ok: false; error: string };
-          if (worktreeMode === "create") {
-            // Fall back to HEAD (current commit) when no base branch is
-            // resolved — e.g. a detached HEAD where there is no current
-            // branch to default to. Never assume a literal "main"; it
-            // may not exist.
-            const base = session.worktreeBase ?? "HEAD";
-            res = await window.pivis.invoke("session.createWorktree", {
-              sessionId,
-              base,
-            });
-          } else {
-            // "attach" — the IPC re-runs `inspectWorktree` server-side
-            // and returns the canonical toplevel path, so a stale or
-            // edited live-validate result can never persist a bad path.
-            res = await window.pivis.invoke("session.attachWorktree", {
-              sessionId,
-              path: session.worktreeAttachPath ?? "",
-            });
-          }
-          if (!res.ok) {
-            // Surface the failure *inline* in the WorktreeBar (durable,
-            // unlike a toast) and keep the prompt text intact so the
-            // user can retry or switch modes and send without a
-            // worktree — nothing is lost.
-            setWorktreeError(sessionId, res.error ?? "Worktree operation failed");
-            submissionsInFlightRef.current.delete(submissionInFlightKey);
-            return;
-          }
-          // Past the narrowing: `res` is `{ok:true, ...}` here. Compose
-          // the success toast after the narrowing check so `res.name` is
-          // accessible without a union cast.
-          const successToast =
-            worktreeMode === "create"
-              ? `Worktree ${res.name} created`
-              : `Attached worktree ${res.name}`;
-          applyWorktree(sessionId, {
-            worktreePath: res.worktreePath,
-            branch: res.branch,
-            name: res.name,
-            base: res.base,
-          });
-          // Drop the pre-send intent so the bar doesn't reappear
-          // (still in the same mode) if the transcript later resets
-          // via /new, /fork, or /clone.
-          clearWorktreeIntent(sessionId);
-          addToast(sessionId, successToast, "success");
-        } catch (err) {
-          setWorktreeError(sessionId, String(err));
-          submissionsInFlightRef.current.delete(submissionInFlightKey);
-          return;
-        } finally {
-          setWorktreeCreating(sessionId, false);
         }
       }
 
@@ -1324,10 +1265,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       openPicker,
       adoptSessionFileAndHydrate,
       closeSessionTab,
-      setWorktreeCreating,
-      setWorktreeError,
-      applyWorktree,
-      clearWorktreeIntent,
       attachments,
       fileAttachments,
       modelSupportsImages,

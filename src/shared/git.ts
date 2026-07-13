@@ -6,6 +6,43 @@
 
 export type GitFileStatus = "M" | "A" | "D" | "R";
 
+/** Immutable metadata for a commit in the selected base → HEAD first-parent path. */
+export interface GitCommitMetadata {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  authorName: string;
+  /** Author timestamp in epoch milliseconds. */
+  authoredAt: number;
+}
+
+/** Inclusive immutable commit endpoints. Both values are full object IDs. */
+export interface GitCommitRange {
+  start: string;
+  end: string;
+}
+
+/** Concrete objects captured when a historical manifest is created. Lazy file
+ * reads use these IDs directly so ref movement and validation-cache eviction
+ * cannot change or invalidate an already-open view. */
+export interface GitHistoricalContext {
+  parent: string;
+  end: string;
+}
+
+export type GitCommitsResult =
+  | {
+      kind: "ok";
+      head: string;
+      mergeBase: string;
+      /** Oldest to newest; capped to the newest 500 candidates. */
+      commits: GitCommitMetadata[];
+      truncated: boolean;
+    }
+  | { kind: "not-a-repo" }
+  | { kind: "git-missing" }
+  | { kind: "error"; message: string };
+
 export interface GitChangedFile {
   /** Repo-root-relative path, posix separators (as git reports). */
   path: string;
@@ -25,18 +62,19 @@ export type GitChangesResult =
       kind: "ok";
       repoRoot: string;
       files: GitChangedFile[];
-      /** Complete, deterministically ordered changed-file manifest used by
-       *  worker-backed search. Unlike `files`, this is never capped; it carries
-       *  descriptors only, never file contents. Optional for compatibility
-       *  with older preview/test fixtures. */
+      /** Deterministically ordered manifest used by worker-backed search.
+       *  Historical manifests share the 500-file bound with `files`; working
+       *  tree mode may provide a larger descriptor-only manifest. Optional for
+       *  compatibility with older preview/test fixtures. */
       searchFiles?: GitChangedFile[] | undefined;
+      /** Present only for immutable historical manifests. */
+      historicalContext?: GitHistoricalContext | undefined;
       /** True when the browsable file list was capped (see WP1b: 500-file limit). */
       truncated: boolean;
-      /** Content hash of the working tree vs HEAD (base-independent), plus
+      /** In working-tree mode, a content hash vs HEAD (base-independent), plus
        *  untracked file contents (the first 200 by name; beyond that, only
-       *  a file's presence is hashed, not its contents). Lets the diff viewer
-       *  tell a real edit from a read-only tool call without inspecting tool
-       *  names. */
+       *  presence is hashed). Historical mode uses its immutable endpoint
+       *  pair; stale/badge tracking intentionally ignores that mode. */
       fingerprint: string;
     }
   | { kind: "not-a-repo" }
@@ -120,6 +158,9 @@ export type GitWorktreeInspect =
   | {
       kind: "ok";
       path: string;
+      /** Canonical Git toplevel of the owning workspace. This can differ from
+       *  the configured workspace cwd when the user selected a subdirectory. */
+      workspaceTop: string;
       /** Best-effort branch label. Falls back to a short SHA on detached
        *  HEAD, or `"(no commits)"` for an unborn HEAD. */
       branch: string;

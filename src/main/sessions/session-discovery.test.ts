@@ -1,12 +1,14 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { saveSettings } from "../settings-store.js";
+import { loadSettings, saveSettings } from "../settings-store.js";
 import {
   extractSessionMeta,
   listSessionsForWorkspace,
+  resolveValidatedWorktreeForFile,
   resolveWorktreeForFile,
 } from "./session-discovery.js";
 
@@ -23,6 +25,7 @@ beforeEach(() => {
   // Isolate settings to a temp dir so worktree associations don't leak
   // between tests or touch the user's real settings.json.
   process.env["PIVIS_SETTINGS_DIR"] = root;
+  loadSettings();
 });
 
 afterEach(() => {
@@ -39,6 +42,22 @@ afterEach(() => {
   vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync(
+    "git",
+    ["-c", "user.name=Pi Vis Tests", "-c", "user.email=pi-vis@example.invalid", ...args],
+    { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+}
+
+function initRepo(directory: string): void {
+  fs.mkdirSync(directory, { recursive: true });
+  git(directory, ["init", "-b", "main"]);
+  fs.writeFileSync(path.join(directory, "tracked.txt"), "tracked\n");
+  git(directory, ["add", "tracked.txt"]);
+  git(directory, ["commit", "-m", "initial"]);
+}
 
 function writeSession(workspace: string, fileName: string, lines: object[]): string {
   const dir = path.join(root, workspace);
@@ -495,6 +514,163 @@ describe("worktree session discovery", () => {
 
     const filePath = writeHeader(worktreePath, "wt-missing");
     expect(resolveWorktreeForFile(filePath, workspace)).toBeUndefined();
+  });
+
+  it("prefers a persisted session override over the immutable header cwd", () => {
+    const workspace = path.join(root, "workspace-A");
+    const oldWorktree = path.join(root, "wt-old");
+    const newWorktree = path.join(root, "wt-new");
+    fs.mkdirSync(oldWorktree, { recursive: true });
+    fs.mkdirSync(newWorktree, { recursive: true });
+    const filePath = writeHeader(oldWorktree, "moved-session");
+    saveSettings({
+      worktrees: {
+        [oldWorktree]: {
+          workspacePath: workspace,
+          branch: "old-branch",
+          name: "old",
+          base: "main",
+        },
+        [newWorktree]: {
+          workspacePath: workspace,
+          branch: "new-branch",
+          name: "new",
+          base: "develop",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: newWorktree },
+    });
+
+    expect(resolveWorktreeForFile(filePath, workspace)).toEqual({
+      path: newWorktree,
+      branch: "new-branch",
+      name: "new",
+      base: "develop",
+    });
+  });
+
+  it("keeps an originally worktree-based session in Workspace after relaunch", async () => {
+    const workspace = path.join(root, "workspace-A");
+    const originalWorktree = path.join(root, "wt-original");
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(originalWorktree, { recursive: true });
+    const filePath = writeHeader(originalWorktree, "returned-to-workspace");
+    saveSettings({
+      worktrees: {
+        [originalWorktree]: {
+          workspacePath: workspace,
+          branch: "original-branch",
+          name: "original",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: path.resolve(workspace) },
+    });
+
+    expect(resolveWorktreeForFile(filePath, workspace)).toBeUndefined();
+    expect((await listSessionsForWorkspace(workspace)).map((item) => item.filePath)).toContain(
+      filePath,
+    );
+  });
+
+  it("does not resurrect the old header cwd when an explicit override is stale", async () => {
+    const workspace = path.join(root, "workspace-A");
+    const oldWorktree = path.join(root, "wt-still-valid");
+    const missingOverride = path.join(root, "wt-missing-override");
+    fs.mkdirSync(oldWorktree, { recursive: true });
+    const filePath = writeHeader(oldWorktree, "stale-move");
+    saveSettings({
+      worktrees: {
+        [oldWorktree]: {
+          workspacePath: workspace,
+          branch: "old-branch",
+          name: "old",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: missingOverride },
+    });
+
+    expect(resolveWorktreeForFile(filePath, workspace)).toBeUndefined();
+    // Runtime falls back to Workspace, but the stale record still belongs in
+    // its parent workspace's sidebar on both parse and cache-hit paths.
+    expect((await listSessionsForWorkspace(workspace)).map((item) => item.filePath)).toContain(
+      filePath,
+    );
+    expect((await listSessionsForWorkspace(workspace)).map((item) => item.filePath)).toContain(
+      filePath,
+    );
+  });
+
+  it("uses the override cwd for fresh and cached workspace ownership checks", async () => {
+    const workspace = path.join(root, "workspace-A");
+    const oldWorkspace = path.join(root, "workspace-before-move");
+    const worktreePath = path.join(root, "wt-after-move");
+    fs.mkdirSync(oldWorkspace, { recursive: true });
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const filePath = writeHeader(oldWorkspace, "ownership-move");
+    saveSettings({
+      worktrees: {
+        [worktreePath]: {
+          workspacePath: workspace,
+          branch: "moved-branch",
+          name: "moved",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: worktreePath },
+    });
+
+    const fresh = await listSessionsForWorkspace(workspace);
+    const cached = await listSessionsForWorkspace(workspace);
+    expect(fresh.map((summary) => summary.filePath)).toContain(filePath);
+    expect(cached.map((summary) => summary.filePath)).toContain(filePath);
+
+    // The same immutable header must no longer make the session belong to its
+    // pre-switch workspace once the explicit override exists.
+    expect(await listSessionsForWorkspace(oldWorkspace)).toHaveLength(0);
+  });
+
+  it("rejects a persisted override replaced by a plain directory", async () => {
+    const workspace = path.join(root, "workspace-A");
+    initRepo(workspace);
+    const reusedPath = path.join(root, "reused-plain");
+    fs.mkdirSync(reusedPath);
+    const filePath = writeHeader(workspace, "reused-plain-session");
+    saveSettings({
+      worktrees: {
+        [reusedPath]: {
+          workspacePath: workspace,
+          branch: "stale-branch",
+          name: "stale",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: reusedPath },
+    });
+
+    expect(await resolveValidatedWorktreeForFile(filePath, workspace)).toBeUndefined();
+  });
+
+  it("rejects a persisted override replaced by an unrelated repository", async () => {
+    const workspace = path.join(root, "workspace-A");
+    initRepo(workspace);
+    const unrelated = path.join(root, "unrelated");
+    initRepo(unrelated);
+    const filePath = writeHeader(workspace, "reused-repo-session");
+    saveSettings({
+      worktrees: {
+        [unrelated]: {
+          workspacePath: workspace,
+          branch: "stale-branch",
+          name: "stale",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve(filePath)]: unrelated },
+    });
+
+    expect(await resolveValidatedWorktreeForFile(filePath, workspace)).toBeUndefined();
   });
 
   it("resolveWorktreeForFile returns undefined for a plain workspace session", () => {

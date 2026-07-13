@@ -25,6 +25,8 @@ interface BranchDropdownProps {
   leadingItem?: { label: string } | undefined;
   disabled?: boolean;
   triggerLabel?: string;
+  /** Accessible name for the trigger when surrounding context is not explicit. */
+  ariaLabel?: string;
   /**
    * Which side of the trigger the panel opens on.
    * "bottom" (default) is correct for controls near the top of the window
@@ -57,6 +59,7 @@ export function BranchDropdown({
   leadingItem,
   disabled = false,
   triggerLabel,
+  ariaLabel,
   placement = "bottom",
 }: BranchDropdownProps): React.ReactElement {
   const [open, setOpen] = useState(false);
@@ -232,6 +235,9 @@ export function BranchDropdown({
         className="branch-dropdown__trigger fade-scope"
         onClick={() => !disabled && setOpen((v) => !v)}
         disabled={disabled}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
       >
         <FadeText>{label}</FadeText>
         <IconChevronDown className="branch-dropdown__caret" />

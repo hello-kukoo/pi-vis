@@ -169,6 +169,8 @@ export interface SessionViewState {
   worktreeBase?: string | null | undefined;
   /** True while the worktree creation IPC is in flight. */
   worktreeCreating?: boolean | undefined;
+  /** Monotonic main-process identity revision used to fence reload races. */
+  worktreeIdentityRevision: number;
   /**
    * The reason the last worktree creation attempt failed, surfaced inline in
    * the WorktreeBar so it persists (unlike a toast) until the user retries or
@@ -997,7 +999,10 @@ interface SessionsStore {
       name: string;
       base: string;
     },
+    revision?: number,
   ) => void;
+  /** Clear linked-worktree identity after an authoritative move to Workspace. */
+  applyWorkspace: (sessionId: SessionId, revision?: number) => void;
   /** Clear pre-send worktree state — called after first send. */
   clearWorktreeIntent: (sessionId: SessionId) => void;
   /** Toggle whether the live unified-TUI panel or the native Composer is
@@ -1275,6 +1280,7 @@ const buildSessionsStore = (
         worktreeAttachPath: pendingSetup?.worktreeAttachPath,
         worktreeBase: pendingSetup?.worktreeBase,
         worktreeCreating: undefined,
+        worktreeIdentityRevision: 0,
         worktreeError: undefined,
         worktreePath: undefined,
         worktreeBranch: undefined,
@@ -2679,17 +2685,35 @@ const buildSessionsStore = (
     });
   },
 
-  applyWorktree: (sessionId, result) => {
+  applyWorktree: (sessionId, result, revision) => {
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
-      if (!s) return {};
+      if (!s || (revision !== undefined && revision < s.worktreeIdentityRevision)) return {};
       sessions.set(sessionId, {
         ...s,
         worktreePath: result.worktreePath,
         worktreeBranch: result.branch,
         worktreeName: result.name,
         worktreeFromBase: result.base,
+        worktreeIdentityRevision: revision ?? s.worktreeIdentityRevision,
+      });
+      return { sessions };
+    });
+  },
+
+  applyWorkspace: (sessionId, revision) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s || (revision !== undefined && revision < s.worktreeIdentityRevision)) return {};
+      sessions.set(sessionId, {
+        ...s,
+        worktreePath: undefined,
+        worktreeBranch: undefined,
+        worktreeName: undefined,
+        worktreeFromBase: undefined,
+        worktreeIdentityRevision: revision ?? s.worktreeIdentityRevision,
       });
       return { sessions };
     });
@@ -3572,13 +3596,52 @@ const buildSessionsStore = (
       // Re-attach worktree identity for a resumed worktree session so the
       // chip renders and git operations target the worktree (not the parent
       // workspace). New sessions have no worktree and skip this.
+      if (res.worktreeOperationInProgress) {
+        get().setWorktreeCreating(sessionId, true);
+        const stillActive = await window.pivis
+          .invoke("session.worktreeOperationStatus", { sessionId })
+          .catch(() => true);
+        get().setWorktreeCreating(sessionId, stillActive);
+      }
+      if (res.worktreeOperationError) {
+        get().setWorktreeError(sessionId, res.worktreeOperationError);
+      }
       if (res.worktree) {
-        get().applyWorktree(sessionId, {
-          worktreePath: res.worktree.path,
-          branch: res.worktree.branch,
-          name: res.worktree.name,
-          base: res.worktree.base,
-        });
+        get().applyWorktree(
+          sessionId,
+          {
+            worktreePath: res.worktree.path,
+            branch: res.worktree.branch,
+            name: res.worktree.name,
+            base: res.worktree.base,
+          },
+          res.worktreeIdentityRevision,
+        );
+      } else {
+        get().applyWorkspace(sessionId, res.worktreeIdentityRevision);
+      }
+      // Re-query after the renderer owns the record. Revision fencing makes
+      // this safe whether a newer worktreeChanged event arrives before or
+      // after the response, and recovers events dropped during reconstruction.
+      try {
+        const snapshot = await window.pivis.invoke("session.worktreeSnapshot", { sessionId });
+        if (snapshot.worktree) {
+          get().applyWorktree(
+            sessionId,
+            {
+              worktreePath: snapshot.worktree.path,
+              branch: snapshot.worktree.branch,
+              name: snapshot.worktree.name,
+              base: snapshot.worktree.base,
+            },
+            snapshot.revision,
+          );
+        } else {
+          get().applyWorkspace(sessionId, snapshot.revision);
+        }
+      } catch {
+        // The initial revisioned snapshot remains valid if the session closed
+        // before the follow-up query completed.
       }
       // Persisted history replaces the initial transcript, but renderer attach
       // and live events can race a large file read. Read only while the session

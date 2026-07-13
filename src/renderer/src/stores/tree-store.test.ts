@@ -328,7 +328,9 @@ describe("tree-store — navigateTo", () => {
     expect(sentNavigate).toBe(true);
     // seedHistory applied — has a user block.
     const transcript = useSessionsStore.getState().sessions.get(SESSION_A)?.transcript;
-    expect(transcript && allTranscriptBlocks(transcript).some((b) => b.type === "user")).toBe(true);
+    expect(
+      transcript && allTranscriptBlocks(transcript).some((block) => block.type === "user"),
+    ).toBe(true);
 
     // editorText injected.
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection?.text).toBe(

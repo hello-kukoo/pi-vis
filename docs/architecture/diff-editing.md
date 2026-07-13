@@ -13,11 +13,69 @@ Read it before editing `components/diff/DiffEdit*`, `lib/diff/{splice,
 auto-indent,edit-range,edit-anchor}.ts`, the diff-store edit-session state, or
 the `git.writeWorkingFile` IPC.
 
+## Base-relative commit ranges
+
+The header's **CommitRangePicker** scopes the viewer to an inclusive commit
+band on the selected base branch's merge-base → current `HEAD` first-parent
+path. A concrete base branch is required; **HEAD** keeps the picker in Working
+tree mode with guidance. `git.commits` returns immutable full object IDs plus
+short SHA, subject, author, and author time, oldest-to-newest internally. The
+picker displays newest-first, supports a one-commit selection or two endpoint
+clicks in either order, and normalizes the draft to `{start, end}` in history
+order. Apply compares `start^` through `end`, so both endpoint commits are
+included. Cancel, outside click, and Escape discard the draft.
+
+Historical range mode is deliberately separate from working-tree mode:
+
+- `git.changes` receives the selected base and immutable range. Main validates
+  full canonical IDs and membership/order within the bounded first-parent path.
+  It first proves the merge base itself lies on HEAD's first-parent chain;
+  second-parent-only topologies are rejected rather than offering commits past
+  a false boundary. Main then returns concrete `{parent, end}` object IDs with
+  the manifest.
+  `git.fileDiff` uses that context directly (while verifying it still matches
+  `start^` and `end`) rather than re-resolving mutable refs, so lazy reads remain
+  valid after branch movement or validation-cache eviction. Manual manifest
+  refreshes carry the same context and rebuild from those concrete objects
+  rather than mutable refs. Mutable base/HEAD range validation is deduplicated
+  only while concurrent requests are in flight; settled successes are never
+  cached, so every fresh Apply rechecks current first-parent topology. It reads both sides
+  from git objects and pins Git's attribute source to the immutable range
+  endpoint so later `.gitattributes` edits cannot alter historical binary
+  classification. Main capability-checks `git check-attr --source`; Git older
+  than 2.42 gets a clear unsupported-version error rather than silently using
+  ambient attributes. Ambient disk changes and
+  untracked files cannot leak into the result.
+- Editing and code comments are disabled because a historical object diff has
+  no writable working-tree side. An open comment editor registers immutable
+  custody in the diff store, disabling and guarding base/range changes until the
+  editor is saved or cancelled so its component-local draft cannot be unmounted.
+  Comment reconciliation, working-tree
+  auto-refresh, stale indicators, and badge semantics remain working-tree-only.
+- Comparison generations fence late list, file, tokenization, and worker-search
+  responses whenever base/range changes. Both ordinary lazy loads and
+  worker-search fetches carry the manifest's immutable historical context. File
+  contents remain lazy and search remains worker-backed with bounded concurrency.
+  Historical blobs that pass the configured size check are streamed from
+  `git cat-file` with that same byte bound instead of inheriting the 64 MiB
+  metadata-command buffer.
+- The chosen base remains remembered per session for the app run, but
+  `commitRange` is ephemeral: opening and closing the viewer both clear it.
+  Reopening therefore always starts at **Working tree**, as does selecting a
+  different base.
+
+Commit history is capped to the newest 500 candidates and rendered in compact
+fixed-height rows with the shared virtual-list primitive, so long histories show
+several useful subjects without mounting the full list. Historical changed-file
+enumeration is streamed and stopped after the 501st descriptor; both browsing
+and search manifests are capped at 500. Working-tree mode retains complete
+descriptor-only search because its status enumeration has separate bounds.
+
 ## Diff rendering scalability
 
 `DiffFileSection` renders browsing rows in bounded chunks (`DIFF_ROW_RENDER_CHUNK`) with a hard normal-browsing DOM ceiling (`DIFF_ROW_RENDER_MAX`) so pathological diffs cannot mount tens of thousands of row nodes. **Search discovery is never render-capped.** It covers every add/del row and hunk-context row, plus unchanged gap context the user explicitly revealed; only the still-collapsed middle of an unchanged gap is outside the logical diff projection. A match after the DOM ceiling is shown as a small targeted row island with an omitted-range notice, never by mounting every preceding row or growing `renderCap`.
 
-Search uses the complete descriptor-only `GitChangesResult.searchFiles` manifest, even when the browsable rail/section list is capped at 500 files. File contents remain lazy: `useDiffSearch` fetches at most two files concurrently and sends model construction/scanning to a Vite module worker. Normal/active file loading also builds its model through `diff-model.worker.ts`, so jumping to an uncached distant result does not run jsdiff on the renderer interaction task. Results return as per-file transferable `Int32Array` data, coalesced to at most one React update per animation frame, so React stores only compact batches and decodes the active occurrence on demand instead of flattening every match into objects on each render. Query, case, projection, base, refresh, viewer-close, and session changes dispose the old worker generation; unavoidable late IPC results are ignored. Partial counts use `N+ · X/Y files`, do not wrap navigation until complete, and explicitly report binary/too-large/failed files as unavailable instead of silently claiming complete coverage. See [ADR 0001](../decisions/0001-worker-backed-diff-search.md).
+Search uses `GitChangesResult.searchFiles`: the complete descriptor-only working-tree manifest, or the same bounded 500-file manifest as historical browsing. File contents remain lazy: `useDiffSearch` fetches at most two files concurrently and sends model construction/scanning to a Vite module worker. Normal/active file loading also builds its model through `diff-model.worker.ts`, so jumping to an uncached distant result does not run jsdiff on the renderer interaction task. Results return as per-file transferable `Int32Array` data, coalesced to at most one React update per animation frame, so React stores only compact batches and decodes the active occurrence on demand instead of flattening every match into objects on each render. Query, case, projection, base, refresh, viewer-close, and session changes dispose the old worker generation; unavoidable late IPC results are ignored. Partial counts use `N+ · X/Y files`, do not wrap navigation until complete, and explicitly report binary/too-large/failed files as unavailable instead of silently claiming complete coverage. See [ADR 0001](../decisions/0001-worker-backed-diff-search.md).
 
 ## Segment model
 

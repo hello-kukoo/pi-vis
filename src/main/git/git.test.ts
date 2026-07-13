@@ -14,8 +14,21 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getBranches, getChanges, getChangesCount, getFileDiff, writeWorkingFile } from "./git.js";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  applyCheckoutChanges,
+  captureCheckoutChanges,
+  checkoutStillMatchesSnapshot,
+  cleanupCreatedWorktree,
+  copyCheckoutChanges,
+  disposeCheckoutChangesSnapshot,
+  getBranches,
+  getChanges,
+  getChangesCount,
+  getCommits,
+  getFileDiff,
+  writeWorkingFile,
+} from "./git.js";
 
 let tmpRoot = "";
 let workDir = "";
@@ -474,6 +487,232 @@ describe("getChanges with base", () => {
   });
 });
 
+describe("commit ranges", () => {
+  function commit(message: string): string {
+    git(workDir, ["add", "-A"]);
+    git(workDir, [...COMMIT_C, "commit", "-m", message]);
+    return git(workDir, ["rev-parse", "HEAD"]);
+  }
+
+  it("lists oldest-to-newest metadata with full SHAs", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "a.ts"), "one\n");
+    const one = commit("first feature");
+    write(path.join(workDir, "b.ts"), "two\n");
+    const two = commit("second feature");
+
+    const res = await getCommits(workDir, "main");
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.commits.map((item) => item.sha)).toEqual([one, two]);
+    expect(res.commits.map((item) => item.subject)).toEqual(["first feature", "second feature"]);
+    expect(res.commits.every((item) => /^[0-9a-f]{40}$/.test(item.sha))).toBe(true);
+    expect(res.commits.every((item) => item.authoredAt > 0 && item.shortSha.length > 0)).toBe(true);
+  });
+
+  it("rejects a merge base that is only on a non-first-parent lineage", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "side"]);
+    write(path.join(workDir, "side.ts"), "side\n");
+    commit("side commit");
+    git(workDir, ["checkout", "main"]);
+    write(path.join(workDir, "main.ts"), "main\n");
+    commit("main commit");
+    git(workDir, [...COMMIT_C, "merge", "--no-ff", "side", "-m", "merge side"]);
+
+    const result = await getCommits(workDir, "side");
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("first-parent");
+  });
+
+  it("uses inclusive immutable ranges and never reads dirty or untracked disk state", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "a.ts"), "first\n");
+    const first = commit("first");
+    write(path.join(workDir, "a.ts"), "second\n");
+    write(path.join(workDir, "b.ts"), "added\n");
+    const second = commit("second");
+    write(path.join(workDir, "a.ts"), "DIRTY\n");
+    write(path.join(workDir, "untracked.ts"), "not historical\n");
+
+    const range = { start: first, end: second };
+    const changes = await getChanges(workDir, "main", range);
+    expect(changes.kind).toBe("ok");
+    if (changes.kind !== "ok") return;
+    expect(changes.files.map((file) => file.path)).toEqual(["a.ts", "b.ts"]);
+    const a = changes.files.find((file) => file.path === "a.ts")!;
+    const diff = await getFileDiff(workDir, a, "main", undefined, range);
+    expect(diff.kind).toBe("ok");
+    if (diff.kind !== "ok") return;
+    expect(diff.oldText).toBe("export const a = 1;\n");
+    expect(diff.newText).toBe("second\n");
+  });
+
+  it("bounds historical browsing and search manifests", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    for (let index = 0; index < 501; index++) {
+      write(path.join(workDir, `generated-${index.toString().padStart(3, "0")}.ts`), `${index}\n`);
+    }
+    const sha = commit("many historical files");
+
+    const result = await getChanges(workDir, "main", { start: sha, end: sha });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.truncated).toBe(true);
+    expect(result.files).toHaveLength(500);
+    expect(result.searchFiles).toHaveLength(500);
+    expect(result.historicalContext).toMatchObject({ end: sha });
+  });
+
+  it("keeps lazy historical reads immutable after cache eviction and ref movement", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "historical.ts"), "selected\n");
+    const selected = commit("selected historical change");
+    const shas = [selected];
+    for (let index = 0; index < 66; index++) {
+      write(path.join(workDir, "later.ts"), `${index}\n`);
+      shas.push(commit(`later ${index}`));
+    }
+    const range = { start: selected, end: selected };
+    const manifest = await getChanges(workDir, "main", range);
+    expect(manifest.kind).toBe("ok");
+    if (manifest.kind !== "ok") return;
+    const file = manifest.files.find((candidate) => candidate.path === "historical.ts")!;
+    for (const sha of shas.slice(1)) {
+      const eviction = await getChanges(workDir, "main", { start: sha, end: sha });
+      expect(eviction.kind).toBe("ok");
+    }
+    git(workDir, ["checkout", "main"]);
+
+    const freshlyApplied = await getChanges(workDir, "main", range);
+    expect(freshlyApplied.kind).toBe("error");
+    const stale = await getFileDiff(workDir, file, "main", undefined, range);
+    expect(stale.kind).toBe("error");
+    const immutable = await getFileDiff(
+      workDir,
+      file,
+      "main",
+      undefined,
+      range,
+      manifest.historicalContext,
+    );
+    expect(immutable.kind).toBe("ok");
+    if (immutable.kind === "ok") expect(immutable.newText).toBe("selected\n");
+    const refreshed = await getChanges(workDir, "main", range, manifest.historicalContext);
+    expect(refreshed.kind).toBe("ok");
+    if (refreshed.kind === "ok") {
+      expect(refreshed.files.some((candidate) => candidate.path === "historical.ts")).toBe(true);
+    }
+  }, 15_000);
+
+  it("reports an expected historical blob that cannot be read", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "present.ts"), "present\n");
+    const sha = commit("feature file");
+
+    const result = await getFileDiff(
+      workDir,
+      { path: "missing.ts", status: "A", untracked: false },
+      "main",
+      undefined,
+      { start: sha, end: sha },
+    );
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("missing.ts");
+  });
+
+  it("streams historical blobs beyond the metadata command buffer", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, ".gitattributes"), "large.txt -diff\n");
+    const size = 64 * 1024 * 1024 + 1024;
+    fs.writeFileSync(path.join(workDir, "large.txt"), Buffer.alloc(size, 0x78));
+    const sha = commit("large historical blob");
+    const range = { start: sha, end: sha };
+    const changes = await getChanges(workDir, "main", range);
+    expect(changes.kind).toBe("ok");
+    if (changes.kind !== "ok") return;
+    const file = changes.files.find((candidate) => candidate.path === "large.txt")!;
+
+    const result = await getFileDiff(workDir, file, "main", size + 1024, range);
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.binary).toBe(true);
+      expect(result.newText).toHaveLength(size);
+    }
+  }, 30_000);
+
+  it("preserves Git's attribute-driven binary classification during lazy loading", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, ".gitattributes"), "*.dat -diff\n");
+    write(path.join(workDir, "fixture.dat"), "plain ASCII classified as binary\n");
+    const sha = commit("attribute binary");
+    // Move HEAD past the selected range and remove the attribute. Historical
+    // classification must come from `sha`, not this current checkout.
+    fs.rmSync(path.join(workDir, ".gitattributes"));
+    commit("remove binary attribute later");
+    const range = { start: sha, end: sha };
+
+    const changes = await getChanges(workDir, "main", range);
+    expect(changes.kind).toBe("ok");
+    if (changes.kind !== "ok") return;
+    const file = changes.files.find((candidate) => candidate.path === "fixture.dat");
+    expect(file?.binary).toBe(true);
+    const diff = await getFileDiff(workDir, file!, "main", undefined, range);
+    expect(diff.kind).toBe("ok");
+    if (diff.kind === "ok") expect(diff.binary).toBe(true);
+  });
+
+  it("rejects non-concrete bases and invalid, reversed, or out-of-scope ranges", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "a.ts"), "one\n");
+    const sha = commit("one");
+    expect((await getCommits(workDir, "HEAD")).kind).toBe("error");
+    expect((await getCommits(workDir, "missing-base")).kind).toBe("error");
+    const unrelatedTree = git(workDir, ["mktree"]);
+    const unrelated = git(workDir, [...COMMIT_C, "commit-tree", unrelatedTree, "-m", "unrelated"]);
+    git(workDir, ["branch", "unrelated", unrelated]);
+    const unrelatedResult = await getCommits(workDir, "unrelated");
+    expect(unrelatedResult.kind).toBe("error");
+    if (unrelatedResult.kind === "error") expect(unrelatedResult.message).toContain("unrelated");
+    expect((await getChanges(workDir, "main", { start: sha.slice(0, 8), end: sha })).kind).toBe(
+      "error",
+    );
+    expect((await getChanges(workDir, "main", { start: sha, end: "f".repeat(40) })).kind).toBe(
+      "error",
+    );
+
+    write(path.join(workDir, "a.ts"), "two\n");
+    const later = commit("two");
+    const reversed = await getChanges(workDir, "main", { start: later, end: sha });
+    expect(reversed.kind).toBe("error");
+  });
+
+  it("uses first-parent history around a merge", async () => {
+    makeRepo();
+    git(workDir, ["checkout", "-b", "feature"]);
+    write(path.join(workDir, "feature.ts"), "feature\n");
+    commit("feature work");
+    git(workDir, ["checkout", "-b", "side", "main"]);
+    write(path.join(workDir, "side.ts"), "side\n");
+    commit("side work");
+    git(workDir, ["checkout", "feature"]);
+    git(workDir, [...COMMIT_C, "merge", "--no-ff", "side", "-m", "merge side"]);
+    const res = await getCommits(workDir, "main");
+    expect(res.kind).toBe("ok");
+    if (res.kind !== "ok") return;
+    expect(res.commits.map((item) => item.subject)).not.toContain("side work");
+    expect(res.commits.map((item) => item.subject)).toContain("merge side");
+  });
+});
+
 describe("getChanges fingerprint", () => {
   /** Convenience: run getChanges and return the fingerprint, failing if not ok. */
   async function fp(root: string, base?: string): Promise<string> {
@@ -642,6 +881,241 @@ describe("createWorktree", () => {
     git(workDir, ["branch", "-D", result.branch]);
   });
 
+  it("resolves HEAD from an active checkout without changing the owning workspace", async () => {
+    makeRepo();
+    const sourcePath = path.join(path.dirname(workDir), `${path.basename(workDir)}-active-source`);
+    git(workDir, ["worktree", "add", "-b", "active/source", sourcePath, "main"]);
+    write(path.join(sourcePath, "active.ts"), "export const active = true;\n");
+    git(sourcePath, ["add", "active.ts"]);
+    git(sourcePath, [...COMMIT_C, "commit", "-m", "active source"]);
+    const sourceHead = git(sourcePath, ["rev-parse", "HEAD"]).trim();
+    expect(sourceHead).not.toBe(git(workDir, ["rev-parse", "HEAD"]).trim());
+
+    const { createWorktree } = await import("./git.js");
+    const result = await createWorktree(workDir, "HEAD", sourcePath);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.base).toBe("active/source");
+    expect(git(result.worktreePath, ["rev-parse", "HEAD"]).trim()).toBe(sourceHead);
+
+    git(workDir, ["worktree", "remove", "--force", result.worktreePath]);
+    git(workDir, ["branch", "-D", result.branch]);
+    git(workDir, ["worktree", "remove", "--force", sourcePath]);
+    git(workDir, ["branch", "-D", "active/source"]);
+  });
+
+  it("copies staged, unstaged, and untracked changes without mutating the source", async () => {
+    makeRepo();
+    write(path.join(workDir, ".gitignore"), "ignored.local\n");
+    write(path.join(workDir, "delete-unstaged.txt"), "remove me\n");
+    write(path.join(workDir, "delete-staged.txt"), "remove me too\n");
+    git(workDir, ["add", ".gitignore", "delete-unstaged.txt", "delete-staged.txt"]);
+    git(workDir, [...COMMIT_C, "commit", "-m", "ignore local files"]);
+
+    write(path.join(workDir, "a.ts"), "export const a = 2;\n");
+    git(workDir, ["add", "a.ts"]);
+    write(path.join(workDir, "a.ts"), "export const a = 3;\n");
+    write(path.join(workDir, "staged.ts"), "export const staged = true;\n");
+    git(workDir, ["add", "staged.ts"]);
+    write(path.join(workDir, "notes", "local.txt"), "untracked\n");
+    write(path.join(workDir, "private", "credentials"), "secret\n");
+    fs.chmodSync(path.join(workDir, "private"), 0o700);
+    fs.rmSync(path.join(workDir, "delete-unstaged.txt"));
+    git(workDir, ["rm", "delete-staged.txt"]);
+    fs.writeFileSync(path.join(workDir, "untracked.bin"), Buffer.from([0, 1, 2, 255]));
+    write(path.join(workDir, "intent.ts"), "export const intent = true;\n");
+    git(workDir, ["add", "-N", "intent.ts"]);
+    const embedded = path.join(workDir, "embedded");
+    fs.mkdirSync(embedded);
+    git(embedded, [...INIT_C, "init"]);
+    write(path.join(embedded, "nested.txt"), "nested repository\n");
+    write(path.join(workDir, "ignored.local"), "do not transfer\n");
+    const sourceStatus = git(workDir, ["status", "--porcelain=v1"]);
+
+    const { createWorktree } = await import("./git.js");
+    const created = await createWorktree(workDir, "HEAD", workDir);
+    expect(created.kind).toBe("ok");
+    if (created.kind !== "ok") return;
+
+    const copied = await copyCheckoutChanges(workDir, created.worktreePath);
+    if (copied.kind === "error") throw new Error(copied.message);
+    expect(copied).toEqual({ kind: "ok", changed: true });
+    expect(git(workDir, ["status", "--porcelain=v1"])).toBe(sourceStatus);
+    expect(git(created.worktreePath, ["status", "--porcelain=v1"])).toBe(sourceStatus);
+    expect(fs.readFileSync(path.join(created.worktreePath, "a.ts"), "utf8")).toContain("a = 3");
+    expect(fs.readFileSync(path.join(created.worktreePath, "untracked.bin"))).toEqual(
+      Buffer.from([0, 1, 2, 255]),
+    );
+    expect(fs.existsSync(path.join(created.worktreePath, "ignored.local"))).toBe(false);
+    expect(fs.existsSync(path.join(created.worktreePath, "embedded", ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(created.worktreePath, "delete-unstaged.txt"))).toBe(false);
+    expect(fs.existsSync(path.join(created.worktreePath, "delete-staged.txt"))).toBe(false);
+    expect(fs.statSync(path.join(created.worktreePath, "private")).mode & 0o777).toBe(0o700);
+    expect(git(created.worktreePath, ["diff", "--name-only"])).toContain("intent.ts");
+    expect(git(created.worktreePath, ["diff", "--cached", "--name-only"])).not.toContain(
+      "intent.ts",
+    );
+
+    git(workDir, ["worktree", "remove", "--force", created.worktreePath]);
+    git(workDir, ["branch", "-D", created.branch]);
+  });
+
+  it("captures nested-workspace state in repository-root coordinates", async () => {
+    makeRepo();
+    const nested = path.join(workDir, "packages", "app");
+    write(path.join(nested, "tracked.ts"), "export const value = 1;\n");
+    git(workDir, ["add", "packages/app/tracked.ts"]);
+    git(workDir, [...COMMIT_C, "commit", "-m", "add nested workspace"]);
+
+    write(path.join(nested, "tracked.ts"), "export const value = 2;\n");
+    git(nested, ["add", "tracked.ts"]);
+    write(path.join(nested, "tracked.ts"), "export const value = 3;\n");
+    write(path.join(nested, "nested-untracked.txt"), "nested\n");
+    write(path.join(workDir, "sibling", "root-untracked.txt"), "sibling\n");
+    write(path.join(nested, "intent.ts"), "intent\n");
+    git(nested, ["add", "-N", "intent.ts"]);
+    const sourceStatus = git(workDir, ["status", "--porcelain=v1"]);
+
+    const captured = await captureCheckoutChanges(nested);
+    if (captured.kind === "error") throw new Error(captured.message);
+    const { createWorktree } = await import("./git.js");
+    const created = await createWorktree(workDir, captured.snapshot.head);
+    expect(created.kind).toBe("ok");
+    if (created.kind !== "ok") {
+      await disposeCheckoutChangesSnapshot(captured.snapshot);
+      return;
+    }
+
+    try {
+      expect(await applyCheckoutChanges(captured.snapshot, created.worktreePath)).toEqual({
+        kind: "ok",
+        changed: true,
+      });
+      expect(git(created.worktreePath, ["status", "--porcelain=v1"])).toBe(sourceStatus);
+      expect(
+        fs.readFileSync(
+          path.join(created.worktreePath, "packages", "app", "nested-untracked.txt"),
+          "utf8",
+        ),
+      ).toBe("nested\n");
+      expect(
+        fs.readFileSync(path.join(created.worktreePath, "sibling", "root-untracked.txt"), "utf8"),
+      ).toBe("sibling\n");
+      expect(fs.existsSync(path.join(created.worktreePath, "packages", "app", "intent.ts"))).toBe(
+        true,
+      );
+    } finally {
+      await disposeCheckoutChangesSnapshot(captured.snapshot);
+      git(workDir, ["worktree", "remove", "--force", created.worktreePath]);
+      git(workDir, ["branch", "-D", created.branch]);
+    }
+  });
+
+  it("applies the captured snapshot even if the source HEAD changes during checkout", async () => {
+    makeRepo();
+    write(path.join(workDir, "a.ts"), "export const a = 2;\n");
+    git(workDir, ["add", "a.ts"]);
+    const captured = await captureCheckoutChanges(workDir);
+    if (captured.kind === "error") throw new Error(captured.message);
+
+    git(workDir, [...COMMIT_C, "commit", "-m", "source advances"]);
+    const { createWorktree } = await import("./git.js");
+    const created = await createWorktree(workDir, captured.snapshot.head);
+    expect(created.kind).toBe("ok");
+    if (created.kind !== "ok") {
+      await disposeCheckoutChangesSnapshot(captured.snapshot);
+      return;
+    }
+
+    try {
+      expect(await applyCheckoutChanges(captured.snapshot, created.worktreePath)).toEqual({
+        kind: "ok",
+        changed: true,
+      });
+      expect(fs.readFileSync(path.join(created.worktreePath, "a.ts"), "utf8")).toContain("a = 2");
+      expect(git(created.worktreePath, ["diff", "--cached", "--name-only"])).toBe("a.ts");
+    } finally {
+      await disposeCheckoutChangesSnapshot(captured.snapshot);
+      git(workDir, ["worktree", "remove", "--force", created.worktreePath]);
+      git(workDir, ["branch", "-D", created.branch]);
+    }
+  });
+
+  it("rejects an untracked payload that changes while its snapshot is being copied", async () => {
+    makeRepo();
+    const changingPath = path.join(workDir, "a-changing.txt");
+    write(changingPath, "before\n");
+    write(path.join(workDir, "z-other.txt"), "other\n");
+    const originalCopyFile = fs.promises.copyFile.bind(fs.promises);
+    let mutated = false;
+    const copySpy = vi.spyOn(fs.promises, "copyFile").mockImplementation(async (...args) => {
+      await originalCopyFile(...args);
+      if (
+        !mutated &&
+        String(args[0]) === changingPath &&
+        String(args[1]).includes("pi-vis-worktree-changes-")
+      ) {
+        mutated = true;
+        write(changingPath, "after\n");
+      }
+    });
+
+    try {
+      const captured = await captureCheckoutChanges(workDir);
+      expect(mutated).toBe(true);
+      expect(captured).toEqual({
+        kind: "error",
+        message: "The checkout changed while local changes were being captured. Try again.",
+      });
+    } finally {
+      copySpy.mockRestore();
+    }
+  });
+
+  it("rejects a stale snapshot immediately before runtime detachment", async () => {
+    makeRepo();
+    write(path.join(workDir, "local.txt"), "first\n");
+    const captured = await captureCheckoutChanges(workDir);
+    if (captured.kind === "error") throw new Error(captured.message);
+
+    try {
+      write(path.join(workDir, "local.txt"), "changed after capture\n");
+      expect(await checkoutStillMatchesSnapshot(workDir, captured.snapshot)).toEqual({
+        kind: "error",
+        message: "The current checkout changed while the worktree was being created. Try again.",
+      });
+    } finally {
+      await disposeCheckoutChangesSnapshot(captured.snapshot);
+    }
+  });
+
+  it("rejects dirty submodules before creating a destination worktree", async () => {
+    makeRepo();
+    const submoduleRepo = fs.mkdtempSync(path.join(tmpRoot, "submodule-"));
+    git(submoduleRepo, [...INIT_C, "init"]);
+    write(path.join(submoduleRepo, "sub.txt"), "committed\n");
+    git(submoduleRepo, ["add", "sub.txt"]);
+    git(submoduleRepo, [...COMMIT_C, "commit", "-m", "submodule init"]);
+    git(workDir, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      submoduleRepo,
+      "vendor/sub",
+    ]);
+    git(workDir, [...COMMIT_C, "commit", "-am", "add submodule"]);
+    write(path.join(workDir, "vendor/sub/only-untracked.txt"), "dirty\n");
+
+    const captured = await captureCheckoutChanges(workDir);
+
+    expect(captured).toEqual({
+      kind: "error",
+      message: "Commit or clean submodule changes before creating a worktree.",
+    });
+  });
+
   it("handles collision by generating a different name", async () => {
     makeRepo();
 
@@ -665,6 +1139,89 @@ describe("createWorktree", () => {
     git(workDir, ["branch", "-D", dupBranch]);
     git(workDir, ["worktree", "remove", "--force", second.worktreePath]);
     git(workDir, ["branch", "-D", second.branch]);
+  });
+
+  it("reserves the destination before git begins populating it", async () => {
+    makeRepo();
+    const { createWorktree } = await import("./git.js");
+    let reservedPath: string | undefined;
+    let absentWhenReserved = false;
+
+    const result = await createWorktree(workDir, "main", workDir, (candidate) => {
+      reservedPath = candidate;
+      absentWhenReserved = !fs.existsSync(candidate);
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(absentWhenReserved).toBe(true);
+    if (result.kind !== "ok") return;
+    expect(reservedPath).toBe(result.worktreePath);
+    expect(fs.existsSync(result.worktreePath)).toBe(true);
+    git(workDir, ["worktree", "remove", "--force", result.worktreePath]);
+    git(workDir, ["branch", "-D", result.branch]);
+  });
+
+  it("serializes concurrent creation within one repository", async () => {
+    makeRepo();
+    const { createWorktree } = await import("./git.js");
+
+    const [first, second] = await Promise.all([
+      createWorktree(workDir, "main"),
+      createWorktree(workDir, "main"),
+    ]);
+    expect(first.kind).toBe("ok");
+    expect(second.kind).toBe("ok");
+    if (first.kind !== "ok" || second.kind !== "ok") return;
+    expect(first.worktreePath).not.toBe(second.worktreePath);
+    const listing = git(workDir, ["worktree", "list", "--porcelain"]);
+    expect(listing).toContain(first.worktreePath);
+    expect(listing).toContain(second.worktreePath);
+
+    git(workDir, ["worktree", "remove", "--force", first.worktreePath]);
+    git(workDir, ["branch", "-D", first.branch]);
+    git(workDir, ["worktree", "remove", "--force", second.worktreePath]);
+    git(workDir, ["branch", "-D", second.branch]);
+  });
+
+  it("rolls back a fresh worktree before runtime detachment", async () => {
+    makeRepo();
+    const { createWorktree } = await import("./git.js");
+    const result = await createWorktree(workDir, "main");
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    expect(await cleanupCreatedWorktree(workDir, result.worktreePath, result.branch)).toEqual({
+      kind: "ok",
+    });
+    expect(fs.existsSync(result.worktreePath)).toBe(false);
+    expect(() => git(workDir, ["rev-parse", "--verify", result.branch])).toThrow();
+  });
+
+  it("cleans partial checkout artifacts when worktree creation fails", async () => {
+    makeRepo();
+    write(path.join(workDir, ".gitattributes"), "blocked.txt filter=blocked\n");
+    write(path.join(workDir, "blocked.txt"), "cannot checkout\n");
+    git(workDir, ["add", ".gitattributes", "blocked.txt"]);
+    git(workDir, [...COMMIT_C, "commit", "-m", "add required filter fixture"]);
+    git(workDir, ["config", "filter.blocked.smudge", "false"]);
+    git(workDir, ["config", "filter.blocked.required", "true"]);
+    const beforeBranches = git(workDir, [
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/heads/pi-vis-",
+    ]);
+    const beforeWorktrees = git(workDir, ["worktree", "list", "--porcelain"]);
+
+    const { createWorktree } = await import("./git.js");
+    const result = await createWorktree(workDir, "main");
+
+    expect(result.kind).toBe("error");
+    expect(git(workDir, ["for-each-ref", "--format=%(refname)", "refs/heads/pi-vis-"])).toBe(
+      beforeBranches,
+    );
+    expect(git(workDir, ["worktree", "list", "--porcelain"])).toBe(beforeWorktrees);
+    const siblingRoot = path.join(path.dirname(workDir), `${path.basename(workDir)}-worktrees`);
+    expect(fs.readdirSync(siblingRoot)).toEqual([]);
   });
 
   it("returns a descriptive error when the base ref can't be resolved", async () => {
@@ -824,18 +1381,49 @@ describe("inspectWorktree", () => {
     git(otherRepo, ["branch", "-D", "branch"]);
   });
 
-  it("returns 'current workspace' guard when the candidate IS the workspace itself", async () => {
+  it("rejects only the session's actual current checkout", async () => {
     const repo = makeTmpRepo();
     const { inspectWorktree } = await import("./git.js");
-    // Pass the workspace root as the candidate. The realpath'd toplevels
-    // match, so the same-repo check passes but the workspace-self guard
-    // trips.
+    // With no explicit current checkout, the owning workspace is current.
     const res = await inspectWorktree(repo, repo);
     expect(res.kind).toBe("error");
     if (res.kind !== "error") return;
-    expect(res.message).toBe(
-      "That's the current workspace — choose a different worktree directory.",
-    );
+    expect(res.message).toBe("That's already the current checkout.");
+  });
+
+  it("allows a linked-worktree session to return to the primary workspace", async () => {
+    const repo = makeTmpRepo();
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-return-workspace-"));
+    git(repo, ["worktree", "add", "-b", "linked/current", wtDir]);
+    const { inspectWorktree } = await import("./git.js");
+
+    const workspace = await inspectWorktree(repo, repo, wtDir);
+    expect(workspace).toMatchObject({ kind: "ok", path: fs.realpathSync(repo), branch: "main" });
+    const noOp = await inspectWorktree(repo, wtDir, wtDir);
+    expect(noOp).toEqual({ kind: "error", message: "That's already the current checkout." });
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+    git(repo, ["branch", "-D", "linked/current"]);
+  });
+
+  it("reports the canonical workspace top for a nested workspace", async () => {
+    const repo = makeTmpRepo();
+    const nestedWorkspace = path.join(repo, "packages", "app");
+    fs.mkdirSync(nestedWorkspace, { recursive: true });
+    const wtDir = fs.mkdtempSync(path.join(tmpRoot, "inspect-nested-workspace-"));
+    git(repo, ["worktree", "add", "-b", "linked/nested", wtDir]);
+    const { inspectWorktree } = await import("./git.js");
+
+    const result = await inspectWorktree(nestedWorkspace, repo, wtDir);
+    if (result.kind === "error") throw new Error(result.message);
+    expect(result).toMatchObject({
+      kind: "ok",
+      path: fs.realpathSync(repo),
+      workspaceTop: fs.realpathSync(repo),
+    });
+
+    git(repo, ["worktree", "remove", "--force", wtDir]);
+    git(repo, ["branch", "-D", "linked/nested"]);
   });
 
   it("returns a short SHA for a detached HEAD", async () => {

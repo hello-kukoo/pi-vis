@@ -48,6 +48,8 @@ export function App(): React.ReactElement {
   const applyTransitionBatch = useSessionsStore((s) => s.applyTransitionBatch);
   const applySubmissionDisposition = useSessionsStore((s) => s.applySubmissionDisposition);
   const applyQueueRestoration = useSessionsStore((s) => s.applyQueueRestoration);
+  const applyWorktree = useSessionsStore((s) => s.applyWorktree);
+  const applyWorkspace = useSessionsStore((s) => s.applyWorkspace);
   const addUiRequest = useSessionsStore((s) => s.addUiRequest);
   const dismissUiRequest = useSessionsStore((s) => s.dismissUiRequest);
   const compact = useSessionsStore((s) => s.headerCompact);
@@ -339,6 +341,11 @@ export function App(): React.ReactElement {
       if (e.key.toLowerCase() !== "g") return;
       e.preventDefault();
       if (showSettings) return;
+      if (
+        activeSessionId &&
+        useSessionsStore.getState().sessions.get(activeSessionId)?.worktreeCreating
+      )
+        return;
       // Defer to overlay viewers — they consume Escape / Cmd+G themselves.
       if (document.querySelector(".picker-overlay, .diff-overlay, .tree-overlay")) return;
       const isOpen = useDiffStore.getState().open;
@@ -418,6 +425,43 @@ export function App(): React.ReactElement {
         // and the user is about to type `/`.
         if (status === "ready") {
           void refreshCommands(sid);
+        }
+      },
+    );
+
+    const unsubWorktreeOperation = window.pivis.on(
+      "session.worktreeOperationChanged",
+      ({ sessionId, active, error }) => {
+        const store = useSessionsStore.getState();
+        const sid = sessionId as SessionId;
+        store.setWorktreeCreating(sid, active);
+        if (error) store.setWorktreeError(sid, error);
+      },
+    );
+
+    const unsubWorktree = window.pivis.on(
+      "session.worktreeChanged",
+      ({ sessionId, revision, worktree }) => {
+        const sid = sessionId as SessionId;
+        const currentRevision = useSessionsStore
+          .getState()
+          .sessions.get(sid)?.worktreeIdentityRevision;
+        if (currentRevision !== undefined && revision < currentRevision) return;
+        const diff = useDiffStore.getState();
+        if (diff.open && diff.sessionId === sid) diff.closeViewer();
+        if (worktree) {
+          applyWorktree(
+            sid,
+            {
+              worktreePath: worktree.path,
+              branch: worktree.branch,
+              name: worktree.name,
+              base: worktree.base,
+            },
+            revision,
+          );
+        } else {
+          applyWorkspace(sid, revision);
         }
       },
     );
@@ -554,6 +598,8 @@ export function App(): React.ReactElement {
       unsubUiReq();
       unsubUiAck();
       unsubStatus();
+      unsubWorktreeOperation();
+      unsubWorktree();
       unsubFileChanged();
       unsubUpdateAvailable();
       unsubUpdateProgress();
@@ -570,6 +616,8 @@ export function App(): React.ReactElement {
     applyTransitionBatch,
     applySubmissionDisposition,
     applyQueueRestoration,
+    applyWorktree,
+    applyWorkspace,
     addUiRequest,
     dismissUiRequest,
     setSessionStatus,

@@ -388,11 +388,26 @@ function RowsView({
   const bumpRenderCap = useDiffStore((s) => s.bumpRenderCap);
   const showNextRows = () => bumpRenderCap(filePath, shownCount + DIFF_ROW_RENDER_CHUNK);
   const [editingLine, setEditingLine] = useState<number | null>(null);
+  const setCommentEditorOpen = useDiffStore((s) => s.setCommentEditorOpen);
+  const commentEditorOpen = editingLine !== null;
+  useEffect(() => {
+    setCommentEditorOpen(filePath, commentEditorOpen);
+    return () => {
+      if (commentEditorOpen) setCommentEditorOpen(filePath, false);
+    };
+  }, [commentEditorOpen, filePath, setCommentEditorOpen]);
+  const historicalRange = useDiffStore((s) => s.commitRange !== null);
+  const worktreeSwitching = useSessionsStore(
+    (s) => s.sessions.get(sessionId)?.worktreeCreating === true,
+  );
+  const historical = historicalRange || worktreeSwitching;
   const commentsForSession = useSessionsStore((s) => s.diffComments.get(sessionId));
+  // Historical comparisons are immutable: avoid both comment lookups and reconciliation.
+  const visibleComments = historical ? undefined : commentsForSession;
   const reconcileDiffCommentsForFile = useSessionsStore((s) => s.reconcileDiffCommentsForFile);
   useEffect(() => {
-    reconcileDiffCommentsForFile(sessionId, filePath, model);
-  }, [sessionId, filePath, model, reconcileDiffCommentsForFile]);
+    if (!historical) reconcileDiffCommentsForFile(sessionId, filePath, model);
+  }, [sessionId, filePath, model, reconcileDiffCommentsForFile, historical]);
 
   // Inline edit: while a card is open for this file, the selected row slice is
   // replaced by the card and the in-range rows/threads are suppressed.
@@ -515,7 +530,7 @@ function RowsView({
             );
           }
           if (row.type === "split-context") {
-            const comment = commentForLine(commentsForSession, filePath, row.rightNo);
+            const comment = commentForLine(visibleComments, filePath, row.rightNo);
             return (
               <Fragment key={idx}>
                 <div className="diff-row diff-row--split">
@@ -525,6 +540,7 @@ function RowsView({
                     comment={comment}
                     editingLine={editingLine}
                     setEditingLine={setEditingLine}
+                    commentsEnabled={!historical}
                   />
                   <div className="diff-row__num">{row.leftNo}</div>
                   <div
@@ -569,11 +585,12 @@ function RowsView({
                   viewMode="split"
                   onEdit={() => setEditingLine(row.rightNo)}
                   onClose={() => setEditingLine(null)}
+                  commentsEnabled={!historical}
                 />
               </Fragment>
             );
           }
-          const comment = commentForLine(commentsForSession, filePath, row.rightNo);
+          const comment = commentForLine(visibleComments, filePath, row.rightNo);
           return (
             <Fragment key={idx}>
               <div className="diff-row diff-row--split">
@@ -583,6 +600,7 @@ function RowsView({
                   comment={comment}
                   editingLine={editingLine}
                   setEditingLine={setEditingLine}
+                  commentsEnabled={!historical}
                 />
                 <div
                   className={`diff-row__num${row.leftText === "" ? " diff-row__num--empty" : ""}`}
@@ -637,6 +655,7 @@ function RowsView({
                   if (row.rightNo !== null) setEditingLine(row.rightNo);
                 }}
                 onClose={() => setEditingLine(null)}
+                commentsEnabled={!historical}
               />
             </Fragment>
           );
@@ -709,7 +728,7 @@ function RowsView({
           );
         }
         if (row.type === "context") {
-          const comment = commentForLine(commentsForSession, filePath, row.line.newNo);
+          const comment = commentForLine(visibleComments, filePath, row.line.newNo);
           return (
             <Fragment key={idx}>
               <div className="diff-row" data-line-idx={row.lineIdx}>
@@ -719,6 +738,7 @@ function RowsView({
                   comment={comment}
                   editingLine={editingLine}
                   setEditingLine={setEditingLine}
+                  commentsEnabled={!historical}
                 />
                 <div className="diff-row__num">{row.line.oldNo}</div>
                 <div className="diff-row__num">{row.line.newNo}</div>
@@ -743,6 +763,7 @@ function RowsView({
                 viewMode="unified"
                 onEdit={() => setEditingLine(row.line.newNo)}
                 onClose={() => setEditingLine(null)}
+                commentsEnabled={!historical}
               />
             </Fragment>
           );
@@ -756,6 +777,7 @@ function RowsView({
                 comment={undefined}
                 editingLine={editingLine}
                 setEditingLine={setEditingLine}
+                commentsEnabled={!historical}
               />
               <div className="diff-row__num">{row.line.oldNo}</div>
               <div className="diff-row__num diff-row__num--empty" />
@@ -772,7 +794,7 @@ function RowsView({
             </div>
           );
         }
-        const comment = commentForLine(commentsForSession, filePath, row.line.newNo);
+        const comment = commentForLine(visibleComments, filePath, row.line.newNo);
         return (
           <Fragment key={idx}>
             <div className="diff-row diff-row--add" data-line-idx={row.lineIdx}>
@@ -782,6 +804,7 @@ function RowsView({
                 comment={comment}
                 editingLine={editingLine}
                 setEditingLine={setEditingLine}
+                commentsEnabled={!historical}
               />
               <div className="diff-row__num diff-row__num--empty" />
               <div className="diff-row__num">{row.line.newNo}</div>
@@ -806,6 +829,7 @@ function RowsView({
               viewMode="unified"
               onEdit={() => setEditingLine(row.line.newNo)}
               onClose={() => setEditingLine(null)}
+              commentsEnabled={!historical}
             />
           </Fragment>
         );
@@ -867,14 +891,16 @@ function CommentCell({
   comment,
   editingLine,
   setEditingLine,
+  commentsEnabled,
 }: {
   filePath: string;
   lineNumber: number | null;
   comment: CodeComment | undefined;
   editingLine: number | null;
   setEditingLine: React.Dispatch<React.SetStateAction<number | null>>;
+  commentsEnabled: boolean;
 }): React.ReactElement {
-  if (lineNumber === null) return <div className="diff-row__comment-cell" />;
+  if (!commentsEnabled || lineNumber === null) return <div className="diff-row__comment-cell" />;
   const stale = comment?.anchorStatus === "stale";
   const relocated = comment?.anchorStatus === "relocated";
   const open = editingLine === lineNumber;
@@ -912,6 +938,7 @@ function CommentThreadRow({
   viewMode,
   onEdit,
   onClose,
+  commentsEnabled,
 }: {
   sessionId: SessionId;
   filePath: string;
@@ -922,8 +949,9 @@ function CommentThreadRow({
   viewMode: "unified" | "split";
   onEdit: () => void;
   onClose: () => void;
+  commentsEnabled: boolean;
 }): React.ReactElement | null {
-  if (lineNumber === null || (!comment && !editing)) return null;
+  if (!commentsEnabled || lineNumber === null || (!comment && !editing)) return null;
   return (
     <div className={`diff-comment-thread diff-comment-thread--${viewMode}`}>
       <div className="diff-comment-thread__rail" aria-hidden />

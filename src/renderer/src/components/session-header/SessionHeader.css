@@ -110,40 +110,6 @@
   justify-content: space-between;
 }
 
-/* Worktree chip — shown next to the session name */
-
-.session-header__worktree-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.214rem;
-  border: none;
-  font-family: var(--font-code);
-  font-size: 0.786em;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  padding: 0.071rem 0.429rem;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  -webkit-app-region: no-drag;
-  flex-shrink: 0;
-  min-width: 0;
-  max-width: 10rem;
-  line-height: 1.4;
-}
-
-.session-header__worktree-chip .icon {
-  flex-shrink: 0;
-}
-
-.session-header__worktree-label {
-  min-width: 0;
-}
-
-.session-header__worktree-chip:hover {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-}
-
 /* ── Controls cluster (shared by title bar and sub-bar) ───────────── */
 
 .session-header__controls {

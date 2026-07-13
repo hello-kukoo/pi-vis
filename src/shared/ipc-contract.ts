@@ -5,8 +5,11 @@ import type {
   GitChangedFile,
   GitChangesCountResult,
   GitChangesResult,
+  GitCommitRange,
+  GitCommitsResult,
   GitFileDiffResult,
   GitFileStatus,
+  GitHistoricalContext,
   GitWriteFileResult,
 } from "./git.js";
 import type { SessionId } from "./ids.js";
@@ -83,6 +86,9 @@ export interface IpcInvokeContract {
           name: string | null;
           preview: string | null;
           sessionStatus: SessionStatus;
+          worktreeOperationInProgress: boolean;
+          worktreeOperationError?: string;
+          worktreeIdentityRevision: number;
           worktree?: WorktreeIdentity | undefined;
         }
       | { outcome: "missing" };
@@ -100,6 +106,11 @@ export interface IpcInvokeContract {
   "session.cancelActivationVisitRelease": {
     req: { sessionId: SessionId; activationVisitId: string };
     res: { cancelled: boolean };
+  };
+  "session.worktreeOperationStatus": { req: { sessionId: SessionId }; res: boolean };
+  "session.worktreeSnapshot": {
+    req: { sessionId: SessionId };
+    res: { revision: number; worktree?: WorktreeIdentity };
   };
   "session.reload": {
     req: { sessionId: SessionId; request: ReloadRequest };
@@ -126,10 +137,22 @@ export interface IpcInvokeContract {
     req: undefined;
     res: { ok: true; markdown: string } | { ok: false; error: string };
   };
+  // Fresh-session creation supplies `base`. Active-session switching instead
+  // supplies `fromCurrentCheckout`; main ignores any renderer base and resolves
+  // the exact HEAD of that session's authoritative current checkout.
   "session.createWorktree": {
-    req: { sessionId: SessionId; base: string };
+    req:
+      | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
+      | { sessionId: SessionId; fromCurrentCheckout: true; base?: never };
     res:
-      | { ok: true; worktreePath: string; branch: string; name: string; base: string }
+      | {
+          ok: true;
+          worktreePath: string;
+          branch: string;
+          name: string;
+          base: string;
+          warning?: string;
+        }
       | { ok: false; error: string };
   };
   // Attach an existing worktree on disk to a fresh session. Mirrors the
@@ -146,7 +169,16 @@ export interface IpcInvokeContract {
   "session.attachWorktree": {
     req: { sessionId: SessionId; path: string };
     res:
-      | { ok: true; worktreePath: string; branch: string; name: string; base: string }
+      | {
+          ok: true;
+          workspace?: false;
+          worktreePath: string;
+          branch: string;
+          name: string;
+          base: string;
+          warning?: string;
+        }
+      | { ok: true; workspace: true; warning?: string }
       | { ok: false; error: string };
   };
   // Live-validate a pasted-or-picked path for the WorktreeBar's
@@ -155,7 +187,7 @@ export interface IpcInvokeContract {
   // The result is advisory only — the authoritative gate is the
   // `session.attachWorktree` IPC re-running `inspectWorktree`.
   "worktree.validate": {
-    req: { workspacePath: string; path: string };
+    req: { workspacePath: string; path: string; currentCheckoutPath?: string };
     res: { ok: true; branch: string; name: string } | { ok: false; error: string };
   };
   // Open the OS directory picker for attaching to an existing worktree.
@@ -357,7 +389,16 @@ export interface IpcInvokeContract {
   // `workspacePath` for a worktree path later without touching every
   // call site. The optional `oldPath` is set on renames; status is the
   // single-letter git code; `untracked` is true for new untracked files.
-  "git.changes": { req: { root: string; base?: string }; res: GitChangesResult };
+  "git.commits": { req: { root: string; base: string }; res: GitCommitsResult };
+  "git.changes": {
+    req: {
+      root: string;
+      base?: string;
+      range?: GitCommitRange;
+      historicalContext?: GitHistoricalContext;
+    };
+    res: GitChangesResult;
+  };
   // Lightweight changed-file count for the header badge while the viewer is
   // closed — one `git status` scan, no line counts / fingerprint / file reads.
   "git.changesCount": { req: { root: string }; res: GitChangesCountResult };
@@ -365,10 +406,14 @@ export interface IpcInvokeContract {
     req: {
       root: string;
       base?: string;
+      range?: GitCommitRange;
+      historicalContext?: GitHistoricalContext;
       path: string;
       oldPath?: string;
       status: GitFileStatus;
       untracked: boolean;
+      /** Git's authoritative numstat classification (including attributes). */
+      binary: boolean;
     };
     res: GitFileDiffResult;
   };
@@ -448,6 +493,19 @@ export interface IpcEventContract {
   // authoritative sessionFile + sessionName are known. The renderer adopts
   // the new file unconditionally (overriding any "only-if-unset" guard),
   // reseeds the transcript, and refreshes the workspace session list.
+  /** Authoritative checkout identity after a live host replacement. Omitted
+   *  worktree means the session returned to its primary Workspace. */
+  "session.worktreeChanged": {
+    sessionId: SessionId;
+    revision: number;
+    worktree?: WorktreeIdentity;
+  };
+  /** Main-owned operation custody survives renderer reloads. */
+  "session.worktreeOperationChanged": {
+    sessionId: SessionId;
+    active: boolean;
+    error?: string;
+  };
   "session.fileChanged": {
     sessionId: SessionId;
     hostInstanceId: string;

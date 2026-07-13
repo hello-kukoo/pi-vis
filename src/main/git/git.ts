@@ -16,15 +16,26 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs, type Stats } from "node:fs";
+import {
+  promises as fs,
+  type BigIntStats,
+  type Stats,
+  createReadStream,
+  constants as fsConstants,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
   GitBranchesResult,
   GitChangedFile,
   GitChangesCountResult,
   GitChangesResult,
+  GitCommitMetadata,
+  GitCommitRange,
+  GitCommitsResult,
   GitFileDiffResult,
   GitFileStatus,
+  GitHistoricalContext,
   GitWorktreeInspect,
   GitWorktreeResult,
   GitWriteFileResult,
@@ -54,6 +65,9 @@ const GIT_TIMEOUT_MS = 15_000;
  *  working-tree checkout — on large repos this can take minutes, far past
  *  the 15s default that governs the cheap read-only commands. */
 const WORKTREE_ADD_TIMEOUT_MS = 10 * 60_000; // 10 minutes
+/** Large configured historical blobs are streamed and may legitimately need
+ *  longer than the ordinary metadata-command budget. */
+const GIT_BLOB_TIMEOUT_MS = 2 * 60_000;
 /** Buffer ceiling — list output is small; file contents are read via fs. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 /** Git's well-known empty-tree object — used to diff a HEAD-less repo's
@@ -93,6 +107,171 @@ function execGitText(
         });
       },
     );
+  });
+}
+
+interface LimitedNulOutput {
+  stdout: string;
+  truncated: boolean;
+}
+
+/** Stream a NUL-delimited Git listing and stop once one record beyond the UI
+ * bound is complete. This bounds main-process memory and IPC payloads even for
+ * ranges touching millions of paths. */
+function execGitNulLimited<T>(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+  parse: (stdout: string) => T[],
+  limit: number,
+): Promise<LimitedNulOutput> {
+  return new Promise((resolve, reject) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let deliberatelyStopped = false;
+    let timedOut = false;
+    let settled = false;
+    const child = spawn("git", args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, GIT_TIMEOUT_MS);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+        return;
+      }
+      const text = Buffer.concat(stdout, stdoutBytes).toString("utf8");
+      resolve({ stdout: text, truncated: parse(text).length > limit });
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (deliberatelyStopped) return;
+      stdout.push(chunk);
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_BUFFER) {
+        child.kill("SIGTERM");
+        finish(new Error("Git path listing exceeded its safe output limit."));
+        return;
+      }
+      const text = Buffer.concat(stdout, stdoutBytes).toString("utf8");
+      if (parse(text).length > limit) {
+        deliberatelyStopped = true;
+        child.stdout.pause();
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr.push(chunk);
+      stderrBytes += chunk.length;
+      while (stderrBytes > 8192 && stderr.length > 1) {
+        const removed = stderr.shift();
+        if (removed) stderrBytes -= removed.length;
+      }
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code, signal) => {
+      if (deliberatelyStopped) {
+        finish();
+        return;
+      }
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const detail = Buffer.concat(stderr).toString("utf8").trim();
+      finish(
+        new Error(
+          detail ||
+            (timedOut
+              ? "Git path listing timed out."
+              : `git exited with code ${code ?? "null"}${signal ? ` (${signal})` : ""}`),
+        ),
+      );
+    });
+  });
+}
+
+function readGitBlobText(
+  object: string,
+  cwd: string,
+  env: Record<string, string>,
+  maxBytes: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    const child = spawn("git", ["cat-file", "blob", object], {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, GIT_BLOB_TIMEOUT_MS);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+        return;
+      }
+      try {
+        resolve(Buffer.concat(stdout, stdoutBytes).toString("utf8"));
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxBytes) {
+        child.kill("SIGTERM");
+        finish(new Error("Historical blob exceeded the configured file-size limit."));
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr.push(chunk);
+      stderrBytes += chunk.length;
+      while (stderrBytes > 8192 && stderr.length > 1) {
+        const removed = stderr.shift();
+        if (removed) stderrBytes -= removed.length;
+      }
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const detail = Buffer.concat(stderr).toString("utf8").trim();
+      finish(
+        new Error(
+          detail ||
+            (timedOut
+              ? "Historical blob read timed out."
+              : `git cat-file exited with code ${code ?? "null"}${signal ? ` (${signal})` : ""}`),
+        ),
+      );
+    });
   });
 }
 
@@ -311,7 +490,399 @@ async function resolveBaseRef(
   return base;
 }
 
-export async function getChanges(root: string, base?: string): Promise<GitChangesResult> {
+interface CommitContext {
+  repoRoot: string;
+  env: Record<string, string>;
+  head: string;
+  mergeBase: string;
+  commits: GitCommitMetadata[];
+  truncated: boolean;
+}
+
+const FULL_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+/** Successful range validation is immutable and shared by the manifest plus
+ * lazy per-file loads. Without this small bounded cache, each visible file
+ * would repeat the merge-base and 500-commit history walk. */
+const rangeValidationCache = new Map<string, Promise<ValidatedRange | GitErrorResult>>();
+const worktreeCreationTails = new Map<string, Promise<void>>();
+
+async function acquireWorktreeCreationLock(repoRoot: string): Promise<() => void> {
+  const key = await fs.realpath(repoRoot).catch(() => path.resolve(repoRoot));
+  const previous = worktreeCreationTails.get(key) ?? Promise.resolve();
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => gate);
+  worktreeCreationTails.set(key, tail);
+  await previous.catch(() => {});
+  return () => {
+    releaseGate();
+    if (worktreeCreationTails.get(key) === tail) worktreeCreationTails.delete(key);
+  };
+}
+
+/** Strictly resolve a concrete base and its first-parent candidate path. */
+async function getCommitContext(
+  root: string,
+  base: string,
+): Promise<CommitContext | GitErrorResult> {
+  const env = { ...(await getSubprocessEnv()), GIT_OPTIONAL_LOCKS: "0" };
+  let repoRoot: string;
+  try {
+    repoRoot = (await execGitText(["rev-parse", "--show-toplevel"], root, env)).stdout.trim();
+  } catch (err) {
+    return mapSpawnError(err);
+  }
+  if (!repoRoot) return { kind: "not-a-repo" };
+  if (!base || base === "HEAD")
+    return { kind: "error", message: "A concrete non-HEAD base branch is required." };
+
+  let head: string;
+  try {
+    head = (
+      await execGitText(["rev-parse", "--verify", "HEAD^{commit}"], repoRoot, env)
+    ).stdout.trim();
+  } catch {
+    return { kind: "error", message: "Repository has no HEAD commit." };
+  }
+  let baseSha: string;
+  try {
+    baseSha = (
+      await execGitText(["rev-parse", "--verify", `${base}^{commit}`], repoRoot, env)
+    ).stdout.trim();
+  } catch {
+    return { kind: "error", message: `Base branch "${base}" could not be resolved.` };
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = (await execGitText(["merge-base", baseSha, head], repoRoot, env)).stdout.trim();
+  } catch {
+    return { kind: "error", message: `Base branch "${base}" has unrelated history.` };
+  }
+  if (!mergeBase) return { kind: "error", message: `Base branch "${base}" has unrelated history.` };
+
+  // `--first-parent mergeBase..HEAD` alone can walk past a merge base that is
+  // reachable only through a later merge parent. Prove the boundary itself is
+  // on HEAD's first-parent chain before offering a contiguous range.
+  try {
+    const distanceText = (
+      await execGitText(
+        ["rev-list", "--first-parent", "--count", `${mergeBase}..${head}`],
+        repoRoot,
+        env,
+      )
+    ).stdout.trim();
+    const distance = Number.parseInt(distanceText, 10);
+    if (!Number.isSafeInteger(distance) || distance < 0) throw new Error("invalid distance");
+    const boundary = (
+      await execGitText(["rev-parse", "--verify", `${head}~${distance}^{commit}`], repoRoot, env)
+    ).stdout.trim();
+    if (boundary !== mergeBase) {
+      return {
+        kind: "error",
+        message: `Base branch "${base}" does not meet HEAD on its first-parent history.`,
+      };
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid distance") {
+      return { kind: "error", message: "Could not resolve the first-parent commit path." };
+    }
+    return {
+      kind: "error",
+      message: `Base branch "${base}" does not meet HEAD on its first-parent history.`,
+    };
+  }
+
+  let out: string;
+  try {
+    out = (
+      await execGitText(
+        [
+          "log",
+          "--first-parent",
+          "-n",
+          String(MAX_FILES + 1),
+          "-z",
+          "--format=%H%x00%h%x00%s%x00%an%x00%at",
+          `${mergeBase}..${head}`,
+        ],
+        repoRoot,
+        env,
+      )
+    ).stdout;
+  } catch (err) {
+    return { kind: "error", message: errorMessage(err) };
+  }
+  // `git log -z` terminates each record with NUL while the format inserts
+  // four additional NUL-delimited fields. Keep empty subjects intact (Git
+  // permits `--allow-empty-message`); filtering empty tokens would shift every
+  // later record out of alignment.
+  const fields = splitNul(out);
+  const newest: GitCommitMetadata[] = [];
+  for (let i = 0; i + 4 < fields.length; i += 5) {
+    const [sha, shortSha, subject, authorName, authoredAt] = fields.slice(i, i + 5);
+    if (
+      !sha ||
+      !shortSha ||
+      subject === undefined ||
+      authorName === undefined ||
+      authoredAt === undefined
+    )
+      continue;
+    newest.push({
+      sha,
+      shortSha,
+      subject,
+      authorName,
+      authoredAt: Number.parseInt(authoredAt, 10) * 1000,
+    });
+  }
+  const truncated = newest.length > MAX_FILES;
+  return {
+    repoRoot,
+    env,
+    head,
+    mergeBase,
+    commits: (truncated ? newest.slice(0, MAX_FILES) : newest).reverse(),
+    truncated,
+  };
+}
+
+/** List the newest 500 first-parent commits after the strict merge-base. */
+export async function getCommits(root: string, base: string): Promise<GitCommitsResult> {
+  const context = await getCommitContext(root, base);
+  if ("kind" in context) return context;
+  return {
+    kind: "ok",
+    head: context.head,
+    mergeBase: context.mergeBase,
+    commits: context.commits,
+    truncated: context.truncated,
+  };
+}
+
+interface ValidatedRange {
+  parent: string;
+  end: string;
+  context: CommitContext;
+}
+
+async function validateRangeUncached(
+  root: string,
+  base: string,
+  range: GitCommitRange,
+): Promise<ValidatedRange | GitErrorResult> {
+  const context = await getCommitContext(root, base);
+  if ("kind" in context) return context;
+  const startIndex = context.commits.findIndex((commit) => commit.sha === range.start);
+  const endIndex = context.commits.findIndex((commit) => commit.sha === range.end);
+  if (startIndex < 0 || endIndex < 0) {
+    return {
+      kind: "error",
+      message: "Commit range is stale or outside the current first-parent history.",
+    };
+  }
+  if (startIndex > endIndex)
+    return { kind: "error", message: "Commit range endpoints are reversed." };
+  let canonicalStart: string;
+  let canonicalEnd: string;
+  let parent: string;
+  try {
+    [canonicalStart, canonicalEnd, parent] = await Promise.all([
+      execGitText(
+        ["rev-parse", "--verify", `${range.start}^{commit}`],
+        context.repoRoot,
+        context.env,
+      ).then((r) => r.stdout.trim()),
+      execGitText(
+        ["rev-parse", "--verify", `${range.end}^{commit}`],
+        context.repoRoot,
+        context.env,
+      ).then((r) => r.stdout.trim()),
+      execGitText(["rev-parse", "--verify", `${range.start}^`], context.repoRoot, context.env).then(
+        (r) => r.stdout.trim(),
+      ),
+    ]);
+  } catch {
+    return { kind: "error", message: "Commit range endpoints are no longer valid." };
+  }
+  if (canonicalStart !== range.start || canonicalEnd !== range.end) {
+    return { kind: "error", message: "Commit range endpoints must be canonical object IDs." };
+  }
+  return { parent, end: canonicalEnd, context };
+}
+
+async function validateRange(
+  root: string,
+  base: string | undefined,
+  range: GitCommitRange | undefined,
+): Promise<ValidatedRange | GitErrorResult> {
+  if (!range) return { kind: "error", message: "A commit range is required." };
+  if (!base || base === "HEAD")
+    return {
+      kind: "error",
+      message: "A concrete non-HEAD base branch is required for a commit range.",
+    };
+  if (!FULL_OBJECT_ID.test(range.start) || !FULL_OBJECT_ID.test(range.end)) {
+    return { kind: "error", message: "Commit range endpoints must be full immutable object IDs." };
+  }
+
+  const key = `${path.resolve(root)}\0${base}\0${range.start}\0${range.end}`;
+  const cached = rangeValidationCache.get(key);
+  if (cached) return cached;
+
+  // Deduplicate only concurrent validation. A later fresh manifest request
+  // must re-read mutable base/HEAD topology; immutable open-viewer reads carry
+  // their concrete historicalContext and bypass this path entirely.
+  const pending = validateRangeUncached(root, base, range);
+  rangeValidationCache.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (rangeValidationCache.get(key) === pending) rangeValidationCache.delete(key);
+  }
+}
+
+async function resolveHistoricalReadContext(
+  root: string,
+  base: string | undefined,
+  range: GitCommitRange,
+  immutable: GitHistoricalContext | undefined,
+): Promise<
+  { parent: string; end: string; repoRoot: string; env: Record<string, string> } | GitErrorResult
+> {
+  if (!immutable) {
+    const validated = await validateRange(root, base, range);
+    if ("kind" in validated) return validated;
+    return {
+      parent: validated.parent,
+      end: validated.end,
+      repoRoot: validated.context.repoRoot,
+      env: validated.context.env,
+    };
+  }
+  if (!base || base === "HEAD") {
+    return {
+      kind: "error",
+      message: "A concrete non-HEAD base branch is required for a commit range.",
+    };
+  }
+  if (
+    !FULL_OBJECT_ID.test(range.start) ||
+    !FULL_OBJECT_ID.test(range.end) ||
+    !FULL_OBJECT_ID.test(immutable.parent) ||
+    !FULL_OBJECT_ID.test(immutable.end) ||
+    immutable.end !== range.end
+  ) {
+    return { kind: "error", message: "Historical diff context is invalid." };
+  }
+  const env = { ...(await getSubprocessEnv()), GIT_OPTIONAL_LOCKS: "0" };
+  try {
+    const repoRoot = (await execGitText(["rev-parse", "--show-toplevel"], root, env)).stdout.trim();
+    const [parent, end] = await Promise.all([
+      execGitText(["rev-parse", "--verify", `${range.start}^`], repoRoot, env).then((result) =>
+        result.stdout.trim(),
+      ),
+      execGitText(["rev-parse", "--verify", `${range.end}^{commit}`], repoRoot, env).then(
+        (result) => result.stdout.trim(),
+      ),
+    ]);
+    if (parent !== immutable.parent || end !== immutable.end) {
+      return { kind: "error", message: "Historical diff context no longer matches its range." };
+    }
+    return { parent, end, repoRoot, env };
+  } catch (error) {
+    return { kind: "error", message: errorMessage(error) };
+  }
+}
+
+async function getHistoricalChanges(
+  root: string,
+  base: string | undefined,
+  range: GitCommitRange,
+  immutable: GitHistoricalContext | undefined,
+): Promise<GitChangesResult> {
+  const validated = await resolveHistoricalReadContext(root, base, range, immutable);
+  if ("kind" in validated) return validated;
+  const { repoRoot, env } = validated;
+  const attrCapability = await execGitCapture(
+    ["check-attr", `--source=${validated.end}`, "--all", "--", ".gitattributes"],
+    repoRoot,
+    env,
+  );
+  if (attrCapability.code !== 0) {
+    return {
+      kind: "error",
+      message:
+        "Historical commit ranges require Git 2.42 or newer so attributes can be read from the selected commit.",
+    };
+  }
+  const diffArgs = `${validated.parent}..${validated.end}`;
+  // Git normally consults attributes from the current checkout even for a
+  // tree-to-tree diff. Pin them to the immutable range endpoint so a later
+  // `.gitattributes` edit at HEAD cannot change historical binary semantics.
+  const historicalEnv = { ...env, GIT_ATTR_SOURCE: validated.end };
+  const [statusR, numstatR] = await Promise.all([
+    execGitNulLimited(
+      ["diff", "--name-status", "-z", "-M", diffArgs],
+      repoRoot,
+      historicalEnv,
+      parseNameStatus,
+      MAX_FILES,
+    ),
+    execGitNulLimited(
+      ["diff", "--numstat", "-z", "-M", diffArgs],
+      repoRoot,
+      historicalEnv,
+      parseNumstat,
+      MAX_FILES,
+    ),
+  ]);
+  const counts = new Map(
+    parseNumstat(numstatR.stdout)
+      .slice(0, MAX_FILES)
+      .map((entry) => [entry.path, entry]),
+  );
+  const files = parseNameStatus(statusR.stdout)
+    .slice(0, MAX_FILES)
+    .map((file) => {
+      const count = counts.get(file.path);
+      return count
+        ? {
+            ...file,
+            insertions: count.insertions,
+            deletions: count.deletions,
+            binary: count.binary,
+          }
+        : file;
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const truncated = statusR.truncated;
+  return {
+    kind: "ok",
+    repoRoot,
+    files,
+    searchFiles: files,
+    historicalContext: { parent: validated.parent, end: validated.end },
+    truncated,
+    fingerprint: createHash("sha1").update(`${validated.parent}\0${validated.end}`).digest("hex"),
+  };
+}
+
+export async function getChanges(
+  root: string,
+  base?: string,
+  range?: GitCommitRange,
+  historicalContext?: GitHistoricalContext,
+): Promise<GitChangesResult> {
+  if (range) {
+    try {
+      return await getHistoricalChanges(root, base, range, historicalContext);
+    } catch (err) {
+      return { kind: "error", message: errorMessage(err) };
+    }
+  }
   // This is the heavyweight path: it computes the file list, per-file line
   // counts, AND the working-tree fingerprint (a hash of the entire patch).
   // The header badge while the viewer is closed only needs a file count, so
@@ -553,12 +1124,95 @@ function countPorcelainV2(out: string): number {
 
 // ── Public: getFileDiff ────────────────────────────────────────────────
 
+async function getHistoricalFileDiff(
+  root: string,
+  file: {
+    path: string;
+    oldPath?: string;
+    status: GitFileStatus;
+    untracked: boolean;
+    binary?: boolean;
+  },
+  base: string | undefined,
+  maxFileSizeBytes: number,
+  range: GitCommitRange,
+  immutable: GitHistoricalContext | undefined,
+): Promise<GitFileDiffResult> {
+  const validated = await resolveHistoricalReadContext(root, base, range, immutable);
+  if ("kind" in validated)
+    return {
+      kind: "error",
+      message: validated.kind === "error" ? validated.message : validated.kind,
+    };
+  const { repoRoot, env } = validated;
+  type BlobSide = { text: string; missingNewline: boolean; tooLarge: boolean } | { error: string };
+  const readBlob = async (ref: string, blobPath: string, present: boolean): Promise<BlobSide> => {
+    if (!present) return { text: "", missingNewline: false, tooLarge: false };
+    const object = `${ref}:${blobPath}`;
+    try {
+      const size = Number.parseInt(
+        (await execGitText(["cat-file", "-s", object], repoRoot, env)).stdout.trim(),
+        10,
+      );
+      if (Number.isFinite(size) && size > maxFileSizeBytes)
+        return { text: "", missingNewline: false, tooLarge: true };
+      const text = await readGitBlobText(object, repoRoot, env, maxFileSizeBytes);
+      return { text, missingNewline: text.length > 0 && !text.endsWith("\n"), tooLarge: false };
+    } catch (error) {
+      return {
+        error: `Could not read historical file ${blobPath} at ${ref.slice(0, 8)}: ${errorMessage(error)}`,
+      };
+    }
+  };
+  const [oldSide, newSide] = await Promise.all([
+    readBlob(validated.parent, file.oldPath ?? file.path, !file.untracked && file.status !== "A"),
+    readBlob(validated.end, file.path, file.status !== "D"),
+  ]);
+  if ("error" in oldSide) return { kind: "error", message: oldSide.error };
+  if ("error" in newSide) return { kind: "error", message: newSide.error };
+  if (oldSide.tooLarge || newSide.tooLarge) {
+    return {
+      kind: "ok",
+      oldText: oldSide.text,
+      newText: newSide.text,
+      binary: false,
+      tooLarge: true,
+      oldMissingNewline: oldSide.missingNewline,
+      newMissingNewline: newSide.missingNewline,
+    };
+  }
+  return {
+    kind: "ok",
+    oldText: oldSide.text,
+    newText: newSide.text,
+    // `numstat` is authoritative and includes `.gitattributes` decisions;
+    // preserve it even when an attribute-classified blob contains no NUL.
+    binary:
+      file.binary === true ||
+      (file.status !== "A" && hasBinaryAtStart(oldSide.text)) ||
+      (file.status !== "D" && hasBinaryAtStart(newSide.text)),
+    tooLarge: false,
+    oldMissingNewline: oldSide.missingNewline,
+    newMissingNewline: newSide.missingNewline,
+  };
+}
+
 export async function getFileDiff(
   root: string,
-  file: { path: string; oldPath?: string; status: GitFileStatus; untracked: boolean },
+  file: {
+    path: string;
+    oldPath?: string;
+    status: GitFileStatus;
+    untracked: boolean;
+    binary?: boolean;
+  },
   base?: string,
   maxFileSizeBytes: number = FILE_TOO_LARGE_DEFAULT,
+  range?: GitCommitRange,
+  historicalContext?: GitHistoricalContext,
 ): Promise<GitFileDiffResult> {
+  if (range)
+    return getHistoricalFileDiff(root, file, base, maxFileSizeBytes, range, historicalContext);
   // GIT_OPTIONAL_LOCKS=0: these are read-only commands; don't take
   // index.lock (avoids contention with concurrent git reads and a stray
   // index write).
@@ -1037,102 +1691,913 @@ function describeWorktreeAddFailure(add: GitExecResult, worktreePath: string): s
  * Returns the worktree path, branch name, friendly name, and base.
  * Collision-safe: if the branch ref or dir already exists, re-rolls
  * the name a few times before appending a suffix.
+ *
+ * `sourceRoot` controls where the base ref is resolved while `root` remains
+ * the owning workspace used for placement and worktree administration. Active
+ * sessions use this to branch from the exact HEAD of their current checkout
+ * without exposing an arbitrary base picker in the renderer.
  */
-export async function createWorktree(root: string, base: string): Promise<GitWorktreeResult> {
+export async function createWorktree(
+  root: string,
+  base: string,
+  sourceRoot: string = root,
+  onPathReserved?: (worktreePath: string) => void,
+): Promise<GitWorktreeResult> {
   try {
     const env = await getSubprocessEnv();
     // Resolve the repo root
     const r = await execGitText(["rev-parse", "--show-toplevel"], root, env);
     const repoRoot = r.stdout.trim();
     if (!repoRoot) return { kind: "error", message: "Not a git repository" };
+    const releaseCreationLock = await acquireWorktreeCreationLock(repoRoot);
+    try {
+      // Pre-flight: confirm the base ref actually resolves before we commit to
+      // creating directories and a branch. Without this, a stale/typo'd base
+      // surfaces only as git's verbose "invalid reference" deep inside the
+      // `worktree add` failure; this turns it into a crisp, actionable message.
+      const baseCheck = await execGitCapture(
+        ["rev-parse", "--verify", "--quiet", `${base}^{commit}`],
+        sourceRoot,
+        env,
+      );
+      const resolvedBase = baseCheck.stdout.trim();
+      if (baseCheck.code !== 0 || !resolvedBase) {
+        return {
+          kind: "error",
+          message: `Base branch "${base}" could not be resolved — it may have been deleted or renamed. Pick a different base branch and try again.`,
+        };
+      }
+      const targetHasBase = await execGitCapture(
+        ["cat-file", "-e", `${resolvedBase}^{commit}`],
+        repoRoot,
+        env,
+      );
+      if (targetHasBase.code !== 0) {
+        return {
+          kind: "error",
+          message: "The current checkout belongs to a different repository.",
+        };
+      }
+      let baseLabel = base;
+      if (base === "HEAD") {
+        const current = await execGitCapture(
+          ["rev-parse", "--abbrev-ref", "HEAD"],
+          sourceRoot,
+          env,
+        );
+        const label = current.stdout.trim();
+        baseLabel =
+          current.code === 0 && label && label !== "HEAD" ? label : resolvedBase.slice(0, 8);
+      }
 
-    // Pre-flight: confirm the base ref actually resolves before we commit to
-    // creating directories and a branch. Without this, a stale/typo'd base
-    // surfaces only as git's verbose "invalid reference" deep inside the
-    // `worktree add` failure; this turns it into a crisp, actionable message.
-    const baseCheck = await execGitCapture(
-      ["rev-parse", "--verify", "--quiet", `${base}^{commit}`],
-      repoRoot,
+      const repoName = path.basename(repoRoot);
+      const parentDir = path.dirname(repoRoot);
+      const worktreesRoot = path.join(parentDir, `${repoName}-worktrees`);
+      try {
+        await fs.mkdir(worktreesRoot, { recursive: true });
+      } catch (err) {
+        return {
+          kind: "error",
+          message: `Could not create the worktrees directory at ${worktreesRoot}: ${errorMessage(err)}`,
+        };
+      }
+
+      // Import the name generator (lazy to avoid circular deps if any).
+      const { generateWorktreeName } = await import("./worktree-names.js");
+
+      // Try up to 5 names, then append -2, -3, etc.
+      let name = generateWorktreeName();
+      let attempts = 0;
+      const MAX_ATTEMPTS = 5;
+
+      const collision = async (n: string): Promise<boolean> => {
+        const branchRef = `pi-vis-${n}`;
+        // Check branch existence
+        try {
+          await execGitText(["rev-parse", "--verify", "--quiet", branchRef], repoRoot, env);
+          return true; // branch exists
+        } catch {
+          // branch doesn't exist — good
+        }
+        // Check directory existence
+        const dir = path.join(worktreesRoot, n);
+        try {
+          await fs.stat(dir);
+          return true; // directory exists
+        } catch {
+          return false; // no collision
+        }
+      };
+
+      while (await collision(name)) {
+        attempts++;
+        if (attempts < MAX_ATTEMPTS) {
+          name = generateWorktreeName();
+        } else {
+          // Last-resort suffix
+          const suffix = attempts - MAX_ATTEMPTS + 2;
+          name = `${generateWorktreeName()}-${suffix}`;
+        }
+      }
+
+      const branch = `pi-vis-${name}`;
+      const worktreePath = path.join(worktreesRoot, name);
+      onPathReserved?.(worktreePath);
+
+      // Create the checkout detached first so a failed/timeout checkout cannot
+      // strand the generated branch. Once the full worktree exists, attaching a
+      // new branch at the same commit only updates HEAD and is cheap.
+      const add = await execGitCapture(
+        ["worktree", "add", "--detach", worktreePath, resolvedBase],
+        repoRoot,
+        env,
+        WORKTREE_ADD_TIMEOUT_MS,
+      );
+
+      if (add.code !== 0) {
+        const cleanup = await cleanupFailedWorktreeAdd(repoRoot, worktreePath, resolvedBase, env);
+        const message = describeWorktreeAddFailure(add, worktreePath);
+        return {
+          kind: "error",
+          message:
+            cleanup.kind === "ok" ? message : `${message} Cleanup also failed: ${cleanup.message}`,
+        };
+      }
+
+      const attachBranch = await execGitCapture(
+        ["checkout", "-b", branch],
+        worktreePath,
+        env,
+        WORKTREE_ADD_TIMEOUT_MS,
+      );
+      if (attachBranch.code !== 0) {
+        const currentBranch = await execGitCapture(
+          ["symbolic-ref", "--short", "HEAD"],
+          worktreePath,
+          env,
+        );
+        const branchOwned = currentBranch.code === 0 && currentBranch.stdout.trim() === branch;
+        const cleanup = await cleanupOwnedWorktreeArtifacts(
+          repoRoot,
+          worktreePath,
+          branchOwned ? branch : undefined,
+          env,
+        );
+        const message = describeWorktreeAddFailure(attachBranch, worktreePath);
+        return {
+          kind: "error",
+          message:
+            cleanup.kind === "ok" ? message : `${message} Cleanup also failed: ${cleanup.message}`,
+        };
+      }
+
+      return { kind: "ok", worktreePath, branch, name, base: baseLabel };
+    } finally {
+      releaseCreationLock();
+    }
+  } catch (err) {
+    return { kind: "error", message: errorMessage(err) };
+  }
+}
+
+export type CopyCheckoutChangesResult =
+  | { kind: "ok"; changed: boolean }
+  | { kind: "error"; message: string };
+
+export interface CheckoutChangesSnapshot {
+  head: string;
+  baseLabel: string;
+  changed: boolean;
+  tempDir: string;
+  stagedPatch: string;
+  unstagedPatch: string;
+  untrackedPaths: string[];
+  intentToAddPaths: string[];
+  directoryModes: Array<{ path: string; mode: number }>;
+  digest: string;
+}
+
+export type CaptureCheckoutChangesResult =
+  | { kind: "ok"; snapshot: CheckoutChangesSnapshot }
+  | { kind: "error"; message: string };
+
+function describeCheckoutCopyFailure(step: string, result: GitExecResult): string {
+  return (
+    result.stderr.trim() ||
+    (result.timedOut
+      ? `${step} timed out.`
+      : `${step} failed${result.signal ? ` (${result.signal})` : ` with code ${result.code}`}.`)
+  );
+}
+
+function resolveSnapshotPath(root: string, relativePath: string): string | null {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, relativePath);
+  return resolved.startsWith(`${resolvedRoot}${path.sep}`) ? resolved : null;
+}
+
+async function copySnapshotPath(source: string, target: string): Promise<void> {
+  const stat = await fs.lstat(source);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  if (stat.isSymbolicLink()) {
+    await fs.symlink(await fs.readlink(source), target);
+  } else if (stat.isDirectory()) {
+    await fs.cp(source, target, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+      preserveTimestamps: true,
+      verbatimSymlinks: true,
+    });
+  } else if (stat.isFile()) {
+    await fs.copyFile(source, target, fsConstants.COPYFILE_EXCL);
+    await fs.chmod(target, stat.mode);
+  } else {
+    throw new Error("unsupported file type");
+  }
+}
+
+async function captureDirectoryModes(
+  sourceRoot: string,
+  relativePaths: string[],
+): Promise<Array<{ path: string; mode: number }>> {
+  const parents = new Set<string>();
+  for (const relativePath of relativePaths) {
+    let parent = path.dirname(relativePath);
+    while (parent !== "." && parent !== path.dirname(parent)) {
+      parents.add(parent);
+      parent = path.dirname(parent);
+    }
+  }
+  const result: Array<{ path: string; mode: number }> = [];
+  for (const relativePath of [...parents].sort()) {
+    const absolutePath = resolveSnapshotPath(sourceRoot, relativePath);
+    if (!absolutePath) throw new Error("Git returned an invalid local directory path.");
+    const stat = await fs.lstat(absolutePath);
+    if (!stat.isDirectory()) throw new Error("An untracked parent path is not a directory.");
+    result.push({ path: relativePath, mode: stat.mode & 0o7777 });
+  }
+  return result;
+}
+
+async function snapshotPathsEqual(left: string, right: string): Promise<boolean> {
+  const [leftStat, rightStat] = await Promise.all([fs.lstat(left), fs.lstat(right)]);
+  if ((leftStat.mode & 0o7777) !== (rightStat.mode & 0o7777)) return false;
+  if (leftStat.isSymbolicLink() || rightStat.isSymbolicLink()) {
+    if (!leftStat.isSymbolicLink() || !rightStat.isSymbolicLink()) return false;
+    const [leftTarget, rightTarget] = await Promise.all([fs.readlink(left), fs.readlink(right)]);
+    return leftTarget === rightTarget;
+  }
+  if (leftStat.isDirectory() || rightStat.isDirectory()) {
+    if (!leftStat.isDirectory() || !rightStat.isDirectory()) return false;
+    const [leftEntries, rightEntries] = await Promise.all([fs.readdir(left), fs.readdir(right)]);
+    leftEntries.sort();
+    rightEntries.sort();
+    if (
+      leftEntries.length !== rightEntries.length ||
+      leftEntries.some((entry, index) => entry !== rightEntries[index])
+    )
+      return false;
+    for (const entry of leftEntries) {
+      if (!(await snapshotPathsEqual(path.join(left, entry), path.join(right, entry))))
+        return false;
+    }
+    return true;
+  }
+  if (!leftStat.isFile() || !rightStat.isFile() || leftStat.size !== rightStat.size) return false;
+  const hashFile = async (filePath: string): Promise<string> => {
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+    return hash.digest("hex");
+  };
+  const [leftHash, rightHash] = await Promise.all([hashFile(left), hashFile(right)]);
+  return leftHash === rightHash;
+}
+
+async function snapshotMetadataDigest(paths: string[]): Promise<string> {
+  const hash = createHash("sha256");
+  const visit = async (absolutePath: string, logicalPath: string): Promise<void> => {
+    let stat: BigIntStats;
+    try {
+      stat = await fs.lstat(absolutePath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        hash.update(`${logicalPath}\0missing\0`);
+        return;
+      }
+      throw error;
+    }
+    hash.update(`${logicalPath}\0${stat.mode}\0${stat.size}\0${stat.mtimeNs}\0${stat.ctimeNs}\0`);
+    if (stat.isSymbolicLink()) {
+      hash.update(`link\0${await fs.readlink(absolutePath)}\0`);
+    } else if (stat.isDirectory()) {
+      const entries = await fs.readdir(absolutePath);
+      entries.sort();
+      for (const entry of entries) {
+        await visit(path.join(absolutePath, entry), `${logicalPath}/${entry}`);
+      }
+    }
+  };
+  const unique = [...new Set(paths)].sort();
+  for (const absolutePath of unique) await visit(absolutePath, absolutePath);
+  return hash.digest("hex");
+}
+
+async function checkoutSourceMetadata(
+  sourceRoot: string,
+  env: Record<string, string>,
+  payloadPaths: string[],
+): Promise<
+  { trackedPaths: string; indexEntries: string; digest: string } | { error: GitExecResult }
+> {
+  const [tracked, indexEntries] = await Promise.all([
+    execGitCapture(["diff", "--name-only", "-z"], sourceRoot, env),
+    execGitCapture(["ls-files", "--stage", "-z"], sourceRoot, env),
+  ]);
+  if (tracked.code !== 0) return { error: tracked };
+  if (indexEntries.code !== 0) return { error: indexEntries };
+  const relativePaths = [...tracked.stdout.split("\0").filter(Boolean), ...payloadPaths];
+  const absolutePaths: string[] = [];
+  for (const relativePath of relativePaths) {
+    const resolved = resolveSnapshotPath(sourceRoot, relativePath);
+    if (!resolved) {
+      return {
+        error: {
+          code: 1,
+          stdout: "",
+          stderr: "Git returned an invalid local file path.",
+          signal: null,
+          timedOut: false,
+        },
+      };
+    }
+    absolutePaths.push(resolved);
+  }
+  return {
+    trackedPaths: tracked.stdout,
+    indexEntries: indexEntries.stdout,
+    digest: await snapshotMetadataDigest(absolutePaths),
+  };
+}
+
+async function digestSnapshotTree(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = path.join(directory, entry.name);
+      const stat = await fs.lstat(absolutePath);
+      hash.update(`${relativePath}\0${stat.mode & 0o7777}\0`);
+      if (stat.isSymbolicLink()) {
+        hash.update(`link\0${await fs.readlink(absolutePath)}\0`);
+      } else if (stat.isDirectory()) {
+        hash.update("dir\0");
+        await visit(absolutePath, relativePath);
+      } else if (stat.isFile()) {
+        hash.update(`file\0${stat.size}\0`);
+        for await (const chunk of createReadStream(absolutePath)) hash.update(chunk);
+        hash.update("\0");
+      } else {
+        throw new Error(`Unsupported captured file type: ${relativePath}`);
+      }
+    }
+  };
+  await visit(root, "");
+  return hash.digest("hex");
+}
+
+/** Capture an immutable, source-preserving snapshot before worktree checkout. */
+export async function captureCheckoutChanges(
+  requestedRoot: string,
+): Promise<CaptureCheckoutChangesResult> {
+  const env = await getSubprocessEnv();
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-vis-worktree-changes-"));
+  const stagedPatch = path.join(tempDir, "staged.patch");
+  const unstagedPatch = path.join(tempDir, "unstaged.patch");
+  let verificationDir: string | undefined;
+  let retained = false;
+  try {
+    const rootResult = await execGitCapture(["rev-parse", "--show-toplevel"], requestedRoot, env);
+    const repositoryRoot = rootResult.stdout.trim();
+    if (rootResult.code !== 0 || !repositoryRoot) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading repository root", rootResult),
+      };
+    }
+    // Git path output is not consistently cwd-relative across commands. Capture
+    // the complete checkout from one canonical repository-root coordinate system.
+    const sourceRoot = repositoryRoot;
+    const headResult = await execGitCapture(
+      ["rev-parse", "--verify", "HEAD^{commit}"],
+      sourceRoot,
       env,
     );
-    if (baseCheck.code !== 0) {
+    const head = headResult.stdout.trim();
+    if (headResult.code !== 0 || !head) {
+      return { kind: "error", message: describeCheckoutCopyFailure("Reading HEAD", headResult) };
+    }
+    const current = await execGitCapture(["rev-parse", "--abbrev-ref", "HEAD"], sourceRoot, env);
+    const currentLabel = current.stdout.trim();
+    const baseLabel =
+      current.code === 0 && currentLabel && currentLabel !== "HEAD"
+        ? currentLabel
+        : head.slice(0, 8);
+
+    const status = await execGitCapture(
+      ["status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignore-submodules=none"],
+      sourceRoot,
+      env,
+    );
+    if (status.code !== 0) {
+      return { kind: "error", message: describeCheckoutCopyFailure("Reading status", status) };
+    }
+    const dirtySubmodule = status.stdout
+      .split("\0")
+      .filter(Boolean)
+      .some((record) => {
+        if (!record.startsWith("1 ") && !record.startsWith("2 ") && !record.startsWith("u ")) {
+          return false;
+        }
+        return record.split(" ")[2]?.startsWith("S") === true;
+      });
+    if (dirtySubmodule) {
       return {
         kind: "error",
-        message: `Base branch "${base}" could not be resolved — it may have been deleted or renamed. Pick a different base branch and try again.`,
+        message: "Commit or clean submodule changes before creating a worktree.",
       };
     }
 
-    const repoName = path.basename(repoRoot);
-    const parentDir = path.dirname(repoRoot);
-    const worktreesRoot = path.join(parentDir, `${repoName}-worktrees`);
-    try {
-      await fs.mkdir(worktreesRoot, { recursive: true });
-    } catch (err) {
-      return {
-        kind: "error",
-        message: `Could not create the worktrees directory at ${worktreesRoot}: ${errorMessage(err)}`,
-      };
-    }
-
-    // Import the name generator (lazy to avoid circular deps if any).
-    const { generateWorktreeName } = await import("./worktree-names.js");
-
-    // Try up to 5 names, then append -2, -3, etc.
-    let name = generateWorktreeName();
-    let attempts = 0;
-    const MAX_ATTEMPTS = 5;
-
-    const collision = async (n: string): Promise<boolean> => {
-      const branchRef = `pi-vis-${n}`;
-      // Check branch existence
-      try {
-        await execGitText(["rev-parse", "--verify", "--quiet", branchRef], repoRoot, env);
-        return true; // branch exists
-      } catch {
-        // branch doesn't exist — good
-      }
-      // Check directory existence
-      const dir = path.join(worktreesRoot, n);
-      try {
-        await fs.stat(dir);
-        return true; // directory exists
-      } catch {
-        return false; // no collision
-      }
-    };
-
-    while (await collision(name)) {
-      attempts++;
-      if (attempts < MAX_ATTEMPTS) {
-        name = generateWorktreeName();
-      } else {
-        // Last-resort suffix
-        const suffix = attempts - MAX_ATTEMPTS + 2;
-        name = `${generateWorktreeName()}-${suffix}`;
-      }
-    }
-
-    const branch = `pi-vis-${name}`;
-    const worktreePath = path.join(worktreesRoot, name);
-
-    // `git worktree add -b <branch> <path> <base>`
-    // Uses a generous timeout: this checks out the entire working tree, which
-    // on a large repo can take minutes. Capture stderr so a failure surfaces
-    // git's actual reason rather than a bare exit code.
-    const add = await execGitCapture(
-      ["worktree", "add", "-b", branch, worktreePath, base],
-      repoRoot,
+    const patchArgs = ["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv"];
+    const staged = await execGitCapture(
+      [...patchArgs, `--output=${stagedPatch}`, "--cached", head, "--"],
+      sourceRoot,
       env,
       WORKTREE_ADD_TIMEOUT_MS,
     );
-
-    if (add.code !== 0) {
-      return { kind: "error", message: describeWorktreeAddFailure(add, worktreePath) };
+    if (staged.code !== 0) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading staged changes", staged),
+      };
+    }
+    const unstaged = await execGitCapture(
+      [...patchArgs, `--output=${unstagedPatch}`, "--"],
+      sourceRoot,
+      env,
+      WORKTREE_ADD_TIMEOUT_MS,
+    );
+    if (unstaged.code !== 0) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading unstaged changes", unstaged),
+      };
     }
 
-    return { kind: "ok", worktreePath, branch, name, base };
+    const [untracked, intentToAdd, stagedStat, unstagedStat] = await Promise.all([
+      execGitCapture(["ls-files", "--others", "--exclude-standard", "-z"], sourceRoot, env),
+      execGitCapture(["diff", "--name-only", "--diff-filter=A", "-z"], sourceRoot, env),
+      fs.stat(stagedPatch),
+      fs.stat(unstagedPatch),
+    ]);
+    if (untracked.code !== 0) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading untracked files", untracked),
+      };
+    }
+    if (intentToAdd.code !== 0) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading intent-to-add files", intentToAdd),
+      };
+    }
+
+    const untrackedPaths = untracked.stdout.split("\0").filter(Boolean);
+    const intentToAddPaths = intentToAdd.stdout.split("\0").filter(Boolean);
+    await Promise.all([
+      fs.mkdir(path.join(tempDir, "untracked"), { recursive: true }),
+      fs.mkdir(path.join(tempDir, "intent"), { recursive: true }),
+    ]);
+    for (const [kind, paths] of [
+      ["untracked", untrackedPaths],
+      ["intent", intentToAddPaths],
+    ] as const) {
+      for (const relativePath of paths) {
+        const source = resolveSnapshotPath(sourceRoot, relativePath);
+        const target = resolveSnapshotPath(path.join(tempDir, kind), relativePath);
+        if (!source || !target) {
+          return { kind: "error", message: "Git returned an invalid local file path." };
+        }
+        await copySnapshotPath(source, target);
+      }
+    }
+    const directoryModes = await captureDirectoryModes(sourceRoot, [
+      ...untrackedPaths,
+      ...intentToAddPaths,
+    ]);
+    for (const kind of ["untracked", "intent"] as const) {
+      for (const directory of directoryModes) {
+        const capturedDirectory = resolveSnapshotPath(path.join(tempDir, kind), directory.path);
+        if (!capturedDirectory) {
+          return { kind: "error", message: "The captured directory path is invalid." };
+        }
+        try {
+          await fs.chmod(capturedDirectory, directory.mode);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+    }
+
+    // Re-read every captured input after payload copying. This makes a capture
+    // self-consistent: a file or index mutation while an earlier path was being
+    // copied cannot produce a mixed snapshot that later validates by accident.
+    const sourceMetadataBefore = await checkoutSourceMetadata(sourceRoot, env, [
+      ...untrackedPaths,
+      ...intentToAddPaths,
+      ...directoryModes.map((directory) => directory.path),
+    ]);
+    if ("error" in sourceMetadataBefore) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading source metadata", sourceMetadataBefore.error),
+      };
+    }
+    // Hash the retained tree before the second source observation. The final
+    // payload comparison below hashes source bytes directly against this tree,
+    // avoiding a long temp-only hashing interval after the last source read.
+    const digest = await digestSnapshotTree(tempDir);
+    verificationDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-vis-worktree-verify-"));
+    const verificationStagedPatch = path.join(verificationDir, "staged.patch");
+    const verificationUnstagedPatch = path.join(verificationDir, "unstaged.patch");
+    const verificationStaged = await execGitCapture(
+      [...patchArgs, `--output=${verificationStagedPatch}`, "--cached", head, "--"],
+      sourceRoot,
+      env,
+      WORKTREE_ADD_TIMEOUT_MS,
+    );
+    const verificationUnstaged = await execGitCapture(
+      [...patchArgs, `--output=${verificationUnstagedPatch}`, "--"],
+      sourceRoot,
+      env,
+      WORKTREE_ADD_TIMEOUT_MS,
+    );
+    const [verificationUntracked, verificationIntent] = await Promise.all([
+      execGitCapture(["ls-files", "--others", "--exclude-standard", "-z"], sourceRoot, env),
+      execGitCapture(["diff", "--name-only", "--diff-filter=A", "-z"], sourceRoot, env),
+    ]);
+    const verificationFailed = [
+      verificationStaged,
+      verificationUnstaged,
+      verificationUntracked,
+      verificationIntent,
+    ].find((result) => result.code !== 0);
+    if (verificationFailed) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Verifying local changes", verificationFailed),
+      };
+    }
+    if (
+      verificationUntracked.stdout !== untracked.stdout ||
+      verificationIntent.stdout !== intentToAdd.stdout ||
+      !(await snapshotPathsEqual(verificationStagedPatch, stagedPatch)) ||
+      !(await snapshotPathsEqual(verificationUnstagedPatch, unstagedPatch))
+    ) {
+      return {
+        kind: "error",
+        message: "The checkout changed while local changes were being captured. Try again.",
+      };
+    }
+    for (const [kind, paths] of [
+      ["untracked", untrackedPaths],
+      ["intent", intentToAddPaths],
+    ] as const) {
+      for (const relativePath of paths) {
+        const source = resolveSnapshotPath(sourceRoot, relativePath);
+        const captured = resolveSnapshotPath(path.join(tempDir, kind), relativePath);
+        if (!source || !captured) {
+          return { kind: "error", message: "Git returned an invalid local file path." };
+        }
+        if (!(await snapshotPathsEqual(source, captured))) {
+          return {
+            kind: "error",
+            message: "The checkout changed while local changes were being captured. Try again.",
+          };
+        }
+      }
+    }
+    // Finish with cheap source metadata/ref observations; no temporary payload
+    // is re-read after this point.
+    const [finalUntracked, finalIntent, finalStatus, finalHead, finalBranch] = await Promise.all([
+      execGitCapture(["ls-files", "--others", "--exclude-standard", "-z"], sourceRoot, env),
+      execGitCapture(["diff", "--name-only", "--diff-filter=A", "-z"], sourceRoot, env),
+      execGitCapture(
+        ["status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignore-submodules=none"],
+        sourceRoot,
+        env,
+      ),
+      execGitCapture(["rev-parse", "--verify", "HEAD^{commit}"], sourceRoot, env),
+      execGitCapture(["rev-parse", "--abbrev-ref", "HEAD"], sourceRoot, env),
+    ]);
+    const finalFailed = [finalUntracked, finalIntent, finalStatus, finalHead, finalBranch].find(
+      (result) => result.code !== 0,
+    );
+    if (finalFailed) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Verifying local changes", finalFailed),
+      };
+    }
+    const finalLabel = finalBranch.stdout.trim();
+    const finalBaseLabel = finalLabel && finalLabel !== "HEAD" ? finalLabel : head.slice(0, 8);
+    if (
+      finalHead.stdout.trim() !== head ||
+      finalBaseLabel !== baseLabel ||
+      finalStatus.stdout !== status.stdout ||
+      finalUntracked.stdout !== untracked.stdout ||
+      finalIntent.stdout !== intentToAdd.stdout
+    ) {
+      return {
+        kind: "error",
+        message: "The checkout changed while local changes were being captured. Try again.",
+      };
+    }
+    const sourceMetadataAfter = await checkoutSourceMetadata(sourceRoot, env, [
+      ...untrackedPaths,
+      ...intentToAddPaths,
+      ...directoryModes.map((directory) => directory.path),
+    ]);
+    if ("error" in sourceMetadataAfter) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure(
+          "Verifying source metadata",
+          sourceMetadataAfter.error,
+        ),
+      };
+    }
+    if (
+      sourceMetadataAfter.trackedPaths !== sourceMetadataBefore.trackedPaths ||
+      sourceMetadataAfter.indexEntries !== sourceMetadataBefore.indexEntries ||
+      sourceMetadataAfter.digest !== sourceMetadataBefore.digest
+    ) {
+      return {
+        kind: "error",
+        message: "The checkout changed while local changes were being captured. Try again.",
+      };
+    }
+    retained = true;
+    return {
+      kind: "ok",
+      snapshot: {
+        head,
+        baseLabel,
+        changed:
+          stagedStat.size > 0 ||
+          unstagedStat.size > 0 ||
+          untrackedPaths.length > 0 ||
+          intentToAddPaths.length > 0,
+        tempDir,
+        stagedPatch,
+        unstagedPatch,
+        untrackedPaths,
+        intentToAddPaths,
+        directoryModes,
+        digest,
+      },
+    };
   } catch (err) {
-    return { kind: "error", message: errorMessage(err) };
+    return { kind: "error", message: `Could not capture local changes: ${errorMessage(err)}` };
+  } finally {
+    if (verificationDir) {
+      await fs.rm(verificationDir, { recursive: true, force: true }).catch(() => {});
+    }
+    // Ownership of a successful snapshot passes to the caller.
+    if (!retained) await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function disposeCheckoutChangesSnapshot(
+  snapshot: CheckoutChangesSnapshot,
+): Promise<void> {
+  await fs.rm(snapshot.tempDir, { recursive: true, force: true }).catch(() => {});
+}
+
+export async function checkoutStillMatchesSnapshot(
+  sourceRoot: string,
+  snapshot: CheckoutChangesSnapshot,
+): Promise<{ kind: "ok" } | { kind: "error"; message: string }> {
+  const current = await captureCheckoutChanges(sourceRoot);
+  if (current.kind === "error") return current;
+  try {
+    if (
+      current.snapshot.head !== snapshot.head ||
+      current.snapshot.baseLabel !== snapshot.baseLabel ||
+      current.snapshot.digest !== snapshot.digest
+    ) {
+      return {
+        kind: "error",
+        message: "The current checkout changed while the worktree was being created. Try again.",
+      };
+    }
+    return { kind: "ok" };
+  } finally {
+    await disposeCheckoutChangesSnapshot(current.snapshot);
+  }
+}
+
+/** Apply a captured checkout snapshot to a clean worktree at the same HEAD. */
+export async function applyCheckoutChanges(
+  snapshot: CheckoutChangesSnapshot,
+  targetRoot: string,
+): Promise<CopyCheckoutChangesResult> {
+  const env = await getSubprocessEnv();
+  try {
+    const targetHead = await execGitCapture(
+      ["rev-parse", "--verify", "HEAD^{commit}"],
+      targetRoot,
+      env,
+    );
+    if (targetHead.code !== 0 || targetHead.stdout.trim() !== snapshot.head) {
+      return { kind: "error", message: "The new worktree no longer matches the captured HEAD." };
+    }
+    const stagedStat = await fs.stat(snapshot.stagedPatch);
+    if (stagedStat.size > 0) {
+      const applied = await execGitCapture(
+        ["apply", "--binary", "--index", "--whitespace=nowarn", snapshot.stagedPatch],
+        targetRoot,
+        env,
+        WORKTREE_ADD_TIMEOUT_MS,
+      );
+      if (applied.code !== 0) {
+        return {
+          kind: "error",
+          message: describeCheckoutCopyFailure("Copying staged changes", applied),
+        };
+      }
+    }
+    const unstagedStat = await fs.stat(snapshot.unstagedPatch);
+    if (unstagedStat.size > 0) {
+      const applied = await execGitCapture(
+        ["apply", "--binary", "--whitespace=nowarn", snapshot.unstagedPatch],
+        targetRoot,
+        env,
+        WORKTREE_ADD_TIMEOUT_MS,
+      );
+      if (applied.code !== 0) {
+        return {
+          kind: "error",
+          message: describeCheckoutCopyFailure("Copying unstaged changes", applied),
+        };
+      }
+    }
+
+    for (const relativePath of snapshot.untrackedPaths) {
+      const source = resolveSnapshotPath(path.join(snapshot.tempDir, "untracked"), relativePath);
+      const target = resolveSnapshotPath(targetRoot, relativePath);
+      if (!source || !target) {
+        return { kind: "error", message: "The captured untracked path is invalid." };
+      }
+      await copySnapshotPath(source, target);
+    }
+    for (const relativePath of snapshot.intentToAddPaths) {
+      const source = resolveSnapshotPath(path.join(snapshot.tempDir, "intent"), relativePath);
+      const target = resolveSnapshotPath(targetRoot, relativePath);
+      if (!source || !target) {
+        return { kind: "error", message: "The captured intent-to-add path is invalid." };
+      }
+      try {
+        await fs.lstat(target);
+      } catch {
+        await copySnapshotPath(source, target);
+      }
+    }
+    // mkdir uses the process umask; restore source permissions only after all
+    // payloads are in place so restrictive parents do not interrupt copying.
+    for (const directory of snapshot.directoryModes) {
+      const target = resolveSnapshotPath(targetRoot, directory.path);
+      if (!target) return { kind: "error", message: "The captured directory path is invalid." };
+      await fs.chmod(target, directory.mode);
+    }
+    for (let index = 0; index < snapshot.intentToAddPaths.length; index += 100) {
+      const batch = snapshot.intentToAddPaths.slice(index, index + 100);
+      const added = await execGitCapture(["add", "-N", "--", ...batch], targetRoot, env);
+      if (added.code !== 0) {
+        return {
+          kind: "error",
+          message: describeCheckoutCopyFailure("Restoring intent-to-add files", added),
+        };
+      }
+    }
+    return { kind: "ok", changed: snapshot.changed };
+  } catch (err) {
+    return { kind: "error", message: `Could not copy local changes: ${errorMessage(err)}` };
+  }
+}
+
+/** Convenience helper for tests and already-created matching worktrees. */
+export async function copyCheckoutChanges(
+  sourceRoot: string,
+  targetRoot: string,
+): Promise<CopyCheckoutChangesResult> {
+  const captured = await captureCheckoutChanges(sourceRoot);
+  if (captured.kind === "error") return captured;
+  try {
+    return await applyCheckoutChanges(captured.snapshot, targetRoot);
+  } finally {
+    await disposeCheckoutChangesSnapshot(captured.snapshot);
+  }
+}
+
+async function cleanupFailedWorktreeAdd(
+  repoRoot: string,
+  worktreePath: string,
+  expectedHead: string,
+  env: Record<string, string>,
+): Promise<{ kind: "ok" } | { kind: "error"; message: string }> {
+  const listing = await execGitCapture(["worktree", "list", "--porcelain"], repoRoot, env);
+  if (listing.code !== 0) {
+    return {
+      kind: "error",
+      message: listing.stderr.trim() || "Could not verify failed worktree ownership.",
+    };
+  }
+  const ownedRegistration = listing.stdout.split(/\n\n+/).some((block) => {
+    const fields = block.split("\n");
+    return fields.includes(`worktree ${worktreePath}`) && fields.includes(`HEAD ${expectedHead}`);
+  });
+  if (ownedRegistration) {
+    return cleanupOwnedWorktreeArtifacts(repoRoot, worktreePath, undefined, env);
+  }
+  const pathExists = await fs
+    .stat(worktreePath)
+    .then(() => true)
+    .catch(() => false);
+  return pathExists
+    ? {
+        kind: "error",
+        message:
+          "A path appeared at the destination, but this operation could not prove ownership; it was left untouched.",
+      }
+    : { kind: "ok" };
+}
+
+async function cleanupOwnedWorktreeArtifacts(
+  repoRoot: string,
+  worktreePath: string,
+  branch: string | undefined,
+  env: Record<string, string>,
+): Promise<{ kind: "ok" } | { kind: "error"; message: string }> {
+  const failures: string[] = [];
+  const removed = await execGitCapture(
+    ["worktree", "remove", "--force", worktreePath],
+    repoRoot,
+    env,
+    WORKTREE_ADD_TIMEOUT_MS,
+  );
+  if (removed.code !== 0) {
+    // A checkout can fail before Git finishes registering it. The path was
+    // collision-checked immediately before creation and is therefore owned by
+    // this attempt; remove it directly, then prune any partial registration.
+    await fs.rm(worktreePath, { recursive: true, force: true }).catch((error) => {
+      failures.push(`remove directory: ${errorMessage(error)}`);
+    });
+    const pruned = await execGitCapture(["worktree", "prune", "--expire", "now"], repoRoot, env);
+    if (pruned.code !== 0) {
+      failures.push(pruned.stderr.trim() || `git worktree prune failed with code ${pruned.code}`);
+    }
+  }
+  if (branch) {
+    const deleted = await execGitCapture(["branch", "-D", branch], repoRoot, env);
+    if (deleted.code !== 0) {
+      failures.push(deleted.stderr.trim() || `git branch -D failed with code ${deleted.code}`);
+    }
+  }
+  return failures.length > 0 ? { kind: "error", message: failures.join("; ") } : { kind: "ok" };
+}
+
+/**
+ * Roll back a worktree freshly created by {@link createWorktree} when session
+ * eligibility changes before runtime detachment begins. This must never be
+ * used after the replacement host starts: extension startup could already
+ * have written user data into that checkout.
+ */
+export async function cleanupCreatedWorktree(
+  root: string,
+  worktreePath: string,
+  branch: string,
+): Promise<{ kind: "ok" } | { kind: "error"; message: string }> {
+  try {
+    const env = await getSubprocessEnv();
+    const repoRoot = (await execGitText(["rev-parse", "--show-toplevel"], root, env)).stdout.trim();
+    if (!repoRoot) return { kind: "error", message: "Not a git repository" };
+    return await cleanupOwnedWorktreeArtifacts(repoRoot, worktreePath, branch, env);
+  } catch (error) {
+    return { kind: "error", message: errorMessage(error) };
   }
 }
 
@@ -1159,7 +2624,7 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
  *     all linked worktrees of one repo share it. Compare
  *     `realpath(commonDir(candidate)) === realpath(commonDir(workspaceRoot))`.
  *     (`--git-common-dir` can return a relative path, so resolve it
- *     against the candidate's toplevel before realpath. No
+ *     against the command's cwd before realpath. No
  *     `--path-format=absolute` — it needs git ≥2.31 and is unnecessary
  *     here.)
  *
@@ -1171,10 +2636,9 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
  *    missing — wrong message.)
  *  - `--show-toplevel` fails → "Not a git repository."
  *  - common-dir mismatch → "That directory belongs to a different repository."
- *  - canonical toplevel === realpath'd workspace toplevel → "That's the
- *    current workspace — choose a different worktree directory."
- *    (Compare two *realpath'd* toplevels, not raw `workspaceRoot` vs
- *    realpath'd candidate.)
+ *  - canonical toplevel === the session's realpath'd current checkout →
+ *    "That's already the current checkout." The primary workspace remains a
+ *    valid destination when the session currently runs in a linked worktree.
  *
  * Branch resolution (best effort, never fails the validation):
  *
@@ -1191,6 +2655,8 @@ export async function createWorktree(root: string, base: string): Promise<GitWor
 export async function inspectWorktree(
   workspaceRoot: string,
   candidatePath: string,
+  currentCheckoutRoot: string = workspaceRoot,
+  allowCurrentCheckout = false,
 ): Promise<GitWorktreeInspect> {
   // Precheck: must exist AND be a directory. Do this BEFORE shelling out to
   // git — `mapSpawnError` below maps ENOENT to `git-missing`, which means
@@ -1220,15 +2686,15 @@ export async function inspectWorktree(
   } catch {
     return { kind: "error", message: "Not a git repository." };
   }
-  // `--git-common-dir` can return a relative path; resolve it against the
-  // canonical toplevel, then realpath both sides for the byte-for-byte
+  // `--git-common-dir` can return a relative path; resolve it against each
+  // command's cwd, then realpath both sides for the byte-for-byte
   // compare that survives `/var`↔`/private/var` (macOS) and any symlinks
   // the user or `git worktree add` created in the candidate path.
   try {
     const commonRes = await execGitText(["rev-parse", "--git-common-dir"], candidatePath, env);
     const rel = commonRes.stdout.trim();
     if (!rel) return { kind: "error", message: "Not a git repository." };
-    commonDirRel = path.isAbsolute(rel) ? rel : path.resolve(canonicalTop, rel);
+    commonDirRel = path.isAbsolute(rel) ? rel : path.resolve(candidatePath, rel);
   } catch {
     return { kind: "error", message: "Not a git repository." };
   }
@@ -1250,7 +2716,7 @@ export async function inspectWorktree(
     const commonRes = await execGitText(["rev-parse", "--git-common-dir"], workspaceRoot, env);
     const rel = commonRes.stdout.trim();
     if (!rel) return { kind: "error", message: "Not a git repository." };
-    workspaceCommon = path.isAbsolute(rel) ? rel : path.resolve(workspaceTop, rel);
+    workspaceCommon = path.isAbsolute(rel) ? rel : path.resolve(workspaceRoot, rel);
   } catch {
     return { kind: "error", message: "Not a git repository." };
   }
@@ -1278,11 +2744,19 @@ export async function inspectWorktree(
       message: "That directory belongs to a different repository.",
     };
   }
-  if (realCandidateTop === realWorkspaceTop) {
-    return {
-      kind: "error",
-      message: "That's the current workspace — choose a different worktree directory.",
-    };
+  if (!allowCurrentCheckout) {
+    let realCurrentTop: string;
+    try {
+      const currentTop = (
+        await execGitText(["rev-parse", "--show-toplevel"], currentCheckoutRoot, env)
+      ).stdout.trim();
+      realCurrentTop = await fs.realpath(currentTop);
+    } catch {
+      return { kind: "error", message: "The session's current checkout is unavailable." };
+    }
+    if (realCandidateTop === realCurrentTop) {
+      return { kind: "error", message: "That's already the current checkout." };
+    }
   }
 
   // From here down, use the realpath'd toplevel (`realCandidateTop`) — the
@@ -1328,7 +2802,7 @@ export async function inspectWorktree(
   // freshly-created worktree would have, not the subdir's basename.
   const name = path.basename(realCandidateTop);
 
-  return { kind: "ok", path: realCandidateTop, branch, name };
+  return { kind: "ok", path: realCandidateTop, workspaceTop: realWorkspaceTop, branch, name };
 }
 
 /** The error variants shared by getChanges / getChangesCount — a subset of

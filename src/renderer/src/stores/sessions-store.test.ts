@@ -2771,6 +2771,79 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     ]);
   });
 
+  it("restores authoritative worktree-operation custody when reopening after renderer reload", async () => {
+    const invoke = vi.fn(async (channel: string, payload?: unknown) => {
+      if (channel === "session.open") {
+        return {
+          outcome: "existing",
+          sessionId: SESSION_A,
+          name: null,
+          preview: null,
+          sessionStatus: "ready",
+          worktreeOperationInProgress: true,
+          worktreeIdentityRevision: 4,
+        };
+      }
+      if (channel === "session.worktreeOperationStatus") return true;
+      if (channel === "session.worktreeSnapshot") return { revision: 4 };
+      if (channel === "session.loadHistory") {
+        return loadedHistory(payload, []);
+      }
+      throw new Error(`unexpected channel ${channel}`);
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+
+    await useSessionsStore.getState().openSessionTab(WORKSPACE, "/f/a.jsonl");
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreeCreating).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("session.worktreeOperationStatus", {
+      sessionId: SESSION_A,
+    });
+  });
+
+  it("uses a post-reconstruction identity snapshot and ignores stale identity revisions", async () => {
+    const invoke = vi.fn(async (channel: string, payload?: unknown) => {
+      if (channel === "session.open") {
+        return {
+          outcome: "existing",
+          sessionId: SESSION_A,
+          name: null,
+          preview: null,
+          sessionStatus: "ready",
+          worktreeOperationInProgress: false,
+          worktreeIdentityRevision: 1,
+          worktree: {
+            path: "/stale-worktree",
+            branch: "stale",
+            name: "stale",
+            base: "main",
+          },
+        };
+      }
+      if (channel === "session.worktreeSnapshot") return { revision: 2 };
+      if (channel === "session.loadHistory") {
+        return loadedHistory(payload, []);
+      }
+      throw new Error(`unexpected channel ${channel}`);
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+
+    await useSessionsStore.getState().openSessionTab(WORKSPACE, "/f/a.jsonl");
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)).toMatchObject({
+      worktreePath: undefined,
+      worktreeIdentityRevision: 2,
+    });
+
+    useSessionsStore
+      .getState()
+      .applyWorktree(
+        SESSION_A,
+        { worktreePath: "/late-stale", branch: "stale", name: "stale", base: "main" },
+        1,
+      );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.worktreePath).toBeUndefined();
+  });
+
   it("rereads open-session history when a transcript event arrives during hydration", async () => {
     const historyRequests: Array<{
       payload: unknown;

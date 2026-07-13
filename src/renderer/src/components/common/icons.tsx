@@ -136,3 +136,13 @@ export function IconPencil(props: IconProps): React.ReactElement {
     </Icon>
   );
 }
+
+/** Copy — duplicate documents, used for clipboard actions. */
+export function IconCopy(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <rect x="4" y="2" width="5.5" height="6.5" rx="0.75" />
+      <path d="M8 8.5v1A1.5 1.5 0 016.5 11h-4A1.5 1.5 0 011 9.5v-4A1.5 1.5 0 012.5 4h1.25" />
+    </Icon>
+  );
+}

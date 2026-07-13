@@ -87,93 +87,6 @@
   cursor: not-allowed;
 }
 
-/* ── Attach mode (Existing): path input + Browse button ─────────── */
-
-.worktree-bar__attach {
-  display: flex;
-  align-items: center;
-  gap: 0.357rem;
-  flex: 1 1 auto;
-  min-width: 0;
-  -webkit-app-region: no-drag;
-}
-
-.worktree-bar__attach-input {
-  appearance: none;
-  -webkit-appearance: none;
-  flex: 1 1 auto;
-  min-width: 8rem;
-  padding: 0.286rem 0.5rem;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  font: inherit;
-  font-family: var(--font-code);
-  font-size: 0.857em;
-  outline: none;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
-}
-
-.worktree-bar__attach-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-
-.worktree-bar__attach-input::placeholder {
-  color: var(--text-ghost);
-}
-
-.worktree-bar__attach-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.worktree-bar__attach-browse {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text);
-  padding: 0.286rem 0.643rem;
-  font: inherit;
-  font-size: 0.857em;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  white-space: nowrap;
-  -webkit-app-region: no-drag;
-  transition: background-color 0.12s ease, border-color 0.12s ease;
-}
-
-.worktree-bar__attach-browse:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--border-strong);
-}
-
-.worktree-bar__attach-browse:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* ── Attach validation status line (advisory) ──────────────────── */
-
-.worktree-bar__status {
-  display: flex;
-  align-items: center;
-  gap: 0.357rem;
-  font-size: 0.857em;
-  line-height: 1.4;
-  padding: 0.143rem 0;
-}
-
-.worktree-bar__status--validating {
-  color: var(--text-muted);
-}
-
-.worktree-bar__status--ok {
-  color: var(--accent);
-}
-
 /* ── Spinner (shared by create + attach busy states) ────────────── */
 
 .worktree-bar__spinner {
@@ -205,9 +118,14 @@
   line-height: 1.4;
 }
 
-.worktree-bar__error-icon {
-  flex-shrink: 0;
-  line-height: 1.4;
+.worktree-bar__error::before {
+  content: "";
+  flex: 0 0 0.429rem;
+  width: 0.429rem;
+  height: 0.429rem;
+  margin-top: 0.357rem;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .worktree-bar__error-text {

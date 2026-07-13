@@ -16,10 +16,11 @@ import {
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
-import { IconBranch, IconCheck, IconChevronDown } from "../common/icons.js";
+import { IconCheck, IconChevronDown } from "../common/icons.js";
 import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
 import { NotificationBellButton } from "../notifications/NotificationStack.js";
 import { ContextMeter } from "./ContextMeter.js";
+import { WorktreeSwitcher } from "./WorktreeSwitcher.js";
 import "./SessionHeader.css";
 
 interface SessionHeaderProps {
@@ -245,15 +246,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
           )}
         </div>
 
-        {session?.worktreeName && (
-          <WorktreeChip
-            sessionId={sessionId}
-            name={session.worktreeName}
-            branch={session.worktreeBranch ?? session.worktreeName ?? ""}
-            base={session.worktreeFromBase}
-            path={session.worktreePath}
-          />
-        )}
+        <WorktreeSwitcher sessionId={sessionId} />
         {!compact && <SessionControls sessionId={sessionId} />}
         <NotificationBellButton sessionId={sessionId} />
       </div>
@@ -874,52 +867,6 @@ export function SessionControls({
       {/* Context ring — click for a usage breakdown dropdown. */}
       <ContextMeter sessionId={sessionId} />
     </div>
-  );
-}
-
-/**
- * Worktree chip — shown next to the session name when the session is
- * running in a git worktree.
- */
-function WorktreeChip({
-  sessionId,
-  name,
-  branch,
-  base,
-  path,
-}: {
-  sessionId: SessionId;
-  name: string;
-  branch: string;
-  base?: string | undefined;
-  path?: string | undefined;
-}): React.ReactElement {
-  const addToast = useSessionsStore((s) => s.addToast);
-  // For an attached worktree there is no "cut from" relationship — the
-  // attach IPC stores `base = branch` as a sentinel meaning "attached,
-  // not cut from anything". Skip the `· from <base>` segment in that
-  // case so the tooltip stays honest about the worktree's provenance.
-  const showFromBase = base && base !== branch;
-  const detail = `${branch}${showFromBase ? ` · from ${base}` : ""}${path ? ` · ${path}` : ""}`;
-  // A real <button> so it's keyboard-operable (Enter/Space) and screen-reader
-  // friendly without hand-rolling key handlers.
-  return (
-    <button
-      type="button"
-      className="session-header__worktree-chip fade-scope"
-      title={path ? `${detail} · click to copy path` : detail}
-      data-testid="worktree-chip"
-      onClick={() => {
-        if (!path) return;
-        void window.pivis
-          .invoke("clipboard.writeText", { text: path })
-          .then(() => addToast(sessionId, "Worktree path copied", "info"))
-          .catch(() => addToast(sessionId, "Failed to copy worktree path", "error"));
-      }}
-    >
-      <IconBranch />
-      <FadeText className="session-header__worktree-label">{name}</FadeText>
-    </button>
   );
 }
 

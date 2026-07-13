@@ -12,6 +12,7 @@ export function BaseBranchDropdown(): React.ReactElement {
   const selectedBase = useDiffStore((s) => s.selectedBase);
   const includeRemoteBranches = useDiffStore((s) => s.includeRemoteBranches);
   const setBase = useDiffStore((s) => s.setBase);
+  const disabled = useDiffStore((s) => s.editSession !== null || s.commentEditorFiles.size > 0);
   const setIncludeRemoteBranches = useDiffStore((s) => s.setIncludeRemoteBranches);
 
   return (
@@ -24,6 +25,8 @@ export function BaseBranchDropdown(): React.ReactElement {
       onToggleRemote={() => setIncludeRemoteBranches(!includeRemoteBranches)}
       leadingItem={{ label: "HEAD" }}
       triggerLabel={selectedBase ?? "HEAD"}
+      ariaLabel="Compare against base branch"
+      disabled={disabled}
     />
   );
 }

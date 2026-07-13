@@ -4,7 +4,11 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listSessionsForWorkspace } from "./sessions/session-discovery.js";
 import { getSettings, loadSettings, saveSettings } from "./settings-store.js";
-import { respawnAndPersistWorktree } from "./worktree-persistence.js";
+import {
+  persistRecoverableWorktree,
+  respawnAndPersistWorkspace,
+  respawnAndPersistWorktree,
+} from "./worktree-persistence.js";
 
 let dir: string;
 let sessionsDir: string;
@@ -82,6 +86,8 @@ describe("respawnAndPersistWorktree", () => {
 
       const firstRespawn = deferred();
       const secondRespawn = deferred();
+      const firstSessionFile = path.join(sessionsDir, "saved", "first.jsonl");
+      const secondSessionFile = path.join(sessionsDir, "saved", "second.jsonl");
       const firstAssociation = {
         workspacePath,
         branch: "pi-vis-first",
@@ -98,11 +104,13 @@ describe("respawnAndPersistWorktree", () => {
       const first = respawnAndPersistWorktree({
         worktreePath: firstPath,
         association: firstAssociation,
+        sessionFile: firstSessionFile,
         respawn: () => firstRespawn.promise,
       });
       const second = respawnAndPersistWorktree({
         worktreePath: secondPath,
         association: secondAssociation,
+        sessionFile: secondSessionFile,
         respawn: () => secondRespawn.promise,
       });
 
@@ -121,9 +129,14 @@ describe("respawnAndPersistWorktree", () => {
       }
 
       // Reload from disk to model the next app launch, not just the in-memory map.
-      expect(loadSettings().worktrees).toEqual({
+      const persisted = loadSettings();
+      expect(persisted.worktrees).toEqual({
         [firstPath]: firstAssociation,
         [secondPath]: secondAssociation,
+      });
+      expect(persisted.sessionWorktrees).toEqual({
+        [path.resolve(firstSessionFile)]: firstPath,
+        [path.resolve(secondSessionFile)]: secondPath,
       });
 
       const firstFile = writePersistedSession("first.jsonl", "first-session", firstPath);
@@ -137,6 +150,98 @@ describe("respawnAndPersistWorktree", () => {
     },
   );
 
+  it("records a recoverable worktree without moving a session override", async () => {
+    saveSettings({
+      sessionWorktrees: { [path.resolve("/sessions/current.jsonl")]: "/worktrees/old" },
+    });
+
+    await expect(
+      persistRecoverableWorktree({
+        worktreePath: "/worktrees/recovery",
+        association: {
+          workspacePath: "/repos/workspace",
+          branch: "pi-vis-recovery",
+          name: "recovery",
+          base: "main",
+        },
+      }),
+    ).resolves.toEqual({ persisted: true });
+
+    expect(loadSettings()).toMatchObject({
+      worktrees: {
+        "/worktrees/recovery": {
+          workspacePath: "/repos/workspace",
+          branch: "pi-vis-recovery",
+          name: "recovery",
+          base: "main",
+        },
+      },
+      sessionWorktrees: { [path.resolve("/sessions/current.jsonl")]: "/worktrees/old" },
+    });
+  });
+
+  it("persists an explicit Workspace override when returning", async () => {
+    const sessionFile = "/sessions/returning.jsonl";
+    saveSettings({
+      worktrees: {
+        "/worktrees/shared": {
+          workspacePath: "/repos/workspace",
+          branch: "feature/shared",
+          name: "shared",
+          base: "main",
+        },
+      },
+      sessionWorktrees: {
+        [path.resolve(sessionFile)]: "/worktrees/shared",
+        [path.resolve("/sessions/other.jsonl")]: "/worktrees/shared",
+      },
+    });
+
+    await expect(
+      respawnAndPersistWorkspace({
+        sessionFile,
+        workspacePath: "/repos/workspace",
+        respawn: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual({ persisted: true });
+
+    expect(loadSettings()).toMatchObject({
+      worktrees: {
+        "/worktrees/shared": {
+          workspacePath: "/repos/workspace",
+          branch: "feature/shared",
+          name: "shared",
+          base: "main",
+        },
+      },
+      sessionWorktrees: {
+        [path.resolve(sessionFile)]: path.resolve("/repos/workspace"),
+        [path.resolve("/sessions/other.jsonl")]: "/worktrees/shared",
+      },
+    });
+  });
+
+  it("reports persistence failure without turning a completed respawn into switch failure", async () => {
+    const blockedSettingsDir = path.join(dir, "settings-blocker");
+    fs.writeFileSync(blockedSettingsDir, "not a directory");
+    process.env["PIVIS_SETTINGS_DIR"] = blockedSettingsDir;
+
+    const result = await respawnAndPersistWorktree({
+      worktreePath: "/worktrees/moved",
+      association: {
+        workspacePath: "/repos/workspace",
+        branch: "pi-vis-moved",
+        name: "moved",
+        base: "main",
+      },
+      sessionFile: "/sessions/moved.jsonl",
+      respawn: () => Promise.resolve(),
+    });
+
+    expect(result.persisted).toBe(false);
+    if (!result.persisted) expect(result.error).toMatch(/not a directory|ENOTDIR/i);
+  });
+
   it("does not persist an association when respawn fails", async () => {
     saveSettings({
       worktrees: {
@@ -146,6 +251,9 @@ describe("respawnAndPersistWorktree", () => {
           name: "existing",
           base: "main",
         },
+      },
+      sessionWorktrees: {
+        [path.resolve("/sessions/existing.jsonl")]: "/worktrees/existing",
       },
     });
 
@@ -158,17 +266,22 @@ describe("respawnAndPersistWorktree", () => {
           name: "failed",
           base: "main",
         },
+        sessionFile: "/sessions/failed.jsonl",
         respawn: () => Promise.reject(new Error("replacement host failed")),
       }),
     ).rejects.toThrow("replacement host failed");
 
-    expect(loadSettings().worktrees).toEqual({
+    const persisted = loadSettings();
+    expect(persisted.worktrees).toEqual({
       "/worktrees/existing": {
         workspacePath: "/repos/existing",
         branch: "existing",
         name: "existing",
         base: "main",
       },
+    });
+    expect(persisted.sessionWorktrees).toEqual({
+      [path.resolve("/sessions/existing.jsonl")]: "/worktrees/existing",
     });
   });
 });

@@ -65,6 +65,10 @@ export const AppSettingsSchema = z.object({
       }),
     )
     .default({}),
+  // Per-session cwd overrides: Pi's JSONL header cwd is immutable, so a
+  // session moved mid-run must reopen in this canonical worktree instead.
+  // Keyed by resolved existing session-file path.
+  sessionWorktrees: z.record(z.string(), z.string()).default({}),
   // User-selected theme ids for each luminance family. Free strings (not
   // enums) because themes are a registry: bundled themes (src/shared/theme)
   // plus user-droppable ones (<userData>/themes). An id that no longer

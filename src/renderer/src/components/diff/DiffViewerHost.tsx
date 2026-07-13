@@ -24,6 +24,7 @@ import {
   IconClose,
 } from "../common/icons.js";
 import { BaseBranchDropdown } from "./BaseBranchDropdown.js";
+import { CommitRangePicker } from "./CommitRangePicker.js";
 import { DiffEditBubble } from "./DiffEditBubble.js";
 import { DiffFileSection } from "./DiffFileSection.js";
 import "../common/viewer-header.css";
@@ -78,6 +79,9 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const viewMode = useDiffStore((s) => s.viewMode);
   const setViewMode = useDiffStore((s) => s.setViewMode);
   const selectedBase = useDiffStore((s) => s.selectedBase);
+  const commitRange = useDiffStore((s) => s.commitRange);
+  const historicalContext = useDiffStore((s) => s.historicalContext);
+  const historical = commitRange !== null;
   const [narrow, setNarrow] = useState(false);
   const select = useDiffStore((s) => s.select);
   const railWidth = useDiffStore((s) => s.railWidth);
@@ -121,6 +125,8 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     viewMode: effectiveSearchViewMode,
     root,
     base: selectedBase,
+    range: commitRange,
+    historicalContext,
     files: searchFiles,
     projectionKey: searchProjectionKey,
   });
@@ -196,7 +202,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const stale = useDiffStore((s) => s.stale);
   const refreshing = useDiffStore((s) => s.refreshing);
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || historical) return;
     const unsubEvent = window.pivis.on("session.events", ({ sessionId: sid, events }) => {
       if (sid !== sessionId) return;
       if (events.some((event) => event.type === "agent_end")) {
@@ -211,7 +217,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       unsubEvent();
       window.removeEventListener("focus", onFocus);
     };
-  }, [visible, sessionId, refresh]);
+  }, [visible, historical, sessionId, refresh]);
 
   // ── Keep pending diff-comment anchors checked against current files ─
   // Files with comments are loaded eagerly after refresh so RowsView can
@@ -219,7 +225,13 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   // that file. Comments for files that no longer appear in the diff are marked
   // stale immediately so the prompt metadata never presents them as current.
   useEffect(() => {
-    if (!visible || phase !== "ready" || !commentsForSession || commentsForSession.size === 0) {
+    if (
+      !visible ||
+      historical ||
+      phase !== "ready" ||
+      !commentsForSession ||
+      commentsForSession.size === 0
+    ) {
       return;
     }
     const currentPaths = new Set(files.map((f) => f.path));
@@ -236,6 +248,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     sessionId,
     ensureFileLoaded,
     markDiffCommentsStaleForMissingFiles,
+    historical,
   ]);
 
   // ── Re-tokenize open diff when the color scheme changes ───────────
@@ -651,7 +664,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
             {phase === "error" && (
               <ErrorState message={errorMessage} onRetry={() => void refresh()} />
             )}
-            {phase === "ready" && files.length === 0 && <CleanState />}
+            {phase === "ready" && files.length === 0 && <CleanState historical={historical} />}
             {phase === "ready" && files.length > 0 && (
               <FileSections
                 sessionId={sessionId}
@@ -664,7 +677,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
                 registerSection={registerSection}
               />
             )}
-            <DiffEditBubble />
+            {!historical && <DiffEditBubble />}
           </div>
         </div>
       </div>
@@ -731,6 +744,7 @@ function ViewerHeader({
         </button>
         <span className="diff-viewer__title">Changes</span>
         <BaseBranchDropdown />
+        <CommitRangePicker />
         <span className="diff-viewer__summary">
           <span>
             {truncated ? `>${(totals.count - 1).toLocaleString()}` : totals.count.toLocaleString()}{" "}
@@ -1427,14 +1441,14 @@ function FileSections({
 
 // ── Empty / error states ─────────────────────────────────────────────
 
-function CleanState(): React.ReactElement {
+function CleanState({ historical = false }: { historical?: boolean }): React.ReactElement {
   return (
     <div className="diff-empty">
       <span className="diff-empty__check" aria-hidden>
         <IconCheck />
       </span>
-      <span>Working tree clean</span>
-      <span className="diff-empty__sub">No changes since HEAD</span>
+      <span>{historical ? "No changes in selected range" : "Working tree clean"}</span>
+      {!historical && <span className="diff-empty__sub">No changes since HEAD</span>}
     </div>
   );
 }

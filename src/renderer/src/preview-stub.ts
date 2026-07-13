@@ -747,6 +747,7 @@ const settingsState = {
   pinnedSessions: [] as string[],
   archivedSessions: [] as string[],
   worktrees: {},
+  sessionWorktrees: {},
   diffViewMode: "unified" as "unified" | "split",
   diffIncludeRemoteBranches: false,
   diffRailWidth: 280,
@@ -1043,6 +1044,36 @@ const stub = {
               insertions: 8,
               deletions: 0,
               binary: false,
+            },
+          ],
+        };
+      case "git.commits":
+        return {
+          kind: "ok",
+          head: "cccccccccccccccccccccccccccccccccccccccc",
+          mergeBase: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          truncated: false,
+          commits: [
+            {
+              sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              shortSha: "aaaaaaaa",
+              subject: "Prepare config",
+              authorName: "Pi",
+              authoredAt: 1704067200000,
+            },
+            {
+              sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              shortSha: "bbbbbbbb",
+              subject: "Tune retries",
+              authorName: "Pi",
+              authoredAt: 1704153600000,
+            },
+            {
+              sha: "cccccccccccccccccccccccccccccccccccccccc",
+              shortSha: "cccccccc",
+              subject: "Add timeout",
+              authorName: "Pi",
+              authoredAt: 1704240000000,
             },
           ],
         };

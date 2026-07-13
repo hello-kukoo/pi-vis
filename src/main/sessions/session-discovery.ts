@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { SessionSummary, WorktreeIdentity } from "@shared/ipc-contract.js";
 import { SessionHeaderSchema } from "@shared/session-file/entries.js";
+import { inspectWorktree } from "../git/git.js";
 import { getSettings } from "../settings-store.js";
 import { mapLimit } from "../util/concurrency.js";
 
@@ -258,15 +259,37 @@ export function resolveWorktreeForFile(
   } catch {
     return undefined;
   }
-  const cwd = typeof header?.cwd === "string" ? header.cwd : undefined;
+  const settings = getSettings();
+  // A persisted move is authoritative over Pi's immutable JSONL header.
+  // Crucially, a stale override must not fall through to the old header cwd:
+  // doing so would resurrect the location the user explicitly switched away
+  // from after relaunch.
+  const override = settings.sessionWorktrees?.[path.resolve(filePath)];
+  const cwd = override ?? (typeof header?.cwd === "string" ? header.cwd : undefined);
   if (!cwd || cwd === workspacePath) return undefined;
-  const wt = getSettings().worktrees?.[cwd];
+  const wt = settings.worktrees?.[cwd];
   if (!wt || wt.workspacePath !== workspacePath) return undefined;
   // Don't claim a worktree whose directory no longer exists — the session
   // would otherwise try to spawn pi in a missing cwd. Fall back to the
   // workspace so the session is still openable.
   if (!fs.existsSync(cwd)) return undefined;
   return { path: cwd, branch: wt.branch, name: wt.name, base: wt.base };
+}
+
+export async function resolveValidatedWorktreeForFile(
+  filePath: string,
+  workspacePath: string,
+): Promise<WorktreeIdentity | undefined> {
+  const persisted = resolveWorktreeForFile(filePath, workspacePath);
+  if (!persisted) return undefined;
+  const inspected = await inspectWorktree(workspacePath, persisted.path, workspacePath, true);
+  if (inspected.kind === "error" || inspected.path !== persisted.path) return undefined;
+  return {
+    path: inspected.path,
+    branch: inspected.branch,
+    name: inspected.name,
+    base: persisted.base,
+  };
 }
 
 export async function listSessionsForWorkspace(workspacePath: string): Promise<SessionSummary[]> {
@@ -284,8 +307,9 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
   // one of these worktree paths is shown under the parent workspace even
   // though its file lives elsewhere on disk (pi writes the worktree cwd
   // into the header). Without this, worktree sessions vanish on relaunch.
+  const settings = getSettings();
   const worktreeCwds = new Set<string>();
-  for (const [wtPath, wt] of Object.entries(getSettings().worktrees ?? {})) {
+  for (const [wtPath, wt] of Object.entries(settings.worktrees ?? {})) {
     if (wt.workspacePath === workspacePath) worktreeCwds.add(wtPath);
   }
 
@@ -321,12 +345,27 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
         return null;
       }
 
+      // A valid session-file override is authoritative even on cache hits.
+      // If its association has gone stale, keep using the immutable header only
+      // to recover the parent workspace for sidebar ownership; runtime
+      // resolution still returns Workspace and must not resurrect that old cwd.
+      const belongsToWorkspace = (headerCwd: string): boolean => {
+        const override = settings.sessionWorktrees?.[path.resolve(filePath)];
+        if (override !== undefined) {
+          const target = settings.worktrees?.[override];
+          if (target) return target.workspacePath === workspacePath;
+          return (
+            headerCwd === workspacePath ||
+            settings.worktrees?.[headerCwd]?.workspacePath === workspacePath
+          );
+        }
+        return headerCwd === workspacePath || worktreeCwds.has(headerCwd);
+      };
+
       // Check cache
       const cached = cache.get(filePath);
       if (cached && cached.mtime === mtime) {
-        return cached.summary.cwd === workspacePath || worktreeCwds.has(cached.summary.cwd)
-          ? cached.summary
-          : null;
+        return belongsToWorkspace(cached.summary.cwd) ? cached.summary : null;
       }
 
       const headerLine = await readFirstLineAsync(filePath);
@@ -358,9 +397,7 @@ export async function listSessionsForWorkspace(workspacePath: string): Promise<S
       // enumerating. Without this, switching workspaces re-parses every
       // file from disk on each call.
       cache.set(filePath, { mtime, summary });
-      return header.data.cwd === workspacePath || worktreeCwds.has(header.data.cwd)
-        ? summary
-        : null;
+      return belongsToWorkspace(header.data.cwd) ? summary : null;
     },
   );
   results.push(...summaries.filter((s): s is SessionSummary => s !== null));

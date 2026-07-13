@@ -526,7 +526,9 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
     expect(m.overflowY).toBe("hidden");
   });
 
-  test("orders the title-bar worktree chip before unified toggle and changes", async ({ page }) => {
+  test("orders the title-bar worktree switcher before unified toggle and changes", async ({
+    page,
+  }) => {
     await page.setViewportSize({ width: 1200, height: 760 });
     await page.goto("/?unified=1");
     await page.waitForLoadState("domcontentloaded");
@@ -548,26 +550,26 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
       });
     });
 
-    const chip = page.locator('[data-testid="worktree-chip"]');
-    await expect(chip).toBeVisible({ timeout: 10_000 });
+    const switcher = page.locator('[data-testid="worktree-switcher-trigger"]');
+    await expect(switcher).toBeVisible({ timeout: 10_000 });
 
     const order = await page.evaluate(() => {
-      const chipEl = document.querySelector('[data-testid="worktree-chip"]');
+      const switcherEl = document.querySelector('[data-testid="worktree-switcher-trigger"]');
       const toggleEl = document.querySelector(".session-header__controls .unified-toggle");
       const changesEl = document.querySelector('[data-testid="changes-button"]');
       const before = (a: Element | null, b: Element | null): boolean =>
         !!a && !!b && Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
       return {
-        chipBeforeToggle: before(chipEl, toggleEl),
+        switcherBeforeToggle: before(switcherEl, toggleEl),
         toggleBeforeChanges: before(toggleEl, changesEl),
-        chipBeforeChanges: before(chipEl, changesEl),
+        switcherBeforeChanges: before(switcherEl, changesEl),
       };
     });
 
     expect(order).toEqual({
-      chipBeforeToggle: true,
+      switcherBeforeToggle: true,
       toggleBeforeChanges: true,
-      chipBeforeChanges: true,
+      switcherBeforeChanges: true,
     });
   });
 

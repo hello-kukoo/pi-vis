@@ -1,4 +1,4 @@
-import type { GitChangedFile } from "@shared/git.js";
+import type { GitChangedFile, GitCommitRange, GitHistoricalContext } from "@shared/git.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type PackedSearchFile,
@@ -55,6 +55,8 @@ interface UseDiffSearchOptions {
   viewMode: SearchViewMode;
   root: string | null;
   base: string | null;
+  range: GitCommitRange | null;
+  historicalContext: GitHistoricalContext | null;
   files: GitChangedFile[];
   /** Changes only when explicitly revealed gap context changes. */
   projectionKey: string;
@@ -72,6 +74,8 @@ export function useDiffSearch({
   viewMode,
   root,
   base,
+  range,
+  historicalContext,
   files,
   projectionKey,
 }: UseDiffSearchOptions): DiffSearchIndex {
@@ -194,7 +198,10 @@ export function useDiffSearch({
               path: file.path,
               status: file.status,
               untracked: file.untracked,
+              binary: file.binary,
               ...(base !== null ? { base } : {}),
+              ...(range !== null ? { range } : {}),
+              ...(historicalContext !== null ? { historicalContext } : {}),
               ...(file.oldPath !== undefined ? { oldPath: file.oldPath } : {}),
             };
             const response = await window.pivis.invoke("git.fileDiff", params);
@@ -268,7 +275,18 @@ export function useDiffSearch({
       pendingCompletions.length = 0;
       client?.dispose();
     };
-  }, [enabled, query, caseSensitive, viewMode, root, base, files, projectionKey]);
+  }, [
+    enabled,
+    query,
+    caseSensitive,
+    viewMode,
+    root,
+    base,
+    range,
+    historicalContext,
+    files,
+    projectionKey,
+  ]);
 
   const orderedResults = useMemo(() => {
     let start = 0;

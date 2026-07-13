@@ -44,6 +44,7 @@ function resetStoreWithTexts(oldText: string, newText: string, status: "A" | "M"
       },
     ],
     selectedPath: FILE,
+    commitRange: null,
     editSession: null,
     fileState: new Map([
       [
@@ -255,6 +256,222 @@ describe("diff-store base branch selection", () => {
     expect(useDiffStore.getState().root).toBe("/repo-b");
     expect(useDiffStore.getState().sessionId).toBe("session-b");
     expect(useDiffStore.getState().selectedBase).toBe("keep");
+  });
+});
+
+describe("diff-store commit ranges", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    invoke = vi.fn(async (channel: string) => {
+      if (channel === "git.changes") {
+        return {
+          kind: "ok",
+          repoRoot: "/repo",
+          files: [],
+          truncated: false,
+          fingerprint: "working-fingerprint",
+        };
+      }
+      if (channel === "git.branches") {
+        return {
+          kind: "ok",
+          current: "feature",
+          branches: [
+            { name: "feature", remote: false, current: true },
+            { name: "main", remote: false, current: false },
+          ],
+        };
+      }
+      return { kind: "ok" };
+    });
+    vi.stubGlobal("window", { pivis: { invoke } });
+    useDiffStore.setState({
+      open: true,
+      sessionId: "range-session" as never,
+      root: "/repo",
+      selectedBase: "main",
+      commitRange: null,
+      historicalContext: null,
+      files: [],
+      searchFiles: [],
+      fileState: new Map(),
+      editSession: null,
+      stale: false,
+      baselineFingerprint: null,
+      search: { open: true, query: "needle", caseSensitive: false, activeMatch: null },
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("resets a range on close/reopen while retaining the selected base", () => {
+    const store = useDiffStore.getState();
+    store.setBase("main");
+    store.setCommitRange({ start: "a", end: "a" });
+    store.closeViewer();
+    store.openViewer("range-session" as never, "/repo");
+
+    expect(useDiffStore.getState().selectedBase).toBe("main");
+    expect(useDiffStore.getState().commitRange).toBeNull();
+  });
+
+  it("setBase clears the selected commit range", () => {
+    useDiffStore.setState({ commitRange: { start: "a", end: "b" } });
+
+    useDiffStore.getState().setBase("feature");
+
+    expect(useDiffStore.getState().selectedBase).toBe("feature");
+    expect(useDiffStore.getState().commitRange).toBeNull();
+  });
+
+  it("does not change comparison while an unsaved comment editor is open", () => {
+    useDiffStore.getState().setCommentEditorOpen(FILE, true);
+
+    useDiffStore.getState().setBase("feature");
+    useDiffStore.getState().setCommitRange({ start: "a", end: "b" });
+
+    expect(useDiffStore.getState().selectedBase).toBe("main");
+    expect(useDiffStore.getState().commitRange).toBeNull();
+    expect(invoke.mock.calls.filter((call) => call[0] === "git.changes")).toHaveLength(0);
+    useDiffStore.getState().setCommentEditorOpen(FILE, false);
+  });
+
+  it("does one changes refresh for a changed commit range and no refresh for an equal range", () => {
+    useDiffStore.getState().setCommitRange({ start: "a", end: "b" });
+    expect(invoke.mock.calls.filter((call) => call[0] === "git.changes")).toHaveLength(1);
+
+    useDiffStore.getState().setCommitRange({ start: "a", end: "b" });
+    expect(invoke.mock.calls.filter((call) => call[0] === "git.changes")).toHaveLength(1);
+  });
+
+  it("does not allow an unresolved old-range file diff to populate after changing range", async () => {
+    let resolveFileDiff!: (value: unknown) => void;
+    const oldFileDiff = new Promise((resolve) => {
+      resolveFileDiff = resolve;
+    });
+    const file = {
+      path: FILE,
+      status: "A" as const,
+      untracked: true,
+      insertions: 1,
+      deletions: 0,
+      binary: false,
+    };
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === "git.fileDiff") return oldFileDiff;
+      if (channel === "git.changes") {
+        return { kind: "ok", repoRoot: "/repo", files: [file], truncated: false, fingerprint: "x" };
+      }
+      return { kind: "ok" };
+    });
+    useDiffStore.setState({
+      files: [file],
+      searchFiles: [file],
+      fileState: new Map([[FILE, { status: "idle", collapsed: false }]]),
+      commitRange: { start: "old", end: "old" },
+    });
+
+    const oldLoad = useDiffStore.getState().ensureFileLoaded(FILE);
+    useDiffStore.getState().setCommitRange({ start: "new", end: "new" });
+    resolveFileDiff({
+      kind: "ok",
+      oldText: "",
+      newText: "old range",
+      binary: false,
+      tooLarge: false,
+      oldMissingNewline: false,
+      newMissingNewline: false,
+    });
+    await oldLoad;
+
+    expect(useDiffStore.getState().fileState.get(FILE)?.newText).not.toBe("old range");
+  });
+
+  it("refuses editing historical comparisons", () => {
+    resetStore("a\nb\n");
+    useDiffStore.setState({ commitRange: { start: "a", end: "a" } });
+
+    openOver(0, 0);
+
+    expect(useDiffStore.getState().editSession).toBeNull();
+  });
+
+  it("forwards the manifest's immutable context to lazy historical reads", async () => {
+    const range = { start: "a".repeat(40), end: "b".repeat(40) };
+    const historicalContext = { parent: "c".repeat(40), end: range.end };
+    const file = {
+      path: FILE,
+      status: "A" as const,
+      untracked: false,
+      insertions: 1,
+      deletions: 0,
+      binary: true,
+    };
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === "git.changes") {
+        return {
+          kind: "ok",
+          repoRoot: "/repo",
+          files: [file],
+          searchFiles: [file],
+          historicalContext,
+          truncated: false,
+          fingerprint: "immutable",
+        };
+      }
+      if (channel === "git.fileDiff") {
+        return {
+          kind: "ok",
+          oldText: "",
+          newText: "historical\n",
+          binary: true,
+          tooLarge: false,
+          oldMissingNewline: false,
+          newMissingNewline: false,
+        };
+      }
+      return { kind: "ok" };
+    });
+    useDiffStore.setState({ commitRange: range });
+
+    const refresh = useDiffStore.getState().refresh();
+    await Promise.resolve();
+    vi.advanceTimersByTime(800);
+    await refresh;
+    await useDiffStore.getState().ensureFileLoaded(FILE);
+    const secondRefresh = useDiffStore.getState().refresh();
+    await Promise.resolve();
+    vi.advanceTimersByTime(800);
+    await secondRefresh;
+
+    expect(invoke).toHaveBeenCalledWith(
+      "git.changes",
+      expect.objectContaining({ range, historicalContext }),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "git.fileDiff",
+      expect.objectContaining({ range, historicalContext }),
+    );
+  });
+
+  it("historical refresh clears the working-tree baseline and stale indicator", async () => {
+    useDiffStore.setState({
+      commitRange: { start: "a", end: "b" },
+      stale: true,
+      baselineFingerprint: "old-working-baseline",
+    });
+
+    const refresh = useDiffStore.getState().refresh();
+    await Promise.resolve();
+    vi.advanceTimersByTime(800);
+    await refresh;
+
+    expect(useDiffStore.getState().baselineFingerprint).toBeNull();
+    expect(useDiffStore.getState().stale).toBe(false);
   });
 });
 

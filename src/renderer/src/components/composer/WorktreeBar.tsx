@@ -1,6 +1,6 @@
 import type { GitBranch } from "@shared/git.js";
 import type { SessionId } from "@shared/ids.js";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   gitRootForSession,
   sessionHasHistory,
@@ -8,18 +8,12 @@ import {
 } from "../../stores/sessions-store.js";
 import { BranchDropdown } from "../common/BranchDropdown.js";
 import { Spinner } from "../common/Spinner.js";
-import { IconCheck } from "../common/icons.js";
+import { WorktreeAttachField } from "../common/WorktreeAttachField.js";
 import "./WorktreeBar.css";
 
 interface WorktreeBarProps {
   sessionId: SessionId;
 }
-
-type AttachStatus =
-  | { kind: "idle" }
-  | { kind: "validating" }
-  | { kind: "ok"; branch: string; name: string }
-  | { kind: "error"; message: string };
 
 type WorktreeMode = "none" | "create" | "attach";
 
@@ -104,12 +98,12 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
 
   // Self-gate: hide once a worktree already exists for this session (so it
   // never reappears after the transcript resets via /new, /fork, /clone),
-  // if the session has any known transcript/tree history (already sent, even
-  // when `/tree` is viewing the root before messages), or if we're not in a
-  // git repo context (no branches to base from).
+  // once the session has an authoritative file (including a resumed
+  // header-only session), if it has any other known transcript/tree history,
+  // or if we're not in a git repo context (no branches to base from).
   if (!session) return null;
   if (session.worktreePath) return null;
-  if (sessionHasHistory(session)) return null;
+  if (session.sessionFile || sessionHasHistory(session)) return null;
   if (loading) return null;
   if (loadError || branches.length === 0) return null;
 
@@ -155,16 +149,17 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
             onToggleRemote={handleToggleRemote}
             disabled={creating}
             triggerLabel={base ?? "branch"}
+            ariaLabel="Choose worktree base branch"
             placement="top"
           />
         )}
 
         {mode === "attach" && (
-          <AttachMode
-            sessionId={sessionId}
-            attachPath={session.worktreeAttachPath ?? ""}
+          <WorktreeAttachField
+            workspacePath={session.workspacePath}
+            path={session.worktreeAttachPath ?? ""}
             disabled={creating}
-            onPathChange={(p) => setWorktreeAttachPath(sessionId, p)}
+            onPathChange={(path) => setWorktreeAttachPath(sessionId, path)}
           />
         )}
 
@@ -176,15 +171,9 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
         )}
       </div>
 
-      {/* Validation status line for attach mode (advisory — does not gate send). */}
-      {mode === "attach" && !creating && <AttachStatusLine sessionId={sessionId} />}
-
       {/* Inline, durable failure message (create or attach). */}
       {worktreeError && !creating && (
         <div className="worktree-bar__error" role="alert">
-          <span className="worktree-bar__error-icon" aria-hidden="true">
-            ⚠
-          </span>
           <span className="worktree-bar__error-text">{worktreeError}</span>
         </div>
       )}
@@ -230,155 +219,6 @@ function SegmentedControl({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-// ── Attach mode (path input + Browse) ───────────────────────────────
-//
-// `setWorktreeAttachPath` is the single source of truth for the path
-// value. Live validation runs as a debounced side-effect on every
-// change; the result is shown by AttachStatusLine (advisory — the
-// authoritative validation happens server-side in
-// `session.attachWorktree`).
-function AttachMode({
-  sessionId,
-  attachPath,
-  disabled,
-  onPathChange,
-}: {
-  sessionId: SessionId;
-  attachPath: string;
-  disabled: boolean;
-  onPathChange: (p: string) => void;
-}): React.ReactElement {
-  const [browseBusy, setBrowseBusy] = useState(false);
-
-  const handleBrowse = useCallback(async () => {
-    const session = useSessionsStore.getState().sessions.get(sessionId);
-    const workspacePath = session?.workspacePath;
-    if (!workspacePath) return;
-    setBrowseBusy(true);
-    try {
-      const picked = await window.pivis.invoke("worktree.pickDirectory", {
-        workspacePath,
-      });
-      if (typeof picked === "string" && picked.length > 0) {
-        onPathChange(picked);
-      }
-    } catch {
-      // Swallow — the picker may have failed (e.g. dialog dismissed
-      // unexpectedly). The text input still works as a fallback.
-    } finally {
-      setBrowseBusy(false);
-    }
-  }, [sessionId, onPathChange]);
-
-  return (
-    <div className="worktree-bar__attach">
-      <input
-        type="text"
-        className="worktree-bar__attach-input"
-        value={attachPath}
-        onChange={(e) => onPathChange(e.target.value)}
-        placeholder="/path/to/worktree"
-        spellCheck={false}
-        autoCorrect="off"
-        autoCapitalize="off"
-        disabled={disabled}
-        aria-label="Worktree directory path"
-      />
-      <button
-        type="button"
-        className="worktree-bar__attach-browse"
-        onClick={() => void handleBrowse()}
-        disabled={disabled || browseBusy}
-      >
-        {browseBusy ? "…" : "Browse…"}
-      </button>
-    </div>
-  );
-}
-
-// ── Attach validation status line ────────────────────────────────────
-//
-// Debounced live validation of the path in `worktreeAttachPath`. Stale
-// responses are dropped via a monotonic request id so a slow validate
-// for an older path can't overwrite a newer one. The line is advisory
-// only — the actual submit is gated by `session.attachWorktree`
-// re-running `inspectWorktree` server-side.
-function AttachStatusLine({ sessionId }: { sessionId: SessionId }): React.ReactElement | null {
-  // Subscribe to the path directly so we re-run when it changes (and to
-  // the workspace path so we re-run when the workspace context shifts).
-  const attachPath = useSessionsStore((s) => s.sessions.get(sessionId)?.worktreeAttachPath ?? "");
-  const workspacePath = useSessionsStore((s) => s.sessions.get(sessionId)?.workspacePath);
-  const [status, setStatus] = useState<AttachStatus>({ kind: "idle" });
-  const requestIdRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (!workspacePath) return;
-    if (!attachPath.trim()) {
-      // Empty path: show a quiet hint (no error, no spinner).
-      setStatus({ kind: "idle" });
-      return;
-    }
-    // Bump the request id so any in-flight (older) response is ignored.
-    const myId = ++requestIdRef.current;
-    setStatus({ kind: "validating" });
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      window.pivis
-        .invoke("worktree.validate", { workspacePath, path: attachPath })
-        .then((res: { ok: true; branch: string; name: string } | { ok: false; error: string }) => {
-          if (myId !== requestIdRef.current) return; // stale
-          if (res.ok) {
-            setStatus({ kind: "ok", branch: res.branch, name: res.name });
-          } else {
-            setStatus({ kind: "error", message: res.error });
-          }
-        })
-        .catch((err: Error) => {
-          if (myId !== requestIdRef.current) return; // stale
-          setStatus({ kind: "error", message: String(err) });
-        });
-    }, 300); // ~300ms — keeps the line responsive without thrashing IPC
-
-    return () => {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-  }, [attachPath, workspacePath]);
-
-  if (status.kind === "idle") return null;
-
-  if (status.kind === "validating") {
-    return (
-      <div className="worktree-bar__status worktree-bar__status--validating">
-        <Spinner className="worktree-bar__spinner-dot" aria-hidden="true" />
-        <span>Checking…</span>
-      </div>
-    );
-  }
-
-  if (status.kind === "ok") {
-    return (
-      <div className="worktree-bar__status worktree-bar__status--ok">
-        <IconCheck />
-        <span>On branch {status.branch}</span>
-      </div>
-    );
-  }
-
-  // error
-  return (
-    <div className="worktree-bar__error" role="alert">
-      <span className="worktree-bar__error-icon" aria-hidden="true">
-        ⚠
-      </span>
-      <span className="worktree-bar__error-text">{status.message}</span>
     </div>
   );
 }

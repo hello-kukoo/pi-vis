@@ -246,6 +246,21 @@ describe("SessionRegistry direct AgentSession authority", () => {
     busy.registry.stopAll();
   });
 
+  it("retains an activation visit when worktree work is admitted before replacement", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {}, "visit-worktree");
+
+    h.registry.beginWorktreeSwitch(id);
+
+    await expect(h.registry.releaseActivationVisit(id, "visit-worktree")).resolves.toEqual({
+      released: false,
+    });
+    expect(h.registry.getSession(id)?.proc).toBeDefined();
+    expect(h.fakes[0]!.killed).toBe(false);
+    h.registry.stopAll();
+  });
+
   it("suspends the registry snapshot lease for acknowledged provisional lifecycle UI", async () => {
     vi.useFakeTimers();
     try {
@@ -1542,6 +1557,28 @@ describe("SessionRegistry direct AgentSession authority", () => {
     h.registry.stopAll();
   });
 
+  it("reactivates the previous checkout when destination startup fails", async () => {
+    const h = harness({ failStartupAt: [1] });
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    h.fakes[0]!.editor = { revision: 2, text: "recover me", attachments: [] };
+
+    await expect(
+      h.registry.setWorktreeAndRespawn(id, "/tmp/project-worktree", "/tmp/pi", {}),
+    ).rejects.toThrow("direct host unavailable");
+
+    expect(h.spawnCwds).toEqual(["/tmp/project", "/tmp/project-worktree", "/tmp/project"]);
+    expect(h.registry.getSession(id)).toMatchObject({
+      status: "ready",
+      availability: "available",
+      worktreePath: undefined,
+    });
+    expect(h.registry.getSession(id)?.snapshot?.editor).toMatchObject({
+      text: "recover me",
+    });
+    h.registry.stopAll();
+  });
+
   it("does not detach for worktree respawn after close wins a deferred preflight", async () => {
     const h = harness();
     const id = h.registry.openSession("/tmp/project");
@@ -1583,6 +1620,197 @@ describe("SessionRegistry direct AgentSession authority", () => {
     expect(h.fakes).toHaveLength(1);
     expect(h.fakes[0]!.killed).toBe(false);
     expect(h.registry.getSession(id)?.worktreePath).toBeUndefined();
+    h.registry.stopAll();
+  });
+
+  it("restores availability when close preparation fails after a worktree abort", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    record.availability = "transitioning";
+    record._worktreeTransition = undefined;
+    vi.spyOn(record.proc!, "prepareClose").mockRejectedValueOnce(new Error("checkpoint failed"));
+
+    await expect(h.registry.prepareClose(id)).rejects.toThrow("checkpoint failed");
+
+    expect(record).toMatchObject({ availability: "available", _closing: false });
+    expect(() => h.registry.assertWorktreeSwitchEligible(id)).not.toThrow();
+    h.registry.stopAll();
+  });
+
+  it("restores availability when close confirmation becomes invalid after a worktree abort", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    const prepared = await h.registry.prepareClose(id);
+    record.availability = "transitioning";
+    record._worktreeTransition = undefined;
+    vi.spyOn(record.proc!, "confirmClose").mockResolvedValueOnce({ valid: false });
+
+    await expect(h.registry.confirmClose(id, prepared.reviewToken)).resolves.toEqual({
+      closed: false,
+      reason: "Host state changed after the close checkpoint",
+    });
+    expect(record).toMatchObject({ availability: "available", _closing: false });
+    expect(() => h.registry.assertWorktreeSwitchEligible(id)).not.toThrow();
+    h.registry.stopAll();
+  });
+
+  it("keeps the current host attached when an async pre-detach guard rejects", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+
+    await expect(
+      h.registry.setWorktreeAndRespawn(
+        id,
+        "/tmp/project-worktree",
+        "/tmp/pi",
+        {},
+        {
+          onBeforeDetach: async () => {
+            await Promise.resolve();
+            throw new Error("source checkout changed");
+          },
+        },
+      ),
+    ).rejects.toThrow("source checkout changed");
+
+    expect(h.fakes).toHaveLength(1);
+    expect(h.fakes[0]!.killed).toBe(false);
+    expect(h.registry.getSession(id)?.worktreePath).toBeUndefined();
+    expect(h.registry.getSession(id)?.status).toBe("ready");
+    h.registry.stopAll();
+  });
+
+  it("rechecks lifecycle eligibility after an asynchronous pre-detach guard", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    let guardEntered = false;
+    let releaseGuard!: () => void;
+    const guard = new Promise<void>((resolve) => {
+      releaseGuard = resolve;
+    });
+    const detached = vi.fn();
+
+    const respawn = h.registry.setWorktreeAndRespawn(
+      id,
+      "/tmp/project-worktree",
+      "/tmp/pi",
+      {},
+      {
+        onBeforeDetach: async () => {
+          guardEntered = true;
+          await guard;
+        },
+        onDetachCommitted: detached,
+      },
+    );
+    await vi.waitFor(() => expect(guardEntered).toBe(true));
+    const prepared = await h.registry.prepareClose(id);
+    releaseGuard();
+
+    await expect(respawn).rejects.toThrow("active and retained work");
+    expect(detached).not.toHaveBeenCalled();
+    expect(h.fakes).toHaveLength(1);
+    expect(h.fakes[0]!.killed).toBe(false);
+    expect(h.registry.getSession(id)?.worktreePath).toBeUndefined();
+    await expect(h.registry.cancelClose(id, prepared.reviewToken)).resolves.toEqual({
+      cancelled: true,
+    });
+    expect(h.registry.getSession(id)).toMatchObject({
+      availability: "available",
+      _worktreeTransition: undefined,
+    });
+    expect(() => h.registry.assertWorktreeSwitchEligible(id)).not.toThrow();
+    h.registry.stopAll();
+  });
+
+  it("runs the immediate source guard only after the final host snapshot settles", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    const originalRequestSnapshot = record.proc!.requestSnapshot.bind(record.proc!);
+    let finalSnapshotEntered = false;
+    let releaseFinalSnapshot!: () => void;
+    const finalSnapshot = new Promise<void>((resolve) => {
+      releaseFinalSnapshot = resolve;
+    });
+    vi.spyOn(record.proc!, "requestSnapshot")
+      .mockImplementationOnce(originalRequestSnapshot)
+      .mockImplementationOnce(async () => {
+        finalSnapshotEntered = true;
+        await finalSnapshot;
+        return originalRequestSnapshot();
+      });
+    const immediateGuard = vi.fn();
+
+    const respawn = h.registry.setWorktreeAndRespawn(
+      id,
+      "/tmp/project-worktree",
+      "/tmp/pi",
+      {},
+      { onImmediatelyBeforeDetach: immediateGuard },
+    );
+    await vi.waitFor(() => expect(finalSnapshotEntered).toBe(true));
+    expect(immediateGuard).not.toHaveBeenCalled();
+    releaseFinalSnapshot();
+    await respawn;
+
+    expect(immediateGuard).toHaveBeenCalledOnce();
+    expect(h.fakes).toHaveLength(2);
+    h.registry.stopAll();
+  });
+
+  it("fences editor ingress and captures a final draft after the async guard", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    const [hostId, epoch] = runtimeIdentity(record);
+    let guardEntered = false;
+    let releaseGuard!: () => void;
+    const guard = new Promise<void>((resolve) => {
+      releaseGuard = resolve;
+    });
+
+    const respawn = h.registry.setWorktreeAndRespawn(
+      id,
+      "/tmp/project-worktree",
+      "/tmp/pi",
+      {},
+      {
+        onBeforeDetach: async () => {
+          guardEntered = true;
+          await guard;
+        },
+      },
+    );
+    await vi.waitFor(() => expect(guardEntered).toBe(true));
+    await expect(
+      h.registry.applyEditorPatch(id, hostId, epoch, {
+        baseRevision: 0,
+        revision: 1,
+        text: "late renderer draft",
+        attachments: [],
+      }),
+    ).rejects.toThrow("unavailable");
+    h.fakes[0]!.editor = {
+      revision: 3,
+      text: "extension draft during guard",
+      attachments: [],
+    };
+    releaseGuard();
+    await respawn;
+
+    expect(h.registry.getSession(id)?.snapshot?.editor).toMatchObject({
+      text: "extension draft during guard",
+    });
+    expect(h.fakes).toHaveLength(2);
     h.registry.stopAll();
   });
 

@@ -100,6 +100,7 @@ export interface SessionRecord {
   _leaseTimer?: ReturnType<typeof setTimeout> | undefined;
   _lifecycleUiLease?: boolean | undefined;
   _hostTransition?: { transitionId: string; provisionalEpoch: number } | undefined;
+  _worktreeTransition?: boolean | undefined;
   _retainedIntents: Map<string, RetainedIntent>;
   _pendingSubmissionPromises: Map<string, Promise<SubmissionResult>>;
   _expiredUnifiedIntents: Set<string>;
@@ -618,7 +619,8 @@ export class SessionRegistry {
     }
     record.snapshotReceivedAt = Date.now();
     const leaseMs = snapshot.isIdle ? 5_000 : 1_000;
-    const transitionPending = record._hostTransition !== undefined;
+    const transitionPending =
+      record._hostTransition !== undefined || record._worktreeTransition === true;
     record.leaseExpiresAt = transitionPending ? undefined : record.snapshotReceivedAt + leaseMs;
     record.availability = transitionPending ? "transitioning" : "available";
     record.lastActiveAt = Date.now();
@@ -2297,12 +2299,31 @@ export class SessionRegistry {
     }
   }
 
-  private assertWorktreeRespawnEligible(record: SessionRecord): void {
+  /** Atomically admit user-requested worktree work and retain its activation visit. */
+  beginWorktreeSwitch(sessionId: SessionId): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    this.assertWorktreeRespawnEligible(record);
+    this.markActivationVisitInteracted(record);
+  }
+
+  /** Fast authoritative preflight for IPC callers before git worktree work. */
+  assertWorktreeSwitchEligible(sessionId: SessionId): void {
+    const record = this.sessions.get(sessionId);
+    if (!record) throw new Error(`Unknown session: ${sessionId}`);
+    this.assertWorktreeRespawnEligible(record);
+  }
+
+  private assertWorktreeRespawnEligible(
+    record: SessionRecord,
+    allowWorktreeTransition = false,
+  ): void {
     if (
       this.sessions.get(record.sessionId) !== record ||
       record._closing ||
       record._dead ||
-      record.availability !== "available" ||
+      (record.availability !== "available" &&
+        !(allowWorktreeTransition && record.availability === "transitioning")) ||
       record._hostTransition !== undefined ||
       record.snapshot?.isIdle === false ||
       record.snapshot?.hostFacts.submitting === true ||
@@ -2315,11 +2336,38 @@ export class SessionRegistry {
     }
   }
 
+  private restoreAvailableRuntime(record: SessionRecord): void {
+    if (
+      this.sessions.get(record.sessionId) !== record ||
+      record._closing ||
+      record._dead ||
+      !record.proc ||
+      !record._procReady ||
+      record._hostTransition !== undefined ||
+      record._worktreeTransition === true ||
+      record.availability !== "transitioning"
+    )
+      return;
+    record.availability = "available";
+    if (record.snapshot) {
+      record.snapshotReceivedAt = Date.now();
+      const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
+      record.leaseExpiresAt = record.snapshotReceivedAt + leaseMs;
+      this.armLease(record, leaseMs);
+    }
+    this.publishRuntime(record, "available");
+  }
+
   async setWorktreeAndRespawn(
     sessionId: SessionId,
-    worktreePath: string,
+    worktreePath: string | undefined,
     piPath: string,
     env?: Record<string, string>,
+    lifecycle?: {
+      onBeforeDetach?: () => void | Promise<void>;
+      onImmediatelyBeforeDetach?: () => void | Promise<void>;
+      onDetachCommitted?: () => void;
+    },
   ): Promise<void> {
     const record = this.sessions.get(sessionId);
     if (!record) throw new Error(`Unknown session: ${sessionId}`);
@@ -2329,15 +2377,61 @@ export class SessionRegistry {
       this.assertWorktreeRespawnEligible(record);
       const old = record.worktreePath;
       const proc = record.proc;
-      if (proc && record._procReady) {
-        const freshSnapshot = await proc.requestSnapshot();
-        if (record.proc !== proc) throw new Error("Session changed before worktree respawn");
-        this.assertWorktreeRespawnEligible(record);
-        this.installSnapshot(record, freshSnapshot);
-        this.assertWorktreeRespawnEligible(record);
+      let detachmentCommitted = false;
+      record._worktreeTransition = true;
+      record.availability = "transitioning";
+      this.publishRuntime(record, "transitioning", "Worktree replacement in progress");
+      try {
+        if (proc && record._procReady) {
+          // The transition fence is installed before requesting this snapshot:
+          // already-admitted host messages settle ahead of the request, while
+          // new renderer/editor ingress is rejected until replacement ends.
+          const freshSnapshot = await proc.requestSnapshot();
+          if (record.proc !== proc) throw new Error("Session changed before worktree respawn");
+          this.installSnapshot(record, freshSnapshot);
+          this.assertWorktreeRespawnEligible(record, true);
+        }
+        this.assertWorktreeRespawnEligible(record, true);
+        this.captureEditorRecovery(record);
+        // Callers can finish asynchronous pre-detach work before the final
+        // host snapshot. Destructive cleanup remains safe until
+        // onDetachCommitted runs below.
+        await lifecycle?.onBeforeDetach?.();
+        if (this.sessions.get(sessionId) !== record || record.proc !== proc) {
+          throw new Error("Session changed before worktree respawn detachment");
+        }
+        if (proc && record._procReady) {
+          const finalSnapshot = await proc.requestSnapshot();
+          if (this.sessions.get(sessionId) !== record || record.proc !== proc) {
+            throw new Error("Session changed before worktree respawn detachment");
+          }
+          this.installSnapshot(record, finalSnapshot);
+        }
+        // Source-checkout validation belongs here: no await may intervene
+        // between this callback and the committed detachment boundary.
+        await lifecycle?.onImmediatelyBeforeDetach?.();
+        if (this.sessions.get(sessionId) !== record || record.proc !== proc) {
+          throw new Error("Session changed before worktree respawn detachment");
+        }
+        this.assertWorktreeRespawnEligible(record, true);
+        this.captureEditorRecovery(record);
+        lifecycle?.onDetachCommitted?.();
+        detachmentCommitted = true;
+      } catch (error) {
+        if (
+          !detachmentCommitted &&
+          this.sessions.get(sessionId) === record &&
+          record.proc === proc &&
+          !record._dead
+        ) {
+          // Clear this fence even while close review owns `_closing`.
+          // `cancelClose` restores availability after its own fence clears.
+          record._worktreeTransition = undefined;
+          this.restoreAvailableRuntime(record);
+        }
+        throw error;
       }
-      this.assertWorktreeRespawnEligible(record);
-      this.captureEditorRecovery(record);
+      record._worktreeTransition = undefined;
       record.proc = undefined;
       record._procReady = false;
       this.retireHostUi(record);
@@ -2348,19 +2442,33 @@ export class SessionRegistry {
       record.worktreePath = worktreePath;
       try {
         await this.activateSession(sessionId, piPath, env);
+        const activated = this.sessions.get(sessionId);
         if (
-          this.sessions.get(sessionId) !== record ||
-          record._closing ||
-          record._dead ||
-          record.availability !== "available"
+          activated !== record ||
+          activated._closing ||
+          activated._dead ||
+          activated.availability !== "available"
         ) {
           throw new Error("Session lifecycle changed while worktree respawn was activating");
         }
-      } catch (error) {
-        if (this.sessions.get(sessionId) === record && !record._closing) {
-          record.worktreePath = old;
+      } catch (destinationError) {
+        if (this.sessions.get(sessionId) !== record || record._closing || record._dead) {
+          throw destinationError;
         }
-        throw error;
+        record.worktreePath = old;
+        this.captureEditorRecovery(record);
+        try {
+          await this.activateSession(sessionId, piPath, env);
+        } catch (rollbackError) {
+          const destinationMessage =
+            destinationError instanceof Error ? destinationError.message : String(destinationError);
+          const rollbackMessage =
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          throw new Error(
+            `${destinationMessage} Restoring the previous checkout also failed: ${rollbackMessage}`,
+          );
+        }
+        throw destinationError;
       }
     });
   }
@@ -2474,6 +2582,7 @@ export class SessionRegistry {
       if (hostReviewToken) await closeProc.cancelClose(hostReviewToken).catch(() => false);
       record._closing = false;
       record._closeToken = undefined;
+      this.restoreAvailableRuntime(record);
       throw error;
     }
   }
@@ -2485,6 +2594,7 @@ export class SessionRegistry {
     if (!cancelled) return { cancelled: false };
     record._closeToken = undefined;
     record._closing = false;
+    this.restoreAvailableRuntime(record);
     return { cancelled: true };
   }
 
@@ -2501,6 +2611,7 @@ export class SessionRegistry {
       if (record.proc) await record.proc.cancelClose(token).catch(() => false);
       record._closeToken = undefined;
       record._closing = false;
+      this.restoreAvailableRuntime(record);
       return { closed: false, reason: "Session changed after the close checkpoint" };
     }
     if (record.proc) {
@@ -2511,12 +2622,14 @@ export class SessionRegistry {
         await record.proc.cancelClose(token).catch(() => false);
         record._closeToken = undefined;
         record._closing = false;
+        this.restoreAvailableRuntime(record);
         return { closed: false, reason: error instanceof Error ? error.message : String(error) };
       }
       if (!confirmed.valid) {
         await record.proc.cancelClose(token).catch(() => false);
         record._closeToken = undefined;
         record._closing = false;
+        this.restoreAvailableRuntime(record);
         return { closed: false, reason: "Host state changed after the close checkpoint" };
       }
     }
@@ -2810,6 +2923,15 @@ export class SessionRegistry {
 
   getSession(sessionId: SessionId): SessionRecord | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  isWorktreePathInUse(worktreePath: string, exceptSessionId?: SessionId): boolean {
+    return [...this.sessions.values()].some(
+      (record) =>
+        record.sessionId !== exceptSessionId &&
+        !record._dead &&
+        record.worktreePath === worktreePath,
+    );
   }
 
   getByFile(sessionFile: string): SessionRecord | undefined {
