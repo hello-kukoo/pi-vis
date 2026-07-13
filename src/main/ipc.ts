@@ -12,6 +12,8 @@ import type {
   IntentReceipt,
   ReloadRequest,
   RendererCommandRequest,
+  SessionQueryEnvelope,
+  SessionQueryResult,
   SessionSubmission,
 } from "@shared/pi-protocol/runtime-state.js";
 import { resolveActiveColorScheme } from "@shared/settings.js";
@@ -1143,6 +1145,14 @@ export function initIpc(win: BrowserWindow): void {
       }
 
       return res;
+    },
+  );
+
+  ipcMain.handle(
+    "session.query",
+    async (_evt, envelope: SessionQueryEnvelope): Promise<SessionQueryResult> => {
+      if (!registry) throw new Error("Session registry not initialized");
+      return registry.query(envelope);
     },
   );
 

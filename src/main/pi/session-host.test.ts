@@ -155,7 +155,7 @@ describe("SessionHost", () => {
       fake.emitReady("0.80.2");
       await host.waitForReady();
       let settled = false;
-      const command = host.sendCommand({ type: "new_session" } as never).finally(() => {
+      const command = host.executeCommand({ type: "new_session" } as never).finally(() => {
         settled = true;
       });
       const outbound = [...fake.sent].reverse().find((message) => message.type === "command");
@@ -558,12 +558,12 @@ describe("SessionHost", () => {
     });
   });
 
-  describe("sendCommand", () => {
+  describe("command transport", () => {
     it("correlates a response by id and resolves with data", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
 
-      const p = host.sendCommand({ type: "get_state" } as never);
+      const p = host.executeCommand({ type: "get_state" } as never);
       // The host received the command on the wire:
       expect(fake.sent.some((m) => m.type === "command")).toBe(true);
 
@@ -579,11 +579,30 @@ describe("SessionHost", () => {
       expect(res.success).toBe(true);
     });
 
+    it("correlates a read-only query to its mapped command without interpreting its data", async () => {
+      await fake.emitReady("0.80.0");
+      await host.waitForReady();
+
+      const pending = host.query({ type: "get_state" });
+      const sent = fake.sent.find((message) => message.type === "command")!;
+      expect(sent.command).toEqual({ type: "get_state" });
+      fake.emitWire({ type: "response", id: sent.id, success: true, data: { opaque: true } });
+
+      await expect(pending).resolves.toEqual({
+        type: "response",
+        command: "get_state",
+        id: sent.id,
+        success: true,
+        data: { opaque: true },
+        error: undefined,
+      });
+    });
+
     it("forwards the invoking UI surface outside the pi RPC command", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
 
-      const p = host.sendCommand({ type: "prompt", message: "/custom" } as never, {
+      const p = host.executeCommand({ type: "prompt", message: "/custom" } as never, {
         uiSurface: "composer",
       });
       const sentCmd = fake.sent.find((m) => m.type === "command")!;
@@ -597,7 +616,7 @@ describe("SessionHost", () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
 
-      const p = host.sendCommand({ type: "clone" } as never);
+      const p = host.executeCommand({ type: "clone" } as never);
       const sentCmd = fake.sent.find((m) => m.type === "command")!;
       fake.emitWire({
         type: "response",
@@ -616,7 +635,7 @@ describe("SessionHost", () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
 
-      const p = host.sendCommand({ type: "get_state" } as never);
+      const p = host.executeCommand({ type: "get_state" } as never);
       fake.emitStderr("fatal host detail\n");
       fake.emitExit(1);
       await expect(p).rejects.toThrow(/Host process exited.*fatal host detail/s);
@@ -744,14 +763,14 @@ describe("SessionHost", () => {
       fake.emitExit(0);
       // Post-exit the IPC channel is closed; the send-callback rejects rather
       // than leaving the (timeout-less) get_state pending forever.
-      await expect(host.sendCommand({ type: "get_state" })).rejects.toThrow(/closed/i);
+      await expect(host.executeCommand({ type: "get_state" })).rejects.toThrow(/closed/i);
     });
 
     it("a command sent BEFORE ready resolves with the host's 'Not initialized' failure", async () => {
       // The fake mirrors host.mjs. This is the failure the registry's
       // _procReady gate prevents (P1-i); at the SessionHost layer command
       // failures are normal RPC responses, not rejected IPC sends.
-      const res = await host.sendCommand({ type: "get_state" });
+      const res = await host.executeCommand({ type: "get_state" });
       expect(res.success).toBe(false);
       expect(res.error).toMatch(/Not initialized/);
     });

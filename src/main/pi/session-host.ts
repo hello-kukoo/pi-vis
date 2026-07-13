@@ -3,7 +3,7 @@
  *
  * Exposes the main-process EventEmitter bridge for one SDK host:
  *   - Events: event(PiEvent), uiRequest(ExtensionUiRequest), exit, error
- *   - Methods: sendCommand(PiRpcCommand): Promise<PiRpcResponse>, sendUiResponse(string), stop()
+ *   - Methods: executeCommand(PiRpcCommand): Promise<PiRpcResponse>, query(PiReadOnlyCommand), sendUiResponse(string), stop()
  *
  * Additional events for panels:
  *   - panelOpen(panelId, overlay), panelData(panelId, data), panelClose(panelId)
@@ -20,7 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionId } from "@shared/ids.js";
 import { newRpcRequestId } from "@shared/ids.js";
-import type { PiRpcCommand } from "@shared/pi-protocol/commands.js";
+import type { PiReadOnlyCommand, PiRpcCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import { PiEventSchema } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
@@ -1149,7 +1149,8 @@ export class SessionHost extends EventEmitter {
 
   // ─── Public SDK-host interface ─────────────────────────────────────────
 
-  async sendCommand(
+  /** Low-level child command transport. Higher layers use the capability-specific public methods. */
+  private async sendCommand(
     command: PiRpcCommand,
     options: {
       uiSurface?: "composer" | "unified" | undefined;
@@ -1191,6 +1192,26 @@ export class SessionHost extends EventEmitter {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /** Execute a legacy renderer command after SessionRegistry admission. */
+  executeCommand(
+    command: PiRpcCommand,
+    options: {
+      uiSurface?: "composer" | "unified" | undefined;
+      /** Called only after Node confirms the command crossed child IPC. */
+      onDispatched?: (() => void) | undefined;
+    } = {},
+  ): Promise<PiRpcResponse> {
+    return this.sendCommand(command, options);
+  }
+
+  /** Execute an explicitly read-only query without exposing generic child command transport. */
+  async query(command: PiReadOnlyCommand): Promise<PiRpcResponse> {
+    const response = await this.sendCommand(command);
+    // The child response is opaque; only restore its request correlation at
+    // this transport boundary for the typed query result contract.
+    return { ...response, command: command.type };
   }
 
   private requestHost(

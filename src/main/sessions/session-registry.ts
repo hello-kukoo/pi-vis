@@ -6,6 +6,7 @@ import { newSessionId } from "@shared/ids.js";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
 import {
+  type PiReadOnlyCommand,
   type PiRpcCommand,
   commandNeedsIntent,
   commandPolicy,
@@ -32,6 +33,10 @@ import {
   type RuntimeIdentity,
   type RuntimeRecord,
   type RuntimeStateUpdate,
+  type SessionQuery,
+  type SessionQueryEnvelope,
+  SessionQueryEnvelopeSchema,
+  type SessionQueryResult,
   type SessionSubmission,
   SessionSubmissionSchema,
   type SubmissionResult,
@@ -188,6 +193,32 @@ function removeRuntimePinWithRetry(alias: string, attemptsRemaining = 60): void 
 /** A visit release is startup cancellation, never a later idle-host policy. */
 const ACTIVATION_VISIT_RELEASE_WINDOW_MS = 2_000;
 const DEFAULT_UNIFIED_CLAIM_TIMEOUT_MS = 60_000;
+
+/** The query protocol is deliberately narrower than Pi's general command union. */
+function commandForSessionQuery(query: SessionQuery): PiReadOnlyCommand {
+  switch (query.type) {
+    case "get_available_models":
+    case "get_scoped_models":
+    case "get_logout_providers":
+    case "get_commands":
+    case "get_state":
+    case "get_session_stats":
+    case "get_messages":
+    case "get_fork_messages":
+    case "get_last_assistant_text":
+    case "get_trust_state":
+    case "get_tree":
+    case "get_cache_miss_notices":
+      return { type: query.type };
+    case "render_entry":
+      return {
+        type: "render_entry",
+        entryId: query.entryId,
+        cols: query.cols,
+        ...(query.expanded !== undefined ? { expanded: query.expanded } : {}),
+      };
+  }
+}
 
 type SessionEventCallback = (sessionId: SessionId, event: PiEvent) => void;
 type UiRequestCallback = (sessionId: SessionId, req: ExtensionUiRequest) => void;
@@ -1315,6 +1346,53 @@ export class SessionRegistry {
     }
   }
 
+  /**
+   * Execute one owner-bound read-only host query. Query responses are opaque:
+   * registry only correlates transport ownership and never retries a callback.
+   */
+  async query(envelopeInput: SessionQueryEnvelope): Promise<SessionQueryResult> {
+    const parsed = SessionQueryEnvelopeSchema.safeParse(envelopeInput);
+    if (!parsed.success) throw new Error(`Invalid session query: ${parsed.error.message}`);
+    const envelope = parsed.data;
+    const sessionId = envelope.sessionId as SessionId;
+    const expected = envelope.expectedOwner;
+    const record = this.sessions.get(sessionId);
+    if (
+      !record?.proc ||
+      !record._procReady ||
+      record.status !== "ready" ||
+      record._closing ||
+      record._dead ||
+      record.availability !== "available" ||
+      record._hostTransition ||
+      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+    ) {
+      throw new Error("Session changed before query dispatch");
+    }
+
+    const proc = record.proc;
+    const response = await proc.query(commandForSessionQuery(envelope.query));
+    if (
+      this.sessions.get(sessionId) !== record ||
+      !record._procReady ||
+      record.status !== "ready" ||
+      record._closing ||
+      record._dead ||
+      record.availability !== "available" ||
+      record._hostTransition ||
+      record.proc !== proc ||
+      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
+    ) {
+      throw new Error("Session changed during query");
+    }
+    return {
+      queryId: envelope.queryId,
+      owner: expected,
+      queryType: envelope.query.type,
+      response,
+    };
+  }
+
   async submit(
     sessionId: SessionId,
     submissionInput: SessionSubmission,
@@ -2258,7 +2336,7 @@ export class SessionRegistry {
 
   async readInternalProbe(
     sessionId: SessionId,
-    command: PiRpcCommand,
+    command: PiReadOnlyCommand,
     expected: { hostInstanceId: string; sessionEpoch: number },
   ): Promise<PiRpcResponse> {
     if (commandPolicy(command).class !== "read_only") {
@@ -2276,7 +2354,7 @@ export class SessionRegistry {
       throw new Error("Session changed before internal probe");
     }
     const proc = record.proc;
-    const response = await proc.sendCommand(command);
+    const response = await proc.query(command);
     if (
       record.proc !== proc ||
       !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
@@ -2358,7 +2436,7 @@ export class SessionRegistry {
     }
 
     try {
-      const response = await proc.sendCommand(request.command, {
+      const response = await proc.executeCommand(request.command, {
         ...(request.uiSurface ? { uiSurface: request.uiSurface } : {}),
         onDispatched: () => {
           dispatched = true;
