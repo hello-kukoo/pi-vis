@@ -686,7 +686,6 @@ describe("SessionHost", () => {
     });
   });
 
-  
   describe("unified TUI wire contract", () => {
     it("panel_open forwards the unified flag (persistent panel vs custom overlay)", async () => {
       await fake.emitReady("0.80.0");
