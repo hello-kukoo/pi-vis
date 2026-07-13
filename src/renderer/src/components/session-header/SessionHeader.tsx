@@ -1,17 +1,21 @@
 import type { SessionId } from "@shared/ids.js";
 import type { ModelInfo, SessionStats } from "@shared/pi-protocol/responses.js";
-import { SessionStatsSchema } from "@shared/pi-protocol/responses.js";
+import { ModelInfoSchema, SessionStatsSchema } from "@shared/pi-protocol/responses.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "@shared/pi-protocol/thinking.js";
 import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { findCurrentModel, modelDisplayName, modelKey } from "../../lib/model-utils.js";
-import { invokeSessionCommand } from "../../lib/session-command.js";
+import {
+  type AuthorityObservation,
+  dispatchSessionIntent,
+  querySession,
+} from "../../lib/session-intent.js";
 import { openDiffForSession, useDiffStore } from "../../stores/diff-store.js";
 import {
+  type SessionViewState,
   gitRootForSession,
-  sessionMatchesRuntime,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
@@ -33,6 +37,54 @@ type GroupedModelHighlight =
 
 type GroupedModelKeyboardItem = GroupedModelHighlight & { model?: ModelInfo };
 
+type PendingIntent<T> = { intentId: string; value: T };
+
+function authorityObservationFor(
+  projection: SessionViewState["authorityProjection"],
+  compatibilityOwner: AuthorityObservation["owner"] | undefined,
+): AuthorityObservation | undefined {
+  if (projection) {
+    if (projection.semantic.state !== "following" || !projection.authoritativeSnapshot) {
+      return undefined;
+    }
+    return { owner: projection.authoritativeSnapshot.owner, cursor: projection.semantic.cursor };
+  }
+  // The authority-frame path is deployed alongside the compatibility runtime
+  // projection. Until an attach baseline exists, a fresh available legacy
+  // owner is still a valid semantic gate; it simply has no cursor to observe.
+  return compatibilityOwner ? { owner: compatibilityOwner } : undefined;
+}
+
+function sameOwner(a: AuthorityObservation["owner"], b: AuthorityObservation["owner"]): boolean {
+  return a.hostInstanceId === b.hostInstanceId && a.sessionEpoch === b.sessionEpoch;
+}
+
+function sameObservation(a: AuthorityObservation, b: AuthorityObservation | undefined): boolean {
+  return !!(
+    b &&
+    sameOwner(a.owner, b.owner) &&
+    a.cursor?.transportSequence === b.cursor?.transportSequence &&
+    a.cursor?.snapshotSequence === b.cursor?.snapshotSequence
+  );
+}
+
+function observationForSession(
+  session: SessionViewState | undefined,
+): AuthorityObservation | undefined {
+  const compatibilityOwner =
+    session?.status === "ready" && session.availability === "available" && session.hostInstanceId
+      ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
+      : undefined;
+  return authorityObservationFor(session?.authorityProjection, compatibilityOwner);
+}
+
+function observationIsCurrent(sessionId: SessionId, observation: AuthorityObservation): boolean {
+  return sameObservation(
+    observation,
+    observationForSession(useSessionsStore.getState().sessions.get(sessionId)),
+  );
+}
+
 /** Mirror pi-ai's getSupportedThinkingLevels without importing pi internals. */
 export function thinkingLevelsForModel(model?: ModelInfo): readonly ThinkingLevel[] {
   if (model?.reasoning === false) return ["off"];
@@ -50,142 +102,169 @@ export function thinkingLevelsForModel(model?: ModelInfo): readonly ThinkingLeve
 export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactElement {
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
   const setStats = useSessionsStore((s) => s.setStats);
-  const setSessionName = useSessionsStore((s) => s.setSessionName);
   const setSessionFile = useSessionsStore((s) => s.setSessionFile);
   const refreshWorkspaceSessions = useSessionsStore((s) => s.refreshWorkspaceSessions);
-  const bootstrapModelState = useSessionsStore((s) => s.bootstrapModelState);
 
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
+  const [pendingRename, setPendingRename] = useState<PendingIntent<string> | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Claim ESC while the rename field is open so a background streaming
   // session isn't aborted.
   useEscapeClaim(editingName);
 
-  // Cold-aware gate. A boolean on purpose: starting→ready doesn't re-fire
-  // effects, but cold→starting does. Sessions whose process is alive get
-  // to drive their models/stats/get_state effects.
-  const live =
-    session?.status === "ready" && session.availability === "available" && !!session.hostInstanceId;
-  const runtime = useMemo(
+  // A semantic authority cursor, rather than process liveness alone, gates
+  // header controls and reads. Retained legacy values are diagnostics while a
+  // semantic plane is synchronizing and must not drive a mutation.
+  const authorityProjection = session?.authorityProjection;
+  const availability = session?.availability;
+  const hostInstanceId = session?.hostInstanceId;
+  const sessionEpoch = session?.sessionEpoch;
+  const status = session?.status;
+  const observation = useMemo(
     () =>
-      session?.hostInstanceId
-        ? { hostInstanceId: session.hostInstanceId, sessionEpoch: session.sessionEpoch }
-        : undefined,
-    [session?.hostInstanceId, session?.sessionEpoch],
+      authorityObservationFor(
+        authorityProjection,
+        status === "ready" &&
+          availability === "available" &&
+          hostInstanceId &&
+          sessionEpoch !== undefined
+          ? { hostInstanceId, sessionEpoch }
+          : undefined,
+      ),
+    [authorityProjection, availability, hostInstanceId, sessionEpoch, status],
   );
+  const live =
+    session?.status === "ready" &&
+    session.availability === "available" &&
+    observation !== undefined;
 
-  // Seed the store with pi's authoritative model + thinking level for this
-  // session, and (for brand-new sessions) apply the global last-used
-  // preference — ONCE per session.
-  //
-  // This effect re-runs on every header mount, which includes every tab
-  // switch back to this session (only the active session's SessionHeader is
-  // mounted; see TitleBar). The actual work is idempotent and guarded inside
-  // `bootstrapModelState` by the session's `modelInitialized` flag, so a
-  // remount is a no-op. That guard — living in the store, not in this
-  // component — is what structurally enforces invariant #2: switching to
-  // another session, changing its model, and switching back can NEVER
-  // re-apply that now-global preference and silently change this session's
-  // model. The dropdown reads `session.currentModel` / `session.thinkingLevel`
-  // straight from the store (invariant #1), and those only change via this
-  // one-time bootstrap, pi events for this session, or the user's explicit
-  // dropdown / slash-command actions in this session.
+  // Catalog is a read-only query. Its response is useful only at the exact
+  // owner/cursor that requested it; a newer frame re-runs this effect instead
+  // of allowing an older read to overwrite the newer projection.
   useEffect(() => {
-    if (!live) return;
-    void bootstrapModelState(sessionId);
-  }, [sessionId, live, bootstrapModelState]);
+    if (!live || !observation) return;
+    void querySession(sessionId, { type: "get_available_models" }, observation)
+      .then((result) => {
+        if (
+          !result.response.success ||
+          !sameOwner(result.owner, observation.owner) ||
+          !observationIsCurrent(sessionId, observation)
+        )
+          return;
+        const raw = result.response.data as { models?: unknown[] } | undefined;
+        const models = (raw?.models ?? [])
+          .map((model) => {
+            const parsed = ModelInfoSchema.safeParse(model);
+            return parsed.success ? parsed.data : null;
+          })
+          .filter((model): model is ModelInfo => model !== null);
+        useSessionsStore.getState().setAvailableModels(sessionId, models);
+      })
+      .catch(() => {});
+  }, [sessionId, live, observation]);
 
-  // Poll stats after each agent_end and periodically while streaming
-  useEffect(() => {
-    if (!live) return;
-    const fetchStats = () => {
-      if (!runtime) return;
-      invokeSessionCommand(sessionId, { type: "get_session_stats" }, runtime)
-        .then((res) => {
-          if (res.success && res.data) {
-            const parsed = SessionStatsSchema.safeParse(res.data);
-            if (
-              parsed.success &&
-              sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
-            ) {
-              const stats = parsed.data as SessionStats;
-              setStats(sessionId, stats);
-              if (stats.sessionFile) setSessionFile(sessionId, stats.sessionFile);
-            }
+  // Poll stats after each agent_end and periodically while streaming. Queries
+  // carry the observed cursor and only write their result while it remains the
+  // current semantic owner/cursor.
+  const fetchStats = useCallback(
+    (capturedObservation: AuthorityObservation) => {
+      void querySession(sessionId, { type: "get_session_stats" }, capturedObservation)
+        .then((result) => {
+          if (
+            !result.response.success ||
+            !sameOwner(result.owner, capturedObservation.owner) ||
+            !observationIsCurrent(sessionId, capturedObservation)
+          ) {
+            return;
           }
+          const parsed = SessionStatsSchema.safeParse(result.response.data);
+          if (!parsed.success) return;
+          const stats = parsed.data as SessionStats;
+          setStats(sessionId, stats);
+          if (stats.sessionFile) setSessionFile(sessionId, stats.sessionFile);
         })
         .catch(() => {});
-    };
+    },
+    [sessionId, setSessionFile, setStats],
+  );
 
-    fetchStats();
-    const interval = setInterval(fetchStats, 60_000);
+  useEffect(() => {
+    if (!live || !observation) return;
+    fetchStats(observation);
+    const interval = setInterval(() => fetchStats(observation), 60_000);
     return () => clearInterval(interval);
-  }, [sessionId, live, runtime, setStats, setSessionFile]);
+  }, [fetchStats, live, observation]);
 
-  // Listen for agent_end to refresh stats
   useEffect(() => {
     return window.pivis.on("session.events", ({ sessionId: sid, events }) => {
-      if (sid === sessionId && events.some((event) => event.type === "agent_end")) {
-        if (!runtime) return;
-        invokeSessionCommand(sessionId, { type: "get_session_stats" }, runtime)
-          .then((res) => {
-            if (res.success && res.data) {
-              const parsed = SessionStatsSchema.safeParse(res.data);
-              if (
-                parsed.success &&
-                sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
-              ) {
-                setStats(sessionId, parsed.data as SessionStats);
-              }
-            }
-          })
-          .catch(() => {});
+      if (sid === sessionId && events.some((event) => event.type === "agent_end") && observation) {
+        fetchStats(observation);
       }
     });
-  }, [sessionId, runtime, setStats]);
+  }, [fetchStats, observation, sessionId]);
 
   // The model + thinking pickers (and their handlers) live in
   // <SessionControls> — this component only owns the name, the worktree chip,
   // the data-loading effects, and the compact-mode reflow.
 
   const handleRenameStart = useCallback(() => {
+    if (!observation) return;
     setNameInput(session?.sessionName ?? session?.sessionTitle ?? "");
     setEditingName(true);
     setTimeout(() => nameInputRef.current?.focus(), 10);
-  }, [session]);
+  }, [observation, session]);
 
   const handleRenameConfirm = useCallback(async () => {
-    if (nameInput.trim()) {
-      try {
-        if (!runtime) throw new Error("Session runtime is unavailable");
-        const result = await invokeSessionCommand(
-          sessionId,
-          { type: "set_session_name", name: nameInput.trim() },
-          runtime,
-        );
-        if (!result.success) throw new Error(result.error ?? "Failed to set session name");
-        if (!sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)) {
-          throw new Error("Session changed before rename settlement");
-        }
-        setSessionName(sessionId, nameInput.trim());
-        if (session?.workspacePath) {
-          void refreshWorkspaceSessions(session.workspacePath);
-        }
-      } catch (err) {
-        console.error("Failed to set session name:", err);
-      }
+    const name = nameInput.trim();
+    if (!name || !observation) {
+      setEditingName(false);
+      return;
     }
+    const intentId = crypto.randomUUID();
+    setPendingRename({ intentId, value: name });
     setEditingName(false);
-  }, [
-    nameInput,
-    sessionId,
-    setSessionName,
-    refreshWorkspaceSessions,
-    session?.workspacePath,
-    runtime,
-  ]);
+    try {
+      const receipt = await dispatchSessionIntent(
+        sessionId,
+        { kind: "rename", name },
+        observation,
+        intentId,
+      );
+      // A receipt acknowledges delivery/admission only. It never changes the
+      // displayed canonical name; that arrives in a semantic authority frame.
+      if (receipt.status === "not_admitted") {
+        setPendingRename((pending) => (pending?.intentId === intentId ? null : pending));
+        useSessionsStore
+          .getState()
+          .addToast(sessionId, `Failed to rename session: ${receipt.reason}`, "error");
+      }
+    } catch {
+      // Dispatch may have crossed the transport boundary. Keep the request
+      // visibly pending until a frame settles it rather than guessing failure.
+    }
+  }, [nameInput, observation, sessionId]);
+
+  useEffect(() => {
+    if (!pendingRename || !observation) return;
+    const outcome = session?.authorityProjection?.authoritativeSnapshot?.recentIntentOutcomes.find(
+      (candidate) => candidate.intentId === pendingRename.intentId,
+    );
+    if (!outcome) return;
+    setPendingRename(null);
+    if (outcome.state === "completed") {
+      if (session?.workspacePath) void refreshWorkspaceSessions(session.workspacePath);
+    } else {
+      useSessionsStore
+        .getState()
+        .addToast(
+          sessionId,
+          `Failed to rename session: ${outcome.error ?? outcome.state}`,
+          "error",
+        );
+    }
+  }, [observation, pendingRename, refreshWorkspaceSessions, session, sessionId]);
 
   // ── Compact mode (responsive reflow) ───────────────────────────────
   const headerRef = useRef<HTMLDivElement>(null);
@@ -233,6 +312,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
               type="button"
               className="session-header__name-btn fade-scope"
               onClick={handleRenameStart}
+              disabled={!observation}
               title={
                 session?.piVersion
                   ? `${session?.sessionName ?? session?.sessionTitle ?? "Untitled session"} · pi ${session.piVersion}`
@@ -242,6 +322,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
               <FadeText>
                 {session?.sessionName ?? session?.sessionTitle ?? "Untitled session"}
               </FadeText>
+              {pendingRename && <span className="session-header__pending">Renaming…</span>}
             </button>
           )}
         </div>
@@ -265,10 +346,18 @@ export function SessionControls({
   sessionId: SessionId;
 }): React.ReactElement {
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
-  const applyModelChange = useSessionsStore((s) => s.applyModelChange);
-  const applyThinkingLevel = useSessionsStore((s) => s.applyThinkingLevel);
   const addToast = useSessionsStore((s) => s.addToast);
   const groupModelsByProvider = useSettingsStore((s) => s.settings.groupModelsByProvider);
+  const observation = observationForSession(session);
+  const semanticSnapshot = session?.authorityProjection?.authoritativeSnapshot;
+  // The compatibility snapshot remains a display-only diagnostic until the
+  // semantic frame baseline is attached. It never receives optimistic writes;
+  // once a frame is following, its terminal snapshot is preferred.
+  const currentModel = semanticSnapshot?.model?.id ?? session?.currentModel;
+  const currentProvider = semanticSnapshot?.model?.provider ?? session?.currentProvider;
+  const currentThinkingLevel = semanticSnapshot?.thinkingLevel ?? session?.thinkingLevel;
+  const [pendingModel, setPendingModel] = useState<PendingIntent<ModelInfo> | null>(null);
+  const [pendingThinking, setPendingThinking] = useState<PendingIntent<ThinkingLevel> | null>(null);
 
   // ── Model picker state ────────────────────────────────────────────
   const [modelOpen, setModelOpen] = useState(false);
@@ -397,12 +486,32 @@ export function SessionControls({
   const handleModelChange = useCallback(
     async (model: ModelInfo) => {
       setModelOpen(false);
-      const res = await applyModelChange(sessionId, model);
-      if (!res.ok) {
-        addToast(sessionId, `Failed to set model: ${res.error}`, "error");
+      if (!observation) return;
+      const intentId = crypto.randomUUID();
+      setPendingModel({ intentId, value: model });
+      try {
+        const receipt = await dispatchSessionIntent(
+          sessionId,
+          {
+            kind: "setModel",
+            ...(model.provider ? { provider: model.provider } : { provider: "" }),
+            modelId: model.id,
+          },
+          observation,
+          intentId,
+        );
+        // Do not update the current model or preferences from a receipt. The
+        // semantic frame is the only canonical confirmation.
+        if (receipt.status === "not_admitted") {
+          setPendingModel((pending) => (pending?.intentId === intentId ? null : pending));
+          addToast(sessionId, `Failed to set model: ${receipt.reason}`, "error");
+        }
+      } catch {
+        // Possible post-dispatch loss remains pending until authority reports
+        // its terminal outcome (or outcome_unknown).
       }
     },
-    [sessionId, addToast, applyModelChange],
+    [addToast, observation, sessionId],
   );
 
   const activateGroupedKeyboardItem = useCallback((item: GroupedModelKeyboardItem): void => {
@@ -503,22 +612,20 @@ export function SessionControls({
   }, [modelOpen, modelSearch, thinkingOpen]);
 
   const currentModelInfo = useMemo<ModelInfo | undefined>(
-    () =>
-      findCurrentModel(
-        session?.availableModels ?? [],
-        session?.currentModel,
-        session?.currentProvider,
-      ),
-    [session?.availableModels, session?.currentModel, session?.currentProvider],
+    () => findCurrentModel(session?.availableModels ?? [], currentModel, currentProvider),
+    [currentModel, currentProvider, session?.availableModels],
   );
   // Button label: the active model's name with its provider in brackets
   // (mirrors pi's TUI "glm-5.2 [zai]"), so when the same model id is offered
   // by several providers the user can see which subscription/API is in use.
+  const canonicalModel = semanticSnapshot?.model ?? session?.runtimeSnapshot?.model;
   const modelButtonLabel = currentModelInfo
     ? modelDisplayName(currentModelInfo)
-    : session?.currentModel
-      ? `${session.currentModel}${session.currentProvider ? ` [${session.currentProvider}]` : ""}`
-      : "model";
+    : canonicalModel?.name
+      ? `${canonicalModel.name}${canonicalModel.provider ? ` [${canonicalModel.provider}]` : ""}`
+      : currentModel
+        ? `${currentModel}${currentProvider ? ` [${currentProvider}]` : ""}`
+        : "model";
   const thinkingOptions = useMemo(
     () => thinkingLevelsForModel(currentModelInfo),
     [currentModelInfo],
@@ -528,19 +635,77 @@ export function SessionControls({
   const handleThinkingLevel = useCallback(
     async (level: ThinkingLevel) => {
       setThinkingOpen(false);
-      const res = await applyThinkingLevel(sessionId, level);
-      if (!res.ok) {
-        addToast(sessionId, `Failed to set thinking level: ${res.error}`, "error");
-      } else if (res.clampedTo) {
-        addToast(
+      if (!observation) return;
+      const intentId = crypto.randomUUID();
+      setPendingThinking({ intentId, value: level });
+      try {
+        const receipt = await dispatchSessionIntent(
           sessionId,
-          `Model does not support thinking level: ${level} — using ${res.clampedTo} instead.`,
-          "warning",
+          { kind: "setThinking", level },
+          observation,
+          intentId,
         );
+        if (receipt.status === "not_admitted") {
+          setPendingThinking((pending) => (pending?.intentId === intentId ? null : pending));
+          addToast(sessionId, `Failed to set thinking level: ${receipt.reason}`, "error");
+        }
+      } catch {
+        // Keep a possible dispatch visible until its authority-frame outcome.
       }
     },
-    [sessionId, applyThinkingLevel, addToast],
+    [addToast, observation, sessionId],
   );
+
+  useEffect(() => {
+    const outcomes = semanticSnapshot?.recentIntentOutcomes;
+    if (!outcomes) return;
+    if (pendingModel) {
+      const outcome = outcomes.find((candidate) => candidate.intentId === pendingModel.intentId);
+      if (outcome) {
+        setPendingModel(null);
+        if (outcome.state === "completed") {
+          // Persist only after an authority frame confirms completion; the
+          // receipt is deliberately not completion evidence.
+          const confirmed = semanticSnapshot?.model;
+          if (confirmed?.id) {
+            void useSettingsStore.getState().update({
+              lastUsedModel: {
+                ...(confirmed.provider ? { provider: confirmed.provider } : {}),
+                modelId: confirmed.id,
+              },
+            });
+          }
+        } else {
+          addToast(sessionId, `Failed to set model: ${outcome.error ?? outcome.state}`, "error");
+        }
+      }
+    }
+    if (pendingThinking) {
+      const outcome = outcomes.find((candidate) => candidate.intentId === pendingThinking.intentId);
+      if (outcome) {
+        setPendingThinking(null);
+        if (outcome.state === "completed") {
+          const confirmed = semanticSnapshot?.thinkingLevel;
+          if (confirmed) {
+            void useSettingsStore.getState().update({ lastUsedThinkingLevel: confirmed });
+            if (confirmed !== pendingThinking.value) {
+              addToast(
+                sessionId,
+                `Model does not support thinking level: ${pendingThinking.value} — using ${confirmed} instead.`,
+                "warning",
+              );
+            }
+          }
+        } else {
+          addToast(
+            sessionId,
+            `Failed to set thinking level: ${outcome.error ?? outcome.state}`,
+            "error",
+          );
+        }
+      }
+    }
+  }, [addToast, pendingModel, pendingThinking, semanticSnapshot, sessionId]);
 
   useEffect(() => {
     if (!thinkingOpen) return;
@@ -580,9 +745,11 @@ export function SessionControls({
           type="button"
           className="session-header__picker-btn session-header__model-btn fade-scope"
           onClick={() => setModelOpen((v) => !v)}
-          title={modelButtonLabel}
+          disabled={!observation}
+          title={pendingModel ? `${modelButtonLabel} · change pending` : modelButtonLabel}
         >
           <FadeText className="session-header__picker-label">{modelButtonLabel}</FadeText>
+          {pendingModel && <span className="session-header__pending">Pending…</span>}
           <IconChevronDown className="session-header__caret" />
         </button>
         {modelOpen && (
@@ -828,21 +995,22 @@ export function SessionControls({
           type="button"
           className="session-header__picker-btn"
           onClick={() => setThinkingOpen((v) => !v)}
-          disabled={thinkingDisabled}
+          disabled={thinkingDisabled || !observation}
           title={
             currentModelInfo?.reasoning === false
               ? "Current model does not support reasoning."
               : undefined
           }
         >
-          <span>{session?.thinkingLevel ?? "off"}</span>
+          <span>{currentThinkingLevel ?? "off"}</span>
+          {pendingThinking && <span className="session-header__pending">Pending…</span>}
           <IconChevronDown className="session-header__caret" />
         </button>
         {thinkingOpen && !thinkingDisabled && (
           <div className="session-header__dropdown">
             <div className="session-header__dropdown-list">
               {thinkingOptions.map((l) => {
-                const selected = session?.thinkingLevel === l;
+                const selected = currentThinkingLevel === l;
                 return (
                   <button
                     type="button"

@@ -59,6 +59,23 @@ function setSession(): void {
     commands: [],
     resumed: false,
     modelInitialized: true,
+    authorityProjection: {
+      semantic: {
+        state: "following",
+        cursor: {
+          hostInstanceId: "host-controls",
+          sessionEpoch: 1,
+          transportSequence: 1,
+          snapshotSequence: 1,
+        },
+      },
+      authoritativeSnapshot: {
+        owner: { hostInstanceId: "host-controls", sessionEpoch: 1 },
+        model: { id: "glm-5", provider: "zai" },
+        thinkingLevel: "medium",
+        recentIntentOutcomes: [],
+      },
+    },
   } as unknown as SessionViewState;
 
   useSessionsStore.setState({ sessions: new Map([[sessionId, session]]) });
@@ -144,12 +161,21 @@ describe("SessionControls dropdown toggles", () => {
     });
     const unhandledRejection = vi.fn();
     process.on("unhandledRejection", unhandledRejection);
-    const invoke = vi.fn(async (channel: string, payload: { command?: { type?: string } }) => {
-      if (channel === "settings.set") {
-        return { ...defaultSettings, ...payload };
+    const invoke = vi.fn(async (channel: string, payload: { query?: { type?: string } }) => {
+      if (channel === "session.query") {
+        return {
+          queryId: "query",
+          owner: { hostInstanceId: "host-controls", sessionEpoch: 1 },
+          queryType: payload.query?.type,
+          response: { success: true, command: payload.query?.type, data: { models } },
+        };
       }
-      if (payload.command?.type === "get_state") {
-        return { success: true, data: { model: { id: "claude", provider: "anthropic" } } };
+      if (channel === "session.dispatchIntent") {
+        return {
+          status: "admitted",
+          intentId: "intent",
+          owner: { hostInstanceId: "host-controls", sessionEpoch: 1 },
+        };
       }
       return { success: true, data: {} };
     });
@@ -185,19 +211,17 @@ describe("SessionControls dropdown toggles", () => {
 
     expect(enter.defaultPrevented).toBe(true);
     expect(invoke).toHaveBeenCalledWith(
-      "session.sendCommand",
+      "session.dispatchIntent",
       expect.objectContaining({
-        command: { type: "set_model", provider: "anthropic", modelId: "claude" },
+        expectedOwner: { hostInstanceId: "host-controls", sessionEpoch: 1 },
+        observedCursor: expect.objectContaining({ transportSequence: 1, snapshotSequence: 1 }),
+        intent: { kind: "setModel", provider: "anthropic", modelId: "claude" },
       }),
     );
-    await vi.waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith(
-        "settings.set",
-        expect.objectContaining({
-          lastUsedModel: { provider: "anthropic", modelId: "claude" },
-        }),
-      );
-    });
+    // Receipt admission is not canonical state: the old authority-frame model
+    // remains rendered while the request is visibly pending.
+    expect(container.querySelector(".session-header__model-btn")?.textContent).toContain("GLM 5");
+    expect(container.textContent).toContain("Pending…");
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
