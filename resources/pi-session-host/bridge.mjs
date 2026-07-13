@@ -230,16 +230,43 @@ export function setupCommandBridge({
   function trackInterruptibleOperation(kind, interrupt, run) {
     const id = nextInterruptId++;
     activeInterrupts.set(id, { kind, interrupt });
+    // compact() has its own command/invocation barrier below. Recording it as
+    // an observed compaction start here would lie about Pi lifecycle evidence.
+    const observedId = ["agent", "bash"].includes(kind)
+      ? authority.beginObservedOperation(kind)
+      : null;
     let promise;
     try {
       promise = run();
     } catch (err) {
       activeInterrupts.delete(id);
+      if (observedId) {
+        authority.settleObservedOperation(kind, observedId, {
+          failed: true,
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
       throw err;
     }
-    return Promise.resolve(promise).finally(() => {
-      activeInterrupts.delete(id);
-    });
+    return Promise.resolve(promise)
+      .then(
+        (result) => {
+          if (observedId) authority.settleObservedOperation(kind, observedId, result ?? {});
+          return result;
+        },
+        (err) => {
+          if (observedId) {
+            authority.settleObservedOperation(kind, observedId, {
+              failed: true,
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          }
+          throw err;
+        },
+      )
+      .finally(() => {
+        activeInterrupts.delete(id);
+      });
   }
 
   async function interruptActiveOperation() {
@@ -896,9 +923,14 @@ export function setupCommandBridge({
               () => _session.abort(),
               () => _session.compact(intent.instructions),
             );
-            return { compactionId: compactIntentId };
-          } finally {
             authority.settleCompactionInvocation(compactIntentId);
+            return { compactionId: compactIntentId };
+          } catch (error) {
+            authority.settleCompactionInvocation(compactIntentId, {
+              failed: true,
+              detail: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
           }
         }
         case "runBash":
@@ -1252,9 +1284,14 @@ export function setupCommandBridge({
               () => _session.abort(),
               () => _session.compact(command.customInstructions),
             );
-            send({ type: "response", id, success: true, data: result });
-          } finally {
             authority.settleCompactionInvocation(compactIntentId);
+            send({ type: "response", id, success: true, data: result });
+          } catch (error) {
+            authority.settleCompactionInvocation(compactIntentId, {
+              failed: true,
+              detail: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
           }
           break;
         }

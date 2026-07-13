@@ -11,6 +11,8 @@ export type RuntimeAvailability = z.infer<typeof RuntimeAvailabilitySchema>;
 export const SubmissionDispositionSchema = z.enum([
   "not_submitted",
   "in_custody",
+  /** Child-owned prompt/preflight remains live past its diagnostic deadline. */
+  "admitting",
   "consumed",
   "rejected",
   "completed",
@@ -874,7 +876,16 @@ export const ObservedOperationRecordSchema = z
     operationId: NonEmptyIdSchema,
     owner: RuntimeIdentitySchema,
     kind: z.enum(["agent", "compaction", "retry", "bash", "navigation", "command"]),
-    state: z.enum(["started", "active", "retry_wait", "completed", "aborted", "failed", "unknown"]),
+    state: z.enum([
+      "started",
+      "invoking",
+      "active",
+      "retry_wait",
+      "completed",
+      "aborted",
+      "failed",
+      "unknown",
+    ]),
     intentId: NonEmptyIdSchema.optional(),
     observedAt: z.number(),
     detail: z.string().optional(),
@@ -937,6 +948,10 @@ export const SemanticSnapshotSchema = z
     operationJournalLowWatermark: NonNegativeIntegerSchema,
     operationJournalHighWatermark: NonNegativeIntegerSchema,
     operationJournalTruncated: z.boolean(),
+    /** Bounded target-intent retention is independent of the operation journal. */
+    dispatchedIntentLowWatermark: NonNegativeIntegerSchema.optional(),
+    dispatchedIntentHighWatermark: NonNegativeIntegerSchema.optional(),
+    dispatchedIntentTruncated: z.boolean().optional(),
     model: RuntimeModelSchema.nullable(),
     thinkingLevel: ThinkingLevelSchema,
     catalog: RuntimeCatalogSchema,

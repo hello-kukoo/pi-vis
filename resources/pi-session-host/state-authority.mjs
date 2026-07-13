@@ -20,6 +20,8 @@ export function createStateAuthority({
   sendPresentation = null,
   operationJournalCapacity = 128,
   recentOutcomeCapacity = 64,
+  dispatchedIntentCapacity = 128,
+  dispatchedIntentPayloadBytes = 8 * 1024 * 1024,
   getCatalog = () => ({}),
   getEditor = () => ({ revision: 0, text: "", attachments: [] }),
   acceptEditorSubmission = () => false,
@@ -67,6 +69,12 @@ export function createStateAuthority({
   // ledger above. Their key is explicitly owner-bound, so an old owner's
   // duplicate can never be admitted by a successor.
   const dispatchedIntents = new Map();
+  let nextDispatchedIntentSequence = 0;
+  let dispatchedIntentTruncated = false;
+  // Every emitted observed operation that has not reached a terminal state.
+  // This is deliberately distinct from SDK getter projections: an invocation
+  // is not fabricated as an observed Pi lifecycle start.
+  const activeObservedOperations = new Map();
   let navigationDepth = 0;
   let submitting = 0;
   let unresolvedAdmissions = 0;
@@ -261,6 +269,117 @@ export function createStateAuthority({
     };
   }
 
+  function dispatchedIntentBounds() {
+    const retained = [...dispatchedIntents.values()]
+      .filter((entry) => entry.outcome)
+      .sort((a, b) => a.recordSequence - b.recordSequence);
+    return {
+      low: retained[0]?.recordSequence ?? nextDispatchedIntentSequence,
+      high: nextDispatchedIntentSequence,
+      truncated: dispatchedIntentTruncated,
+    };
+  }
+
+  function pruneDispatchedIntents() {
+    const capacity = Math.max(1, Number(dispatchedIntentCapacity) || 1);
+    const terminal = [...dispatchedIntents.entries()]
+      .filter(([, entry]) => entry.outcome)
+      .sort(([, a], [, b]) => a.recordSequence - b.recordSequence);
+    while (dispatchedIntents.size > capacity && terminal.length > 0) {
+      const [key] = terminal.shift();
+      dispatchedIntents.delete(key);
+      dispatchedIntentTruncated = true;
+    }
+  }
+
+  function intentPayloadBytes(intent) {
+    try {
+      return Buffer.byteLength(JSON.stringify(intent), "utf8");
+    } catch {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  function retainedDispatchedIntent(intent) {
+    // The execution closure holds the full payload only until settlement. Do
+    // not retain text or image bytes merely to service a duplicate receipt.
+    switch (intent.kind) {
+      case "invokeCommand":
+        return {
+          kind: intent.kind,
+          commandType:
+            typeof intent.text === "string"
+              ? intent.text.replace(/^\//, "").trim().split(/\s+/, 1)[0]
+              : undefined,
+        };
+      case "setModel":
+        return { kind: intent.kind, provider: intent.provider, modelId: intent.modelId };
+      case "setThinking":
+        return { kind: intent.kind, level: intent.level };
+      case "rename":
+        return { kind: intent.kind, name: intent.name };
+      case "navigate":
+        return { kind: intent.kind, targetId: intent.targetId, summarize: intent.summarize };
+      default:
+        return { kind: intent.kind };
+    }
+  }
+
+  function observedOperation(
+    kind,
+    state,
+    { operationId = crypto.randomUUID(), intentId, detail } = {},
+  ) {
+    const record = {
+      kind,
+      phase: state,
+      observed: true,
+      operationId,
+      owner: semanticOwner(),
+      ...(intentId ? { intentId } : {}),
+      ...(detail ? { detail: String(detail) } : {}),
+    };
+    appendOperation(record);
+    const key = `${kind}:${operationId}`;
+    if (["completed", "aborted", "failed", "unknown"].includes(state)) {
+      activeObservedOperations.delete(key);
+    } else {
+      activeObservedOperations.set(key, record);
+    }
+    return operationId;
+  }
+
+  function operationProjection(entry, state = entry.phase) {
+    return {
+      operationId: String(entry.operationId ?? entry.operationSequence),
+      owner: structuredClone(entry.owner ?? semanticOwner()),
+      kind: entry.kind,
+      state,
+      observedAt: entry.observedAt,
+      ...(entry.intentId ? { intentId: entry.intentId } : {}),
+      ...(entry.detail || entry.anomaly ? { detail: String(entry.detail ?? entry.anomaly) } : {}),
+    };
+  }
+
+  function observedJournal() {
+    return operationJournal
+      .filter((entry) => entry.observed === true)
+      .map((entry) => operationProjection(entry));
+  }
+
+  function activeOperationId(kind) {
+    return [...activeObservedOperations.values()].find((entry) => entry.kind === kind)?.operationId;
+  }
+
+  function reconcileObservedGetters() {
+    if (session.isRetrying === true && !activeOperationId("retry")) {
+      observedOperation("retry", "retry_wait", { detail: "getter_without_start" });
+    }
+    if (session.isBashRunning === true && !activeOperationId("bash")) {
+      observedOperation("bash", "active", { detail: "getter_without_start" });
+    }
+  }
+
   function compactionBarrierOpen() {
     return (
       session.isCompacting === true ||
@@ -272,11 +391,9 @@ export function createStateAuthority({
   function setCompactionAnomaly(reason) {
     if (compaction.anomaly === reason) return;
     compaction = { ...compaction, anomaly: reason };
-    appendOperation({
-      kind: "compaction",
-      phase: compaction.phase,
+    observedOperation("compaction", "unknown", {
       operationId: compaction.operationId,
-      anomaly: reason,
+      detail: reason,
     });
   }
 
@@ -295,13 +412,9 @@ export function createStateAuthority({
         attempt: Math.max(1, compaction.attempt + 1),
         anomaly: "missing_compaction_start",
       };
-      appendOperation({
-        kind: "compaction",
-        phase: compaction.phase,
+      observedOperation("compaction", "active", {
         operationId: compaction.operationId,
-        origin: compaction.origin,
-        attempt: compaction.attempt,
-        anomaly: compaction.anomaly,
+        detail: compaction.anomaly,
       });
     } else if (
       !getterActive &&
@@ -327,6 +440,7 @@ export function createStateAuthority({
   }
 
   function snapshot() {
+    reconcileObservedGetters();
     reconcileCompactionGetter();
     const s = session;
     const { steering, followUp } = readQueues();
@@ -450,26 +564,7 @@ export function createStateAuthority({
   function semanticSnapshot() {
     const value = snapshot();
     const owner = semanticOwner();
-    const observed = operationJournal
-      .filter((entry) => entry.kind === "compaction")
-      .map((entry) => ({
-        operationId: String(entry.operationId ?? entry.operationSequence),
-        owner,
-        kind: "compaction",
-        state: ["active", "retry_wait"].includes(entry.phase)
-          ? entry.phase === "retry_wait"
-            ? "retry_wait"
-            : "active"
-          : entry.phase === "terminal_success"
-            ? "completed"
-            : entry.phase === "terminal_aborted"
-              ? "aborted"
-              : entry.phase === "terminal_failed"
-                ? "failed"
-                : "unknown",
-        observedAt: entry.observedAt,
-        ...(entry.anomaly ? { detail: String(entry.anomaly) } : {}),
-      }));
+    const observed = observedJournal();
     // Keep the child-normalized typed outcome intact. Dropping result/error
     // here made a terminal frame unusable for consumers that correctly wait
     // for settlement instead of treating a receipt as completion.
@@ -553,6 +648,9 @@ export function createStateAuthority({
       operationJournalLowWatermark: value.operationJournalLowWatermark,
       operationJournalHighWatermark: value.operationJournalHighWatermark,
       operationJournalTruncated: value.operationJournalTruncated,
+      dispatchedIntentLowWatermark: dispatchedIntentBounds().low,
+      dispatchedIntentHighWatermark: dispatchedIntentBounds().high,
+      dispatchedIntentTruncated: dispatchedIntentBounds().truncated,
       model: value.model,
       thinkingLevel: value.thinkingLevel,
       catalog: value.catalog,
@@ -734,6 +832,22 @@ export function createStateAuthority({
       ...(error ? { error } : {}),
     };
     entry.outcome = outcome;
+    if (entry.observedOperationId) {
+      observedOperation(
+        "command",
+        state === "completed"
+          ? "completed"
+          : state === "cancelled"
+            ? "aborted"
+            : state === "outcome_unknown"
+              ? "unknown"
+              : "failed",
+        { operationId: entry.observedOperationId, intentId },
+      );
+    }
+    // Terminal receipts must not pin the original command text or image bytes.
+    entry.intent = retainedDispatchedIntent(entry.intent);
+    pruneDispatchedIntents();
     appendOperation({
       kind: "intent",
       phase: state,
@@ -1093,44 +1207,50 @@ export function createStateAuthority({
         }
       }
       if (winner === "deadline") {
-        activeIntents.set(request.intentId, "unknown");
+        // The deadline is diagnostic only while this child still owns the
+        // promise. Returning outcome_unknown here made a live admission look
+        // terminal and then emitted a second completion later.
+        activeIntents.set(request.intentId, "admitting");
         if (wasStreaming) rememberAttachments(request);
         unresolvedAdmissions++;
         const stuckTimer = setTimeout(() => {
-          if (activeIntents.get(request.intentId) === "unknown") {
+          if (activeIntents.get(request.intentId) === "admitting") {
             onAdmissionStuck({ intentId: request.intentId, sessionEpoch });
           }
         }, admissionStuckMs);
         stuckTimer.unref?.();
         void promptPromise
+          .then(
+            () => {
+              if (wasStreaming) registerQueuedIntent(request, queueLengthBeforePrompt);
+              acknowledgeEditorCustody(request);
+              activeIntents.delete(request.intentId);
+              reportSubmission(resultFor(request, "completed", { queued: wasStreaming }));
+              publishSnapshot();
+            },
+            (err) => {
+              activeIntents.delete(request.intentId);
+              if (isExtension) acknowledgeEditorCustody(request);
+              reportSubmission(
+                resultFor(
+                  request,
+                  isExtension
+                    ? "extension_error"
+                    : crossedPreflight
+                      ? "outcome_unknown"
+                      : "rejected",
+                  { message: err instanceof Error ? err.message : String(err) },
+                ),
+              );
+              publishSnapshot();
+            },
+          )
           .finally(() => {
             clearTimeout(stuckTimer);
             unresolvedAdmissions--;
-          })
-          .catch(() => {});
-        // An unknown admission has a later terminal disposition when prompt
-        // settles; do not leave consumers with a permanently non-terminal item.
-        void promptPromise.then(
-          () => {
-            if (wasStreaming) registerQueuedIntent(request, queueLengthBeforePrompt);
-            acknowledgeEditorCustody(request);
-            activeIntents.delete(request.intentId);
-            reportSubmission(resultFor(request, "completed", { queued: wasStreaming }));
-            publishSnapshot();
-          },
-          (err) => {
-            if (isExtension) acknowledgeEditorCustody(request);
-            activeIntents.delete(request.intentId);
-            reportSubmission(
-              resultFor(request, isExtension ? "extension_error" : "outcome_unknown", {
-                message: err instanceof Error ? err.message : String(err),
-              }),
-            );
-            publishSnapshot();
-          },
-        );
-        return resultFor(request, "outcome_unknown", {
-          message: "Prompt admission did not acknowledge before its deadline",
+          });
+        return resultFor(request, "admitting", {
+          message: "Prompt admission is still pending in this authority",
         });
       }
 
@@ -1205,7 +1325,16 @@ export function createStateAuthority({
     }
 
     const key = intentOwnerKey(owner, intentId);
-    const fingerprint = stableFingerprint({ owner, intent });
+    const payloadBytes = intentPayloadBytes(intent);
+    const payloadLimit = Math.max(1, Number(dispatchedIntentPayloadBytes) || 1);
+    if (payloadBytes > payloadLimit) {
+      return Promise.resolve({ status: "not_admitted", intentId, reason: "payload_too_large" });
+    }
+    // A digest retains duplicate protection without retaining payload/image bytes.
+    const fingerprint = crypto
+      .createHash("sha256")
+      .update(stableFingerprint({ owner, intent }))
+      .digest("hex");
     const prior = dispatchedIntents.get(key);
     if (prior) {
       if (prior.fingerprint !== fingerprint) {
@@ -1216,7 +1345,21 @@ export function createStateAuthority({
 
     // This write happens before scheduling any possible SDK call. The bounded
     // operation journal therefore has a durable admission boundary even if the
-    // child dies during dispatch.
+    // child dies during dispatch. Refuse rather than dropping unsettled work.
+    const intentCapacity = Math.max(1, Number(dispatchedIntentCapacity) || 1);
+    // Make room only by retiring already-settled receipts; unsettled work is
+    // never silently forgotten merely to admit another intent.
+    const terminal = [...dispatchedIntents.entries()]
+      .filter(([, entry]) => entry.outcome)
+      .sort(([, a], [, b]) => a.recordSequence - b.recordSequence);
+    while (dispatchedIntents.size >= intentCapacity && terminal.length > 0) {
+      const [terminalKey] = terminal.shift();
+      dispatchedIntents.delete(terminalKey);
+      dispatchedIntentTruncated = true;
+    }
+    if (dispatchedIntents.size >= intentCapacity) {
+      return Promise.resolve({ status: "not_admitted", intentId, reason: "capacity" });
+    }
     const entry = {
       intentId,
       fingerprint,
@@ -1224,6 +1367,7 @@ export function createStateAuthority({
       intent: structuredClone(intent),
       owner: structuredClone(owner),
       recordedAt: Date.now(),
+      recordSequence: ++nextDispatchedIntentSequence,
       outcome: null,
     };
     dispatchedIntents.set(key, entry);
@@ -1249,6 +1393,9 @@ export function createStateAuthority({
             message: "Intent execution lost its owning authority",
           });
           return;
+        }
+        if (intent.kind === "invokeCommand") {
+          entry.observedOperationId = observedOperation("command", "invoking", { intentId });
         }
         const result = await execute(intent, owner);
         // submit/invokeCommand settle when their existing child admission
@@ -1345,6 +1492,7 @@ export function createStateAuthority({
       const value = await admit(item.request, true);
       if (
         value.disposition === "consumed" ||
+        value.disposition === "admitting" ||
         value.disposition === "completed" ||
         value.disposition === "extension_error"
       ) {
@@ -1435,6 +1583,23 @@ export function createStateAuthority({
         deliveredQueueIntentIds.length === 1 ? deliveredQueueIntentIds[0] : undefined;
       if (queueIntentId) publishedEvent = { ...event, queueIntentId };
     }
+    if (event?.type === "agent_start") {
+      const retryId = activeOperationId("retry");
+      if (retryId) observedOperation("retry", "completed", { operationId: retryId });
+      observedOperation("agent", "active");
+    } else if (event?.type === "agent_end") {
+      const agentId = activeOperationId("agent") ?? observedOperation("agent", "started");
+      observedOperation(
+        "agent",
+        event.aborted === true
+          ? "aborted"
+          : typeof event.errorMessage === "string"
+            ? "failed"
+            : "completed",
+        { operationId: agentId, ...(event.errorMessage ? { detail: event.errorMessage } : {}) },
+      );
+      if (event.willRetry === true) observedOperation("retry", "retry_wait");
+    }
     if (event?.type === "compaction_start") {
       const retrying = compaction.phase === "retry_wait";
       compaction = {
@@ -1445,25 +1610,14 @@ export function createStateAuthority({
         anomaly: null,
       };
       barrierSequence++;
-      appendOperation({
-        kind: "compaction",
-        phase: "active",
-        operationId: compaction.operationId,
-        origin: "event",
-        attempt: compaction.attempt,
-      });
+      observedOperation("compaction", "active", { operationId: compaction.operationId });
     } else if (event?.type === "compaction_end") {
       const failed = event.aborted === true || typeof event.errorMessage === "string";
       if (event.willRetry === true) {
         // Keep the barrier closed between retry attempts so new ingress joins
         // custody rather than overtaking the retained prefix.
         compaction = { ...compaction, phase: "retry_wait", anomaly: null };
-        appendOperation({
-          kind: "compaction",
-          phase: "retry_wait",
-          operationId: compaction.operationId,
-          attempt: compaction.attempt,
-        });
+        observedOperation("compaction", "retry_wait", { operationId: compaction.operationId });
       } else {
         compaction = {
           ...compaction,
@@ -1475,15 +1629,16 @@ export function createStateAuthority({
           anomaly: null,
           invocationPending: false,
         };
-        appendOperation({
-          kind: "compaction",
-          phase: compaction.phase,
-          operationId: compaction.operationId,
-          attempt: compaction.attempt,
-          ...(failed && typeof event.errorMessage === "string"
-            ? { error: event.errorMessage }
-            : {}),
-        });
+        observedOperation(
+          "compaction",
+          failed ? (event.aborted === true ? "aborted" : "failed") : "completed",
+          {
+            operationId: compaction.operationId,
+            ...(failed && typeof event.errorMessage === "string"
+              ? { detail: event.errorMessage }
+              : {}),
+          },
+        );
       }
       // Direct getter evidence is sampled before custody is released. A stale
       // false/true disagreement leaves the barrier closed and is visible in
@@ -1556,19 +1711,27 @@ export function createStateAuthority({
   async function runNavigation(fn) {
     navigationDepth++;
     const navigationBarrierId = `barrier-${++barrierSequence}`;
+    const navigationOperationId = observedOperation("navigation", "started");
     publishSnapshot();
     let shouldDrain = true;
     try {
       const result = await fn();
       if (result?.cancelled === true || result?.aborted === true) {
+        observedOperation("navigation", "aborted", { operationId: navigationOperationId });
         shouldDrain = false;
         restoreCancelledNavigationCustody(
           navigationBarrierId,
           "Navigation was cancelled; review this submission before retrying",
         );
+      } else {
+        observedOperation("navigation", "completed", { operationId: navigationOperationId });
       }
       return result;
     } catch (error) {
+      observedOperation("navigation", "failed", {
+        operationId: navigationOperationId,
+        detail: error instanceof Error ? error.message : String(error),
+      });
       shouldDrain = false;
       restoreCancelledNavigationCustody(
         navigationBarrierId,
@@ -1676,6 +1839,9 @@ export function createStateAuthority({
   function beginCompactionInvocation(intentId = crypto.randomUUID()) {
     compaction = { ...compaction, invocationPending: true };
     activeIntents.set(intentId, "invoking");
+    // This is command invocation evidence and a conservative admission
+    // barrier, never fabricated proof that Pi observed compaction as active.
+    observedOperation("command", "invoking", { operationId: intentId, intentId });
     publishSnapshot();
     return intentId;
   }
@@ -1683,14 +1849,46 @@ export function createStateAuthority({
   function settleCompactionInvocation(intentId, result = {}) {
     activeIntents.delete(intentId);
     compaction = { ...compaction, invocationPending: false };
-    // Do not synthesize start/end from a command promise. If Pi supplied no
-    // observation, the snapshot remains inactive; if it is open, the journal
-    // remains the last public evidence.
+    observedOperation(
+      "command",
+      result.failed === true ? "failed" : result.aborted === true ? "aborted" : "completed",
+      { operationId: intentId, intentId, ...(result.detail ? { detail: result.detail } : {}) },
+    );
+    // Do not synthesize compaction start/end from a command promise. If Pi
+    // supplied no observation, only the command invocation is journaled.
     publishSnapshot();
     return result;
   }
 
+  function beginObservedOperation(kind, intentId, state = "started") {
+    return observedOperation(kind, state, { intentId });
+  }
+
+  function settleObservedOperation(kind, operationId, result = {}) {
+    return observedOperation(
+      kind,
+      result.unknown === true
+        ? "unknown"
+        : result.failed === true
+          ? "failed"
+          : result.cancelled === true || result.aborted === true
+            ? "aborted"
+            : "completed",
+      {
+        operationId,
+        ...(result.intentId ? { intentId: result.intentId } : {}),
+        ...(result.detail ? { detail: result.detail } : {}),
+      },
+    );
+  }
+
   function failureEscrow() {
+    const unknownObservedOperations = [
+      ...observedJournal(),
+      ...[...activeObservedOperations.values()].map((entry) =>
+        operationProjection(entry, "unknown"),
+      ),
+    ];
     return {
       activeIntents: [...activeIntents].map(([intentId, disposition]) => ({
         intentId,
@@ -1711,7 +1909,16 @@ export function createStateAuthority({
       compaction: compactionBarrierOpen()
         ? { state: "outcome_unknown", lastObserved: compactionProjection() }
         : null,
-      operationJournal: structuredClone(operationJournal),
+      // No synthetic terminal is emitted on child loss. Active observations
+      // are explicitly unknown, alongside the bounded recent history.
+      recentObservedOperations: unknownObservedOperations,
+      operationJournal: operationJournal
+        .filter((entry) => entry.observed === true)
+        .map((entry) => ({
+          type: "observed_operation",
+          sequence: entry.operationSequence,
+          record: operationProjection(entry),
+        })),
       operationJournalLowWatermark: journalBounds().low,
       operationJournalHighWatermark: journalBounds().high,
       operationJournalTruncated: operationJournalTruncated,
@@ -1817,7 +2024,17 @@ export function createStateAuthority({
 
   async function requestFullSnapshot() {
     while (transition) await transition.settled;
-    return publishSnapshot(true);
+    // state_request is a compatibility RPC whose response is always the
+    // direct AgentSessionSnapshot. Frame consumers receive an independent
+    // publication; never leak the frame envelope into this response.
+    const value = snapshot();
+    observeSnapshotMutation(value);
+    if (typeof sendFrame === "function") {
+      commitSemanticFrame([], true);
+    } else {
+      sendControl({ type: "snapshot", snapshot: value, full: true });
+    }
+    return value;
   }
 
   // Lifecycle admission is deliberately evaluated in this child, on the same
@@ -1921,28 +2138,11 @@ export function createStateAuthority({
       };
       const catalog = semantic.catalog;
       const journal = operationJournal
-        .filter((entry) => entry.kind === "compaction")
+        .filter((entry) => entry.observed === true)
         .map((entry) => ({
           type: "observed_operation",
           sequence: entry.operationSequence,
-          record: {
-            operationId: String(entry.operationId ?? entry.operationSequence),
-            owner,
-            kind: "compaction",
-            state: ["active", "retry_wait"].includes(entry.phase)
-              ? entry.phase === "retry_wait"
-                ? "retry_wait"
-                : "active"
-              : entry.phase === "terminal_success"
-                ? "completed"
-                : entry.phase === "terminal_aborted"
-                  ? "aborted"
-                  : entry.phase === "terminal_failed"
-                    ? "failed"
-                    : "unknown",
-            observedAt: entry.observedAt,
-            ...(entry.anomaly ? { detail: String(entry.anomaly) } : {}),
-          },
+          record: operationProjection(entry),
         }));
       const panels = (presentation.panels?.() ?? []).map((panel) => ({
         panelKey: `panel:${panel.panelId}`,
@@ -2125,6 +2325,8 @@ export function createStateAuthority({
     beginCompactionInvocation,
     settleCompactionInvocation,
     settleTransitionInitiator,
+    beginObservedOperation,
+    settleObservedOperation,
     failureEscrow,
     requestEscape,
     runNavigation,

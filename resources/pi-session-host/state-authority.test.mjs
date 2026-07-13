@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AuthorityFrameSchema } from "../../src/shared/pi-protocol/runtime-state.ts";
+import {
+  AgentSessionSnapshotSchema,
+  AuthorityFrameSchema,
+} from "../../src/shared/pi-protocol/runtime-state.ts";
 import { createStateAuthority } from "./state-authority.mjs";
 
 function deferred() {
@@ -544,7 +547,7 @@ describe("state authority", () => {
     expect(authority.snapshot().hostFacts.custodyCount).toBe(2);
   });
 
-  it("never replays custody whose original admission became outcome-unknown", async () => {
+  it("keeps timed-out custody pending and completes it once without replay", async () => {
     vi.useFakeTimers();
     const pending = deferred();
     const { authority, session, sendRecord } = setup({
@@ -560,11 +563,17 @@ describe("state authority", () => {
     await flush();
 
     expect(session.prompt).toHaveBeenCalledTimes(1);
-    expect(sendRecord).toHaveBeenCalledWith(
+    expect(sendRecord).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "queue_restoration", followUp: ["only once"] }),
     );
     pending.resolve();
     await flush();
+    expect(sendRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "submission",
+        result: expect.objectContaining({ intentId: "slow-custody", disposition: "completed" }),
+      }),
+    );
     authority.observeEvent({ type: "compaction_start" });
     authority.observeEvent({ type: "compaction_end" });
     await flush();
@@ -1118,6 +1127,19 @@ describe("state authority", () => {
     ]);
   });
 
+  it("returns a real direct snapshot for state_request while separately publishing frames", async () => {
+    const sendFrame = vi.fn();
+    const { authority } = setup({}, { sendFrame });
+
+    const response = await authority.requestFullSnapshot();
+
+    expect(AgentSessionSnapshotSchema.safeParse(response).success).toBe(true);
+    expect(response).not.toHaveProperty("terminalSnapshot");
+    expect(sendFrame).toHaveBeenCalledWith(
+      expect.objectContaining({ terminalSnapshot: expect.any(Object) }),
+    );
+  });
+
   it("defers full state requests until a provisional transition commits", async () => {
     const { authority } = setup();
     authority.beginTransition(1);
@@ -1190,7 +1212,7 @@ describe("state authority", () => {
     expect(streamingReads).toBe(readsAfterSettlement);
   });
 
-  it("retires a hung timed-out admission made during an active turn", async () => {
+  it("keeps a hung admission pending after its deadline while this child still owns settlement", async () => {
     vi.useFakeTimers();
     const pending = deferred();
     const onAdmissionStuck = vi.fn();
@@ -1205,7 +1227,8 @@ describe("state authority", () => {
 
     const result = authority.submit(makeRequest("active-turn-hang"));
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(result).resolves.toMatchObject({ disposition: "outcome_unknown" });
+    await expect(result).resolves.toMatchObject({ disposition: "admitting" });
+    expect(authority.snapshot().hostFacts.submitting).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(onAdmissionStuck).toHaveBeenCalledWith({
       intentId: "active-turn-hang",
@@ -1215,7 +1238,7 @@ describe("state authority", () => {
     await flush();
   });
 
-  it("retains active-turn images while timed-out admission remains uncertain", async () => {
+  it("retains active-turn images while timed-out admission remains pending", async () => {
     vi.useFakeTimers();
     const pending = deferred();
     let steering = [];
@@ -1235,7 +1258,7 @@ describe("state authority", () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(result).resolves.toMatchObject({ disposition: "outcome_unknown" });
+    await expect(result).resolves.toMatchObject({ disposition: "admitting" });
     steering = ["queued with image"];
     pending.resolve();
     await flush();
@@ -1277,9 +1300,9 @@ describe("state authority", () => {
 
     const result = authority.submit(makeRequest("slow", { text: "slow prompt" }));
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(result).resolves.toMatchObject({ disposition: "outcome_unknown" });
     expect(editor.text).toBe("slow prompt");
 
+    await expect(result).resolves.toMatchObject({ disposition: "admitting" });
     pending.resolve();
     await flush();
 
@@ -1305,9 +1328,9 @@ describe("state authority", () => {
 
     const result = authority.submit(makeRequest("slow", { text: "slow prompt" }));
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(result).resolves.toMatchObject({ disposition: "outcome_unknown" });
     editor = { revision: 2, text: "new typing", attachments: [{ kind: "file" }] };
 
+    await expect(result).resolves.toMatchObject({ disposition: "admitting" });
     pending.resolve();
     await flush();
 
@@ -1318,7 +1341,7 @@ describe("state authority", () => {
     });
   });
 
-  it("reports an admission timeout and later records its terminal disposition", async () => {
+  it("does not terminally report an admission timeout and records one later disposition", async () => {
     vi.useFakeTimers();
     const pending = deferred();
     const onAdmissionStuck = vi.fn();
@@ -1329,7 +1352,7 @@ describe("state authority", () => {
 
     const result = authority.submit(makeRequest("slow"));
     await vi.advanceTimersByTimeAsync(2_000);
-    await expect(result).resolves.toMatchObject({ disposition: "outcome_unknown" });
+    await expect(result).resolves.toMatchObject({ disposition: "admitting" });
     expect(authority.snapshot().hostFacts.submitting).toBe(true);
     await expect(authority.requestEscape("stuck-escape")).resolves.toMatchObject({
       disposition: "outcome_unknown",
@@ -1339,10 +1362,12 @@ describe("state authority", () => {
 
     pending.resolve();
     await flush();
-    expect(sendRecord).toHaveBeenCalledWith({
-      type: "submission",
-      result: expect.objectContaining({ intentId: "slow", disposition: "completed" }),
-    });
+    const terminals = sendRecord.mock.calls
+      .map(([record]) => record)
+      .filter((record) => record.type === "submission" && record.result.intentId === "slow");
+    expect(terminals).toEqual([
+      expect.objectContaining({ result: expect.objectContaining({ disposition: "completed" }) }),
+    ]);
   });
 
   it("observes an independent compaction from direct getter evidence", () => {
@@ -1742,6 +1767,95 @@ describe("state authority", () => {
         },
       }),
     );
+  });
+
+  it("projects detached and failed agent, retry, bash, navigation, command, and compaction operations", async () => {
+    const navigation = deferred();
+    const { authority, session } = setup({ isRetrying: true });
+    authority.observeEvent({ type: "agent_start" });
+    authority.observeEvent({ type: "agent_end", willRetry: true });
+    const bashId = authority.beginObservedOperation("bash");
+    const commandId = authority.beginObservedOperation("command", "cmd-intent", "invoking");
+    const compactId = authority.beginCompactionInvocation("compact-intent");
+    const navigating = authority.runNavigation(() => navigation.promise);
+
+    const attach = await authority.requestAuthorityAttach(3);
+    expect(attach.operationJournal.map((entry) => entry.record.kind)).toEqual(
+      expect.arrayContaining(["agent", "retry", "bash", "navigation", "command"]),
+    );
+    const semantic = authority.createSemanticFrame().terminalSnapshot;
+    expect(semantic.recentObservedOperations).toContainEqual(
+      expect.objectContaining({ kind: "command", operationId: compactId, state: "invoking" }),
+    );
+    expect(semantic.recentObservedOperations).not.toContainEqual(
+      expect.objectContaining({ kind: "compaction", state: "active", intentId: "compact-intent" }),
+    );
+    const escrow = authority.failureEscrow();
+    expect(escrow.recentObservedOperations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "bash", operationId: bashId, state: "unknown" }),
+        expect.objectContaining({ kind: "navigation", state: "unknown" }),
+        expect.objectContaining({ kind: "command", operationId: commandId, state: "unknown" }),
+      ]),
+    );
+
+    authority.settleObservedOperation("bash", bashId);
+    authority.settleObservedOperation("command", commandId);
+    authority.settleCompactionInvocation(compactId);
+    session.isRetrying = false;
+    navigation.resolve({ cancelled: true });
+    await navigating;
+  });
+
+  it("bounds dispatched intent retention and rejects image payloads over its byte cap", async () => {
+    const { authority } = setup(
+      {},
+      { dispatchedIntentCapacity: 2, dispatchedIntentPayloadBytes: 200 },
+    );
+    const owner = { hostInstanceId: "host-1", sessionEpoch: 0 };
+    const dispatch = (intentId) =>
+      authority.dispatchIntent(
+        { intentId, expectedOwner: owner, intent: { kind: "runBash", command: "pwd" } },
+        async () => ({ output: "/tmp", exitCode: 0 }),
+      );
+
+    for (const id of ["one", "two", "three"]) {
+      await expect(dispatch(id)).resolves.toMatchObject({ status: "admitted" });
+      await vi.waitFor(() =>
+        expect(
+          authority
+            .createSemanticFrame()
+            .terminalSnapshot.recentIntentOutcomes.some((outcome) => outcome.intentId === id),
+        ).toBe(true),
+      );
+    }
+    expect(authority.createSemanticFrame().terminalSnapshot).toMatchObject({
+      dispatchedIntentLowWatermark: 2,
+      dispatchedIntentHighWatermark: 3,
+      dispatchedIntentTruncated: true,
+      recentIntentOutcomes: [
+        expect.objectContaining({ intentId: "two" }),
+        expect.objectContaining({ intentId: "three" }),
+      ],
+    });
+    await expect(
+      authority.dispatchIntent(
+        {
+          intentId: "too-large",
+          expectedOwner: owner,
+          intent: {
+            kind: "submit",
+            text: "x",
+            images: [{ data: "image bytes that exceed cap ".repeat(20) }],
+          },
+        },
+        vi.fn(),
+      ),
+    ).resolves.toEqual({
+      status: "not_admitted",
+      intentId: "too-large",
+      reason: "payload_too_large",
+    });
   });
 
   it("exposes an atomic semantic frame and failure escrow without inventing a compaction end", () => {
