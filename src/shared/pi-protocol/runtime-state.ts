@@ -37,85 +37,6 @@ export const RuntimeIdentitySchema = z.object({
 });
 export type RuntimeIdentity = z.infer<typeof RuntimeIdentitySchema>;
 
-/**
- * Transitional payload for the retired renderer command bridge. It intentionally
- * has no dependency on Pi's command union: new renderer reads use
- * `SessionQueryEnvelope` and mutations use `IntentEnvelope`.
- *
- * `any` quarantines the old bridge while main/renderer callers migrate. The
- * schema still requires a command discriminant so malformed IPC never reaches
- * the registry as an untyped value.
- */
-// biome-ignore lint/suspicious/noExplicitAny: Compatibility boundary for callers not migrated to intents/queries.
-export type LegacyCommandPayload = any;
-export const LegacyCommandPayloadSchema: z.ZodType<LegacyCommandPayload> = z
-  .object({ type: z.string().min(1) })
-  .passthrough();
-
-// The legacy bridge retains its effect-intent fence until callers finish
-// migration. This is intentionally a narrow structural check; Pi command
-// validation remains at the host boundary and is not re-exported here.
-const LegacyIntentRequiredCommandTypes = new Set([
-  "abort",
-  "bash",
-  "abort_bash",
-  "cycle_model",
-  "cycle_thinking_level",
-  "new_session",
-  "switch_session",
-  "fork",
-  "clone",
-  "compact",
-  "abort_retry",
-  "export_html",
-  "navigate_tree",
-]);
-
-/** @deprecated Use `IntentEnvelope` for mutations; retained only for migration. */
-export const RendererCommandRequestSchema = z
-  .object({
-    requestId: z.string().min(1),
-    command: LegacyCommandPayloadSchema,
-    expectedHostInstanceId: z.string().min(1),
-    expectedSessionEpoch: z.number().int().nonnegative(),
-    intentId: z.string().min(1).optional(),
-    uiSurface: SubmissionSurfaceSchema.optional(),
-    sourceText: z.string().optional(),
-    editorRevision: z.number().int().nonnegative().optional(),
-  })
-  .superRefine((request, ctx) => {
-    if (LegacyIntentRequiredCommandTypes.has(request.command.type) && !request.intentId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["intentId"],
-        message: `${request.command.type} requires an effect intent id`,
-      });
-    }
-  });
-export type RendererCommandRequest = z.infer<typeof RendererCommandRequestSchema>;
-
-export const CommandDispositionSchema = z.enum(["not_executed", "completed", "outcome_unknown"]);
-export type CommandDisposition = z.infer<typeof CommandDispositionSchema>;
-
-/** @deprecated Command discriminants are no longer part of the shared process API. */
-export const PiCommandTypeSchema = z.string().min(1);
-
-/** Pi response plus authoritative command admission/settlement metadata. */
-export const CommandSettlementSchema = PiRpcResponseSchema.and(
-  z.object({
-    requestId: z.string(),
-    intentId: z.string().optional(),
-    commandType: PiCommandTypeSchema,
-    commandClass: z.enum(["read_only", "idempotent", "effectful", "replacement"]),
-    hostInstanceId: z.string(),
-    sessionEpoch: z.number().int().nonnegative(),
-    disposition: CommandDispositionSchema,
-    successorIdentity: RuntimeIdentitySchema.optional(),
-    restorationId: z.string().optional(),
-  }),
-);
-export type CommandSettlement = z.infer<typeof CommandSettlementSchema>;
-
 export const ReloadRequestSchema = z.object({
   requestId: z.string().min(1),
   intentId: z.string().min(1),
@@ -124,6 +45,9 @@ export const ReloadRequestSchema = z.object({
   sourceText: z.string().optional(),
 });
 export type ReloadRequest = z.infer<typeof ReloadRequestSchema>;
+
+export const CommandDispositionSchema = z.enum(["not_executed", "completed", "outcome_unknown"]);
+export type CommandDisposition = z.infer<typeof CommandDispositionSchema>;
 
 export const ReloadSettlementSchema = z.object({
   requestId: z.string(),
@@ -655,6 +579,7 @@ export const SessionIntentKindSchema = z.enum([
   "setThinking",
   "rename",
   "reload",
+  "export",
 ]);
 export type SessionIntentKind = z.infer<typeof SessionIntentKindSchema>;
 
@@ -698,6 +623,7 @@ export const SessionIntentSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("setThinking"), level: ThinkingLevelSchema }).strict(),
   z.object({ kind: z.literal("rename"), name: z.string() }).strict(),
   z.object({ kind: z.literal("reload") }).strict(),
+  z.object({ kind: z.literal("export"), outputPath: z.string().optional() }).strict(),
 ]);
 export type SessionIntent = z.infer<typeof SessionIntentSchema>;
 
@@ -868,6 +794,8 @@ export const RenameIntentResultSchema = z.object({ name: z.string() }).strict();
 export const ReloadIntentResultSchema = z
   .object({ successorIdentity: RuntimeIdentitySchema.optional() })
   .strict();
+/** The child-authoritative file produced by an export effect. */
+export const ExportIntentResultSchema = z.object({ path: z.string().min(1) }).strict();
 
 export const IntentOutcomeSchema = z.discriminatedUnion("kind", [
   OutcomeBaseSchema.extend({
@@ -909,6 +837,10 @@ export const IntentOutcomeSchema = z.discriminatedUnion("kind", [
   OutcomeBaseSchema.extend({
     kind: z.literal("reload"),
     result: ReloadIntentResultSchema.optional(),
+  }).strict(),
+  OutcomeBaseSchema.extend({
+    kind: z.literal("export"),
+    result: ExportIntentResultSchema.optional(),
   }).strict(),
 ]);
 export type IntentOutcome = z.infer<typeof IntentOutcomeSchema>;

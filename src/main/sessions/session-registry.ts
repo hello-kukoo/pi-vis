@@ -5,12 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { newSessionId } from "@shared/ids.js";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus } from "@shared/ipc-contract.js";
-import {
-  type PiReadOnlyCommand,
-  type PiRpcCommand,
-  commandNeedsIntent,
-  commandPolicy,
-} from "@shared/pi-protocol/commands.js";
+import type { PiReadOnlyCommand } from "@shared/pi-protocol/commands.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
 import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
@@ -21,15 +16,12 @@ import {
   type AuthorityAttachBaseline,
   type AuthorityAttachResponse,
   type AuthorityFrame,
-  type CommandSettlement,
   type EscapeResult,
   type IntentEnvelope,
   type IntentReceipt,
   type ReloadRequest,
   ReloadRequestSchema,
   type ReloadSettlement,
-  type RendererCommandRequest,
-  RendererCommandRequestSchema,
   type RendererPublication,
   type RuntimeIdentity,
   type RuntimeRecord,
@@ -76,12 +68,6 @@ function reviewQueues(submission: SessionSubmission): { steering: string[]; foll
     steering: queueLabel === "steer" ? [text] : [],
     followUp: queueLabel === "followUp" ? [text] : [],
   };
-}
-
-interface RetainedCommandIntent {
-  request: RendererCommandRequest;
-  dispatched: boolean;
-  recoveryPublished?: boolean | undefined;
 }
 
 /**
@@ -167,7 +153,6 @@ export interface SessionRecord {
   _expiredUnifiedIntents: Set<string>;
   _acknowledgedUnifiedIntents: Set<string>;
   _unifiedRestorationIntents: Map<string, string>;
-  _retainedCommandIntents: Map<string, RetainedCommandIntent>;
   _retainedDispatchIntents: Map<string, RetainedDispatchIntent>;
   _restorations: Map<string, unknown>;
   _rendererGeneration: number;
@@ -342,7 +327,6 @@ export class SessionRegistry {
       _expiredUnifiedIntents: new Set(),
       _acknowledgedUnifiedIntents: new Set(),
       _unifiedRestorationIntents: new Map(),
-      _retainedCommandIntents: new Map(),
       _retainedDispatchIntents: new Map(),
       _restorations: new Map(),
       _rendererGeneration: 0,
@@ -1325,27 +1309,6 @@ export class SessionRegistry {
         message: "Host failed after custody; review the retained submission before retrying",
       });
     }
-    // Commands that crossed child IPC but lost their terminal response are
-    // never replayed. Publish one durable review marker per intent.
-    for (const [intentId, retained] of record._retainedCommandIntents) {
-      if (!retained.dispatched || retained.recoveryPublished) continue;
-      retained.recoveryPublished = true;
-      const restorationId = `ambiguous-command:${intentId}`;
-      const restoration: RuntimeRecord & { type: "queue_restoration" } = {
-        type: "queue_restoration",
-        restorationId,
-        steering: [],
-        followUp: [],
-        originalAttachments: [],
-        commandDescription: `${retained.request.command.type}${
-          retained.request.sourceText?.trim() ? ` (${retained.request.sourceText.trim()})` : ""
-        } may have completed before its acknowledgement was lost. Review before retrying.`,
-        requiresReview: true,
-      };
-      record._restorations.set(restorationId, structuredClone(restoration));
-      this.onQueueRestoration(record.sessionId, restoration);
-    }
-
     // A unified request belongs to the host identity that emitted it. If that
     // host dies before the renderer response, never execute it against a
     // replacement host. Convert its text into an explicit review-required
@@ -2120,10 +2083,6 @@ export class SessionRegistry {
       if (restorationId.startsWith(ambiguousIntentPrefix)) {
         record._retainedIntents.delete(restorationId.slice(ambiguousIntentPrefix.length));
       }
-      const ambiguousCommandPrefix = "ambiguous-command:";
-      if (restorationId.startsWith(ambiguousCommandPrefix)) {
-        record._retainedCommandIntents.delete(restorationId.slice(ambiguousCommandPrefix.length));
-      }
       const unifiedIntentId = record._unifiedRestorationIntents.get(restorationId);
       if (unifiedIntentId) {
         record._unifiedRestorationIntents.delete(restorationId);
@@ -2248,6 +2207,19 @@ export class SessionRegistry {
     record._pendingUiAcks.set(operationId, { promise, resolve: resolvePromise, timer });
     sendOperation();
     return promise;
+  }
+
+  /** Fence main-only effects to the authority that produced their typed outcome. */
+  isCurrentOwner(sessionId: SessionId, owner: RuntimeIdentity): boolean {
+    const record = this.sessions.get(sessionId);
+    return Boolean(
+      record &&
+        !record._closing &&
+        !record._dead &&
+        record.availability === "available" &&
+        !record._hostTransition &&
+        this.matchesExpectedRuntime(record, owner.hostInstanceId, owner.sessionEpoch),
+    );
   }
 
   private matchesExpectedRuntime(
@@ -2499,211 +2471,6 @@ export class SessionRegistry {
     record._mutationSequence++;
   }
 
-  async readInternalProbe(
-    sessionId: SessionId,
-    command: PiReadOnlyCommand,
-    expected: { hostInstanceId: string; sessionEpoch: number },
-  ): Promise<PiRpcResponse> {
-    if (commandPolicy(command).class !== "read_only") {
-      throw new Error(`Internal probe cannot execute ${command.type}`);
-    }
-    const record = this.sessions.get(sessionId);
-    if (
-      !record?.proc ||
-      !record._procReady ||
-      record.status !== "ready" ||
-      record.availability !== "available" ||
-      record._hostTransition ||
-      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
-    ) {
-      throw new Error("Session changed before internal probe");
-    }
-    const proc = record.proc;
-    const response = await proc.query(command);
-    if (
-      record.proc !== proc ||
-      !this.matchesExpectedRuntime(record, expected.hostInstanceId, expected.sessionEpoch)
-    ) {
-      throw new Error("Session changed during internal probe");
-    }
-    return response;
-  }
-
-  /**
-   * Sole renderer-command admission path. Every valid request settles with an
-   * explicit disposition; malformed requests alone throw.
-   */
-  async executeRendererCommand(
-    sessionId: SessionId,
-    requestInput: RendererCommandRequest,
-  ): Promise<CommandSettlement> {
-    const parsed = RendererCommandRequestSchema.safeParse(requestInput);
-    if (!parsed.success) throw new Error(`Invalid command request: ${parsed.error.message}`);
-    const request = parsed.data;
-    const policy = commandPolicy(request.command);
-    const record = this.sessions.get(sessionId);
-    // Automatic read probes do not turn a view-only visit into an
-    // interaction. Every state-changing command does.
-    if (policy.class !== "read_only") this.markActivationVisitInteracted(record);
-    const base = {
-      requestId: request.requestId,
-      ...(request.intentId ? { intentId: request.intentId } : {}),
-      commandType: request.command.type,
-      commandClass: policy.class,
-      hostInstanceId: request.expectedHostInstanceId,
-      sessionEpoch: request.expectedSessionEpoch,
-    } as const;
-    const notExecuted = (message: string): CommandSettlement => ({
-      type: "response",
-      command: request.command.type,
-      success: false,
-      error: message,
-      ...base,
-      disposition: "not_executed",
-    });
-
-    if (policy.submissionOnly) return notExecuted("Text submissions must use session.submit");
-    if (record?._closing) return notExecuted("Session close preparation is in progress");
-    if (
-      !record?.proc ||
-      !record._procReady ||
-      record.status !== "ready" ||
-      record.availability !== "available" ||
-      record._hostTransition
-    ) {
-      return notExecuted(`No available SDK host for session ${sessionId}`);
-    }
-    if (
-      !this.matchesExpectedRuntime(
-        record,
-        request.expectedHostInstanceId,
-        request.expectedSessionEpoch,
-      )
-    ) {
-      return notExecuted("Session changed before command dispatch");
-    }
-
-    const proc = record.proc;
-    const needsIntent = commandNeedsIntent(request.command);
-    let dispatched = false;
-    let retained: RetainedCommandIntent | undefined;
-    if (needsIntent && request.intentId) {
-      const duplicate = record._retainedCommandIntents.get(request.intentId);
-      if (duplicate) {
-        return {
-          ...notExecuted("Command intent is already retained for review"),
-          disposition: duplicate.dispatched ? "outcome_unknown" : "not_executed",
-        };
-      }
-      retained = { request: structuredClone(request), dispatched: false };
-      record._retainedCommandIntents.set(request.intentId, retained);
-      record._mutationSequence++;
-    }
-
-    try {
-      const response = await proc.executeCommand(request.command, {
-        ...(request.uiSurface ? { uiSurface: request.uiSurface } : {}),
-        onDispatched: () => {
-          dispatched = true;
-          if (retained) retained.dispatched = true;
-        },
-      });
-      if (
-        this.sessions.get(sessionId) !== record ||
-        record._closing ||
-        record._dead ||
-        record.proc !== proc ||
-        record.availability !== "available" ||
-        record._hostTransition !== undefined
-      ) {
-        throw new Error("Session lifecycle changed before command settlement");
-      }
-      if (
-        policy.class !== "replacement" &&
-        !this.matchesExpectedRuntime(
-          record,
-          request.expectedHostInstanceId,
-          request.expectedSessionEpoch,
-        )
-      ) {
-        throw new Error("Session epoch changed before command settlement");
-      }
-      if (request.intentId && record._retainedCommandIntents.delete(request.intentId)) {
-        record._mutationSequence++;
-      }
-      const currentIdentity = {
-        hostInstanceId: proc.hostInstanceId ?? request.expectedHostInstanceId,
-        sessionEpoch: proc.sessionEpoch,
-      };
-      return {
-        ...response,
-        command: request.command.type,
-        ...base,
-        disposition: "completed",
-        hostInstanceId: request.expectedHostInstanceId,
-        sessionEpoch: request.expectedSessionEpoch,
-        ...(policy.class === "replacement" && response.success
-          ? { successorIdentity: currentIdentity }
-          : {}),
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!dispatched) {
-        if (request.intentId && record._retainedCommandIntents.delete(request.intentId)) {
-          record._mutationSequence++;
-        }
-        return notExecuted(message);
-      }
-      const lifecycleRetired =
-        this.sessions.get(sessionId) !== record || record._closing || record._dead;
-      if (lifecycleRetired) {
-        return {
-          type: "response",
-          command: request.command.type,
-          success: false,
-          error: message,
-          ...base,
-          disposition: "outcome_unknown",
-        };
-      }
-      if (!retained) {
-        return {
-          type: "response",
-          command: request.command.type,
-          success: false,
-          error: message,
-          ...base,
-          disposition: "outcome_unknown",
-        };
-      }
-      const restorationId = `ambiguous-command:${request.intentId}`;
-      if (!retained.recoveryPublished) {
-        retained.recoveryPublished = true;
-        const restoration: RuntimeRecord & { type: "queue_restoration" } = {
-          type: "queue_restoration",
-          restorationId,
-          steering: [],
-          followUp: request.sourceText?.trim() ? [request.sourceText] : [],
-          originalAttachments: [],
-          commandDescription: `${request.command.type} may have completed before its acknowledgement was lost. Review before retrying.`,
-          requiresReview: true,
-        };
-        record._restorations.set(restorationId, structuredClone(restoration));
-        record._mutationSequence++;
-        this.onQueueRestoration(sessionId, restoration);
-      }
-      return {
-        type: "response",
-        command: request.command.type,
-        success: false,
-        error: message,
-        ...base,
-        disposition: "outcome_unknown",
-        restorationId,
-      };
-    }
-  }
-
   async executeReload(
     sessionId: SessionId,
     requestInput: ReloadRequest,
@@ -2903,7 +2670,6 @@ export class SessionRegistry {
         !(allowWorktreeTransition && record.availability === "transitioning")) ||
       record._hostTransition !== undefined ||
       record._retainedIntents.size > 0 ||
-      record._retainedCommandIntents.size > 0 ||
       record._pendingUnifiedSubmits.size > 0
     ) {
       throw new Error("Wait for active and retained work before moving the session to a worktree");
@@ -3101,9 +2867,6 @@ export class SessionRegistry {
           editor: record.snapshot?.editor,
           catalog: record.snapshot?.catalog,
           intents: [...record._retainedIntents.values()].map((item) => structuredClone(item)),
-          commandIntents: [...record._retainedCommandIntents.values()].map((item) =>
-            structuredClone(item),
-          ),
           restorations: [...record._restorations.values()].map((item) => structuredClone(item)),
           dialogs: [...record._pendingUiRequests.values()].map((item) => structuredClone(item)),
           unifiedSubmissions: [...record._pendingUnifiedSubmits.values()].map((item) =>
@@ -3154,9 +2917,6 @@ export class SessionRegistry {
           editor: record.snapshot?.editor,
           catalog: record.snapshot?.catalog,
           intents: [...record._retainedIntents.values()].map((item) => structuredClone(item)),
-          commandIntents: [...record._retainedCommandIntents.values()].map((item) =>
-            structuredClone(item),
-          ),
           restorations: [...record._restorations.values()].map((item) => structuredClone(item)),
           dialogs: [...record._pendingUiRequests.values()].map((item) => structuredClone(item)),
           unifiedSubmissions: [...record._pendingUnifiedSubmits.values()].map((item) =>
@@ -3355,7 +3115,6 @@ export class SessionRegistry {
       !record._pendingRendererCancellation &&
       record._retainedIntents.size === 0 &&
       record._pendingSubmissionPromises.size === 0 &&
-      record._retainedCommandIntents.size === 0 &&
       record._restorations.size === 0 &&
       record._pendingUnifiedSubmits.size === 0 &&
       record._expiredUnifiedIntents.size === 0 &&

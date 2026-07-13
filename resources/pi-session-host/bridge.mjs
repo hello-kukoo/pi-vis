@@ -956,6 +956,12 @@ export function setupCommandBridge({
           return {
             successorIdentity: { hostInstanceId, sessionEpoch: authority.sessionEpoch },
           };
+        case "export": {
+          const path = await _session.exportToHtml(intent.outputPath);
+          if (typeof path !== "string" || path.length === 0)
+            throw new Error("Session export did not return a file path");
+          return { path };
+        }
         default:
           throw new Error(`Unknown intent kind: ${intent.kind}`);
       }

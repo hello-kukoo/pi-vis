@@ -30,7 +30,7 @@ async function mockInvoke(channel: string, payload: unknown): Promise<unknown> {
       expectedOwner: { hostInstanceId: string; sessionEpoch: number };
       query: { type: string };
     };
-    const response = await nextResponse("session.sendCommand", {
+    const response = await nextResponse("child.transport", {
       ...envelope,
       command: envelope.query,
     });
@@ -53,7 +53,7 @@ async function mockInvoke(channel: string, payload: unknown): Promise<unknown> {
         : envelope.intent.text?.startsWith("/label ")
           ? { type: "set_label" }
           : { type: envelope.intent.kind };
-    const response = (await nextResponse("session.sendCommand", { ...envelope, command })) as {
+    const response = (await nextResponse("child.transport", { ...envelope, command })) as {
       success?: boolean;
     };
     return response.success
@@ -217,7 +217,7 @@ describe("tree-store — open / refresh", () => {
       },
     ];
     nextResponse = async (channel) => {
-      if (channel === "session.sendCommand") {
+      if (channel === "child.transport") {
         return { success: true, data: { nodes: flat, leafId: "u2" } };
       }
       return { success: false };

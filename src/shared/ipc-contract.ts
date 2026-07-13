@@ -160,17 +160,15 @@ export interface IpcInvokeContract {
     req: { sessionId: SessionId; request: ReloadRequest };
     res: ReloadSettlement;
   };
-  // /share: export the session to a secret GitHub gist (via `gh`) and
-  // return the pi.dev share viewer URL. Implemented in main because it
-  // shells out to `gh` and writes a temp file; the HTML content comes from
-  // the host's export_html bridge command. Error strings match pi's TUI
-  // messages verbatim for the gh-missing / gh-not-logged-in cases.
+  // Main-only gist creation. `exportedPath` is accepted only after the
+  // owner-bound export intent published it in an authority outcome.
   "session.share": {
     req: {
       sessionId: SessionId;
       expectedHostInstanceId: string;
       expectedSessionEpoch: number;
       exportIntentId: string;
+      exportedPath: string;
     };
     res: { ok: true; url: string; gistUrl: string } | { ok: false; error: string };
   };

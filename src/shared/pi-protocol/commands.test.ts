@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  PI_COMMAND_POLICY,
-  type PiRpcCommand,
-  PiRpcCommandSchema,
-  commandNeedsIntent,
-} from "./commands.js";
-import { RendererCommandRequestSchema } from "./runtime-state.js";
+import { PI_COMMAND_POLICY, type PiRpcCommand } from "./commands.js";
 
 const COMMAND_TYPES = [
   "prompt",
@@ -68,21 +62,5 @@ describe("Pi command admission policy", () => {
         submissionOnly: true,
       });
     }
-  });
-
-  it("marks effectful commands for intent-bearing mutation dispatch", () => {
-    const command = PiRpcCommandSchema.parse({ type: "compact" });
-    expect(commandNeedsIntent(command)).toBe(true);
-    const base = {
-      requestId: "request",
-      command,
-      expectedHostInstanceId: "host",
-      expectedSessionEpoch: 0,
-    };
-    expect(RendererCommandRequestSchema.safeParse(base).success).toBe(false);
-    expect(RendererCommandRequestSchema.safeParse({ ...base, intentId: "intent" }).success).toBe(
-      true,
-    );
-    expect(commandNeedsIntent(PiRpcCommandSchema.parse({ type: "get_state" }))).toBe(false);
   });
 });

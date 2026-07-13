@@ -65,7 +65,7 @@ function authorityBaseline(fake: FakeHostProcess, generation = 1) {
  * via FakeHostProcess (installed through the __forkOverride test seam) — no
  * real fork, no real pi install. Covers the seams the adversarial review
  * identified: waitForReady resolve/reject/timeout, the watchdog re-arm gap
- * (W1), sendCommand correlation + rejectAllPending, panel forwarding with the
+ * (W1), read-query correlation + rejectAllPending, panel forwarding with the
  * generation guard, sendUiResponse, and pre-ready uiRequest ordering.
  */
 describe("SessionHost", () => {
@@ -150,34 +150,6 @@ describe("SessionHost", () => {
       expect(leases.mock.calls).toEqual([[true]]);
       fake.emitWire({ type: "ui_ack", operationId: "lifecycle-dialog" });
       expect(leases.mock.calls).toEqual([[true], [false]]);
-    });
-
-    it("suspends a lifecycle command deadline while correlated UI remains open", async () => {
-      vi.useFakeTimers();
-      fake.emitReady("0.80.2");
-      await host.waitForReady();
-      let settled = false;
-      const command = host.executeCommand({ type: "new_session" } as never).finally(() => {
-        settled = true;
-      });
-      const outbound = [...fake.sent].reverse().find((message) => message.type === "command");
-      if (!outbound || outbound.type !== "command") throw new Error("missing command");
-      fake.emitWire({
-        type: "extension_ui_request",
-        id: "slow-command-dialog",
-        operationId: "slow-command-dialog",
-        method: "confirm",
-        title: "Lifecycle",
-        message: "Continue?",
-        provisionalEpoch: 1,
-      });
-
-      await vi.advanceTimersByTimeAsync(120_000);
-      expect(settled).toBe(false);
-
-      fake.emitWire({ type: "ui_ack", operationId: "slow-command-dialog" });
-      fake.emitWire({ type: "response", id: outbound.id, success: true, data: {} });
-      await expect(command).resolves.toMatchObject({ success: true });
     });
 
     it("suspends the reload request deadline while correlated UI remains open", async () => {
@@ -580,26 +552,6 @@ describe("SessionHost", () => {
   });
 
   describe("command transport", () => {
-    it("correlates a response by id and resolves with data", async () => {
-      await fake.emitReady("0.80.0");
-      await host.waitForReady();
-
-      const p = host.executeCommand({ type: "get_state" } as never);
-      // The host received the command on the wire:
-      expect(fake.sent.some((m) => m.type === "command")).toBe(true);
-
-      // Host responds:
-      const sentCmd = fake.sent.find((m) => m.type === "command")!;
-      fake.emitWire({
-        type: "response",
-        id: sentCmd.id,
-        success: true,
-        data: { sessionId: "x" },
-      });
-      const res = await p;
-      expect(res.success).toBe(true);
-    });
-
     it("correlates a read-only query to its mapped command without interpreting its data", async () => {
       await fake.emitReady("0.80.0");
       await host.waitForReady();
@@ -617,49 +569,6 @@ describe("SessionHost", () => {
         data: { opaque: true },
         error: undefined,
       });
-    });
-
-    it("forwards the invoking UI surface outside the pi RPC command", async () => {
-      await fake.emitReady("0.80.0");
-      await host.waitForReady();
-
-      const p = host.executeCommand({ type: "prompt", message: "/custom" } as never, {
-        uiSurface: "composer",
-      });
-      const sentCmd = fake.sent.find((m) => m.type === "command")!;
-      expect(sentCmd.uiSurface).toBe("composer");
-      expect(sentCmd.command).toEqual({ type: "prompt", message: "/custom" });
-      fake.emitWire({ type: "response", id: sentCmd.id, success: true, data: {} });
-      await expect(p).resolves.toMatchObject({ success: true });
-    });
-
-    it("resolves host command failures as success:false RPC responses", async () => {
-      await fake.emitReady("0.80.0");
-      await host.waitForReady();
-
-      const p = host.executeCommand({ type: "clone" } as never);
-      const sentCmd = fake.sent.find((m) => m.type === "command")!;
-      fake.emitWire({
-        type: "response",
-        id: sentCmd.id,
-        success: false,
-        error: "Cannot clone an empty session",
-      });
-
-      await expect(p).resolves.toMatchObject({
-        success: false,
-        error: "Cannot clone an empty session",
-      });
-    });
-
-    it("rejects when the host exits mid-command (rejectAllPending)", async () => {
-      await fake.emitReady("0.80.0");
-      await host.waitForReady();
-
-      const p = host.executeCommand({ type: "get_state" } as never);
-      fake.emitStderr("fatal host detail\n");
-      fake.emitExit(1);
-      await expect(p).rejects.toThrow(/Host process exited.*fatal host detail/s);
     });
   });
 
@@ -777,25 +686,7 @@ describe("SessionHost", () => {
     });
   });
 
-  describe("fake-fidelity: command failure modes", () => {
-    it("a command sent after the host exits rejects (rejectAllPending)", async () => {
-      await fake.emitReady("0.80.0");
-      await host.waitForReady();
-      fake.emitExit(0);
-      // Post-exit the IPC channel is closed; the send-callback rejects rather
-      // than leaving the (timeout-less) get_state pending forever.
-      await expect(host.executeCommand({ type: "get_state" })).rejects.toThrow(/closed/i);
-    });
-
-    it("a command sent BEFORE ready resolves with the host's 'Not initialized' failure", async () => {
-      // The fake mirrors host.mjs. This is the failure the registry's
-      // _procReady gate prevents (P1-i); at the SessionHost layer command
-      // failures are normal RPC responses, not rejected IPC sends.
-      const res = await host.executeCommand({ type: "get_state" });
-      expect(res.success).toBe(false);
-      expect(res.error).toMatch(/Not initialized/);
-    });
-  });
+  describe("fake-fidelity: command failure modes", () => {});
 
   describe("unified TUI wire contract", () => {
     it("panel_open forwards the unified flag (persistent panel vs custom overlay)", async () => {
@@ -904,7 +795,7 @@ describe("isSessionHost (panel-capability duck type)", () => {
   it("is true for any proc exposing sendPanelInput, false otherwise", () => {
     expect(isSessionHost({ sendPanelInput: () => {} })).toBe(true);
     // An unrelated process-shaped object (no host panel methods) is rejected.
-    expect(isSessionHost({ sendCommand: () => {}, stop: () => {} })).toBe(false);
+    expect(isSessionHost({ legacyCommand: () => {}, stop: () => {} })).toBe(false);
     expect(isSessionHost(null)).toBe(false);
     expect(isSessionHost(undefined)).toBe(false);
     expect(isSessionHost({})).toBe(false);

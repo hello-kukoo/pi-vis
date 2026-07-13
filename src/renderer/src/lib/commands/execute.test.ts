@@ -27,7 +27,9 @@ function authoritativeOutcome(
           ? { provider: "anthropic", modelId: "claude-haiku" }
           : kind === "rename"
             ? { name: "Renamed" }
-            : {};
+            : kind === "export"
+              ? { path: "/tmp/export.html" }
+              : {};
   return { intentId, owner: OWNER, kind, state, result, ...extra } as IntentOutcome;
 }
 
@@ -313,19 +315,44 @@ describe("Composer intent execution — model, name, and replacement commands", 
     expect(deps.addToast).toHaveBeenCalledWith(SID, "Cloned to new session");
   });
 
-  it("routes export through an intent and reports its authoritative failure", async () => {
+  it("routes export through an owner-bound effect intent and reports its authority failure", async () => {
     const { deps, dispatch } = depsFor({
       awaitIntentOutcome: vi.fn(async (_sid, intentId) =>
-        authoritativeOutcome(intentId, "invokeCommand", "failed", { error: "write denied" }),
+        authoritativeOutcome(intentId, "export", "failed", { error: "write denied" }),
       ),
     });
     await executeAction(SID, { kind: "export", outputPath: "/tmp/export.html" }, deps);
     expect(dispatch).toHaveBeenCalledWith(
       SID,
-      { kind: "invokeCommand", text: "/export /tmp/export.html", editorRevision: 2 },
+      { kind: "export", outputPath: "/tmp/export.html" },
       expect.any(String),
     );
-    expect(deps.addToast).toHaveBeenCalledWith(SID, "write denied", "error");
+    expect(deps.addToast).toHaveBeenCalledWith(
+      SID,
+      "Failed to export session: write denied",
+      "error",
+    );
+  });
+
+  it("waits for the authoritative export path before invoking main-only sharing", async () => {
+    const invoke = vi.fn(async () => ({
+      ok: true,
+      url: "https://pi.dev/session/#gist",
+      gistUrl: "https://gist.github.com/test/gist",
+    }));
+    const { deps, dispatch } = depsFor({
+      invoke: invoke as unknown as ExecuteDeps["invoke"],
+    });
+    await executeAction(SID, { kind: "share" }, deps);
+    const [, , intentId] = dispatch.mock.calls[0]!;
+    expect(dispatch).toHaveBeenCalledWith(SID, { kind: "export" }, expect.any(String));
+    expect(invoke).toHaveBeenCalledWith("session.share", {
+      sessionId: SID,
+      expectedHostInstanceId: OWNER.hostInstanceId,
+      expectedSessionEpoch: OWNER.sessionEpoch,
+      exportIntentId: intentId,
+      exportedPath: "/tmp/export.html",
+    });
   });
 });
 

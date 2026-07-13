@@ -92,6 +92,8 @@ function outcomeFor(envelope: Envelope, patch: Partial<IntentOutcome> = {}): Int
       return { ...base, kind: "compact", result: {} };
     case "reload":
       return { ...base, kind: "reload", result: {} };
+    case "export":
+      return { ...base, kind: "export", result: { path: "/tmp/preview-export.html" } };
     case "runBash":
       return { ...base, kind: "runBash", result: { started: true } };
     case "rename":
@@ -384,7 +386,7 @@ describe("Composer autocomplete and authority intents", () => {
     expect(composer.textarea().value).toBe("/compact ");
     publishOutcome(envelope);
     await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
-    expect(invoke.mock.calls.some(([channel]) => channel === "session.sendCommand")).toBe(false);
+    expect(invoke.mock.calls.some(([channel]) => channel === "session.legacyCommand")).toBe(false);
     composer.unmount();
   });
 

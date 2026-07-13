@@ -22,7 +22,6 @@ function record(
     _rapidFailureCount: 0,
     _retainedIntents: new Map(),
     _pendingSubmissionPromises: new Map(),
-    _retainedCommandIntents: new Map(),
     _restorations: new Map(),
     _rendererGeneration: 0,
     _mutationSequence: 0,

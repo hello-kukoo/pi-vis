@@ -901,6 +901,8 @@ function outcomeFor(
       return { ...base, kind: "rename", result: { name: intent.name } };
     case "reload":
       return { ...base, kind: "reload", result: {} };
+    case "export":
+      return { ...base, kind: "export", result: { path: "/tmp/pi-vis-preview-export.html" } };
   }
 }
 
@@ -944,6 +946,9 @@ async function settleIntent(envelope: PreviewIntentEnvelope): Promise<void> {
         emitEvent({ type: "session_info_changed", name: intent.name });
         break;
       case "reload":
+        await sleep(50);
+        break;
+      case "export":
         await sleep(50);
         break;
     }
@@ -1259,6 +1264,12 @@ const stub = {
         return handleQuery(req as Parameters<typeof handleQuery>[0]);
       case "session.dispatchIntent":
         return dispatchIntent(req as PreviewIntentEnvelope);
+      case "session.share":
+        return {
+          ok: true,
+          url: "https://pi.dev/session/#preview-gist",
+          gistUrl: "https://gist.github.com/preview/preview-gist",
+        };
       case "session.submit": {
         const { sessionId, submission } = req as {
           sessionId: SessionId;

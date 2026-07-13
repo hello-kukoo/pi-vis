@@ -62,7 +62,7 @@ import {
 import { SessionRegistry } from "./sessions/session-registry.js";
 import { SessionSearchService } from "./sessions/session-search/session-search-service.js";
 import { getSettings, saveSettings } from "./settings-store.js";
-import { createGistForSession } from "./share.js";
+import { OwnerBoundShareEffects } from "./share.js";
 import {
   getUserThemes,
   getUserThemesDir,
@@ -90,6 +90,10 @@ const activeWorktreeOperations = new Set<SessionId>();
 const lastWorktreeOperationErrors = new Map<SessionId, string>();
 const reservedCreatedWorktrees = new Map<string, SessionId>();
 let sessionSearchService: SessionSearchService | null = null;
+
+// A main-only OS effect is keyed by the child export intent. Retransmission
+// returns the original promise and can never create a second gist.
+const shareEffects = new OwnerBoundShareEffects();
 
 // Build the env for spawning a pi process/host. Adds the pi theme signals so
 // every host-rendered terminal/ANSI surface resolves colors consistent with
@@ -936,11 +940,7 @@ export function initIpc(win: BrowserWindow): void {
     },
   );
 
-  // ── /share: export session to a secret GitHub gist ─────────────────
-  // Implemented in main (see share.ts) because it shells out to `gh` and
-  // writes a temp file; the HTML content comes from the host's export_html
-  // bridge command, routed through the registry. Error strings match pi's
-  // TUI verbatim for the gh-missing / gh-not-logged-in cases.
+  // ── /share: main-only gist creation from a child-authoritative export ─
   ipcMain.handle(
     "session.share",
     async (
@@ -950,22 +950,21 @@ export function initIpc(win: BrowserWindow): void {
         expectedHostInstanceId: string;
         expectedSessionEpoch: number;
         exportIntentId: string;
+        exportedPath: string;
       },
     ) => {
       if (!registry) return { ok: false, error: "Session registry not initialized" };
-      try {
-        return await createGistForSession(
-          args.sessionId,
-          registry,
-          {
-            hostInstanceId: args.expectedHostInstanceId,
-            sessionEpoch: args.expectedSessionEpoch,
-          },
-          args.exportIntentId,
-        );
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
+      const owner = {
+        hostInstanceId: args.expectedHostInstanceId,
+        sessionEpoch: args.expectedSessionEpoch,
+      };
+      return shareEffects.run(
+        args.sessionId,
+        owner,
+        args.exportIntentId,
+        args.exportedPath,
+        () => registry?.isCurrentOwner(args.sessionId, owner) ?? false,
+      );
     },
   );
 

@@ -376,11 +376,6 @@ export function commandPolicy(command: PiRpcCommand): PiCommandPolicy {
   return PI_COMMAND_POLICY[command.type];
 }
 
-export function commandNeedsIntent(command: PiRpcCommand): boolean {
-  const policy = commandPolicy(command);
-  return !policy.submissionOnly && (policy.class === "effectful" || policy.class === "replacement");
-}
-
 export type PromptCommand = z.infer<typeof PromptCommandSchema>;
 export type BashCommand = z.infer<typeof BashCommandSchema>;
 export type SetModelCommand = z.infer<typeof SetModelCommandSchema>;
