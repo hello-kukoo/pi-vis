@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
 import type { SessionId } from "@shared/ids.js";
+import type {
+  IntentEnvelope,
+  IntentOutcome,
+  SessionIntent,
+} from "@shared/pi-protocol/runtime-state.js";
+import type React from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { act } from "react-dom/test-utils";
@@ -8,24 +14,34 @@ import { useSessionsStore } from "../../stores/sessions-store.js";
 import { Composer } from "./Composer.js";
 
 const SID = "session-a" as SessionId;
+const SID_B = "session-b" as SessionId;
+const WORKSPACE = "/tmp/ws";
 const OWNER = { hostInstanceId: "11111111-1111-4111-8111-111111111111", sessionEpoch: 0 };
 
-function mount() {
+type Envelope = IntentEnvelope<SessionIntent>;
+
+function mount(sessionId = SID): {
+  container: HTMLDivElement;
+  root: ReturnType<typeof createRoot>;
+  textarea: () => HTMLTextAreaElement;
+  unmount: () => void;
+} {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => {
-    flushSync(() => root.render(<Composer sessionId={SID} />));
-  });
+  act(() => flushSync(() => root.render(<Composer sessionId={sessionId} />)));
   return {
+    container,
+    root,
     textarea: () => container.querySelector<HTMLTextAreaElement>("textarea")!,
     unmount: () => {
-      act(() => root.unmount());
+      act(() => flushSync(() => root.unmount()));
       container.remove();
     },
   };
 }
-function type(textarea: HTMLTextAreaElement, value: string) {
+
+function type(textarea: HTMLTextAreaElement, value: string): void {
   act(() => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
       textarea,
@@ -34,47 +50,145 @@ function type(textarea: HTMLTextAreaElement, value: string) {
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
-function enter(textarea: HTMLTextAreaElement) {
+
+function key(textarea: HTMLTextAreaElement, value: string, init: KeyboardEventInit = {}): void {
   act(() =>
     textarea.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true, ...init }),
     ),
   );
 }
-function publishOutcome(intentId: string) {
+
+function pickedFile(name: string, type: string, path: string): File {
+  const file = new File(["content"], name, { type });
+  Object.defineProperty(file, "path", { value: path });
+  return file;
+}
+
+function selectFiles(input: HTMLInputElement, files: File[]): void {
+  act(() => {
+    Object.defineProperty(input, "files", { value: files, configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+function outcomeFor(envelope: Envelope, patch: Partial<IntentOutcome> = {}): IntentOutcome {
+  const base = {
+    intentId: envelope.intentId,
+    owner: OWNER,
+    state: "completed" as const,
+    ...patch,
+  };
+  switch (envelope.intent.kind) {
+    case "submit":
+      return {
+        ...base,
+        kind: "submit",
+        result: { disposition: "consumed", editorRevision: envelope.intent.editorRevision },
+      };
+    case "invokeCommand":
+      return { ...base, kind: "invokeCommand", result: {} };
+    case "compact":
+      return { ...base, kind: "compact", result: {} };
+    case "reload":
+      return { ...base, kind: "reload", result: {} };
+    case "runBash":
+      return { ...base, kind: "runBash", result: { started: true } };
+    case "rename":
+      return { ...base, kind: "rename", result: { name: envelope.intent.name } };
+    case "setModel":
+      return {
+        ...base,
+        kind: "setModel",
+        result: { provider: envelope.intent.provider, modelId: envelope.intent.modelId },
+      };
+    case "setThinking":
+      return { ...base, kind: "setThinking", result: { level: envelope.intent.level } };
+    case "interrupt":
+      return { ...base, kind: "interrupt", result: { target: "editor", interrupted: true } };
+    case "navigate":
+      return { ...base, kind: "navigate", result: { targetId: envelope.intent.targetId } };
+  }
+}
+
+function publishOutcome(envelope: Envelope, patch: Partial<IntentOutcome> = {}): void {
   act(() => {
     useSessionsStore.setState((state) => {
+      const sessionId = envelope.sessionId as SessionId;
       const sessions = new Map(state.sessions);
-      const session = sessions.get(SID)!;
-      sessions.set(SID, {
+      const session = sessions.get(sessionId)!;
+      const prior = session.authorityProjection?.authoritativeSnapshot?.recentIntentOutcomes ?? [];
+      sessions.set(sessionId, {
         ...session,
         authorityProjection: {
-          ...session.authorityProjection!,
+          ...session.authorityProjection,
           authoritativeSnapshot: {
-            recentIntentOutcomes: [
-              {
-                intentId,
-                owner: OWNER,
-                kind: "submit",
-                state: "completed",
-                result: { disposition: "consumed", editorRevision: 1 },
-              },
-            ],
-          } as never,
-        },
+            ...session.authorityProjection?.authoritativeSnapshot,
+            recentIntentOutcomes: [...prior, outcomeFor(envelope, patch)],
+          },
+        } as never,
       });
       return { sessions };
     });
   });
 }
 
-describe("Composer authority intent dispatch", () => {
+function intentCalls(invoke: ReturnType<typeof vi.fn>): Envelope[] {
+  return invoke.mock.calls
+    .filter(([channel]) => channel === "session.dispatchIntent")
+    .map(([, payload]) => payload as Envelope);
+}
+
+function installInvoke(invoke: ReturnType<typeof vi.fn>, autoOutcome = true): void {
+  invoke.mockImplementation((channel: string, payload: unknown) => {
+    if (channel === "session.editorPatch") {
+      return Promise.resolve({
+        accepted: true,
+        revision: (payload as { revision: number }).revision,
+      });
+    }
+    if (channel === "session.query") {
+      const query = payload as { queryId: string; query: { type: string } };
+      return Promise.resolve({
+        queryId: query.queryId,
+        owner: OWNER,
+        queryType: query.query.type,
+        response: { success: true, command: query.query.type, data: {} },
+      });
+    }
+    if (channel === "session.dispatchIntent") {
+      const envelope = payload as Envelope;
+      if (autoOutcome) queueMicrotask(() => publishOutcome(envelope));
+      return Promise.resolve({ status: "admitted", intentId: envelope.intentId, owner: OWNER });
+    }
+    return Promise.resolve({ success: true });
+  });
+}
+
+function setSessionField(patch: Record<string, unknown>, sessionId = SID): void {
+  const session = useSessionsStore.getState().sessions.get(sessionId)!;
+  Object.assign(session, patch);
+}
+
+function suggestionCount(container: HTMLElement): number {
+  return container.querySelectorAll(".composer__suggestion").length;
+}
+
+describe("Composer autocomplete and authority intents", () => {
   let invoke: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
-    useSessionsStore.setState({ sessions: new Map(), activeSessionId: SID, workspaces: new Map() });
-    useSessionsStore.getState().createSession(SID, "/tmp/ws");
-    const session = useSessionsStore.getState().sessions.get(SID)!;
-    Object.assign(session, {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: SID,
+      workspaces: new Map(),
+      activeWorkspacePath: WORKSPACE,
+      diffComments: new Map(),
+      sessionDrafts: new Map(),
+      newSessionDrafts: new Map(),
+    });
+    useSessionsStore.getState().createSession(SID, WORKSPACE);
+    setSessionField({
       status: "ready",
       availability: "available",
       currentModel: "model",
@@ -82,96 +196,627 @@ describe("Composer authority intent dispatch", () => {
       sessionEpoch: OWNER.sessionEpoch,
       editorRevision: 0,
     });
-    invoke = vi.fn((channel: string, payload: unknown) => {
-      if (channel === "session.editorPatch")
-        return Promise.resolve({
-          accepted: true,
-          revision: (payload as { revision: number }).revision,
-        });
-      return Promise.resolve(undefined);
-    });
+    invoke = vi.fn();
+    installInvoke(invoke);
     // @ts-expect-error test preload
-    window.pivis = { invoke, getPathForFile: (file: File) => file.name };
+    window.pivis = {
+      invoke,
+      getPathForFile: (file: File) => (file as File & { path?: string }).path ?? file.name,
+    };
   });
-  afterEach(() => {
+
+  afterEach(async () => {
+    await vi.waitFor(() => {
+      for (const session of useSessionsStore.getState().sessions.values()) {
+        expect(session.editorPatchPending).toBe(0);
+      }
+    });
     // @ts-expect-error test cleanup
     delete window.pivis;
+    document.body.innerHTML = "";
   });
 
-  it("keeps editor custody after an admitted receipt until the authority frame arrives", async () => {
-    let admit!: (value: unknown) => void;
-    const receipt = new Promise((resolve) => {
-      admit = resolve;
-    });
-    invoke.mockImplementation((channel: string, payload: unknown) => {
-      if (channel === "session.editorPatch")
-        return Promise.resolve({
-          accepted: true,
-          revision: (payload as { revision: number }).revision,
-        });
-      if (channel === "session.dispatchIntent") return receipt;
-      return Promise.resolve(undefined);
+  it("disables submission controls while runtime availability is transitioning", () => {
+    setSessionField({ availability: "transitioning" });
+    const composer = mount();
+    expect(composer.textarea().disabled).toBe(true);
+    expect(
+      composer.container.querySelector<HTMLButtonElement>(".composer__attach-btn")?.disabled,
+    ).toBe(true);
+    composer.unmount();
+  });
+
+  it("shows slash suggestions, hides them on Escape, and re-shows them after typing", () => {
+    const composer = mount();
+    type(composer.textarea(), "/lo");
+    expect(suggestionCount(composer.container)).toBeGreaterThan(0);
+    key(composer.textarea(), "Escape");
+    expect(suggestionCount(composer.container)).toBe(0);
+    type(composer.textarea(), "/log");
+    expect(suggestionCount(composer.container)).toBeGreaterThan(0);
+    composer.unmount();
+  });
+
+  it("completes an extension command, patches it first, then dispatches an invokeCommand intent", async () => {
+    setSessionField({
+      commands: [{ name: "widget-on", description: "Open", source: "extension" }],
     });
     const composer = mount();
+    type(composer.textarea(), "/wid");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+    expect(envelope.intent).toMatchObject({ kind: "invokeCommand", text: "/widget-on" });
+    const patches = invoke.mock.calls.filter(([channel]) => channel === "session.editorPatch");
+    expect(
+      (
+        patches.find(([, p]) => (p as { text: string }).text === "/widget-on")?.[1] as {
+          revision: number;
+        }
+      ).revision,
+    ).toBe((envelope.intent as { editorRevision: number }).editorRevision);
+    composer.unmount();
+  });
+
+  it("keeps editor custody after an admitted prompt receipt until its authority frame arrives", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
     type(composer.textarea(), "hello");
-    enter(composer.textarea());
-    await vi.waitFor(() =>
-      expect(invoke.mock.calls.some(([channel]) => channel === "session.dispatchIntent")).toBe(
-        true,
-      ),
-    );
-    const envelope = invoke.mock.calls.find(
-      ([channel]) => channel === "session.dispatchIntent",
-    )?.[1] as { intentId: string; intent: { kind: string } };
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
     expect(envelope.intent).toMatchObject({ kind: "submit", text: "hello" });
-    expect(invoke.mock.calls.some(([channel]) => channel === "session.submit")).toBe(false);
-
-    await act(async () => {
-      admit({ status: "admitted", intentId: envelope.intentId, owner: OWNER });
-    });
     expect(composer.textarea().value).toBe("hello");
-
-    publishOutcome(envelope.intentId);
+    publishOutcome(envelope);
     await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
     composer.unmount();
   });
 
-  it("uses invokeCommand intent for discovered extension slash text", async () => {
-    useSessionsStore.setState((state) => {
-      const sessions = new Map(state.sessions);
-      sessions.set(SID, {
-        ...sessions.get(SID)!,
-        commands: [{ name: "extension", source: "extension", description: "x" }],
-      });
-      return { sessions };
+  it("keeps command custody after an admitted receipt until its authority frame arrives", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "/compact");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+    expect(envelope.intent).toEqual({ kind: "compact" });
+    expect(composer.textarea().value).toBe("/compact ");
+    publishOutcome(envelope);
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(invoke.mock.calls.some(([channel]) => channel === "session.sendCommand")).toBe(false);
+    composer.unmount();
+  });
+
+  it("uses session.query for read-only command flows without clearing input", async () => {
+    const composer = mount();
+    type(composer.textarea(), "/name");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() =>
+      expect(
+        invoke.mock.calls.some(
+          ([channel, payload]) =>
+            channel === "session.query" &&
+            (payload as { query: { type: string } }).query.type === "get_state",
+        ),
+      ).toBe(true),
+    );
+    expect(intentCalls(invoke)).toEqual([]);
+    expect(composer.textarea().value).toBe("/name ");
+    composer.unmount();
+  });
+
+  it("dispatches reload as an owner-bound intent and clears only on its terminal frame", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "/reload ");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]!.intent).toEqual({ kind: "reload" });
+    expect(composer.textarea().value).toBe("/reload ");
+    publishOutcome(intentCalls(invoke)[0]!);
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    composer.unmount();
+  });
+
+  it("waits for the editor patch before dispatching a command intent and preserves rejected editor text", async () => {
+    let resolvePatch!: (value: unknown) => void;
+    const patch = new Promise((resolve) => {
+      resolvePatch = resolve;
     });
     invoke.mockImplementation((channel: string, payload: unknown) => {
-      if (channel === "session.editorPatch")
-        return Promise.resolve({
-          accepted: true,
-          revision: (payload as { revision: number }).revision,
-        });
+      if (channel === "session.editorPatch") return patch;
       if (channel === "session.dispatchIntent")
         return Promise.resolve({
-          status: "delivery_unknown",
-          intentId: (payload as { intentId: string }).intentId,
+          status: "admitted",
+          intentId: (payload as Envelope).intentId,
           owner: OWNER,
         });
-      return Promise.resolve(undefined);
+      return Promise.resolve({ success: true });
     });
     const composer = mount();
-    type(composer.textarea(), "/extension");
-    enter(composer.textarea());
+    type(composer.textarea(), "/compact delayed");
+    key(composer.textarea(), "Enter");
+    await Promise.resolve();
+    expect(intentCalls(invoke)).toEqual([]);
+    await act(async () =>
+      resolvePatch({
+        accepted: false,
+        revision: 1,
+        text: "extension",
+        attachments: [],
+        conflictText: "/compact delayed",
+      }),
+    );
     await vi.waitFor(() =>
-      expect(invoke.mock.calls.some(([channel]) => channel === "session.dispatchIntent")).toBe(
-        true,
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+        "both versions",
       ),
     );
-    const envelope = invoke.mock.calls.find(
-      ([channel]) => channel === "session.dispatchIntent",
-    )?.[1] as { intent: unknown };
-    expect(envelope.intent).toMatchObject({ kind: "invokeCommand", text: "/extension" });
-    expect(composer.textarea().value).toBe("/extension");
+    expect(intentCalls(invoke)).toEqual([]);
+    expect(composer.textarea().value).toBe("/compact delayed");
+    composer.unmount();
+  });
+
+  it("retries a failed editor transport only after a fresh runtime resync", async () => {
+    let attempts = 0;
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        attempts++;
+        return attempts === 1
+          ? Promise.reject(new Error("temporary transport failure"))
+          : Promise.resolve({
+              accepted: true,
+              revision: (payload as { revision: number }).revision,
+            });
+      }
+      if (channel === "session.runtimeResync")
+        return Promise.resolve({
+          availability: "available",
+          hostInstanceId: OWNER.hostInstanceId,
+          sessionEpoch: 0,
+          receivedAt: Date.now(),
+          snapshot: {
+            hostInstanceId: OWNER.hostInstanceId,
+            sessionEpoch: 0,
+            snapshotSequence: 1,
+            capturedAt: Date.now(),
+            isStreaming: false,
+            isIdle: true,
+            isCompacting: false,
+            isRetrying: false,
+            retryAttempt: 0,
+            isBashRunning: false,
+            model: { id: "model" },
+            thinkingLevel: "medium",
+            sessionId: SID,
+            pendingMessageCount: 0,
+            steering: [],
+            followUp: [],
+            hostFacts: {
+              submitting: false,
+              actualCompaction: false,
+              navigation: false,
+              pendingDialogs: 0,
+              custodyCount: 0,
+            },
+            catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
+            editor: { revision: 0, text: "/compact retry", attachments: [] },
+          },
+        });
+      if (channel === "session.dispatchIntent") {
+        const envelope = payload as Envelope;
+        queueMicrotask(() => publishOutcome(envelope));
+        return Promise.resolve({ status: "admitted", intentId: envelope.intentId, owner: OWNER });
+      }
+      return Promise.resolve({ success: true });
+    });
+    const composer = mount();
+    type(composer.textarea(), "/compact retry");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() =>
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+        "synchronization failed",
+      ),
+    );
+    expect(intentCalls(invoke)).toEqual([]);
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(invoke.mock.calls.some(([channel]) => channel === "session.runtimeResync")).toBe(true);
+    composer.unmount();
+  });
+
+  it("clears completed and failed command outcomes, but not unknown outcomes", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "/compact");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    publishOutcome(intentCalls(invoke)[0]!, { state: "failed", error: "Compaction failed" });
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    type(composer.textarea(), "/compact again");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
+    publishOutcome(intentCalls(invoke)[1]!, { state: "outcome_unknown", error: "lost" });
+    await vi.waitFor(() =>
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toBe("lost"),
+    );
+    expect(composer.textarea().value).toBe("/compact again");
+    composer.unmount();
+  });
+
+  it("does not let an unmounted completion, stale owner, or unavailable runtime clear newer editor custody", async () => {
+    installInvoke(invoke, false);
+    const first = mount();
+    type(first.textarea(), "/compact old");
+    key(first.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const old = intentCalls(invoke)[0]!;
+    first.unmount();
+    const second = mount();
+    type(second.textarea(), "new draft after remount");
+    publishOutcome(old);
+    await Promise.resolve();
+    expect(second.textarea().value).toBe("new draft after remount");
+    type(second.textarea(), "/compact stale");
+    key(second.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
+    act(() => setSessionField({ sessionEpoch: 1 }));
+    publishOutcome(intentCalls(invoke)[1]!);
+    await Promise.resolve();
+    expect(second.textarea().value).toBe("/compact stale");
+    second.unmount();
+  });
+
+  it("preserves newer typing and extension injections when an older terminal outcome arrives", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "first prompt");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    type(composer.textarea(), "newer typing");
+    publishOutcome(intentCalls(invoke)[0]!);
+    await Promise.resolve();
+    expect(composer.textarea().value).toBe("newer typing");
+    act(() => useSessionsStore.getState().injectEditorText(SID, "/123.foo_bar"));
+    await vi.waitFor(() => expect(composer.textarea().value).toBe("/123.foo_bar"));
+    expect(composer.container.querySelectorAll(".composer__attachment-item")).toHaveLength(0);
+    composer.unmount();
+  });
+
+  it("fences queued editor patches after a conflict until a new explicit edit", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel !== "session.editorPatch") return Promise.resolve({ success: true });
+      return (payload as { revision: number }).revision === 1
+        ? first
+        : Promise.resolve({ accepted: true, revision: (payload as { revision: number }).revision });
+    });
+    const composer = mount();
+    type(composer.textarea(), "local one");
+    type(composer.textarea(), "local two");
+    await vi.waitFor(() =>
+      expect(invoke.mock.calls.filter(([c]) => c === "session.editorPatch")).toHaveLength(1),
+    );
+    await act(async () =>
+      resolveFirst({
+        accepted: false,
+        revision: 1,
+        text: "extension",
+        attachments: [],
+        conflictText: "local one",
+      }),
+    );
+    expect(composer.textarea().value).toBe("local two");
+    type(composer.textarea(), "explicitly reconciled");
+    await vi.waitFor(() =>
+      expect(invoke.mock.calls.filter(([c]) => c === "session.editorPatch")).toHaveLength(2),
+    );
+    expect(invoke.mock.calls.filter(([c]) => c === "session.editorPatch")[1]?.[1]).toMatchObject({
+      baseRevision: 1,
+      text: "explicitly reconciled",
+    });
+    composer.unmount();
+  });
+
+  it("submits dismissed literal slash text rather than its autocomplete completion", async () => {
+    const composer = mount();
+    type(composer.textarea(), "/log");
+    key(composer.textarea(), "Escape");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]!.intent).toMatchObject({ kind: "submit", text: "/log" });
+    composer.unmount();
+  });
+});
+
+describe("Composer attachments under authority outcomes", () => {
+  let invoke: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    useSessionsStore.setState({
+      sessions: new Map(),
+      activeSessionId: SID,
+      workspaces: new Map(),
+      diffComments: new Map(),
+      sessionDrafts: new Map(),
+      newSessionDrafts: new Map(),
+    });
+    useSessionsStore.getState().createSession(SID, WORKSPACE);
+    setSessionField({
+      status: "ready",
+      availability: "available",
+      currentModel: "text-model",
+      availableModels: [{ id: "text-model", name: "Text", input: ["text"] }],
+      hostInstanceId: OWNER.hostInstanceId,
+      sessionEpoch: 0,
+      editorRevision: 0,
+    });
+    invoke = vi.fn();
+    installInvoke(invoke);
+    // @ts-expect-error test preload
+    window.pivis = {
+      invoke,
+      getPathForFile: (file: File) => (file as File & { path?: string }).path ?? file.name,
+    };
+  });
+
+  afterEach(async () => {
+    await vi.waitFor(() =>
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorPatchPending).toBe(0),
+    );
+    // @ts-expect-error test cleanup
+    delete window.pivis;
+    document.body.innerHTML = "";
+  });
+
+  it("keeps the file picker available for text-only models and downgrades image files once", () => {
+    const composer = mount();
+    const input = composer.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const button = composer.container.querySelector<HTMLButtonElement>(".composer__attach-btn")!;
+    const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+    act(() => button.click());
+    expect(input.getAttribute("accept")).toBeNull();
+    expect(click).toHaveBeenCalledOnce();
+    type(composer.textarea(), "inspect");
+    selectFiles(input, [pickedFile("diagram.png", "image/png", "/tmp/diagram.png")]);
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(1);
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+      "doesn't support image input",
+    );
+    composer.unmount();
+  });
+
+  it("keeps file/image attachments staged across extension commands and clears each authority-confirmed context exactly once", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+      commands: [{ name: "widget-on", description: "Open", source: "extension" }],
+      editorAttachments: [
+        { kind: "file", name: "notes.txt", path: "/tmp/notes.txt" },
+        {
+          kind: "image",
+          name: "diagram.png",
+          path: "/tmp/diagram.png",
+          dataUrl: "data:image/png;base64,eA==",
+        },
+      ],
+    });
+    useSessionsStore
+      .getState()
+      .setDiffComment(SID, { filePath: "a.ts", lineNumber: 1, lineText: "x", text: "Explain" });
+    const composer = mount();
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item")).toHaveLength(3),
+    );
+    expect(useSessionsStore.getState().getDiffCommentsForPrompt(SID)).toHaveLength(1);
+    type(composer.textarea(), "/widget-on");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]!.intent).toMatchObject({
+      kind: "invokeCommand",
+      text: "/widget-on",
+    });
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(composer.container.querySelectorAll(".composer__attachment-item")).toHaveLength(2);
+    // The invokeCommand terminal outcome clears the staged comment context,
+    // while file/image editor custody remains for the ordinary prompt.
+    expect(useSessionsStore.getState().getDiffCommentsForPrompt(SID)).toEqual([]);
+    type(composer.textarea(), "  /tmp/notes.txt is context");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
+    const prompt = intentCalls(invoke)[1]!.intent as Extract<SessionIntent, { kind: "submit" }>;
+    expect(prompt.text).toContain("/tmp/notes.txt");
+    expect(prompt.text).not.toContain("### User comments on the code");
+    expect(prompt.images).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item")).toHaveLength(0),
+    );
+    expect(useSessionsStore.getState().getDiffCommentsForPrompt(SID)).toEqual([]);
+    composer.unmount();
+  });
+
+  it("submits image-only prompts and file paths as prompt intent payloads", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+      editorAttachments: [
+        {
+          kind: "image",
+          name: "diagram.png",
+          path: "/tmp/diagram.png",
+          dataUrl: "data:image/png;base64,eA==",
+        },
+      ],
+    });
+    const composer = mount();
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]!.intent).toMatchObject({
+      kind: "submit",
+      text: "",
+      images: [{ type: "image", data: "eA==", mimeType: "image/png" }],
+    });
+    composer.unmount();
+
+    const files = mount();
+    type(files.textarea(), " Please inspect");
+    selectFiles(files.container.querySelector<HTMLInputElement>('input[type="file"]')!, [
+      pickedFile("notes.txt", "text/plain", "/tmp/notes.txt"),
+    ]);
+    key(files.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
+    expect(intentCalls(invoke)[1]!.intent).toMatchObject({
+      kind: "submit",
+      text: "/tmp/notes.txt\n Please inspect",
+    });
+    files.unmount();
+  });
+
+  it("allows the same text again when its attachment payload changes and refuses submit during an image read", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "same text");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    selectFiles(composer.container.querySelector<HTMLInputElement>('input[type="file"]')!, [
+      pickedFile("second.txt", "text/plain", "/tmp/second.txt"),
+    ]);
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
+    expect(intentCalls(invoke)[1]!.intent).toMatchObject({ text: "/tmp/second.txt\nsame text" });
+    useSessionsStore.getState().beginEditorAttachmentRead(SID);
+    key(composer.textarea(), "Enter");
+    await Promise.resolve();
+    expect(intentCalls(invoke)).toHaveLength(2);
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+      "finish loading",
+    );
+    useSessionsStore.getState().endEditorAttachmentRead(SID);
+    composer.unmount();
+  });
+
+  it("patches an image with text typed after reading started and discards it after session switch", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+    });
+    let reader: { result: string | null; onload: (() => void) | null } | undefined;
+    class DeferredReader {
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      readAsDataURL(): void {
+        reader = this;
+      }
+    }
+    const original = globalThis.FileReader;
+    vi.stubGlobal("FileReader", DeferredReader);
+    try {
+      const composer = mount();
+      type(composer.textarea(), "before");
+      selectFiles(composer.container.querySelector<HTMLInputElement>('input[type="file"]')!, [
+        pickedFile("diagram.png", "image/png", "/tmp/diagram.png"),
+      ]);
+      type(composer.textarea(), "newer typing");
+      act(() => {
+        if (!reader) throw new Error("reader not started");
+        reader.result = "data:image/png;base64,eA==";
+        reader.onload?.();
+      });
+      await vi.waitFor(() =>
+        expect(
+          invoke.mock.calls.filter(([c]) => c === "session.editorPatch").at(-1)?.[1],
+        ).toMatchObject({
+          text: "newer typing",
+          attachments: [expect.objectContaining({ name: "diagram.png" })],
+        }),
+      );
+      useSessionsStore.getState().createSession(SID_B, WORKSPACE);
+      setSessionField(
+        {
+          status: "ready",
+          availability: "available",
+          currentModel: "text-model",
+          hostInstanceId: "22222222-2222-4222-8222-222222222222",
+          editorRevision: 0,
+        },
+        SID_B,
+      );
+      act(() => flushSync(() => composer.root.render(<Composer sessionId={SID_B} />)));
+      composer.unmount();
+    } finally {
+      vi.stubGlobal("FileReader", original);
+    }
+  });
+
+  it("discards a deferred image read after the Composer switches sessions", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+    });
+    useSessionsStore.getState().createSession(SID_B, WORKSPACE);
+    setSessionField(
+      {
+        status: "ready",
+        availability: "available",
+        currentModel: "text-model",
+        hostInstanceId: "22222222-2222-4222-8222-222222222222",
+        editorRevision: 0,
+      },
+      SID_B,
+    );
+    let reader: { result: string | null; onload: (() => void) | null } | undefined;
+    class DeferredReader {
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      readAsDataURL(): void {
+        reader = this;
+      }
+    }
+    const original = globalThis.FileReader;
+    vi.stubGlobal("FileReader", DeferredReader);
+    try {
+      const composer = mount();
+      selectFiles(composer.container.querySelector<HTMLInputElement>('input[type="file"]')!, [
+        pickedFile("private.png", "image/png", "/tmp/private.png"),
+      ]);
+      act(() => flushSync(() => composer.root.render(<Composer sessionId={SID_B} />)));
+      invoke.mockClear();
+      act(() => {
+        if (!reader) throw new Error("reader not started");
+        reader.result = "data:image/png;base64,cHJpdmF0ZQ==";
+        reader.onload?.();
+      });
+      await Promise.resolve();
+      expect(
+        invoke.mock.calls.filter(
+          ([channel, payload]) =>
+            channel === "session.editorPatch" &&
+            (payload as { attachments?: unknown[] }).attachments?.length,
+        ),
+      ).toEqual([]);
+      expect(useSessionsStore.getState().sessions.get(SID_B)?.editorAttachments).toEqual([]);
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachmentReads).toBe(0);
+      composer.unmount();
+    } finally {
+      vi.stubGlobal("FileReader", original);
+    }
+  });
+
+  it("renders injected path-only editor text as file tiles and submits those paths", async () => {
+    const composer = mount();
+    act(() => useSessionsStore.getState().injectEditorText(SID, "/tmp/a.txt\n/tmp/b.txt"));
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(
+        2,
+      ),
+    );
+    expect(composer.textarea().value).toBe("");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]!.intent).toMatchObject({ text: "/tmp/a.txt\n/tmp/b.txt" });
     composer.unmount();
   });
 });
