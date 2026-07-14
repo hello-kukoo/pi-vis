@@ -456,16 +456,10 @@ export function reduceAuthorityPublication(
   }
   if (publication.publicationSequence <= (state.publicationSequence ?? 0)) return state;
   if (publication.publicationSequence !== (state.publicationSequence ?? 0) + 1) {
-    const fenced = synchronizeAuthorityPlane(
-      state,
-      publication.plane,
-      "publication_gap",
-      publication.plane === "panel"
-        ? publication.payload.kind === "keyframe"
-          ? publication.payload.panel.panelKey
-          : publication.payload.panelKey
-        : undefined,
-    );
+    // publicationSequence is a single main-process sequence, so a gap does
+    // not identify the source plane that was lost. Fence every projection
+    // until a serialized baseline re-establishes their independent cursors.
+    const fenced = allSynchronizing(state, "publication_gap");
     return { ...fenced, publicationSequence: publication.publicationSequence };
   }
   if (!sameOwner(state.owner, publication.owner)) {

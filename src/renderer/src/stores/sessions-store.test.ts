@@ -3886,6 +3886,50 @@ describe("sessions store - recovered authority-frame regressions", () => {
     expect(session?.queuedMessages).toBeUndefined();
   });
 
+  it("rejects extension presentation after a missing semantic publication until attach", () => {
+    // The semantic publication at sequence 1 was lost. The next global
+    // publication is extension UI, but its source plane is unknowable.
+    publishSemantic(SESSION_A, 3, semanticSnapshot(3));
+    useSessionsStore.getState().applyAuthorityPublication({
+      sessionId: SESSION_A,
+      rendererGeneration: 0,
+      publicationSequence: 3,
+      plane: "extensionUi",
+      owner: { hostInstanceId: "host-1", sessionEpoch: 1 },
+      payload: {
+        kind: "request",
+        cursor: {
+          hostInstanceId: "host-1",
+          sessionEpoch: 1,
+          transportSequence: 2,
+          snapshotSequence: 2,
+        },
+        request: {
+          type: "extension_ui_request",
+          id: "dropped-notification",
+          operationId: "dropped-notification",
+          method: "notify",
+          message: "must not present",
+        },
+      },
+    });
+
+    let session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.authorityProjection?.semantic.state).toBe("synchronizing");
+    expect(session?.authorityProjection?.extensionUi.state).toBe("synchronizing");
+    expect(session?.toasts.some((toast) => toast.message === "must not present")).toBe(false);
+
+    const recovery = authorityAttach(semanticSnapshot(1));
+    recovery.baseline.publicationHighWatermark = 3;
+    recovery.baseline.extensionUi.statuses = { recovered: "visible after attach" };
+    useSessionsStore.getState().applyAuthorityAttach(SESSION_A, recovery);
+
+    session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.authorityProjection?.semantic.state).toBe("following");
+    expect(session?.statusSegments.get("recovered")).toBe("visible after attach");
+    expect(session?.toasts.some((toast) => toast.message === "must not present")).toBe(false);
+  });
+
   it("uses the terminal frame model instead of a requested model", () => {
     useSessionsStore.getState().setCurrentModel(SESSION_A, "requested");
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.currentModel).toBe("model-old");

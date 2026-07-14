@@ -34,11 +34,21 @@ import { useEscapeClaim } from "./hooks/useEscapeClaim.js";
 import { useGlobalEscapeInterrupt } from "./hooks/useGlobalEscapeInterrupt.js";
 import { RENDERER_GENERATION } from "./lib/renderer-generation.js";
 import { useAppUpdatesStore } from "./stores/app-updates-store.js";
+import type { RendererAuthorityState } from "./stores/authority-reducer.js";
 import { openDiffForSession, useDiffStore } from "./stores/diff-store.js";
 import { sessionMatchesRuntime, useSessionsStore } from "./stores/sessions-store.js";
 import { useSettingsStore } from "./stores/settings-store.js";
 import { useUpdatesStore } from "./stores/updates-store.js";
 import "./App.css";
+
+function authorityNeedsBaseline(projection: RendererAuthorityState | undefined): boolean {
+  return (
+    projection?.semantic.state !== "following" ||
+    projection?.transcript.state !== "following" ||
+    projection?.extensionUi.state !== "following" ||
+    [...(projection?.panels.values() ?? [])].some((panel) => panel.sync.state !== "following")
+  );
+}
 
 export function App(): React.ReactElement {
   useGlobalEscapeInterrupt();
@@ -431,7 +441,14 @@ export function App(): React.ReactElement {
     // Authority publications are the sole semantic projection. Compatibility
     // events below may rebuild presentation only; they never repair a frame.
     const unsubPublication = window.pivis.on("session.publication", (publication) => {
+      const sid = publication.sessionId as SessionId;
       applyAuthorityPublication(publication);
+      const session = useSessionsStore.getState().sessions.get(sid);
+      // A publication can fence any plane (and a global routing gap fences
+      // all of them). Only a serialized baseline can restore authority.
+      if (session?.status === "ready" && authorityNeedsBaseline(session.authorityProjection)) {
+        void attachSessionAuthority(sid);
+      }
     });
 
     const unsubRuntime = window.pivis.on("session.runtimeState", ({ sessionId, state }) => {
@@ -439,12 +456,9 @@ export function App(): React.ReactElement {
       if (state.availability === "available") {
         const session = useSessionsStore.getState().sessions.get(sid);
         const projection = session?.authorityProjection;
-        const needsBaseline =
-          projection?.semantic.state !== "following" ||
-          projection.transcript.state !== "following" ||
-          projection.extensionUi.state !== "following" ||
-          [...projection.panels.values()].some((panel) => panel.sync.state !== "following");
-        if (session?.status === "ready" && needsBaseline) void attachSessionAuthority(sid);
+        if (session?.status === "ready" && authorityNeedsBaseline(projection)) {
+          void attachSessionAuthority(sid);
+        }
         return;
       }
       // Runtime-state events are transport fences only. They never install or

@@ -140,13 +140,16 @@ describe("authority reducer", () => {
     expect(state.panels.get("panel-a")?.inputEnabled).toBe(false);
   });
 
-  it("fences only the receiving plane on a publication gap and preserves its stale diagnostic", () => {
+  it("fences every plane on a global publication gap and preserves its stale diagnostic", () => {
     const attached = reduceAuthorityAttach(createRendererAuthorityState(), baseline());
     const before = attached.authoritativeSnapshot;
     const state = reduceAuthorityPublication(attached, semanticPublication(12));
 
     expect(state.semantic.state).toBe("synchronizing");
-    expect(state.transcript.state).toBe("following");
+    expect(state.transcript.state).toBe("synchronizing");
+    expect(state.extensionUi.state).toBe("synchronizing");
+    expect(state.panels.get("panel-a")?.sync.state).toBe("synchronizing");
+    expect(state.panels.get("panel-a")?.inputEnabled).toBe(false);
     expect(state.authoritativeSnapshot).toBeUndefined();
     expect(state.staleDiagnosticSnapshot).toBe(before);
   });
