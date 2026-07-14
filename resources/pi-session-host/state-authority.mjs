@@ -2391,6 +2391,14 @@ export function createStateAuthority({
       };
       const catalog = semantic.catalog;
       const journal = journalRecords(owner);
+      // Every attached panel names the same panel-plane high-water cursor.
+      // The source stream is shared across panel IDs, so a synchronizing
+      // baseline still needs this cursor to continue with the next repaint.
+      const panelHighWaterCursor = {
+        ...owner,
+        transportSequence: presentationTransportSequence.panel,
+        snapshotSequence: Math.max(1, snapshotSequence),
+      };
       const panels = (presentation.panels?.() ?? []).map((panel) => {
         const retained = panel.keyframe;
         const renderRevision = retained?.revision ?? panel.baseline?.revision ?? 0;
@@ -2402,6 +2410,7 @@ export function createStateAuthority({
           // renderer, but remains fenced until that renderer acknowledges it.
           sync: {
             state: "synchronizing",
+            lastCursor: panelHighWaterCursor,
             reason: retained ? "repaint_ack_pending" : "repaint_required",
           },
           overlay: panel.overlay === true,

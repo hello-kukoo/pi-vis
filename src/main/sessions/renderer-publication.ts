@@ -61,10 +61,11 @@ function cursorSequence(baseline: AuthorityAttachBaseline, plane: Plane): number
   // panel plane transport cursor. A baseline with several panels therefore
   // starts at the greatest known panel cursor.
   return baseline.panels.reduce<number | undefined>((highest, panel) => {
-    if (panel.sync.state !== "following") return highest;
+    const cursor = panel.sync.state === "following" ? panel.sync.cursor : panel.sync.lastCursor;
+    if (!cursor) return highest;
     return highest === undefined
-      ? panel.sync.cursor.transportSequence
-      : Math.max(highest, panel.sync.cursor.transportSequence);
+      ? cursor.transportSequence
+      : Math.max(highest, cursor.transportSequence);
   }, undefined);
 }
 

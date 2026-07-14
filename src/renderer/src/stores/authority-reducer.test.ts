@@ -394,6 +394,118 @@ describe("authority reducer", () => {
     expect(state.panels.get("panel-a")?.ansi).toEqual(["repaint"]);
   });
 
+  it("continues a synchronizing attach baseline through repaint acknowledgement", () => {
+    const attachedResponse = baseline();
+    attachedResponse.baseline.panels[0] = {
+      ...attachedResponse.baseline.panels[0]!,
+      sync: {
+        state: "synchronizing",
+        lastCursor: { ...owner, transportSequence: 1, snapshotSequence: 1 },
+        reason: "repaint_required",
+      },
+      keyframe: { kind: "repaint_required", renderRevision: 2 },
+    };
+    const attached = reduceAuthorityAttach(createRendererAuthorityState(), attachedResponse);
+    const repaint = reduceAuthorityPublication(attached, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 11,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "repaint_required",
+        cursor: { ...owner, transportSequence: 2, snapshotSequence: 2 },
+        panelKey: "panel-a",
+        reason: "repaint_required",
+        renderRevision: 3,
+      },
+    });
+    const pending = reduceAuthorityPublication(repaint, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 12,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "keyframe",
+        cursor: { ...owner, transportSequence: 3, snapshotSequence: 3 },
+        panel: {
+          ...attachedResponse.baseline.panels[0]!,
+          sync: {
+            state: "synchronizing",
+            lastCursor: { ...owner, transportSequence: 3, snapshotSequence: 3 },
+            reason: "repaint_ack_pending",
+          },
+          keyframe: { kind: "keyframe", ansi: "complete", renderRevision: 3 },
+        },
+      },
+    });
+    const following = reduceAuthorityPublication(pending, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 13,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "keyframe",
+        cursor: { ...owner, transportSequence: 4, snapshotSequence: 4 },
+        panel: {
+          ...attachedResponse.baseline.panels[0]!,
+          sync: {
+            state: "following",
+            cursor: { ...owner, transportSequence: 4, snapshotSequence: 4 },
+          },
+          keyframe: { kind: "keyframe", ansi: "complete", renderRevision: 3 },
+        },
+      },
+    });
+
+    expect(pending.panels.get("panel-a")?.sync.state).toBe("synchronizing");
+    expect(pending.panels.get("panel-a")?.inputEnabled).toBe(false);
+    expect(following.panels.get("panel-a")?.sync.state).toBe("following");
+    expect(following.panels.get("panel-a")?.inputEnabled).toBe(true);
+  });
+
+  it("does not treat interleaved panel IDs as a source transport gap", () => {
+    const attached = reduceAuthorityAttach(createRendererAuthorityState(), baseline());
+    const withPanelB = reduceAuthorityPublication(attached, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 11,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "reset",
+        cursor: { ...owner, transportSequence: 2, snapshotSequence: 2 },
+        panelKey: "panel-b",
+        panelId: 2,
+        overlay: true,
+        unified: false,
+        mode: "viewport",
+        renderRevision: 1,
+      },
+    });
+    const state = reduceAuthorityPublication(withPanelB, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 12,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "ansi_delta",
+        cursor: { ...owner, transportSequence: 3, snapshotSequence: 3 },
+        panelKey: "panel-a",
+        data: "A after B",
+        renderRevision: 1,
+      },
+    });
+
+    expect(state.panels.get("panel-a")?.sync.state).toBe("following");
+    expect(state.panels.get("panel-a")?.ansi).toEqual(["initial", "A after B"]);
+    expect(state.panels.get("panel-b")?.sync.state).toBe("synchronizing");
+    expect(state.panelTransportSequence).toBe(3);
+  });
+
   it("uses a sequenced authority mode update", () => {
     const attached = reduceAuthorityAttach(createRendererAuthorityState(), baseline());
     const state = reduceAuthorityPublication(attached, {

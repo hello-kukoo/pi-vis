@@ -40,6 +40,8 @@ export interface RendererAuthorityState {
   owner?: RuntimeIdentity | undefined;
   /** Last global publication accepted for this renderer generation. */
   publicationSequence?: number | undefined;
+  /** Shared source cursor for the whole panel plane, never per panel ID. */
+  panelTransportSequence?: number | undefined;
   semantic: PlaneSync;
   transcript: PlaneSync;
   extensionUi: PlaneSync;
@@ -84,6 +86,18 @@ function isFollowingFor(
 
 function panelInputEnabled(panel: PanelPresentationBaseline): boolean {
   return panel.sync.state === "following" && panel.keyframe.kind === "keyframe";
+}
+
+function allPanelsSynchronizing(
+  state: RendererAuthorityState,
+  reason: string,
+): RendererAuthorityState {
+  const panels = new Map<string, AuthorityPanelProjection>();
+  for (const [key, panel] of state.panels) {
+    const sync = synchronizing(cursorOf(panel.sync), reason);
+    panels.set(key, { ...panel, sync, inputEnabled: false });
+  }
+  return { ...state, panels };
 }
 
 function allSynchronizing(state: RendererAuthorityState, reason: string): RendererAuthorityState {
@@ -209,6 +223,11 @@ function installBaseline(
     rendererGeneration: baseline.rendererGeneration,
     owner: baseline.owner,
     publicationSequence: baseline.publicationHighWatermark,
+    panelTransportSequence: baseline.panels.reduce<number | undefined>((highest, panel) => {
+      const sequence = cursorOf(panel.sync)?.transportSequence;
+      if (sequence === undefined) return highest;
+      return highest === undefined ? sequence : Math.max(highest, sequence);
+    }, undefined),
     semantic: baseline.semantic.sync,
     transcript: baseline.transcript.sync,
     extensionUi: baseline.extensionUi.sync,
@@ -426,22 +445,24 @@ function reducePanel(
   const existing = state.panels.get(key);
   if (payload.kind === "keyframe") {
     if (!sameOwner(payload.panel.owner, publication.owner) || !existing) return state;
-    const priorCursor = cursorOf(existing.sync);
     const cursor = payload.cursor;
     const panelCursor = cursorOf(payload.panel.sync);
-    if (
-      !priorCursor ||
-      !panelCursor ||
-      cursor.transportSequence !== priorCursor.transportSequence + 1 ||
-      panelCursor.transportSequence !== cursor.transportSequence
-    ) {
+    if (!panelCursor || panelCursor.transportSequence !== cursor.transportSequence) {
       return synchronizeAuthorityPlane(state, "panel", "panel_keyframe_gap", key);
     }
     const panels = new Map(state.panels);
+    const sameRenderRevision =
+      existing.baseline.keyframe.kind === "keyframe" &&
+      payload.panel.keyframe.kind === "keyframe" &&
+      existing.baseline.keyframe.renderRevision === payload.panel.keyframe.renderRevision;
     panels.set(key, {
       baseline: payload.panel,
       sync: payload.panel.sync,
-      ansi: payload.panel.keyframe.kind === "keyframe" ? [payload.panel.keyframe.ansi] : [],
+      ansi: sameRenderRevision
+        ? existing.ansi
+        : payload.panel.keyframe.kind === "keyframe"
+          ? [payload.panel.keyframe.ansi]
+          : [],
       ...(payload.panel.keyframe.kind === "keyframe"
         ? {
             output: {
@@ -485,21 +506,31 @@ function reducePanel(
   }
   if (!existing || !sameOwner(existing.baseline.owner, publication.owner)) return state;
   const cursor = payload.cursor;
-  const priorCursor = cursorOf(existing.sync);
-  if (!priorCursor || cursor.transportSequence <= priorCursor.transportSequence) return state;
   const panels = new Map(state.panels);
-  if (cursor.transportSequence !== priorCursor.transportSequence + 1) {
-    panels.set(key, {
-      ...existing,
-      sync: synchronizing(priorCursor, "panel_transport_gap"),
-      inputEnabled: false,
-    });
-    return { ...state, panels };
-  }
   // ANSI bytes can only extend a current keyframe. Control records continue
   // advancing a fenced panel so a following keyframe has a contiguous cursor.
   if (payload.kind === "ansi_delta" && !isFollowingFor(existing.sync, publication.owner)) {
-    panels.set(key, { ...existing, sync: synchronizing(cursor, "panel_keyframe_required") });
+    if (existing.baseline.keyframe.kind !== "keyframe") {
+      panels.set(key, { ...existing, sync: synchronizing(cursor, "panel_keyframe_required") });
+      return { ...state, panels };
+    }
+    // A complete pending keyframe may receive later deltas while its repaint
+    // acknowledgement is in flight. Render them in order but keep input fenced.
+    panels.set(key, {
+      ...existing,
+      sync: synchronizing(
+        cursor,
+        existing.sync.state === "synchronizing" ? existing.sync.reason : "repaint_ack_pending",
+      ),
+      ansi: appendAuthorityPanelAnsi(existing.ansi, payload.data, existing.baseline.unified),
+      output: {
+        kind: "delta",
+        sequence: cursor.transportSequence,
+        renderRevision: payload.renderRevision,
+        ansi: payload.data,
+      },
+      inputEnabled: false,
+    });
     return { ...state, panels };
   }
   if (payload.kind === "close") {
@@ -595,9 +626,26 @@ export function reduceAuthorityPublication(
     case "extensionUi":
       next = reduceExtensionUi(state, publication);
       break;
-    case "panel":
-      next = reducePanel(state, publication);
+    case "panel": {
+      if (!cursor) return state;
+      const prior = state.panelTransportSequence;
+      if (prior !== undefined && cursor.transportSequence <= prior) {
+        return { ...state, publicationSequence: publication.publicationSequence };
+      }
+      if (prior !== undefined && cursor.transportSequence !== prior + 1) {
+        const fenced = allPanelsSynchronizing(state, "panel_transport_gap");
+        return {
+          ...fenced,
+          panelTransportSequence: cursor.transportSequence,
+          publicationSequence: publication.publicationSequence,
+        };
+      }
+      next = reducePanel(
+        { ...state, panelTransportSequence: cursor.transportSequence },
+        publication,
+      );
       break;
+    }
   }
   return { ...next, publicationSequence: publication.publicationSequence };
 }

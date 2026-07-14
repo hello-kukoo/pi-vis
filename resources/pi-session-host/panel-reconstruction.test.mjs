@@ -21,7 +21,16 @@ describe("panel reconstruction fence", () => {
     const repaint = panels.requireRepaint(9);
     panels.write(9, "first frame");
 
-    expect(panels.keyframe(9)).toEqual({ ansi: "first frame", revision: repaint.revision });
+    expect(panels.keyframe(9)).toBeUndefined();
+    expect(panels.seal(9)).toEqual({ ansi: "first frame", revision: repaint.revision });
+    // Ordinary output after the synchronous full repaint cannot grow the
+    // retained reconstruction while acknowledgement is delayed.
+    panels.write(9, "ignored later delta".repeat(100));
+    expect(panels.keyframe(9)).toBeUndefined();
+    expect(panels.pendingKeyframe(9)).toEqual({
+      ansi: "first frame",
+      revision: repaint.revision,
+    });
     expect(panels.acknowledge(9, repaint.revision - 1)).toBe(false);
     expect(panels.acknowledge(9, repaint.revision)).toBe(true);
     expect(panels.acceptsInput(9, repaint.revision)).toBe(true);
@@ -31,7 +40,23 @@ describe("panel reconstruction fence", () => {
 
     const later = panels.requireRepaint(9);
     panels.write(9, "second frame");
-    expect(panels.keyframe(9)).toEqual({ ansi: "second frame", revision: later.revision });
+    expect(panels.seal(9)).toEqual({ ansi: "second frame", revision: later.revision });
     expect(panels.acceptsInput(9, repaint.revision)).toBe(false);
+  });
+
+  it("discards an overflowing repaint instead of retaining a truncated keyframe", () => {
+    const panels = createPanelReconstruction({ maxRepaintBytes: 16 });
+    panels.open(3);
+    const repaint = panels.requireRepaint(3);
+    panels.write(3, "x".repeat(17));
+
+    expect(panels.seal(3)).toBeUndefined();
+    expect(panels.keyframe(3)).toBeUndefined();
+    expect(panels.acknowledge(3, repaint.revision)).toBe(false);
+    expect(panels.acceptsInput(3, repaint.revision)).toBe(false);
+
+    const retry = panels.requireRepaint(3);
+    panels.write(3, "bounded");
+    expect(panels.seal(3)).toEqual({ ansi: "bounded", revision: retry.revision });
   });
 });

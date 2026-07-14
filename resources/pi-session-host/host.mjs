@@ -355,7 +355,7 @@ const panelBridge = {
     });
     send({ type: "panel_data", panelId, data: "\u001bc" });
     p.resizeHandler?.(cols, rows, true);
-    const keyframe = panelReconstruction.keyframe(panelId);
+    const keyframe = panelReconstruction.seal(panelId);
     if (keyframe) {
       runtimeAuthority?.publishPanel?.((cursor, owner) => ({
         kind: "keyframe",
@@ -885,7 +885,7 @@ process.on("message", async (msg) => {
         // Read the bounded capture before acknowledgement releases it. The
         // following sequenced keyframe is the only authority transition that
         // enables renderer input.
-        const keyframe = panelReconstruction.keyframe(msg.panelId);
+        const keyframe = panelReconstruction.pendingKeyframe(msg.panelId);
         const result = { acknowledged: panelReconstruction.acknowledge(msg.panelId, msg.revision) };
         if (result.acknowledged) {
           if (panel && keyframe) {

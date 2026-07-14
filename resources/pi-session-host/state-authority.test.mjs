@@ -1425,21 +1425,22 @@ describe("state authority", () => {
     session.isCompacting = false;
     authority.observeEvent({ type: "compaction_end" });
 
-    await expect(attach).resolves.toMatchObject({
-      rendererGeneration: 7,
-      semantic: {
-        snapshot: { activity: {} },
-      },
-      operationJournal: expect.arrayContaining([
-        expect.objectContaining({ type: "observed_operation" }),
-      ]),
-      panels: [
-        expect.objectContaining({
-          panelId: 4,
-          sync: { state: "synchronizing", reason: "repaint_required" },
-          keyframe: { kind: "repaint_required", renderRevision: 9 },
-        }),
-      ],
+    const attached = await attach;
+    expect(attached.rendererGeneration).toBe(7);
+    expect(attached.semantic.snapshot.activity).toEqual({});
+    expect(attached.operationJournal).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "observed_operation" })]),
+    );
+    expect(attached.panels).toHaveLength(1);
+    expect(attached.panels[0]?.panelId).toBe(4);
+    expect(attached.panels[0]?.sync).toMatchObject({
+      state: "synchronizing",
+      lastCursor: { transportSequence: expect.any(Number) },
+      reason: "repaint_required",
+    });
+    expect(attached.panels[0]?.keyframe).toEqual({
+      kind: "repaint_required",
+      renderRevision: 9,
     });
     const nextFrame = authority.commitSemanticFrame();
     expect(nextFrame.transportSequence).toBe(3);
