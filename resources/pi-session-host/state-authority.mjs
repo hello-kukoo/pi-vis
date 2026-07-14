@@ -60,6 +60,13 @@ export function createStateAuthority({
     attempt: 0,
     anomaly: null,
   };
+  // Pi 0.80.6 mutates its public isCompacting getter on opposite sides of
+  // synchronous lifecycle callbacks: automatic start sets it just after
+  // compaction_start, while every end clears it just after compaction_end.
+  // Reconcile the direct getter in a microtask instead of treating those
+  // callback-time values as missing-event anomalies.
+  let compactionGetterReconcilePending = false;
+  let compactionGetterReconcileToken = 0;
   let nextOperationSequence = 0;
   let operationJournalTruncated = false;
   const operationJournal = [];
@@ -95,6 +102,10 @@ export function createStateAuthority({
   let queueIdentity = { steer: [], followUp: [] };
   let queueLengths = { steer: 0, followUp: 0 };
   let queueValues = { steer: [], followUp: [] };
+  // Pi may acknowledge preflight before its public queue getter exposes the
+  // accepted slot. Retain only the exact one-slot baseline claim until a later
+  // direct read can prove that append; ambiguity discards the claim.
+  const pendingQueueClaims = new Map();
 
   // One scheduler owns BOTH ordinary GUI ingress and custody draining. Deferred
   // custody belongs to earlier GUI intent, so it drains FIFO before later normal
@@ -177,30 +188,77 @@ export function createStateAuthority({
     return deliveredQueueIntentIds;
   }
 
+  function resolvePendingQueueClaims(steering, followUp) {
+    for (const [intentId, claim] of pendingQueueClaims) {
+      const queue = claim.mode === "steer" ? steering : followUp;
+      const identities = queueIdentity[claim.mode];
+      const baselineUnchanged = claim.priorValues.every((value, index) => value === queue[index]);
+      if (
+        queue.length === claim.priorLength + 1 &&
+        baselineUnchanged &&
+        identities[claim.priorLength] === null
+      ) {
+        identities[claim.priorLength] = intentId;
+        pendingQueueClaims.delete(intentId);
+      } else if (queue.length !== claim.priorLength || !baselineUnchanged) {
+        // More than one append, replacement, shrink, or prefix mutation has no
+        // public provenance. Never guess which slot belongs to this GUI intent.
+        pendingQueueClaims.delete(intentId);
+      }
+    }
+  }
+
   function readQueues(deliveryExpected = false) {
     const steering = [...session.getSteeringMessages()];
     const followUp = [...session.getFollowUpMessages()];
     const deliveredQueueIntentIds = reconcileQueueIdentity(steering, followUp, deliveryExpected);
+    resolvePendingQueueClaims(steering, followUp);
     return { steering, followUp, deliveredQueueIntentIds };
   }
 
-  function registerQueuedIntent(request, priorLength) {
+  function registerQueuedIntent(request, priorLength, priorValues) {
     const { steering, followUp } = readQueues();
     const mode = request.requestedMode === "steer" ? "steer" : "followUp";
     const queue = mode === "steer" ? steering : followUp;
     const identities = queueIdentity[mode];
-    if (identities.includes(request.intentId)) return;
+    if (identities.includes(request.intentId)) {
+      pendingQueueClaims.delete(request.intentId);
+      return;
+    }
+    const baselineUnchanged = priorValues.every((value, index) => value === queue[index]);
     // Successful admission may claim only the single slot appended relative
     // to its pre-prompt baseline. Extra/replaced slots are extension-owned or
     // ambiguous and must never inherit this GUI intent.
-    if (queue.length !== priorLength + 1 || identities[priorLength] !== null) return;
-    identities[priorLength] = request.intentId;
+    if (queue.length === priorLength + 1 && baselineUnchanged && identities[priorLength] === null) {
+      identities[priorLength] = request.intentId;
+      pendingQueueClaims.delete(request.intentId);
+      return;
+    }
+    if (queue.length === priorLength && baselineUnchanged) {
+      pendingQueueClaims.set(request.intentId, {
+        mode,
+        priorLength,
+        priorValues: [...priorValues],
+      });
+      return;
+    }
+    pendingQueueClaims.delete(request.intentId);
+  }
+
+  function finalizeQueuedIntentClaim(request, priorLength, priorValues) {
+    // Pi may expose the accepted queue slot only as prompt() settles. Take one
+    // final direct getter sample, then retire an unresolved claim permanently:
+    // extension commands can report successful preflight without queueing, and
+    // must never steal a later ordinary prompt's slot.
+    registerQueuedIntent(request, priorLength, priorValues);
+    pendingQueueClaims.delete(request.intentId);
   }
 
   function resetQueueIdentity() {
     queueIdentity = { steer: [], followUp: [] };
     queueLengths = { steer: 0, followUp: 0 };
     queueValues = { steer: [], followUp: [] };
+    pendingQueueClaims.clear();
   }
 
   function reconcileAttachmentLedger(steering, followUp) {
@@ -536,6 +594,7 @@ export function createStateAuthority({
   function compactionBarrierOpen() {
     return (
       session.isCompacting === true ||
+      compactionGetterReconcilePending ||
       ["active", "active_unknown_origin", "cancelling", "retry_wait"].includes(compaction.phase) ||
       compaction.invocationPending === true
     );
@@ -555,6 +614,7 @@ export function createStateAuthority({
     const getterActive = session.isCompacting === true;
     if (
       getterActive &&
+      !compactionGetterReconcilePending &&
       ["inactive", "terminal_success", "terminal_aborted", "terminal_failed"].includes(
         compaction.phase,
       )
@@ -573,6 +633,7 @@ export function createStateAuthority({
       });
     } else if (
       !getterActive &&
+      !compactionGetterReconcilePending &&
       ["active", "active_unknown_origin", "cancelling"].includes(compaction.phase)
     ) {
       // An end event is the only evidence that closes an observed span. Keep
@@ -1343,6 +1404,7 @@ export function createStateAuthority({
     // publishSnapshot synchronizes extension/external queue mutations. The
     // attributable admission baseline must come from that fresh observation.
     const queueLengthBeforePrompt = queueLengths[queueMode];
+    const queueValuesBeforePrompt = [...queueValues[queueMode]];
 
     let preflightResolve;
     let crossedPreflight = false;
@@ -1364,7 +1426,9 @@ export function createStateAuthority({
                 // Correlate synchronously at Pi's acceptance boundary. Waiting
                 // for the submit continuation leaves a re-entrant delivery
                 // window where message_start has no queue intent.
-                if (wasStreaming) registerQueuedIntent(request, queueLengthBeforePrompt);
+                if (wasStreaming) {
+                  registerQueuedIntent(request, queueLengthBeforePrompt, queueValuesBeforePrompt);
+                }
               }
               preflightResolve(success);
             },
@@ -1373,6 +1437,19 @@ export function createStateAuthority({
       ),
     );
     if (!wasStreaming) promptFence = promptPromise;
+    if (wasStreaming) {
+      // Register this before any admission continuation so all prompt() exit
+      // paths (handled extension, rejection, throw, or normal queueing) take a
+      // final queue observation and cannot leave a stale positional claim.
+      void promptPromise
+        .then(
+          () =>
+            finalizeQueuedIntentClaim(request, queueLengthBeforePrompt, queueValuesBeforePrompt),
+          () =>
+            finalizeQueuedIntentClaim(request, queueLengthBeforePrompt, queueValuesBeforePrompt),
+        )
+        .catch(() => pendingQueueClaims.delete(request.intentId));
+    }
 
     const admissionDeadline = new Promise((resolve) => {
       setTimeout(() => resolve("deadline"), 2_000).unref?.();
@@ -1441,7 +1518,13 @@ export function createStateAuthority({
         void promptPromise
           .then(
             () => {
-              if (wasStreaming) registerQueuedIntent(request, queueLengthBeforePrompt);
+              if (wasStreaming) {
+                finalizeQueuedIntentClaim(
+                  request,
+                  queueLengthBeforePrompt,
+                  queueValuesBeforePrompt,
+                );
+              }
               acknowledgeEditorCustody(request);
               activeIntents.delete(request.intentId);
               reportSubmission(resultFor(request, "completed", { queued: wasStreaming }));
@@ -1476,7 +1559,7 @@ export function createStateAuthority({
       activeIntents.set(request.intentId, "consumed");
       acknowledgeEditorCustody(request);
       if (wasStreaming) {
-        registerQueuedIntent(request, queueLengthBeforePrompt);
+        registerQueuedIntent(request, queueLengthBeforePrompt, queueValuesBeforePrompt);
         rememberAttachments(request);
       }
       const consumed = resultFor(request, "consumed", { queued: wasStreaming });
@@ -1833,17 +1916,29 @@ export function createStateAuthority({
     }
     if (event?.type === "compaction_start") {
       const retrying = compaction.phase === "retry_wait";
+      const reconcileToken = ++compactionGetterReconcileToken;
+      compactionGetterReconcilePending = true;
       compaction = {
         phase: "active",
         operationId: retrying ? compaction.operationId : crypto.randomUUID(),
         origin: "event",
         attempt: retrying ? compaction.attempt + 1 : Math.max(1, compaction.attempt + 1),
         anomaly: null,
+        invocationPending: compaction.invocationPending === true,
       };
       barrierSequence++;
       observedOperation("compaction", "active", { operationId: compaction.operationId });
+      queueMicrotask(() => {
+        if (stopped || reconcileToken !== compactionGetterReconcileToken) return;
+        compactionGetterReconcilePending = false;
+        reconcileCompactionGetter();
+        actualCompaction = compactionBarrierOpen();
+        publishSnapshot();
+      });
     } else if (event?.type === "compaction_end") {
       const failed = event.aborted === true || typeof event.errorMessage === "string";
+      const reconcileToken = ++compactionGetterReconcileToken;
+      compactionGetterReconcilePending = true;
       if (event.willRetry === true) {
         // Keep the barrier closed between retry attempts so new ingress joins
         // custody rather than overtaking the retained prefix.
@@ -1858,7 +1953,6 @@ export function createStateAuthority({
               : "terminal_failed"
             : "terminal_success",
           anomaly: null,
-          invocationPending: false,
         };
         observedOperation(
           "compaction",
@@ -1871,20 +1965,27 @@ export function createStateAuthority({
           },
         );
       }
-      // Direct getter evidence is sampled before custody is released. A stale
-      // false/true disagreement leaves the barrier closed and is visible in
-      // the same semantic frame rather than being resolved by the renderer.
-      reconcileCompactionGetter();
-      if (!compactionBarrierOpen()) {
-        if (failed) {
-          restoreCustody(
-            custody.filter((item) => item.phase === "compaction"),
-            "Compaction ended without success; review this submission before retrying",
-          );
-        } else {
-          scheduleCustodyDrain();
+      // Pi clears isCompacting in the finally block immediately after this
+      // synchronous event callback. Sample that direct getter in a microtask;
+      // until then the explicit settlement barrier prevents later ingress from
+      // overtaking compaction custody.
+      queueMicrotask(() => {
+        if (stopped || reconcileToken !== compactionGetterReconcileToken) return;
+        compactionGetterReconcilePending = false;
+        reconcileCompactionGetter();
+        actualCompaction = compactionBarrierOpen();
+        if (!actualCompaction) {
+          if (failed) {
+            restoreCustody(
+              custody.filter((item) => item.phase === "compaction"),
+              "Compaction ended without success; review this submission before retrying",
+            );
+          } else {
+            scheduleCustodyDrain();
+          }
         }
-      }
+        publishSnapshot();
+      });
     }
     actualCompaction = compactionBarrierOpen();
     // Production publishes the event exactly once on its independently
@@ -2009,10 +2110,17 @@ export function createStateAuthority({
         session.abortRetry();
         value = { ...base, disposition: "abort_requested", target: "retry" };
       } else if (session.isStreaming) {
-        const queued = session.clearQueue() ?? {};
+        // Give a preflight-accepted delayed getter one final direct observation
+        // before destructive clearQueue custody is recorded.
+        readQueues();
+        // Capture ownership before clearQueue(): real Pi can synchronously emit
+        // queue_update while clearing, and that direct empty-queue observation
+        // correctly retires positional identities for future delivery but must
+        // not erase the restoration record's just-cleared GUI intents.
         const clearedIntentIds = [...queueIdentity.steer, ...queueIdentity.followUp].filter(
           (intentId) => typeof intentId === "string",
         );
+        const queued = session.clearQueue() ?? {};
         // Destructive removal is not delivery. Retire positional identities
         // before the next snapshot observes the empty queues, otherwise those
         // intents could decorate an unrelated future user event.
@@ -2102,7 +2210,25 @@ export function createStateAuthority({
       { operationId: intentId, intentId, ...(result.detail ? { detail: result.detail } : {}) },
     );
     // Do not synthesize compaction start/end from a command promise. If Pi
-    // supplied no observation, only the command invocation is journaled.
+    // supplied no observation, only the command invocation is journaled. A
+    // real terminal event plus the settled getter does, however, release or
+    // restore custody here because the event deliberately retained this
+    // invocation barrier until the public compact() promise completed.
+    reconcileCompactionGetter();
+    if (!compactionBarrierOpen()) {
+      const failed =
+        result.failed === true ||
+        result.aborted === true ||
+        ["terminal_aborted", "terminal_failed"].includes(compaction.phase);
+      if (failed) {
+        restoreCustody(
+          custody.filter((item) => item.phase === "compaction"),
+          "Compaction ended without success; review this submission before retrying",
+        );
+      } else {
+        scheduleCustodyDrain();
+      }
+    }
     publishSnapshot();
     return result;
   }
@@ -2217,6 +2343,8 @@ export function createStateAuthority({
     nextOperationSequence = 0;
     operationJournalTruncated = false;
     actualCompaction = false;
+    compactionGetterReconcilePending = false;
+    compactionGetterReconcileToken++;
     compaction = {
       phase: "inactive",
       operationId: null,

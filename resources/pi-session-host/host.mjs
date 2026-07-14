@@ -155,6 +155,13 @@ function sendUiRequest(req) {
   const request = {
     ...req,
     id: req.id ?? `extension-ui-${++extensionUiRequestSequence}`,
+    // Presentation publications carry their owner in the envelope, but a
+    // reconstructed dialog is later returned through the typed UI-response
+    // contract itself. Keep that identity on the request so the renderer can
+    // acknowledge the exact host/epoch instead of rendering an unanswerable
+    // dialog after an authority attach.
+    hostInstanceId,
+    sessionEpoch: runtimeAuthority?.sessionEpoch ?? activeEpoch,
   };
   runtimeAuthority?.publishExtensionUi?.(request);
   send(request);

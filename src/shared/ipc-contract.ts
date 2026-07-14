@@ -531,6 +531,8 @@ export interface IpcEventContract {
     steering: string[];
     followUp: string[];
     originalAttachments: Array<{ intentId: string; images: unknown[] }>;
+    /** GUI-owned queue intents cleared before a late optimistic echo can settle. */
+    clearedIntentIds?: string[];
     commandDescription?: string;
     requiresReview: true;
   };

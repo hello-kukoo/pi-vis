@@ -473,6 +473,44 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
     ]);
   });
 
+  it("uses newline-separated text parts and finalizes the matching tool call", () => {
+    const blocks = entriesToTranscript([
+      {
+        type: "message",
+        id: "a1",
+        timestamp: "t1",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+        },
+      },
+      {
+        type: "message",
+        id: "tr1",
+        timestamp: "t2",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-1",
+          content: [
+            { type: "text", text: "first part" },
+            { type: "text", text: "second part" },
+          ],
+          details: { diff: "-old\n+new", fullOutputPath: "/tmp/output" },
+        },
+      },
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.type).toBe("tool_call");
+    expect(blocks[0]?.data).toMatchObject({
+      toolCallId: "call-1",
+      outputText: "first part\nsecond part",
+      resultDetails: { diff: "-old\n+new", fullOutputPath: "/tmp/output" },
+      diff: "-old\n+new",
+      isStreaming: false,
+    });
+  });
+
   it("preserves details.diff for standalone tool results with no preceding tool call", () => {
     const blocks = entriesToTranscript([
       {

@@ -1,34 +1,28 @@
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Page, expect, test } from "@playwright/test";
 import { type LaunchedElectronApplication, launchElectron } from "./electron-launch.mjs";
+import {
+  PINNED_PI_VERSION,
+  createRealSdkFixture,
+  openNewRealSession,
+  pinnedPiBinary,
+  selectLocalTestModel,
+} from "./support/real-sdk-host.mjs";
+import { createScriptedOpenAIProvider } from "./support/scripted-openai-provider.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ENTRY = join(__dirname, "../../out/main/index.js");
 const PROJECT_WORKSPACE = join(__dirname, "../..");
 const FIXTURE_EXTENSION = join(__dirname, "../fixtures/real-host-smoke-extension/smoke-e2e.ts");
 
-function locatePiBin(): string | null {
-  const candidates = [process.env.PIVIS_TEST_PI_BIN];
-  try {
-    candidates.push(execSync("command -v pi", { encoding: "utf8" }).trim());
-  } catch {
-    // Pi is optional in generic CI, but mandatory on developer machines where
-    // this compatibility smoke test can run without model API usage.
-  }
-  candidates.push("/opt/homebrew/bin/pi", "/usr/local/bin/pi");
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) ?? null;
-}
-
-const PI_BIN = locatePiBin();
-const PI_VERSION = PI_BIN
-  ? execFileSync(PI_BIN, ["--version"], { encoding: "utf8" }).trim().replace(/^v/, "")
-  : null;
+const PI_BIN = pinnedPiBinary();
+const PI_VERSION = execFileSync(PI_BIN, ["--version"], { encoding: "utf8" })
+  .trim()
+  .replace(/^v/, "");
 
 function rmrf(path: string): void {
   try {
@@ -38,62 +32,12 @@ function rmrf(path: string): void {
   }
 }
 
-async function launchRealHostApp(): Promise<{
-  app: LaunchedElectronApplication;
-  window: Page;
-  stderr: string[];
-  dirs: string[];
-}> {
-  if (!PI_BIN) throw new Error("Pi binary is unavailable");
-  const settingsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-real-host-settings-"));
-  const workspaceDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-real-host-workspace-"));
-  const agentDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-real-host-agent-"));
-  const sessionsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-real-host-sessions-"));
-  fs.mkdirSync(join(agentDir, "extensions"), { recursive: true });
-  fs.copyFileSync(FIXTURE_EXTENSION, join(agentDir, "extensions", "smoke-e2e.ts"));
-  fs.writeFileSync(
-    join(settingsDir, "settings.json"),
-    JSON.stringify({
-      piBinaryPath: PI_BIN,
-      workspaceOrder: [workspaceDir],
-      fonts: { display: { sizePx: 14 }, code: { family: "IBM Plex Mono", sizePx: 14 } },
-    }),
-  );
-
-  const app = await launchElectron({
-    args: [APP_ENTRY],
-    env: {
-      ...process.env,
-      PIVIS_SETTINGS_DIR: settingsDir,
-      PIVIS_SESSIONS_DIR: sessionsDir,
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_CODING_AGENT_SESSION_DIR: sessionsDir,
-      ELECTRON_RENDERER_URL: undefined,
-    },
-  });
-  const stderr: string[] = [];
-  app.process().stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString("utf8")));
-  app
-    .process()
-    .stdout?.on("data", (chunk: Buffer) => stderr.push(`[stdout] ${chunk.toString("utf8")}`));
-  const window = await app.firstWindow();
-  await window.waitForLoadState("domcontentloaded");
-  await expect(window.locator(".sidebar, .pi-not-found").first()).toBeVisible({ timeout: 30_000 });
-  return {
-    app,
-    window,
-    stderr,
-    dirs: [settingsDir, workspaceDir, agentDir, sessionsDir],
-  };
-}
-
 async function launchUserConfiguredHostApp(): Promise<{
   app: LaunchedElectronApplication;
   window: Page;
   stderr: string[];
   dirs: string[];
 }> {
-  if (!PI_BIN) throw new Error("Pi binary is unavailable");
   const settingsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-user-host-settings-"));
   const sessionsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-user-host-sessions-"));
   fs.writeFileSync(
@@ -125,162 +69,6 @@ async function launchUserConfiguredHostApp(): Promise<{
   return { app, window, stderr, dirs: [settingsDir, sessionsDir] };
 }
 
-interface LocalProviderRequest {
-  method: string;
-  url: string;
-  body: Record<string, unknown>;
-}
-
-async function startLocalProvider(): Promise<{
-  baseUrl: string;
-  requests: LocalProviderRequest[];
-  close: () => Promise<void>;
-}> {
-  const requests: LocalProviderRequest[] = [];
-  const server = http.createServer((request, response) => {
-    const chunks: Buffer[] = [];
-    request.on("data", (chunk: Buffer) => chunks.push(chunk));
-    request.on("end", () => {
-      const url = request.url ?? "";
-      if (request.method !== "POST" || url !== "/v1/chat/completions") {
-        response.writeHead(404, { "content-type": "application/json" });
-        response.end(
-          JSON.stringify({ error: `Unexpected local-provider route: ${request.method} ${url}` }),
-        );
-        return;
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-      requests.push({ method: request.method, url, body });
-      const serializedMessages = JSON.stringify(body.messages ?? []);
-      const isCompaction = /summariz|compaction|context to preserve/i.test(serializedMessages);
-      const text = isCompaction
-        ? "## Goal\nDeterministic compacted summary.\n\n## Progress\n- Seeded local-provider turns were processed."
-        : `Deterministic local assistant response ${requests.length}.`;
-      response.writeHead(200, {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      });
-      response.write(
-        `data: ${JSON.stringify({
-          id: `chatcmpl-${requests.length}`,
-          object: "chat.completion.chunk",
-          created: 1_752_192_000,
-          model: "pivis-test-model",
-          choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }],
-        })}\n\n`,
-      );
-      response.write(
-        `data: ${JSON.stringify({
-          id: `chatcmpl-${requests.length}`,
-          object: "chat.completion.chunk",
-          created: 1_752_192_000,
-          model: "pivis-test-model",
-          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-        })}\n\n`,
-      );
-      response.end("data: [DONE]\n\n");
-    });
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address() as AddressInfo;
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}/v1`,
-    requests,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-  };
-}
-
-async function launchLocalProviderHostApp(baseUrl: string) {
-  if (!PI_BIN) throw new Error("Pi binary is unavailable");
-  const settingsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-local-provider-settings-"));
-  const workspaceDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-local-provider-workspace-"));
-  const agentDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-local-provider-agent-"));
-  const sessionsDir = fs.mkdtempSync(join(os.tmpdir(), "pivis-local-provider-sessions-"));
-  fs.writeFileSync(
-    join(agentDir, "models.json"),
-    JSON.stringify({
-      providers: {
-        "pivis-local": {
-          baseUrl,
-          api: "openai-completions",
-          apiKey: "test-key",
-          compat: {
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: false,
-            supportsUsageInStreaming: false,
-          },
-          models: [
-            {
-              id: "pivis-test-model",
-              name: "Pi-Vis Test Model",
-              reasoning: false,
-              input: ["text"],
-              contextWindow: 128000,
-              maxTokens: 256,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            },
-          ],
-        },
-      },
-    }),
-  );
-  fs.writeFileSync(
-    join(agentDir, "settings.json"),
-    JSON.stringify({
-      compaction: { enabled: false, reserveTokens: 256, keepRecentTokens: 200 },
-    }),
-  );
-  fs.writeFileSync(
-    join(settingsDir, "settings.json"),
-    JSON.stringify({
-      piBinaryPath: PI_BIN,
-      workspaceOrder: [workspaceDir],
-      fonts: { display: { sizePx: 14 }, code: { family: "IBM Plex Mono", sizePx: 14 } },
-    }),
-  );
-  const app = await launchElectron({
-    args: [APP_ENTRY],
-    env: {
-      ...process.env,
-      PIVIS_SETTINGS_DIR: settingsDir,
-      PIVIS_SESSIONS_DIR: sessionsDir,
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_CODING_AGENT_SESSION_DIR: sessionsDir,
-      ELECTRON_RENDERER_URL: undefined,
-      HTTP_PROXY: undefined,
-      HTTPS_PROXY: undefined,
-      ALL_PROXY: undefined,
-    },
-  });
-  const stderr: string[] = [];
-  app.process().stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString("utf8")));
-  app
-    .process()
-    .stdout?.on("data", (chunk: Buffer) => stderr.push(`[stdout] ${chunk.toString("utf8")}`));
-  const window = await app.firstWindow();
-  await window.waitForLoadState("domcontentloaded");
-  await expect(window.locator(".sidebar, .pi-not-found").first()).toBeVisible({ timeout: 30_000 });
-  return {
-    app,
-    window,
-    stderr,
-    sessionsDir,
-    dirs: [settingsDir, workspaceDir, agentDir, sessionsDir],
-  };
-}
-
-function findSessionFiles(root: string): string[] {
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(root, entry.name);
-    return entry.isDirectory() ? findSessionFiles(path) : path.endsWith(".jsonl") ? [path] : [];
-  });
-}
-
 function sessionHasCompaction(path: string, summary: string): boolean {
   return fs
     .readFileSync(path, "utf8")
@@ -297,16 +85,15 @@ function sessionHasCompaction(path: string, summary: string): boolean {
 }
 
 test.describe("Real SDK-host smoke", () => {
-  test.skip(!PI_BIN, "No real Pi binary found");
-  test.beforeAll(() => expect(PI_VERSION).toBe("0.80.6"));
+  test.beforeAll(() => expect(PI_VERSION).toBe(PINNED_PI_VERSION));
 
   test("starts cleanly, executes an extension, and reports empty-session compaction as a domain failure", async () => {
     test.setTimeout(120_000);
-    const { app, window, stderr, dirs } = await launchRealHostApp();
+    const fixture = createRealSdkFixture({ extensionFiles: [FIXTURE_EXTENSION] });
+    const launch = await fixture.launch();
+    const { window } = launch;
     try {
-      await window.getByRole("button", { name: "New session" }).click();
-      const textarea = window.locator(".composer__textarea");
-      await expect(textarea).toBeEnabled({ timeout: 60_000 });
+      const textarea = await openNewRealSession(window);
       await expect(
         window.getByText(
           "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.",
@@ -325,9 +112,7 @@ test.describe("Real SDK-host smoke", () => {
       // A missing compaction_end leaves that authority conservatively fenced;
       // do not prove extension execution by overtaking its unknown boundary.
       // A fresh session verifies the independent extension command path.
-      await window.getByRole("button", { name: "New session" }).click();
-      const freshTextarea = window.locator(".composer__textarea");
-      await expect(freshTextarea).toBeEnabled({ timeout: 60_000 });
+      const freshTextarea = await openNewRealSession(window);
       await freshTextarea.fill("/smoke-e2e");
       await expect(
         window.locator(".composer__suggestion").filter({ hasText: "smoke-e2e" }),
@@ -339,36 +124,64 @@ test.describe("Real SDK-host smoke", () => {
       ).toBeVisible({ timeout: 30_000 });
       await expect(window.getByText(/Host process exited/)).toHaveCount(0);
     } catch (error) {
-      throw new Error(`${String(error)}\nElectron stderr:\n${stderr.join("")}`);
+      throw new Error(
+        `${String(error)}\n${await fixture.diagnostics(window)}\nElectron output:\n${launch.output.join("")}`,
+      );
     } finally {
-      await app.close();
-      for (const dir of dirs) rmrf(dir);
+      await launch.close();
+      fixture.cleanup();
     }
   });
 
   test("successfully compacts through a deterministic localhost provider", async () => {
     test.setTimeout(180_000);
-    const provider = await startLocalProvider();
-    const { app, window, stderr, sessionsDir, dirs } = await launchLocalProviderHostApp(
-      provider.baseUrl,
-    );
+    const provider = await createScriptedOpenAIProvider([
+      {
+        expect: {
+          model: "pivis-test-model",
+          promptIncludes: "First deterministic turn",
+          compaction: false,
+        },
+        response: { type: "text", chunks: ["Deterministic local assistant response 1."] },
+      },
+      {
+        expect: {
+          model: "pivis-test-model",
+          promptIncludes: "Second deterministic turn",
+          compaction: false,
+        },
+        response: { type: "text", chunks: ["Deterministic local assistant response 2."] },
+      },
+      {
+        expect: {
+          model: "pivis-test-model",
+          compaction: { includes: "First deterministic turn" },
+        },
+        response: {
+          type: "text",
+          chunks: [
+            "## Goal\nDeterministic compacted summary.\n\n## Progress\n- Seeded local-provider turns were processed.",
+          ],
+        },
+      },
+      {
+        expect: {
+          model: "pivis-test-model",
+          promptIncludes: ["Deterministic compacted summary", "Post-compaction deterministic turn"],
+          compaction: false,
+        },
+        response: { type: "text", chunks: ["Deterministic local assistant response 4."] },
+      },
+    ]);
+    const fixture = createRealSdkFixture({
+      providerBaseUrl: provider.baseUrl,
+      compactionEnabled: false,
+    });
+    let launch = await fixture.launch();
     try {
-      await window.getByRole("button", { name: "New session" }).click();
-      const textarea = window.locator(".composer__textarea");
-      await expect(textarea).toBeEnabled({ timeout: 60_000 });
-      await expect(
-        window.getByText(
-          "Pi public API cannot install the pi-vis palette globally; extension panels use a local semantic theme.",
-          { exact: true },
-        ),
-      ).toHaveCount(0);
-
-      await textarea.fill("/model pivis-local/pivis-test-model");
-      await textarea.press("Enter");
-      await expect(textarea).toHaveValue("");
-      await expect(
-        window.getByText(/Model:.*Pi-Vis Test Model|Model:.*pivis-test-model/).first(),
-      ).toBeVisible();
+      let { window } = launch;
+      const textarea = await openNewRealSession(window);
+      await selectLocalTestModel(window, textarea);
 
       await textarea.fill(`First deterministic turn ${"alpha beta gamma ".repeat(80)}`);
       await textarea.press("Enter");
@@ -389,42 +202,69 @@ test.describe("Real SDK-host smoke", () => {
       await expect(window.getByText("Nothing to compact", { exact: false })).toHaveCount(0);
       await expect(window.getByText("Compaction failed", { exact: false })).toHaveCount(0);
       await expect(textarea).toHaveValue("");
+      await expect(window.locator(".working-row, .status-dot--streaming")).toHaveCount(0, {
+        timeout: 30_000,
+      });
 
-      expect(provider.requests).toHaveLength(3);
+      await provider.waitForRequestCount(3);
       const compactRequest = provider.requests[2]!;
       expect(compactRequest.method).toBe("POST");
       expect(compactRequest.url).toBe("/v1/chat/completions");
-      expect(compactRequest.body.model).toBe("pivis-test-model");
-      expect(compactRequest.body.stream).toBe(true);
-      expect(JSON.stringify(compactRequest.body.messages)).toContain("First deterministic turn");
+      expect(compactRequest.parsedBody).toMatchObject({ model: "pivis-test-model", stream: true });
+      expect(JSON.stringify(compactRequest.parsedBody)).toContain("First deterministic turn");
 
       await expect
         .poll(() =>
-          findSessionFiles(sessionsDir).some((file) =>
-            sessionHasCompaction(file, "Deterministic compacted summary"),
-          ),
+          fixture
+            .sessionFiles()
+            .some((file) => sessionHasCompaction(file, "Deterministic compacted summary")),
         )
         .toBe(true);
 
-      await textarea.fill("/session");
+      // Compaction changes model context, never GUI scrollback. The next real
+      // turn must use a fresh live tail without reviving stale streaming IDs.
+      await expect(
+        window.getByText("Deterministic local assistant response 1.", { exact: true }),
+      ).toHaveCount(1);
+      await expect(
+        window.getByText("Deterministic local assistant response 2.", { exact: true }),
+      ).toHaveCount(1);
+      await expect(textarea).toBeEnabled();
+      await textarea.fill("Post-compaction deterministic turn");
       await textarea.press("Enter");
+      await expect(
+        window.getByText("Deterministic local assistant response 4.", { exact: true }),
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(window.locator(".working-row, .status-dot--streaming")).toHaveCount(0);
+      provider.assertExhausted();
+
+      // A full process relaunch must hydrate the complete GUI scrollback even
+      // though Pi's model context now starts at the persisted compaction.
+      await launch.close();
+      launch = await fixture.launch();
+      window = launch.window;
+      const stored = window.locator(".sidebar__session:not(.sidebar__session--active)").first();
+      await expect(stored).toBeVisible({ timeout: 30_000 });
+      await stored.click();
+      await expect(
+        window.getByText("Deterministic local assistant response 4.", { exact: true }),
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(window.getByText("Context compacted", { exact: false }).first()).toBeVisible();
+      await expect(
+        window.getByText("Deterministic local assistant response 1.", { exact: true }),
+      ).toHaveCount(1);
+      await expect(
+        window.getByText("Deterministic local assistant response 2.", { exact: true }),
+      ).toHaveCount(1);
       await expect(window.getByText(/Host process exited/)).toHaveCount(0);
     } catch (error) {
-      const body = await window
-        .locator("body")
-        .innerText()
-        .catch(() => "<body unavailable>");
       throw new Error(
-        `${String(error)}\nVisible UI:\n${body.slice(-4_000)}\nElectron output:\n${stderr.join("")}\nSession files:\n${findSessionFiles(
-          sessionsDir,
-        )
-          .map((file) => `${file}\n${fs.readFileSync(file, "utf8").slice(-4_000)}`)
-          .join("\n---\n")}\nProvider requests:\n${JSON.stringify(provider.requests, null, 2)}`,
+        `${String(error)}\n${await fixture.diagnostics(launch.window)}\nElectron output:\n${launch.output.join("")}\nProvider requests:\n${JSON.stringify(provider.requests, null, 2)}`,
       );
     } finally {
-      await app.close();
+      await launch.close();
       await provider.close();
-      for (const dir of dirs) rmrf(dir);
+      fixture.cleanup();
     }
   });
 

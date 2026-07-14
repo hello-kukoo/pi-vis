@@ -260,6 +260,11 @@ test.describe("Diff inline edit", () => {
     const { app, window } = await launchApp(folders);
     try {
       await openViewer(window);
+      // Geometry is the oracle below. Wait for the packaged code font before
+      // capturing it so a cold CI font load cannot masquerade as a card shift.
+      await window.evaluate(async () => {
+        await document.fonts.ready;
+      });
       // The added lines are add rows; pick two consecutive ones. Find their
       // data-line-idx values dynamically.
       const addIdxs = await window

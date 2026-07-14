@@ -10,29 +10,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # The pinned Pi compatibility fixture requires Node >=22.19.0.
+          node-version: "22.19.0"
           cache: "npm"
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
-      - run: npm run build
-      # TODO: add xvfb-run -a npm run test:e2e when e2e reliably passes headless.
-      #   The self-contained kitty e2e (tests/e2e/unified-panel.spec.mts, fake
-      #   host, no real pi) would run here once e2e is enabled — it proves the
-      #   renderer half of the keyboard protocol (xterm 6.1 emits CSI-u).
-
-  # Opt-in real-pi lane (NOT in CI yet). Uncomment + provide secrets when a
-  # macOS runner with pi + provider auth is available. Until then this is a
-  # MANDATORY pre-release manual gate — see RELEASING.md.
-  #
-  # pi-e2e:
-  #   runs-on: macos-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-node@v4
-  #       with: { node-version: "20", cache: "npm" }
-  #     - run: npm ci
-  #     - run: npm run build
-  #     - run: PI_E2E=1 npx playwright test -c tests/e2e/playwright.config.mts --grep kitty-real
-  #       env: { PIVIS_TEST_PI_BIN: pi }   # + provider auth secrets / real API spend
+      - run: xvfb-run -a npm run test:render
+      # Includes the repository-pinned Pi 0.80.6 SDK-host suites. They use only
+      # an isolated loopback provider and require no developer Pi or API key.
+      - run: xvfb-run -a npm run test:e2e

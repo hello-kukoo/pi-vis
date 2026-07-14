@@ -287,6 +287,15 @@ async function executePrompt(
         surface: deps.uiSurface ?? "composer",
       };
   const completion = await dispatchAndAwait(sessionId, intent, deps);
+  if (action.commandSource && completion.outcome.state !== "completed") {
+    const sourceLabel =
+      action.commandSource === "extension"
+        ? "Extension"
+        : action.commandSource === "prompt"
+          ? "Prompt template"
+          : "Skill";
+    deps.addToast(sessionId, completion.outcome.error ?? `${sourceLabel} command failed.`, "error");
+  }
   if (
     completion.outcome.kind === "submit" &&
     completion.outcome.state === "completed" &&

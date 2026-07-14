@@ -464,6 +464,20 @@ describe("sessions store - thinking level invariant", () => {
     expect(useSessionsStore.getState().sessions.get(SESSION_B)?.thinkingLevel).toBeUndefined();
   });
 
+  it("surfaces extension errors as session-scoped error notifications", () => {
+    useSessionsStore.getState().applyEvent(SESSION_A, {
+      type: "extension_error",
+      extensionPath: "/tmp/e2e-extension.ts",
+      error: { message: "extension exploded" },
+    });
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.toasts.at(-1)).toMatchObject({
+      message: "extension exploded",
+      type: "error",
+    });
+    expect(useSessionsStore.getState().sessions.get(SESSION_B)?.toasts).toEqual([]);
+  });
+
   it("scopes authoritative thinking frames to a single session", () => {
     installAuthority(SESSION_A);
     installAuthority(SESSION_B);
@@ -2666,6 +2680,33 @@ describe("sessions store - queue restoration", () => {
     ]);
   });
 
+  it("does not recreate a queued bubble when restoration beats its terminal outcome", () => {
+    vi.stubGlobal("window", { pivis: { invoke: vi.fn(async () => ({})) } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.applyQueueRestoration(SESSION_A, {
+      restorationId: "restore-before-outcome",
+      steering: ["transformed queued"],
+      followUp: [],
+      originalAttachments: [],
+      clearedIntentIds: ["late-intent"],
+    });
+
+    store.addUserMessage(SESSION_A, "original queued", undefined, {
+      registerEcho: true,
+      afterUserMessageSequence: 0,
+      intentId: "late-intent",
+    });
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A)!;
+    expect(session.transcript.blocks).toEqual([]);
+    expect(session.transcript.pendingEchoes).toEqual([]);
+    expect(session.queueRestorations).toEqual([
+      expect.objectContaining({ restorationId: "restore-before-outcome" }),
+    ]);
+  });
+
   it("retains an ambiguous command marker without auto-restoring executable text", () => {
     const invoke = vi.fn(async () => ({ acknowledged: true }));
     vi.stubGlobal("window", { pivis: { invoke } });
@@ -4096,18 +4137,37 @@ describe("sessions store - recovered authority-frame regressions", () => {
     });
   });
 
-  it("makes a terminal editor frame authoritative after a patch in flight", () => {
+  it("suppresses editor replacement while a local patch owns custody", () => {
     useSessionsStore.getState().beginEditorPatch(SESSION_A);
     publishSemantic(
       SESSION_A,
       2,
       semanticSnapshot(2, { editor: { revision: 1, text: "host", attachments: [] } }),
     );
+    const duringPatch = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(duringPatch?.editorRevision).toBe(1);
+    expect(duringPatch?.editorInjection).toBeUndefined();
+    useSessionsStore.getState().endEditorPatch(SESSION_A);
+  });
+
+  it("does not re-inject an unchanged editor revision on unrelated semantic frames", () => {
+    publishSemantic(
+      SESSION_A,
+      2,
+      semanticSnapshot(2, { editor: { revision: 1, text: "typed", attachments: [] } }),
+    );
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toMatchObject({
-      text: "host",
+      text: "typed",
       revision: 1,
     });
-    useSessionsStore.getState().endEditorPatch(SESSION_A);
+    useSessionsStore.getState().clearEditorInjection(SESSION_A);
+
+    publishSemantic(
+      SESSION_A,
+      3,
+      semanticSnapshot(3, { editor: { revision: 1, text: "typed", attachments: [] } }),
+    );
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toBeUndefined();
   });
 
   it("projects an attachment-only rejected patch as an editor conflict", () => {

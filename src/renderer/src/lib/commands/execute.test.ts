@@ -175,6 +175,26 @@ describe("Composer intent execution — prompts and effects", () => {
     expect(deps.addUserMessage).not.toHaveBeenCalled();
   });
 
+  it("surfaces a failed extension command while leaving it consumed", async () => {
+    const { deps } = depsFor({
+      awaitIntentOutcome: vi.fn(async (_sid, intentId) =>
+        authoritativeOutcome(intentId, "invokeCommand", "failed", {
+          error: "extension exploded",
+        }),
+      ),
+    });
+
+    const completion = await executeAction(
+      SID,
+      { kind: "send-prompt", text: "/extension", commandSource: "extension" },
+      deps,
+    );
+
+    expect(completion?.outcome.state).toBe("failed");
+    expect(deps.addToast).toHaveBeenCalledWith(SID, "extension exploded", "error");
+    expect(deps.addUserMessage).not.toHaveBeenCalled();
+  });
+
   it("does not replay an effect after delivery ambiguity and preserves editor custody", async () => {
     const { deps } = depsFor({
       dispatch: vi.fn(async (_sid, _intent, intentId) => ({

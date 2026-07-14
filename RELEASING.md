@@ -93,8 +93,10 @@ has already passed verification.
 ### Mandatory pre-release checks
 
 The automated suite (`typecheck`, `lint`, `test`, `test:render`, `test:e2e`) is
-run by `npm run release`. Two behavior contracts are NOT covered by that suite
-and MUST be verified manually before publishing:
+run by `npm run release`; its Electron lane includes the isolated, repository-pinned
+Pi 0.80.6 SDK-host compatibility journeys described in `docs/testing.md`. Two
+behavior contracts are NOT covered by that suite and MUST be verified manually
+before publishing:
 
 1. **Real-pi end-to-end (Kitty keyboard protocol)**: Shift+Enter inserts a
    newline (not a submit) in the unified editor; Enter submits; a multiline

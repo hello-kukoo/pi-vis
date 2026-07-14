@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { createReadStream } from "node:fs";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
+import { extractToolResult } from "@shared/pi-protocol/tool-result.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { SessionEntrySchema, SessionHeaderSchema } from "@shared/session-file/entries.js";
 
@@ -68,21 +69,9 @@ export function entriesToTranscript(
         const content = msg.content;
 
         if (role === "toolResult") {
-          // Extract result text from toolResult content array
-          let outputText = "";
-          if (typeof content === "string") {
-            outputText = content;
-          } else if (Array.isArray(content)) {
-            for (const part of content) {
-              if (
-                typeof part === "object" &&
-                part !== null &&
-                (part as Record<string, unknown>)["type"] === "text"
-              ) {
-                outputText += ((part as Record<string, unknown>)["text"] as string) ?? "";
-              }
-            }
-          }
+          // Keep persisted results identical to the live reducer, including
+          // newline-separated adjacent text parts and output fallback.
+          const result = extractToolResult(msg);
           // Find the matching tool_call block (created from the preceding assistant message)
           const toolCallId = msg.toolCallId;
           let matched = false;
@@ -93,14 +82,9 @@ export function entriesToTranscript(
                 b?.type === "tool_call" &&
                 (b.data as Record<string, unknown>)["toolCallId"] === toolCallId
               ) {
-                (b.data as Record<string, unknown>)["outputText"] = outputText;
-                if (msg.details && typeof msg.details === "object") {
-                  const details = msg.details as Record<string, unknown>;
-                  (b.data as Record<string, unknown>)["resultDetails"] = details;
-                  if (typeof details.diff === "string") {
-                    (b.data as Record<string, unknown>)["diff"] = details.diff;
-                  }
-                }
+                (b.data as Record<string, unknown>)["outputText"] = result.text;
+                (b.data as Record<string, unknown>)["resultDetails"] = result.details;
+                (b.data as Record<string, unknown>)["diff"] = result.diff;
                 (b.data as Record<string, unknown>)["isError"] = msg.isError ?? false;
                 (b.data as Record<string, unknown>)["isStreaming"] = false;
                 matched = true;
@@ -117,17 +101,9 @@ export function entriesToTranscript(
                 toolCallId: toolCallId ?? "",
                 toolName: msg.toolName ?? "",
                 input: undefined,
-                outputText,
-                resultDetails:
-                  msg.details && typeof msg.details === "object"
-                    ? (msg.details as Record<string, unknown>)
-                    : undefined,
-                diff:
-                  msg.details &&
-                  typeof msg.details === "object" &&
-                  typeof (msg.details as Record<string, unknown>).diff === "string"
-                    ? ((msg.details as Record<string, unknown>).diff as string)
-                    : undefined,
+                outputText: result.text,
+                resultDetails: result.details,
+                diff: result.diff,
                 isError: msg.isError ?? false,
                 isStreaming: false,
               },

@@ -1,5 +1,6 @@
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
+import { extractToolResult } from "@shared/pi-protocol/tool-result.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { assertNever } from "@shared/result.js";
 
@@ -191,28 +192,33 @@ function replaceUserBlockById(
   id: string,
   content: string,
   images: string[] | undefined,
-): Pick<TranscriptState, "archivedBlockChunks" | "blocks"> {
+): Pick<TranscriptState, "archivedBlockChunks" | "blocks"> & { replaced: boolean } {
+  const unchanged = {
+    archivedBlockChunks: state.archivedBlockChunks,
+    blocks: state.blocks,
+    replaced: false,
+  };
   const liveIndex = state.blocks.findIndex((block) => block.id === id);
   if (liveIndex >= 0) {
     const block = state.blocks[liveIndex];
-    if (block?.type !== "user") return state;
+    if (block?.type !== "user") return unchanged;
     const blocks = state.blocks.slice();
     blocks[liveIndex] = { ...block, data: { role: "user", content, images } };
-    return { archivedBlockChunks: state.archivedBlockChunks, blocks };
+    return { archivedBlockChunks: state.archivedBlockChunks, blocks, replaced: true };
   }
   for (let chunkIndex = state.archivedBlockChunks.length - 1; chunkIndex >= 0; chunkIndex -= 1) {
     const chunk = state.archivedBlockChunks[chunkIndex];
     const blockIndex = chunk?.findIndex((block) => block.id === id) ?? -1;
     if (!chunk || blockIndex < 0) continue;
     const block = chunk[blockIndex];
-    if (block?.type !== "user") return state;
+    if (block?.type !== "user") return unchanged;
     const nextChunk = chunk.slice();
     nextChunk[blockIndex] = { ...block, data: { role: "user", content, images } };
     const archivedBlockChunks = state.archivedBlockChunks.slice();
     archivedBlockChunks[chunkIndex] = nextChunk;
-    return { archivedBlockChunks, blocks: state.blocks };
+    return { archivedBlockChunks, blocks: state.blocks, replaced: true };
   }
-  return state;
+  return unchanged;
 }
 
 function transcriptHasBlockId(state: TranscriptState, id: string): boolean {
@@ -261,7 +267,13 @@ export function finalizeActiveBlocks(state: TranscriptState): TranscriptState {
 export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlock[] {
   return history
     .map((b): TypedTranscriptBlock | null => {
-      const d = b.data as Record<string, unknown>;
+      // History is persisted data and can be malformed by older extensions or
+      // interrupted writes. Treat non-record data as an empty record rather
+      // than allowing property access below to throw.
+      const d =
+        b.data && typeof b.data === "object" && !Array.isArray(b.data)
+          ? (b.data as Record<string, unknown>)
+          : {};
       if (b.type === "user") {
         return {
           id: b.id,
@@ -283,8 +295,10 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
         const segs = d.segments;
         let segments: AssistantSegment[];
         if (Array.isArray(segs)) {
-          segments = (segs as Array<Record<string, unknown>>)
-            .map((s): AssistantSegment | null => {
+          segments = segs
+            .map((segment): AssistantSegment | null => {
+              if (!segment || typeof segment !== "object" || Array.isArray(segment)) return null;
+              const s = segment as Record<string, unknown>;
               if (s["kind"] === "thinking") {
                 return { kind: "thinking", content: (s["content"] as string) ?? "" };
               }
@@ -390,28 +404,15 @@ export function seedFromHistory(
     archivedBlockChunks: blocks.length > 0 ? [blocks] : [],
     archivedBlockCount: blocks.length,
     blocks: [],
+    // A history seed is a complete presentation baseline, not an incremental
+    // merge with a potentially stale stream from the prior session view.
+    activeAssistantId: null,
+    activeToolCallIds: new Map(),
+    activeBashId: null,
     pendingRetryErrorBlockId: null,
+    pendingEchoes: [],
+    authoritativeUserEchoes: [],
   };
-}
-
-// tool_execution_end carries the final output in result.content[].text on the
-// real wire (updates with partialResult may never arrive at all)
-function extractResultText(result: unknown): string {
-  if (typeof result === "string") return result;
-  if (!result || typeof result !== "object") return "";
-  const r = result as Record<string, unknown>;
-  if (Array.isArray(r.content)) {
-    const parts: string[] = [];
-    for (const item of r.content) {
-      if (item && typeof item === "object") {
-        const c = item as Record<string, unknown>;
-        if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
-      }
-    }
-    if (parts.length > 0) return parts.join("\n");
-  }
-  if (typeof r.output === "string") return r.output;
-  return "";
 }
 
 /** Extract text and attachment data from Pi's authoritative user message. */
@@ -447,23 +448,6 @@ function extractUserMessage(
     content: textParts.join(""),
     images: images.length > 0 ? images : undefined,
   };
-}
-
-function extractResultDiff(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const r = result as Record<string, unknown>;
-  if (r.details && typeof r.details === "object") {
-    const d = r.details as Record<string, unknown>;
-    if (typeof d.diff === "string") return d.diff;
-  }
-  if (typeof r.diff === "string") return r.diff;
-  return undefined;
-}
-
-function extractResultDetails(result: unknown): Record<string, unknown> | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const details = (result as Record<string, unknown>)["details"];
-  return details && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
 }
 
 // ── Assistant segment helpers ───────────────────────────────────────────
@@ -508,6 +492,15 @@ function startSegment(
 ): AssistantSegment[] {
   if (contentIndex !== undefined && findSegmentByIndex(segments, contentIndex, kind) >= 0) {
     return segments;
+  }
+  if (contentIndex === undefined) {
+    const last = segments.at(-1);
+    // Providers that omit contentIndex can still replay an immediate start.
+    // Reuse only the still-empty tail segment; once content exists, a later
+    // same-kind start is a legitimate new ordered block.
+    if (last?.kind === kind && last.content === "" && last.contentIndex === undefined) {
+      return segments;
+    }
   }
   return [...segments, { kind, content: "", contentIndex }];
 }
@@ -733,6 +726,9 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
     case "message_start": {
       const role = event.message?.role;
       if (role === "assistant") {
+        // message_start may be replayed. The existing stream owns subsequent
+        // deltas, so creating another block here would orphan the first one.
+        if (activeAssistantId) return state;
         const blockId = newBlockId();
         const newBlock: TypedTranscriptBlock = {
           id: blockId,
@@ -776,17 +772,31 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
             echoed.content,
             echoed.images,
           );
-          return {
-            ...authoritativeState,
-            ...replaced,
-            // The existing optimistic bubble consumed this echo. Do not leave
-            // it claimable by a later submission acknowledgement.
-            authoritativeUserEchoes: state.authoritativeUserEchoes,
-            pendingEchoes: [
-              ...pendingEchoes.slice(0, pendingIndex),
-              ...pendingEchoes.slice(pendingIndex + 1),
-            ],
-          };
+          const nextPendingEchoes = [
+            ...pendingEchoes.slice(0, pendingIndex),
+            ...pendingEchoes.slice(pendingIndex + 1),
+          ];
+          const { replaced: didReplace, ...replacementState } = replaced;
+          if (didReplace) {
+            return {
+              ...authoritativeState,
+              ...replacementState,
+              // The existing optimistic bubble consumed this echo. Do not
+              // leave it claimable by a later submission acknowledgement.
+              authoritativeUserEchoes: state.authoritativeUserEchoes,
+              pendingEchoes: nextPendingEchoes,
+            };
+          }
+          // The optimistic block may have been removed while its queued
+          // intent was in flight. Retire the token, but preserve this real
+          // echo both on screen and in the authoritative acknowledgement
+          // ledger so later IPC cannot mistake it for unseen delivery.
+          return addUserBlock(
+            { ...authoritativeState, pendingEchoes: nextPendingEchoes },
+            echoed.content,
+            echoed.images,
+            false,
+          );
         }
         return addUserBlock(authoritativeState, echoed.content, echoed.images, false);
       }
@@ -1006,6 +1016,9 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
     }
 
     case "tool_execution_start": {
+      // A duplicate start for an in-flight call must keep the original block
+      // as the target for updates/end, rather than replacing its map entry.
+      if (activeToolCallIds.has(event.toolCallId)) return state;
       const blockId = newBlockId();
       const newBlock: TypedTranscriptBlock = {
         id: blockId,
@@ -1031,9 +1044,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
     case "tool_execution_update": {
       const blockId = activeToolCallIds.get(event.toolCallId);
       if (!blockId) return state;
-      const partialText = extractResultText(event.partialResult);
-      const partialDetails = extractResultDetails(event.partialResult);
-      const partialDiff = extractResultDiff(event.partialResult);
+      const partial = extractToolResult(event.partialResult);
       const replacesOutput =
         event.partialResult !== null &&
         typeof event.partialResult === "object" &&
@@ -1046,14 +1057,14 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
             ...b,
             data: {
               ...b.data,
-              outputText: partialText
+              outputText: partial.text
                 ? replacesOutput
-                  ? partialText
-                  : b.data.outputText + partialText
+                  ? partial.text
+                  : b.data.outputText + partial.text
                 : b.data.outputText,
-              diff: b.data.diff ?? partialDiff,
-              resultDetails: partialDetails
-                ? { ...b.data.resultDetails, ...partialDetails }
+              diff: b.data.diff ?? partial.diff,
+              resultDetails: partial.details
+                ? { ...b.data.resultDetails, ...partial.details }
                 : b.data.resultDetails,
             },
           };
@@ -1066,9 +1077,7 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       if (!blockId) return state;
       const newActiveIds = new Map(activeToolCallIds);
       newActiveIds.delete(event.toolCallId);
-      const resultText = extractResultText(event.result);
-      const resultDiff = extractResultDiff(event.result);
-      const resultDetails = extractResultDetails(event.result);
+      const result = extractToolResult(event.result);
       return {
         ...state,
         blocks: updateBlock(blockId, (b) => {
@@ -1079,10 +1088,10 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
               ...b.data,
               isStreaming: false,
               isError: event.isError,
-              outputText: resultText || b.data.outputText,
-              diff: resultDiff ?? b.data.diff,
-              resultDetails: resultDetails
-                ? { ...b.data.resultDetails, ...resultDetails }
+              outputText: result.text || b.data.outputText,
+              diff: result.diff ?? b.data.diff,
+              resultDetails: result.details
+                ? { ...b.data.resultDetails, ...result.details }
                 : b.data.resultDetails,
             },
           };
@@ -1115,12 +1124,21 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       const succeeded =
         event.aborted !== true && event.willRetry !== true && event.errorMessage === undefined;
       if (!succeeded) return { ...state, blocks: [...blocks, newCompactionBlock] };
+
+      // Compaction establishes an archive boundary. Never archive a live
+      // streaming block: terminal events can be absent around compaction, so
+      // defensively finalize every active presentation block first.
+      const finalized = finalizeActiveBlocks(state);
+      const finalizedBlocks = finalized.blocks;
       return {
-        ...state,
+        ...finalized,
         archivedBlockChunks:
-          blocks.length > 0 ? [...state.archivedBlockChunks, blocks] : state.archivedBlockChunks,
-        archivedBlockCount: state.archivedBlockCount + blocks.length,
+          finalizedBlocks.length > 0
+            ? [...state.archivedBlockChunks, finalizedBlocks]
+            : state.archivedBlockChunks,
+        archivedBlockCount: state.archivedBlockCount + finalizedBlocks.length,
         blocks: [newCompactionBlock],
+        pendingRetryErrorBlockId: null,
       };
     }
 
@@ -1250,10 +1268,20 @@ export function clearPendingUserEcho(state: TranscriptState, content: string): T
 // User sends a bash command
 export function addBashBlock(state: TranscriptState, command: string): TranscriptState {
   const blockId = newBlockId();
+  // RPC bash execution has no event stream to guarantee an end before the
+  // next command begins. Close the old presentation block before replacing
+  // its active id so it can never be orphaned as permanently streaming.
+  const blocks = state.activeBashId
+    ? state.blocks.map((block) =>
+        block.id === state.activeBashId && block.type === "bash" && block.data.isStreaming
+          ? { ...block, data: { ...block.data, isStreaming: false } }
+          : block,
+      )
+    : state.blocks;
   return {
     ...state,
     blocks: [
-      ...state.blocks,
+      ...blocks,
       { id: blockId, type: "bash", data: { command, outputText: "", isStreaming: true } },
     ],
     activeBashId: blockId,

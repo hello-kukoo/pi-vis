@@ -152,6 +152,36 @@ describe("setupCommandBridge — wiring", () => {
     expect(runtime.setBeforeSessionInvalidate).toHaveBeenCalledTimes(1);
   });
 
+  it("publishes extension runner errors on the authoritative transcript plane", async () => {
+    const sendPresentation = vi.fn();
+    const { session, bindExtensions, send } = setup(undefined, { sendPresentation });
+    await bindExtensions(session);
+    const bindings = session.bindExtensions.mock.calls[0][0];
+
+    bindings.onError({
+      extensionPath: "command:e2e-throw",
+      event: "command",
+      error: "e2e lifecycle command error",
+    });
+
+    expect(sendPresentation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plane: "transcript",
+        payload: expect.objectContaining({
+          entries: [
+            expect.objectContaining({
+              type: "extension_error",
+              extensionPath: "command:e2e-throw",
+              event: "command",
+              error: "e2e lifecycle command error",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "event" }));
+  });
+
   it("retires dialogs from the old extension generation at invalidation", () => {
     const cancelDialogs = vi.fn();
     const { runtime } = setup(undefined, { cancelDialogs });

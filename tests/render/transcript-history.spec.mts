@@ -293,9 +293,15 @@ test("queued steering has exactly one visible projection", async ({ page }) => {
       activeSessionId: string;
       applyEvent: (sessionId: string, event: Record<string, unknown>) => void;
     };
-    const state = (
-      window as unknown as { __pivisStore: { getState: () => PreviewState } }
-    ).__pivisStore.getState();
+    const target = window as unknown as {
+      __pivisPreview: { clearQueuedSteering: () => void };
+      __pivisStore: { getState: () => PreviewState };
+    };
+    // Real Pi removes the public queue slot before its delivered user event.
+    // Keep the preview authority in that same state so a later read-only query
+    // cannot legitimately replay the stale queued projection.
+    target.__pivisPreview.clearQueuedSteering();
+    const state = target.__pivisStore.getState();
     state.applyEvent(state.activeSessionId, {
       type: "message_start",
       message: { role: "user", content: "rewritten exactly once" },

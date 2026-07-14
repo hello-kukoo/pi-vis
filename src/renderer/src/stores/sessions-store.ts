@@ -818,6 +818,15 @@ function queuedMessagesFromSnapshot(
   return queuedMessages;
 }
 
+function extensionErrorMessage(error: unknown): string {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return "An extension failed while handling this session.";
+}
+
 function appendQueueRestorations(
   current: SessionViewState,
   restorations: ReadonlyArray<{
@@ -901,6 +910,24 @@ function applyAuthoritySemanticProjection(
     },
     ownerChanged ? undefined : current.sessionName,
   );
+  // An editor publication changes component state only when it advances the
+  // authoritative editor baseline. Replaying the same revision for unrelated
+  // semantic work must not reset a controlled textarea while a native key
+  // event is in flight. While local patches own custody, suppress replacement;
+  // acceptance already leaves the optimistic value in place, while rejection
+  // is represented explicitly by snapshot.editor conflict candidates.
+  const editorRevisionChanged = ownerChanged || snapshot.editor.revision !== current.editorRevision;
+  const editorInjection =
+    snapshot.editor.conflictText !== undefined || current.editorPatchPending > 0
+      ? undefined
+      : editorRevisionChanged
+        ? {
+            text: snapshot.editor.text,
+            nonce: ++editorInjectionNonce,
+            revision: snapshot.editor.revision,
+          }
+        : current.editorInjection;
+
   // This is deliberately one object construction: frame records and every
   // compatibility projection of its terminal semantic snapshot commit together.
   return {
@@ -915,14 +942,7 @@ function applyAuthoritySemanticProjection(
     editorRevision: snapshot.editor.revision,
     editorAttachments: snapshot.editor.attachments,
     editorConflict: editorConflictFromCandidates(snapshot.editor),
-    editorInjection:
-      snapshot.editor.conflictText === undefined
-        ? {
-            text: snapshot.editor.text,
-            nonce: ++editorInjectionNonce,
-            revision: snapshot.editor.revision,
-          }
-        : undefined,
+    editorInjection,
     runningSince:
       !priorStreaming && snapshot.sdk.isStreaming
         ? Date.now()
@@ -1653,12 +1673,25 @@ const buildSessionsStore = (
           );
           anyPromoted = true;
         }
+        const toasts =
+          event.type === "extension_error"
+            ? [
+                ...current.toasts,
+                {
+                  id: `toast-${++toastCounter}`,
+                  message: extensionErrorMessage(event.error),
+                  type: "error",
+                  createdAt: Date.now(),
+                },
+              ]
+            : current.toasts;
         current = {
           ...current,
           transcript,
           queuedMessages,
           unreadStatus,
           turnErrored,
+          toasts,
 
           isNewPending: promoted ? false : current.isNewPending,
           editorInjection: promoted ? undefined : current.editorInjection,
@@ -1717,6 +1750,17 @@ const buildSessionsStore = (
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
       if (!s) return {};
+      // ESC restoration can win the race with a queued submission's terminal
+      // outcome. Once review custody names that intent, a late Composer
+      // acknowledgement must not recreate its optimistic user bubble beside
+      // the review card (or imply it was delivered).
+      const optimisticIntentId = opts?.intentId;
+      const alreadyRestored =
+        optimisticIntentId !== undefined &&
+        s.queueRestorations?.some((restoration) =>
+          restoration.clearedIntentIds?.includes(optimisticIntentId),
+        );
+      if (alreadyRestored) return {};
       const arrivedEchoIndex =
         opts?.registerEcho === true &&
         opts.afterUserMessageSequence !== undefined &&

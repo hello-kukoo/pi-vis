@@ -1,5 +1,4 @@
 import type { SessionId } from "@shared/ids.js";
-import type { AuthorityCursor } from "@shared/pi-protocol/runtime-state.js";
 import type { TranscriptStyle } from "@shared/settings.js";
 import type React from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -988,24 +987,6 @@ const CustomMessageBlock = memo(function CustomMessageBlock({
 
 type RenderedEntry = { rendered: boolean; ansi?: string; error?: boolean };
 
-function cursorIsCurrent(
-  sessionId: SessionId,
-  runtime: { hostInstanceId: string; sessionEpoch: number },
-  cursor: AuthorityCursor | undefined,
-): boolean {
-  const session = useSessionsStore.getState().sessions.get(sessionId);
-  if (!sessionMatchesRuntime(session, runtime)) return false;
-  if (!cursor) return true;
-  const semantic = session?.authorityProjection?.semantic;
-  return (
-    semantic?.state === "following" &&
-    semantic.cursor.hostInstanceId === cursor.hostInstanceId &&
-    semantic.cursor.sessionEpoch === cursor.sessionEpoch &&
-    semantic.cursor.transportSequence === cursor.transportSequence &&
-    semantic.cursor.snapshotSequence === cursor.snapshotSequence
-  );
-}
-
 const CustomEntryBlock = memo(function CustomEntryBlock({
   sessionId,
   data,
@@ -1015,20 +996,21 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
   data: CustomEntryBlockData;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const runtime = useSessionsStore((state) => {
-    const snapshot = authoritySnapshotFor(state.sessions.get(sessionId));
-    return snapshot ? snapshot.owner : undefined;
-  });
-  const hostInstanceId = runtime?.hostInstanceId;
-  const sessionEpoch = runtime?.sessionEpoch ?? 0;
-  const observedCursor = useSessionsStore((state) => {
-    const semantic = state.sessions.get(sessionId)?.authorityProjection?.semantic;
-    return semantic?.state === "following" &&
-      semantic.cursor.hostInstanceId === hostInstanceId &&
-      semantic.cursor.sessionEpoch === sessionEpoch
-      ? semantic.cursor
-      : undefined;
-  });
+  // Select primitive owner fields rather than snapshot.owner itself: every
+  // authority frame carries a fresh object, and a read-only render_entry query
+  // can itself publish a frame. Depending on that object/cursor creates a
+  // query → frame → query feedback loop that eventually fences the host.
+  const hostInstanceId = useSessionsStore(
+    (state) => authoritySnapshotFor(state.sessions.get(sessionId))?.owner.hostInstanceId,
+  );
+  const sessionEpoch =
+    useSessionsStore(
+      (state) => authoritySnapshotFor(state.sessions.get(sessionId))?.owner.sessionEpoch,
+    ) ?? 0;
+  const runtime = useMemo(
+    () => (hostInstanceId ? { hostInstanceId, sessionEpoch } : undefined),
+    [hostInstanceId, sessionEpoch],
+  );
   const renderedEpochRef = useRef(sessionEpoch);
   const hostRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLPreElement>(null);
@@ -1073,7 +1055,15 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
       setRendered(undefined);
       return;
     }
-    const observation = { owner: runtime, ...(observedCursor ? { cursor: observedCursor } : {}) };
+    const session = useSessionsStore.getState().sessions.get(sessionId);
+    const semantic = session?.authorityProjection?.semantic;
+    const cursor =
+      semantic?.state === "following" &&
+      semantic.cursor.hostInstanceId === runtime.hostInstanceId &&
+      semantic.cursor.sessionEpoch === runtime.sessionEpoch
+        ? semantic.cursor
+        : undefined;
+    const observation = { owner: runtime, ...(cursor ? { cursor } : {}) };
     void querySession(
       sessionId,
       {
@@ -1090,7 +1080,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
           renderedEpochRef.current !== sessionEpoch ||
           result.owner.hostInstanceId !== runtime.hostInstanceId ||
           result.owner.sessionEpoch !== runtime.sessionEpoch ||
-          !cursorIsCurrent(sessionId, runtime, observedCursor)
+          !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
         )
           return;
         const rendered = result.response.success
@@ -1102,7 +1092,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
         if (
           cancelled ||
           renderedEpochRef.current !== sessionEpoch ||
-          !cursorIsCurrent(sessionId, runtime, observedCursor)
+          !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
         )
           return;
         // Hide entries without a renderer rather than showing stale extension data.
@@ -1111,7 +1101,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, data.entryId, cols, expanded, sessionEpoch, runtime, observedCursor]);
+  }, [sessionId, data.entryId, cols, expanded, sessionEpoch, runtime]);
 
   const visible = rendered?.rendered === true;
   return (

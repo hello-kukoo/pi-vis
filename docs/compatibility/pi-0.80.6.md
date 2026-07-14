@@ -1,6 +1,6 @@
 # Pi 0.80.3 → 0.80.6 compatibility audit
 
-Audited against upstream `v0.80.3` through `v0.80.6` on 2026-07-09. Pi-Vis requires the installed pi public SDK surfaces used by the SDK host; an incompatible runtime fails activation rather than switching to another session transport.
+Audited against upstream `v0.80.3` through `v0.80.6` on 2026-07-09. Production Pi-Vis requires the user-selected Pi public SDK surfaces used by the SDK host; an incompatible runtime fails activation rather than switching to another session transport. Tests independently pin `@earendil-works/pi-coding-agent` to exactly `0.80.6` as a dev dependency and never substitute that fixture for the user's production runtime.
 
 ## Integration-significant handling
 
@@ -8,6 +8,7 @@ Audited against upstream `v0.80.3` through `v0.80.6` on 2026-07-09. Pi-Vis requi
 |---|---|
 | `agent_settled` | Preserved as a transcript event. Runtime liveness comes from direct `AgentSession` snapshots, not settlement/event inference. |
 | `entry_appended` / `registerEntryRenderer()` | The SDK host renders the public component to ANSI; custom entries remain ordered transcript blocks. |
+| Extension command errors | `bindExtensions().onError` enters the owner-scoped transcript presentation plane and becomes one session-local error notification; throwing extensions cannot disappear behind Pi's internal command catch. |
 | `showCacheMissNotices` | The host derives and replays non-persisted notices against the active runtime/history. |
 | Optional session name metadata | `session_info_changed.name` remains optional and can clear renderer state. |
 | `ThinkingLevel.max` | Typed in command, event, settings, and controls; model capability maps remain authoritative. |
@@ -18,6 +19,10 @@ Audited against upstream `v0.80.3` through `v0.80.6` on 2026-07-09. Pi-Vis requi
 
 Pi 0.80.6 supplies the public getters/methods the host snapshots directly: streaming/idle/compaction/retry/bash state, model/session metadata, pending queues, prompt preflight, queue clearing, navigation, and abort primitives. Pi-Vis validates those capabilities at host initialization. Snapshot identity, epoch, sequence, and leases protect renderer state across reload/rebind; submission dispositions, custody, editor revisions, and acknowledged queue restoration are Pi-Vis protocol features around those public APIs.
 
+Pi 0.80.6 updates `isCompacting` on opposite sides of its synchronous lifecycle callbacks: automatic compaction sets the getter immediately after `compaction_start`, and compaction clears it in `finally` immediately after `compaction_end`. The host therefore keeps a conservative callback-settlement barrier and samples the public getter in a microtask. For an explicit compact command, custody remains fenced until both the terminal event/getter reconciliation and the public `compact()` promise settle. This avoids both false `missing_compaction_start` anomalies and permanently stranded post-compaction submissions without inferring liveness from transcript events.
+
 ## Regression gates
 
-Run `npm run typecheck && npm test`, or `npm run test:full`. Targeted authority coverage is in `resources/pi-session-host/state-authority.test.mjs`, `src/main/sessions/session-registry.test.ts`, and `src/renderer/src/stores/sessions-store.test.ts`.
+`tests/pinned-pi-runtime.test.mts` gates the manifest pin, installed package version, and executable layout. `tests/e2e/real-sdk-host-smoke.spec.mts` and `tests/e2e/real-sdk-transcript-lifecycle.spec.mts` run in the normal Electron suite against that executable with only a loopback model provider. They cover real extension, prompt, streaming, tool, retry, interruption, compaction, persistence, and reload paths.
+
+Run `npm run test:e2e:real-pi` for the focused compatibility gate or `npm run test:full` for the release gate. Targeted authority/reducer coverage is in `resources/pi-session-host/state-authority.test.mjs`, `src/main/sessions/session-registry.test.ts`, `src/renderer/src/stores/sessions-store.test.ts`, and `npm run test:transcript`.

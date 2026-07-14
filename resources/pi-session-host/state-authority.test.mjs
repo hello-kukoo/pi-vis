@@ -382,6 +382,98 @@ describe("state authority", () => {
     promptDone.resolve();
   });
 
+  it("claims a queue slot that becomes visible only after preflight returns", async () => {
+    const promptDone = deferred();
+    let steering = [];
+    const sendFrame = vi.fn();
+    const { authority } = setup(
+      {
+        isStreaming: true,
+        getSteeringMessages: vi.fn(() => steering),
+        prompt: vi.fn((_text, options) => {
+          options.preflightResult(true);
+          return promptDone.promise;
+        }),
+        clearQueue: vi.fn(() => {
+          const cleared = [...steering];
+          steering = [];
+          // Real Pi can synchronously publish its empty queue from clearQueue.
+          authority.snapshot();
+          return { steering: cleared, followUp: [] };
+        }),
+      },
+      { sendFrame },
+    );
+
+    await authority.submit(
+      makeRequest("intent-delayed-queue", { text: "original", requestedMode: "steer" }),
+    );
+    expect(authority.snapshot().steeringIntentIds).toEqual([]);
+
+    steering = ["transformed delayed queue"];
+    expect(authority.snapshot().steeringIntentIds).toEqual(["intent-delayed-queue"]);
+    await authority.requestEscape("esc-delayed-queue");
+
+    const restoration = sendFrame.mock.calls
+      .flatMap(([frame]) => frame.records)
+      .find((record) => record.type === "queue_restoration");
+    expect(restoration).toMatchObject({
+      steering: ["transformed delayed queue"],
+      clearedIntentIds: ["intent-delayed-queue"],
+    });
+    promptDone.resolve();
+  });
+
+  it("retires a handled extension command claim before a later prompt queues", async () => {
+    const normalDone = deferred();
+    let steering = [];
+    const { authority, sendRecord } = setup({
+      isStreaming: true,
+      getSteeringMessages: vi.fn(() => steering),
+      extensionRunner: {
+        getCommand: vi.fn((name) => (name === "e2e-notify" ? { handler: vi.fn() } : undefined)),
+      },
+      prompt: vi.fn((text, options) => {
+        options.preflightResult(true);
+        if (text === "/e2e-notify") return Promise.resolve();
+        steering = ["transformed ordinary queue"];
+        return normalDone.promise;
+      }),
+    });
+
+    await authority.submit(
+      makeRequest("extension-command", {
+        text: "/e2e-notify",
+        requestedMode: "steer",
+      }),
+    );
+    await flush();
+    expect(authority.snapshot().steeringIntentIds).toEqual([]);
+
+    await authority.submit(
+      makeRequest("ordinary-prompt", {
+        text: "ordinary queue",
+        requestedMode: "steer",
+      }),
+    );
+    expect(authority.snapshot().steeringIntentIds).toEqual(["ordinary-prompt"]);
+
+    steering = [];
+    authority.observeEvent({
+      type: "message_start",
+      message: { role: "user", content: "transformed ordinary delivery" },
+    });
+    expect(sendRecord).toHaveBeenLastCalledWith({
+      type: "event",
+      event: {
+        type: "message_start",
+        message: { role: "user", content: "transformed ordinary delivery" },
+        queueIntentId: "ordinary-prompt",
+      },
+    });
+    normalDone.resolve();
+  });
+
   it("does not assign a GUI intent when preflight adds multiple ambiguous slots", async () => {
     const promptDone = deferred();
     let steering = [];
@@ -547,6 +639,75 @@ describe("state authority", () => {
 
     expect(calls).toEqual(["first", "second", "later"]);
     expect(authority.snapshot().hostFacts.custodyCount).toBe(2);
+  });
+
+  it("keeps manual compaction fenced until Pi clears its callback-time getter and compact promise", async () => {
+    const { authority, session } = setup();
+    const compactId = authority.beginCompactionInvocation("manual-compact");
+    session.isCompacting = true;
+    authority.observeEvent({ type: "compaction_start" });
+    await expect(authority.submit(makeRequest("held-during-manual"))).resolves.toMatchObject({
+      disposition: "in_custody",
+    });
+
+    // Pi 0.80.6 emits the terminal event while isCompacting is still true.
+    authority.observeEvent({ type: "compaction_end" });
+    session.isCompacting = false;
+    await flush();
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(authority.snapshot()).toMatchObject({
+      hostFacts: { actualCompaction: true, custodyCount: 1 },
+      compaction: { phase: "terminal_success", barrierOpen: true },
+    });
+
+    authority.settleCompactionInvocation(compactId);
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(1));
+    expect(session.prompt).toHaveBeenCalledWith("held-during-manual", expect.any(Object));
+    expect(authority.snapshot()).toMatchObject({
+      hostFacts: { actualCompaction: false, custodyCount: 0 },
+      compaction: { phase: "terminal_success", barrierOpen: false },
+    });
+  });
+
+  it("defers automatic-start getter disagreement until callback settlement", async () => {
+    const { authority } = setup({ isCompacting: false });
+    authority.observeEvent({ type: "compaction_start" });
+
+    expect(authority.snapshot()).toMatchObject({
+      hostFacts: { actualCompaction: true },
+      compaction: { phase: "active", barrierOpen: true },
+    });
+    expect(authority.snapshot().hostFacts).not.toHaveProperty("compactionAnomaly");
+    expect(authority.snapshot().recentObservedOperations).not.toContainEqual(
+      expect.objectContaining({ kind: "compaction", state: "unknown" }),
+    );
+
+    // If the getter remains false after Pi's callback stack unwinds, the
+    // disagreement is real and the conservative unknown barrier must remain.
+    await flush();
+    expect(authority.snapshot()).toMatchObject({
+      hostFacts: { compactionAnomaly: "getter_event_disagreement" },
+      compaction: {
+        phase: "active",
+        anomaly: "getter_event_disagreement",
+        barrierOpen: true,
+      },
+    });
+  });
+
+  it("reconciles automatic compaction after Pi clears its callback-time getter", async () => {
+    const { authority, session } = setup();
+    authority.observeEvent({ type: "compaction_start" });
+    session.isCompacting = true;
+    await authority.submit(makeRequest("held-during-auto"));
+
+    authority.observeEvent({ type: "compaction_end" });
+    expect(session.prompt).not.toHaveBeenCalled();
+    session.isCompacting = false;
+    await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(1));
+
+    expect(session.prompt).toHaveBeenCalledWith("held-during-auto", expect.any(Object));
+    expect(authority.snapshot().hostFacts.actualCompaction).toBe(false);
   });
 
   it("keeps timed-out custody pending and completes it once without replay", async () => {
@@ -916,6 +1077,7 @@ describe("state authority", () => {
       target: "compaction",
     });
     authority.observeEvent({ type: "compaction_end" });
+    await flush();
 
     session.isRetrying = true;
     await expect(authority.requestEscape("retry")).resolves.toMatchObject({ target: "retry" });
@@ -1464,6 +1626,7 @@ describe("state authority", () => {
   it("keeps custody fenced and reports an anomaly when getter and event disagree", async () => {
     const { authority, session } = setup({ isCompacting: false });
     authority.observeEvent({ type: "compaction_start" });
+    await flush();
 
     expect(authority.snapshot()).toMatchObject({
       compaction: { phase: "active", barrierOpen: true, anomaly: "getter_event_disagreement" },

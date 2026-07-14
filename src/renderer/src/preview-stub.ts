@@ -126,6 +126,14 @@ const previewHooks = {
     runtime.steeringIntentIds = [intentId];
     emitRuntimeState(activeId, true);
   },
+  /** Clear the authority-owned steering slot before publishing its delivery. */
+  clearQueuedSteering(): void {
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    const runtime = runtimeFor(activeId);
+    runtime.steering = [];
+    runtime.steeringIntentIds = [];
+    emitRuntimeState(activeId, true);
+  },
   /** Replace the fake runtime so render tests can exercise `/reload` semantics. */
   replaceCustomEntryRuntime(available: boolean, version = customEntryRendererVersion): void {
     customEntryRendererAvailable = available;

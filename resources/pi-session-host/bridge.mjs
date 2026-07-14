@@ -339,15 +339,15 @@ export function setupCommandBridge({
       // transcript) on an extension's say-so. Present to satisfy bindExtensions.
       shutdownHandler: () => {},
       onError: (error) => {
-        // ExtensionError = { extensionPath, event, error, stack? }
-        send({
-          type: "event",
-          event: {
-            type: "extension_error",
-            extensionPath: error?.extensionPath,
-            event: error?.event,
-            error: error?.error,
-          },
+        // ExtensionError is not an AgentSession event, so bindExtensions must
+        // inject it into the same authoritative transcript presentation plane.
+        // A raw legacy host message is ignored once frame transport is active
+        // and would make throwing extensions silently disappear in the GUI.
+        authority.observeEvent({
+          type: "extension_error",
+          extensionPath: error?.extensionPath,
+          event: error?.event,
+          error: error?.error,
         });
       },
     });
