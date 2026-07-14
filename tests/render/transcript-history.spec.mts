@@ -196,7 +196,6 @@ test("terminal archived activity stays active until visible live output", async 
       activeSessionId: string;
       seedHistory: (sessionId: string, history: Array<Record<string, unknown>>) => void;
       applyEvent: (sessionId: string, event: Record<string, unknown>) => void;
-      applyRuntimeState: (sessionId: string, state: Record<string, unknown>) => void;
     };
     const state = (
       window as unknown as { __pivisStore: { getState: () => PreviewState } }
@@ -212,42 +211,9 @@ test("terminal archived activity stays active until visible live output", async 
       type: "message_start",
       message: { role: "assistant" },
     });
-    const snapshot = {
-      hostInstanceId: "render-host",
-      sessionEpoch: 1,
-      snapshotSequence: 1,
-      capturedAt: Date.now(),
-      isStreaming: true,
-      isIdle: false,
-      isCompacting: false,
-      isRetrying: false,
-      retryAttempt: 0,
-      isBashRunning: false,
-      model: null,
-      thinkingLevel: "off",
-      sessionId: "render-session",
-      pendingMessageCount: 0,
-      steering: [],
-      followUp: [],
-      steeringIntentIds: [],
-      followUpIntentIds: [],
-      hostFacts: {
-        submitting: false,
-        actualCompaction: false,
-        navigation: false,
-        pendingDialogs: 0,
-        custodyCount: 0,
-      },
-      catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
-      editor: { revision: 0, text: "", attachments: [] },
-    };
-    state.applyRuntimeState(state.activeSessionId, {
-      availability: "available",
-      hostInstanceId: snapshot.hostInstanceId,
-      sessionEpoch: snapshot.sessionEpoch,
-      receivedAt: Date.now(),
-      snapshot,
-    });
+    (
+      window as unknown as { __pivisPreview: { startStreaming: () => void } }
+    ).__pivisPreview.startStreaming();
   });
 
   const boundarySummary = page.locator(".compact-transcript-group__summary", {
@@ -280,49 +246,11 @@ test("queued steering has exactly one visible projection", async ({ page }) => {
   await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
 
   await page.evaluate(() => {
-    type PreviewState = {
-      activeSessionId: string;
-      applyRuntimeState: (sessionId: string, state: Record<string, unknown>) => void;
-    };
-    const state = (
-      window as unknown as { __pivisStore: { getState: () => PreviewState } }
-    ).__pivisStore.getState();
-    const snapshot = {
-      hostInstanceId: "render-host",
-      sessionEpoch: 1,
-      snapshotSequence: 1,
-      capturedAt: Date.now(),
-      isStreaming: true,
-      isIdle: false,
-      isCompacting: false,
-      isRetrying: false,
-      retryAttempt: 0,
-      isBashRunning: false,
-      model: null,
-      thinkingLevel: "off",
-      sessionId: "render-session",
-      pendingMessageCount: 1,
-      steering: ["extension prefix exactly once"],
-      followUp: [],
-      steeringIntentIds: ["render-intent"],
-      followUpIntentIds: [],
-      hostFacts: {
-        submitting: false,
-        actualCompaction: false,
-        navigation: false,
-        pendingDialogs: 0,
-        custodyCount: 0,
-      },
-      catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
-      editor: { revision: 0, text: "", attachments: [] },
-    };
-    state.applyRuntimeState(state.activeSessionId, {
-      availability: "available",
-      hostInstanceId: snapshot["hostInstanceId"],
-      sessionEpoch: snapshot["sessionEpoch"],
-      receivedAt: Date.now(),
-      snapshot,
-    });
+    (
+      window as unknown as {
+        __pivisPreview: { setQueuedSteering: (text: string, intentId: string) => void };
+      }
+    ).__pivisPreview.setQueuedSteering("extension prefix exactly once", "render-intent");
   });
 
   const queuedProjection = page.locator(".queued-bubble__content", {

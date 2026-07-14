@@ -20,6 +20,7 @@ import type { SearchId, SearchTargetId, SessionSearchResult } from "@shared/sess
  * agent response for prompts so transcript/composer/status behavior can be
  * exercised in a plain browser via `npm run dev:renderer`.
  */
+import { useOverlayStore } from "./stores/overlay-store.js";
 import { useSessionsStore } from "./stores/sessions-store.js";
 
 const DEMO_SESSION_ID = "demo-session-1" as SessionId;
@@ -45,6 +46,10 @@ type PreviewRuntime = {
   publicationSequence: number;
   journalSequence: number;
   rendererGeneration?: number;
+  steering: string[];
+  followUp: string[];
+  steeringIntentIds: Array<string | null>;
+  followUpIntentIds: Array<string | null>;
   recentOutcomes: IntentOutcome[];
   operationJournal: OperationJournalRecord[];
   intentPayloads: Map<string, string>;
@@ -64,6 +69,10 @@ const previewHooks = {
   abortCalls: 0,
   /** Explicit search opens; preview selection/context never increments this. */
   searchOpenCalls: 0,
+  /** Current ESC claim count for render-test synchronization. */
+  escapeClaimCount(): number {
+    return useOverlayStore.getState().count;
+  },
   /** Log of every panel input string sent to `session.panelInput`. */
   panelInputLog: [] as string[],
   /** Grid reports from panel sizing, used by overflow convergence tests. */
@@ -113,6 +122,14 @@ const previewHooks = {
     emit("session.events", { sessionId: activeId, events: [{ type: "agent_end" }] });
     emitRuntimeState(activeId, false);
   },
+  /** Install an authority-owned queued steering item for projection tests. */
+  setQueuedSteering(text: string, intentId: string): void {
+    const activeId = useSessionsStore.getState().activeSessionId ?? DEMO_SESSION_ID;
+    const runtime = runtimeFor(activeId);
+    runtime.steering = [text];
+    runtime.steeringIntentIds = [intentId];
+    emitRuntimeState(activeId, true);
+  },
   /** Replace the fake runtime so render tests can exercise `/reload` semantics. */
   replaceCustomEntryRuntime(available: boolean, version = customEntryRendererVersion): void {
     customEntryRendererAvailable = available;
@@ -130,6 +147,9 @@ const previewHooks = {
     useSessionsStore.getState().setSessionStatus(activeId, "starting");
     emitRuntimeState(activeId, runtime.isStreaming);
     useSessionsStore.getState().setSessionStatus(activeId, "ready");
+    useSessionsStore
+      .getState()
+      .applyAuthorityAttach(activeId, authorityAttach(activeId, runtime.rendererGeneration ?? 0));
   },
 };
 // Attach to window for render-test access (guarded for type safety).
@@ -154,6 +174,10 @@ function runtimeFor(sessionId: SessionId): PreviewRuntime {
       transportSequence: 1,
       publicationSequence: 0,
       journalSequence: 0,
+      steering: [],
+      followUp: [],
+      steeringIntentIds: [],
+      followUpIntentIds: [],
       recentOutcomes: [],
       operationJournal: [],
       intentPayloads: new Map(),
@@ -178,7 +202,12 @@ function semanticSnapshot(sessionId: SessionId): SemanticSnapshot {
       isBashRunning: false,
     },
     activity: {},
-    queues: { steering: [], followUp: [], steeringIntentIds: [], followUpIntentIds: [] },
+    queues: {
+      steering: [...runtime.steering],
+      followUp: [...runtime.followUp],
+      steeringIntentIds: [...runtime.steeringIntentIds],
+      followUpIntentIds: [...runtime.followUpIntentIds],
+    },
     custody: [],
     editor: { revision: 0, text: "", attachments: [] },
     activeIntents: [],
@@ -191,6 +220,26 @@ function semanticSnapshot(sessionId: SessionId): SemanticSnapshot {
     thinkingLevel: currentThinkingLevel,
     catalog: { notifications: [], statuses: {}, widgets: {}, capabilityDiagnostics: [] },
   };
+}
+
+function publishSemanticState(sessionId: SessionId): void {
+  const runtime = runtimeFor(sessionId);
+  runtime.transportSequence++;
+  const snapshot = semanticSnapshot(sessionId);
+  emit("session.publication", {
+    sessionId,
+    rendererGeneration: runtime.rendererGeneration ?? 0,
+    publicationSequence: ++runtime.publicationSequence,
+    plane: "semantic",
+    owner: snapshot.owner,
+    payload: {
+      owner: snapshot.owner,
+      transportSequence: runtime.transportSequence,
+      frameId: `preview-frame-${runtime.transportSequence}`,
+      records: [],
+      terminalSnapshot: snapshot,
+    },
+  } satisfies RendererPublication);
 }
 
 function publishIntentOutcome(sessionId: SessionId, outcome: IntentOutcome): void {
@@ -231,6 +280,7 @@ function publishIntentOutcome(sessionId: SessionId, outcome: IntentOutcome): voi
 // against a real host (which clears scrollback every resize).
 type PanelFrame = string | ((rows: number) => string);
 const panelFrames = new Map<number, { sessionId: unknown; frame: PanelFrame }>();
+const panelRepaintRevisions = new Map<number, number>();
 function registerPanelFrame(sessionId: unknown, panelId: number, frame: PanelFrame): void {
   panelFrames.set(panelId, { sessionId, frame });
 }
@@ -291,6 +341,7 @@ function emitRuntimeState(sessionId: SessionId, isStreaming: boolean): void {
   // well as emitting so first-render command surfaces have an identity.
   useSessionsStore.getState().applyRuntimeState(sessionId, state);
   emit("session.runtimeState", { sessionId, state });
+  publishSemanticState(sessionId);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1389,7 +1440,8 @@ const stub = {
         };
         previewHooks.panelResizeLog.push({ panelId, cols: (req as { cols?: number }).cols, rows });
         const rec = panelId !== undefined ? panelFrames.get(panelId) : undefined;
-        if (rec) {
+        if (rec && panelId !== undefined) {
+          const activePanelId = panelId;
           setTimeout(() => {
             // A force resize = a freshly-(re)mounted xterm with no negotiated
             // modes. Mirror the real host's renegotiate(): re-push the kitty
@@ -1398,18 +1450,43 @@ const stub = {
             if (force === true) {
               emit("session.panelEvent", {
                 sessionId: rec.sessionId,
-                event: { type: "panel_data", panelId, data: KITTY_HANDSHAKE },
+                event: { type: "panel_data", panelId: activePanelId, data: KITTY_HANDSHAKE },
               });
             }
             const frame =
               typeof rec.frame === "function" ? rec.frame(Math.max(1, rows ?? 24)) : rec.frame;
             emit("session.panelEvent", {
               sessionId: rec.sessionId,
-              event: { type: "panel_data", panelId, data: frame },
+              event: { type: "panel_data", panelId: activePanelId, data: frame },
             });
+            if (force === true) {
+              const revision = (panelRepaintRevisions.get(activePanelId) ?? 0) + 1;
+              panelRepaintRevisions.set(activePanelId, revision);
+              emit("session.panelEvent", {
+                sessionId: rec.sessionId,
+                event: { type: "panel_repaint", panelId: activePanelId, revision },
+              });
+            }
           }, 0);
         }
         return undefined;
+      }
+      case "session.panelRepaintAck": {
+        const { panelId, revision } = req as { panelId?: number; revision?: number };
+        const rec = panelId !== undefined ? panelFrames.get(panelId) : undefined;
+        const acknowledged =
+          panelId !== undefined && panelRepaintRevisions.get(panelId) === revision;
+        if (acknowledged && rec) {
+          // The first query reply was emitted while input was fenced. Mirror
+          // the real/fake host remount handshake by querying again after ack.
+          setTimeout(() => {
+            emit("session.panelEvent", {
+              sessionId: rec.sessionId,
+              event: { type: "panel_data", panelId, data: KITTY_HANDSHAKE },
+            });
+          }, 0);
+        }
+        return { acknowledged };
       }
       case "app.versions":
         return { app: "0.1.0-preview", electron: "stub", node: "stub" };

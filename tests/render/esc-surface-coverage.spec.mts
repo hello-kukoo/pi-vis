@@ -23,6 +23,7 @@ type PreviewHooks = {
   abortCalls: number;
   startStreaming: () => void;
   stopStreaming: () => void;
+  escapeClaimCount: () => number;
 };
 
 type PreviewStore = {
@@ -37,6 +38,23 @@ async function abortCount(page: import("@playwright/test").Page): Promise<number
   return page.evaluate(() => {
     return (window as unknown as { __pivisPreview: PreviewHooks }).__pivisPreview.abortCalls;
   });
+}
+
+async function waitForNoEscapeClaim(page: import("@playwright/test").Page): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as unknown as { __pivisPreview: PreviewHooks }).__pivisPreview.escapeClaimCount(),
+      ),
+    )
+    .toBe(0);
+}
+
+async function waitForAbort(
+  page: import("@playwright/test").Page,
+  previous: number,
+): Promise<void> {
+  await expect.poll(() => abortCount(page)).toBeGreaterThan(previous);
 }
 
 async function startStreaming(page: import("@playwright/test").Page): Promise<void> {
@@ -144,8 +162,9 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
     await expect(page.locator(".context-dropdown")).toHaveCount(0);
     expect(await abortCount(page)).toBe(before);
 
+    await waitForNoEscapeClaim(page);
     await page.keyboard.press("Escape");
-    expect(await abortCount(page)).toBeGreaterThan(before);
+    await waitForAbort(page, before);
   });
 
   test("Model dropdown: ESC clears search, then closes dropdown, then next ESC aborts", async ({
@@ -177,8 +196,9 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
     await expect(dropdown).toHaveCount(0);
     expect(await abortCount(page)).toBe(before);
 
+    await waitForNoEscapeClaim(page);
     await page.keyboard.press("Escape");
-    expect(await abortCount(page)).toBeGreaterThan(before);
+    await waitForAbort(page, before);
   });
 
   test("Thinking dropdown: ESC closes dropdown, then next ESC aborts", async ({ page }) => {
@@ -197,8 +217,9 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
     );
     expect(await abortCount(page)).toBe(before);
 
+    await waitForNoEscapeClaim(page);
     await page.keyboard.press("Escape");
-    expect(await abortCount(page)).toBeGreaterThan(before);
+    await waitForAbort(page, before);
   });
 
   test("no surface open + streaming: ESC DOES abort (the positive case)", async ({ page }) => {
@@ -210,6 +231,6 @@ test.describe("ESC surface coverage — claims prevent abort", () => {
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
       );
     });
-    expect(await abortCount(page)).toBeGreaterThan(before);
+    await waitForAbort(page, before);
   });
 });
