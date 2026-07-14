@@ -1,5 +1,4 @@
 import type { SessionId } from "@shared/ids.js";
-import { type PiRpcCommand, commandPolicy } from "@shared/pi-protocol/commands.js";
 import type {
   AgentSessionSnapshot,
   AuthorityAttachResponse,

@@ -2764,9 +2764,8 @@ export class SessionRegistry {
     record.availability = "available";
     if (record.snapshot) {
       record.snapshotReceivedAt = Date.now();
-      const leaseMs = record.snapshot.isIdle ? 5_000 : 1_000;
-      record.leaseExpiresAt = record.snapshotReceivedAt + leaseMs;
-      this.armLease(record, leaseMs);
+      record.leaseExpiresAt = record.snapshotReceivedAt + TRANSPORT_LEASE_MS;
+      this.armLease(record, TRANSPORT_LEASE_MS);
     }
     this.publishRuntime(record, "available");
   }
