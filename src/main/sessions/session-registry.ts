@@ -118,13 +118,20 @@ export interface SessionRecord {
   _hasLock?: boolean | undefined;
   /** The file represented by the primary held lock; never infer this from sessionFile. */
   _lockPath?: string | undefined;
+  /** Current primary-lock callback identity; retired before unlock/replacement. */
+  _primaryLockToken?: string | undefined;
+  /** A compromise is terminal for this record: never restart or re-admit it. */
+  _lockCompromised?: boolean | undefined;
+  _handlingLockCompromise?: boolean | undefined;
   /** A replacement retains the predecessor lock while holding this successor lock. */
   _transitionLock?:
     | {
         transitionId: string;
-        oldLockPath?: string;
-        targetFile?: string;
+        oldLockPath?: string | undefined;
+        targetFile?: string | undefined;
         successorLocked: boolean;
+        successorLockToken?: string | undefined;
+        successorCompromised?: boolean | undefined;
       }
     | undefined;
   /** Serializes a pathless host's discovered-file reservation before binding. */
@@ -377,6 +384,9 @@ export class SessionRegistry {
       ) {
         return;
       }
+    }
+    if (record._lockCompromised || record._dead) {
+      throw new Error("Session lock was compromised; this session must be reopened");
     }
     if (record._activating) return record._activationDone;
     if (record.proc && (record.status === "starting" || record.status === "ready")) return;
@@ -895,9 +905,12 @@ export class SessionRegistry {
       const lock = record._transitionLock;
       const terminalFile = terminal.sessionFile ? path.resolve(terminal.sessionFile) : undefined;
       if (
+        record._dead ||
+        record._lockCompromised ||
         !lock ||
         lock.transitionId !== batch.transitionId ||
         !lock.successorLocked ||
+        lock.successorCompromised ||
         (lock.targetFile !== undefined && terminalFile !== lock.targetFile)
       ) {
         this.publishUnavailable(record, "Successor transition batch arrived without its held lock");
@@ -3299,27 +3312,122 @@ export class SessionRegistry {
     record._confinedSessionRoot = undefined;
   }
 
-  private async lockPath(record: SessionRecord, file: string): Promise<void> {
+  private async lockPath(
+    record: SessionRecord,
+    file: string,
+    role: "primary" | "successor",
+    transitionId?: string,
+  ): Promise<string> {
     const resolved = path.resolve(file);
-    if (record._lockPath === resolved && record._hasLock) return;
+    const token = crypto.randomUUID();
     await lockfile.lock(resolved, {
       retries: 0,
       realpath: false,
       lockfilePath: `${resolved}.lock`,
-      onCompromised: () => {
-        // Compromise is a hard activation failure, never a warning.
-        record._hasLock = false;
+      onCompromised: (error) => {
+        this.handleLockCompromise(record, {
+          role,
+          path: resolved,
+          token,
+          ...(transitionId !== undefined ? { transitionId } : {}),
+          error,
+        });
       },
     });
+    return token;
+  }
+
+  /**
+   * proper-lockfile can invoke this callback from outside our awaited lifecycle
+   * work. Fence all ingress before any observable callback or process teardown;
+   * clearing a boolean alone would otherwise leave a live Pi authority running
+   * without its ownership lock. Callback tokens make stale callbacks from a
+   * released/replaced lock harmless.
+   */
+  private handleLockCompromise(
+    record: SessionRecord,
+    compromise: {
+      role: "primary" | "successor";
+      path: string;
+      token: string;
+      transitionId?: string | undefined;
+      error: Error;
+    },
+  ): void {
+    if (
+      this.sessions.get(record.sessionId) !== record ||
+      record._handlingLockCompromise ||
+      record._lockCompromised
+    )
+      return;
+    // A successor callback becomes the primary callback at transition commit,
+    // so current ownership is determined by the token rather than its original
+    // acquisition role.
+    const primaryCurrent =
+      record._hasLock === true &&
+      record._lockPath === compromise.path &&
+      record._primaryLockToken === compromise.token;
+    const successor = record._transitionLock;
+    const successorCurrent =
+      compromise.role === "successor" &&
+      successor !== undefined &&
+      successor.transitionId === compromise.transitionId &&
+      successor.targetFile === compromise.path &&
+      successor.successorLocked === true &&
+      successor.successorLockToken === compromise.token;
+    if (!primaryCurrent && !successorCurrent) return;
+
+    // These assignments are intentionally synchronous and precede publishing,
+    // UI retirement, unlock, and stop: every reentrant ingress path sees a
+    // terminally fenced owner.
+    record._handlingLockCompromise = true;
+    record._lockCompromised = true;
+    record._dead = true;
+    record._closing = true;
+    record._procReady = false;
+    record.status = "failed";
+    const detail =
+      compromise.error instanceof Error ? compromise.error.message : String(compromise.error);
+    const reason = `Session advisory lock compromised (${compromise.path}): ${detail}`;
+    record.error = reason;
+    if (successorCurrent && successor) {
+      successor.successorCompromised = true;
+      successor.successorLocked = false;
+      successor.successorLockToken = undefined;
+    }
+    // Do not leave a transition that an already-buffered successor batch could
+    // commit after the lock callback returns.
+    if (record._hostTransition)
+      this.abortTransitionLock(record, record._hostTransition.transitionId);
+    record._hostTransition = undefined;
+    record.availability = "unavailable";
+    this.publishUnavailable(record, reason);
+
+    const proc = record.proc;
+    if (proc) {
+      // handleRuntimeFailure detaches before stop, so its exit/error callbacks
+      // cannot recursively process this retired authority or schedule restart.
+      this.handleRuntimeFailure(record, proc, reason);
+    } else {
+      this.retireHostUi(record);
+      this.releaseLock(record);
+      this.onStatusChanged(record.sessionId, "failed", reason);
+    }
+    record._handlingLockCompromise = false;
   }
 
   private async acquireLock(record: SessionRecord): Promise<void> {
     if (!record.sessionFile || record._hasLock) return;
     const resolved = path.resolve(record.sessionFile);
     try {
-      await this.lockPath(record, resolved);
+      const token = await this.lockPath(record, resolved, "primary");
+      if (record._dead || record._lockCompromised) {
+        this.unlockPath(resolved);
+        throw new Error("Session lock was compromised during acquisition");
+      }
       record._hasLock = true;
       record._lockPath = resolved;
+      record._primaryLockToken = token;
     } catch (error) {
       record._hasLock = false;
       throw new Error(
@@ -3334,11 +3442,17 @@ export class SessionRegistry {
   }
 
   private releaseLock(record: SessionRecord): void {
-    this.unlockPath(record._lockPath);
-    this.unlockPath(record._transitionLock?.targetFile);
+    const primary = record._lockPath;
+    const successor = record._transitionLock?.targetFile;
+    // Retire callback identities before unlock, because proper-lockfile may
+    // report an error while its release work is still unwinding.
+    record._primaryLockToken = undefined;
+    if (record._transitionLock) record._transitionLock.successorLockToken = undefined;
     record._hasLock = false;
     record._lockPath = undefined;
     record._transitionLock = undefined;
+    this.unlockPath(primary);
+    this.unlockPath(successor);
     // A failed/retired activation must not retain a rejected reservation and
     // block a later activation from attempting to acquire its file anew.
     record._initialSessionFileReservation = undefined;
@@ -3374,8 +3488,9 @@ export class SessionRegistry {
       const occupied = this.byFile.get(target);
       if (occupied && occupied !== record.sessionId)
         throw new Error("Target session file is already active");
+      let token: string;
       try {
-        await this.lockPath(record, target);
+        token = await this.lockPath(record, target, "primary");
       } catch (error) {
         throw new Error(
           `Session file lock contention prevented activation: ${error instanceof Error ? error.message : String(error)}`,
@@ -3394,6 +3509,7 @@ export class SessionRegistry {
       }
       record._hasLock = true;
       record._lockPath = target;
+      record._primaryLockToken = token;
       record.sessionFile = target;
       this.byFile.set(target, record.sessionId);
     })();
@@ -3416,7 +3532,8 @@ export class SessionRegistry {
       record.proc !== proc ||
       record._closing ||
       record._dead ||
-      !record._procReady
+      !record._procReady ||
+      record._lockCompromised
     ) {
       throw new Error("Session lifecycle rejected transition permit");
     }
@@ -3450,8 +3567,13 @@ export class SessionRegistry {
       return;
     }
     try {
-      await this.lockPath(record, target);
+      const token = await this.lockPath(record, target, "successor", request.transitionId);
+      if (record._dead || record._lockCompromised || record._transitionLock !== lock) {
+        this.unlockPath(target);
+        throw new Error("Session lock was compromised during transition reservation");
+      }
       lock.successorLocked = true;
+      lock.successorLockToken = token;
     } catch (error) {
       throw new Error(
         `Session file lock contention prevented transition: ${error instanceof Error ? error.message : String(error)}`,
@@ -3462,19 +3584,34 @@ export class SessionRegistry {
   private abortTransitionLock(record: SessionRecord, transitionId: string): void {
     const lock = record._transitionLock;
     if (!lock || lock.transitionId !== transitionId) return;
-    if (lock.targetFile && lock.targetFile !== lock.oldLockPath) this.unlockPath(lock.targetFile);
+    if (lock.targetFile && lock.targetFile !== lock.oldLockPath) {
+      lock.successorLockToken = undefined;
+      this.unlockPath(lock.targetFile);
+    }
     record._transitionLock = undefined;
   }
 
   private commitTransitionLock(record: SessionRecord, transitionId: string): void {
     const lock = record._transitionLock;
-    if (!lock || lock.transitionId !== transitionId || !lock.successorLocked || !lock.targetFile) {
+    if (
+      record._dead ||
+      record._lockCompromised ||
+      !lock ||
+      lock.transitionId !== transitionId ||
+      !lock.successorLocked ||
+      lock.successorCompromised ||
+      !lock.targetFile ||
+      (lock.targetFile !== lock.oldLockPath && !lock.successorLockToken)
+    ) {
       throw new Error("Cannot commit transition routing without successor lock");
     }
     const old = lock.oldLockPath;
     const priorSessionFile = record.sessionFile;
     record._lockPath = lock.targetFile;
     record._hasLock = true;
+    // A same-file transition keeps the already-held primary lock and callback
+    // identity. A different-file transition promotes the successor identity.
+    if (lock.targetFile !== old) record._primaryLockToken = lock.successorLockToken;
     // The routing map changes only as part of the same commit that transfers
     // lock ownership. No helper may silently point a held lock at a new file.
     if (priorSessionFile && this.byFile.get(path.resolve(priorSessionFile)) === record.sessionId) {

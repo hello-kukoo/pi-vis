@@ -5,6 +5,7 @@ import path from "node:path";
 import type { SessionId } from "@shared/ids.js";
 import type { PiRpcResponse } from "@shared/pi-protocol/responses.js";
 import type { AgentSessionSnapshot, IntentEnvelope } from "@shared/pi-protocol/runtime-state.js";
+import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeHostProcess } from "../../../tests/fixtures/fake-host-process.mjs";
 import { __forkOverride } from "../pi/session-host.js";
@@ -437,6 +438,137 @@ describe("SessionRegistry direct AgentSession authority", () => {
     } finally {
       first.registry.stopAll();
       second?.registry.stopAll();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the primary advisory lock is compromised", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pivis-primary-compromise-"));
+    const sessionFile = path.join(dir, "session.jsonl");
+    await writeFile(sessionFile, "");
+    const callbacks: Array<(error: Error) => void> = [];
+    const originalLock = lockfile.lock;
+    const lockSpy = vi.spyOn(lockfile, "lock").mockImplementation(async (file, options) => {
+      if (options?.onCompromised) callbacks.push(options.onCompromised);
+      return originalLock(file, options);
+    });
+    const h = harness();
+    const id = h.registry.openSession(dir, sessionFile);
+    try {
+      await h.registry.activateSession(id, "/tmp/pi", {});
+      const record = h.registry.getSession(id)!;
+      const [hostInstanceId, sessionEpoch] = runtimeIdentity(record);
+      expect(callbacks).toHaveLength(1);
+
+      callbacks[0]!(new Error("primary lock lost"));
+
+      expect(record).toMatchObject({
+        _lockCompromised: true,
+        availability: "unavailable",
+        status: "failed",
+        proc: undefined,
+      });
+      expect(h.fakes[0]!.killed).toBe(true);
+      await expect(
+        h.registry.dispatchIntent({
+          sessionId: id,
+          intentId: "after-primary-compromise",
+          rendererGeneration: 0,
+          expectedOwner: { hostInstanceId, sessionEpoch },
+          intent: { kind: "interrupt" },
+        }),
+      ).resolves.toMatchObject({ status: "not_admitted" });
+      expect(h.fakes[0]!.sent.some((message) => message.type === "intent_dispatch")).toBe(false);
+    } finally {
+      lockSpy.mockRestore();
+      h.registry.stopAll();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a reserved successor lock is compromised", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "pivis-successor-compromise-"));
+    const oldFile = path.join(dir, "old.jsonl");
+    const nextFile = path.join(dir, "next.jsonl");
+    await Promise.all([writeFile(oldFile, ""), writeFile(nextFile, "")]);
+    const callbacks: Array<(error: Error) => void> = [];
+    const originalLock = lockfile.lock;
+    const lockSpy = vi.spyOn(lockfile, "lock").mockImplementation(async (file, options) => {
+      if (options?.onCompromised) callbacks.push(options.onCompromised);
+      return originalLock(file, options);
+    });
+    const h = harness();
+    const id = h.registry.openSession(dir, oldFile);
+    try {
+      await h.registry.activateSession(id, "/tmp/pi", {});
+      const fake = h.fakes[0]!;
+      const record = h.registry.getSession(id)!;
+      const [hostInstanceId, sessionEpoch] = runtimeIdentity(record);
+      fake.emitControl({
+        type: "transition_started",
+        transitionId: "compromised-successor",
+        provisionalEpoch: 1,
+      });
+      fake.emitWire({
+        type: "transition_prepare",
+        transitionId: "compromised-successor",
+        phase: "prepare",
+        kind: "switch",
+        targetFile: nextFile,
+      });
+      await vi.waitFor(() => {
+        expect(callbacks).toHaveLength(2);
+        expect(
+          fake.sent.some(
+            (message) =>
+              message.type === "transition_permit" &&
+              message.transitionId === "compromised-successor" &&
+              message.allowed === true,
+          ),
+        ).toBe(true);
+      });
+
+      callbacks[1]!(new Error("successor lock lost"));
+
+      // A delayed valid-looking successor batch must not install its baseline
+      // or transfer routing after the reserved lock is lost.
+      fake.sessionEpoch = 1;
+      const terminalSnapshot = { ...fake.snapshot(), sessionFile: nextFile };
+      fake.emitWire({
+        type: "transition_batch",
+        batch: {
+          transitionId: "compromised-successor",
+          provisionalEpoch: 1,
+          records: [],
+          terminalSnapshot,
+        },
+      });
+      await tick();
+
+      expect(record).toMatchObject({
+        _lockCompromised: true,
+        availability: "unavailable",
+        status: "failed",
+        proc: undefined,
+        sessionFile: oldFile,
+      });
+      expect(record.snapshot?.sessionEpoch).toBe(sessionEpoch);
+      expect(h.fakes[0]!.killed).toBe(true);
+      await expect(
+        h.registry.dispatchIntent({
+          sessionId: id,
+          intentId: "after-successor-compromise",
+          rendererGeneration: 0,
+          expectedOwner: { hostInstanceId, sessionEpoch },
+          intent: { kind: "interrupt" },
+        }),
+      ).resolves.toMatchObject({ status: "not_admitted" });
+      expect(h.fakes[0]!.sent.some((message) => message.type === "intent_dispatch")).toBe(false);
+    } finally {
+      lockSpy.mockRestore();
+      h.registry.stopAll();
       await new Promise((resolve) => setTimeout(resolve, 10));
       await rm(dir, { recursive: true, force: true });
     }
