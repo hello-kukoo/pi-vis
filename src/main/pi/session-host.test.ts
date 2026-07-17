@@ -241,6 +241,30 @@ describe("SessionHost", () => {
       await expect(reload).resolves.toBeUndefined();
     });
 
+    it("does not retire a healthy host after system sleep suspends the event loop", async () => {
+      fake.emitReady("0.80.2");
+      await host.waitForReady();
+      const unresponsive = vi.fn();
+      host.on("unresponsive", unresponsive);
+      // Simulate wake-from-sleep: both the last control message and the last
+      // watchdog tick are minutes in the past because the whole process (and
+      // the equally suspended child) was frozen — not because the host went
+      // silent while we were running.
+      const asleepSince = Date.now() - 120_000;
+      (host as unknown as { lastControlAt: number }).lastControlAt = asleepSince;
+      (host as unknown as { lastWatchdogTickAt: number }).lastWatchdogTickAt = asleepSince;
+
+      await new Promise((resolve) => setTimeout(resolve, 650));
+
+      expect(unresponsive).not.toHaveBeenCalled();
+      expect(fake.killed).toBe(false);
+      // The baseline was reset to the wake time, so ordinary probing resumes
+      // (and would only escalate if the child truly stayed silent afterwards).
+      expect((host as unknown as { lastControlAt: number }).lastControlAt).toBeGreaterThan(
+        asleepSince,
+      );
+    });
+
     it("releases a provisional dialog lease on host-side timeout acknowledgement", async () => {
       fake.emitReady("0.80.2");
       await host.waitForReady();

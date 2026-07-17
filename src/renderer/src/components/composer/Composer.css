@@ -324,6 +324,34 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
+/* Sending: the input is frozen while a prompt awaits host acceptance. Keep
+   the accent ring (it reads as "active", not broken) and dim the text. */
+.composer__input-box--pending {
+  border-color: var(--accent);
+}
+
+.composer__input-box--pending .composer__textarea {
+  color: var(--text-secondary);
+}
+
+/* Brief denial cue (e.g. submitting during compaction): the ring flashes to
+   the danger tint and fades back through the box's existing border/shadow
+   transition. Deliberately subtle — no toast, nothing to dismiss. */
+.composer__input-box--denied,
+.composer__input-box--denied:focus-within {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+/* Spinner sits inside the input, at the textarea's trailing edge. */
+.composer__pending-spinner {
+  position: absolute;
+  right: 0.5em;
+  bottom: 0.55em;
+  font-size: 0.85em;
+  pointer-events: none;
+}
+
 .composer__editor-conflict {
   display: flex;
   align-items: center;

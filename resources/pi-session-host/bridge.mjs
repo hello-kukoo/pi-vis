@@ -822,17 +822,28 @@ export function setupCommandBridge({
           result: { response: { stats: _session.getSessionStats(), state: getState() } },
         };
       case "compact": {
+        // Same deferral as the compact intent below: the invocation barrier
+        // opens here, in the serialized slot, while the long compaction
+        // settles off-scheduler so later ingress keeps flowing.
         const compactIntentId = authority.beginCompactionInvocation(`invoke:${intentId}`);
-        try {
-          await trackInterruptibleOperation(
-            "compact",
-            () => _session.abort(),
-            () => _session.compact(args || undefined),
-          );
-          return { handled: true, result: { response: { compactionId: compactIntentId } } };
-        } finally {
-          authority.settleCompactionInvocation(compactIntentId);
-        }
+        const operation = trackInterruptibleOperation(
+          "compact",
+          () => _session.abort(),
+          () => _session.compact(args || undefined),
+        ).then(
+          () => {
+            authority.settleCompactionInvocation(compactIntentId);
+            return { response: { compactionId: compactIntentId } };
+          },
+          (error) => {
+            authority.settleCompactionInvocation(compactIntentId, {
+              failed: true,
+              detail: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          },
+        );
+        return { handled: true, result: { deferredOutcome: operation } };
       }
       case "reload":
         if (args) throw new Error("Usage: /reload");
@@ -911,47 +922,65 @@ export function setupCommandBridge({
           return submission(intent.text, { images: [] });
         }
         case "compact": {
+          // beginCompactionInvocation opens the admission barrier inside this
+          // serialized execution slot, then the compaction itself runs as a
+          // deferred outcome: it can take minutes, and holding the single
+          // ingress scheduler for that long silently freezes every later
+          // intent (prompts that must enter custody, ESC, tree navigation).
           const compactIntentId = authority.beginCompactionInvocation(envelope.intentId);
-          try {
-            await trackInterruptibleOperation(
-              "compact",
-              () => _session.abort(),
-              () => _session.compact(intent.instructions),
-            );
-            authority.settleCompactionInvocation(compactIntentId);
-            return { compactionId: compactIntentId };
-          } catch (error) {
-            authority.settleCompactionInvocation(compactIntentId, {
-              failed: true,
-              detail: error instanceof Error ? error.message : String(error),
-            });
-            throw error;
-          }
+          const operation = trackInterruptibleOperation(
+            "compact",
+            () => _session.abort(),
+            () => _session.compact(intent.instructions),
+          ).then(
+            () => {
+              authority.settleCompactionInvocation(compactIntentId);
+              return { compactionId: compactIntentId };
+            },
+            (error) => {
+              authority.settleCompactionInvocation(compactIntentId, {
+                failed: true,
+                detail: error instanceof Error ? error.message : String(error),
+              });
+              throw error;
+            },
+          );
+          return { deferredOutcome: operation };
         }
         case "runBash":
-          return trackInterruptibleOperation(
-            "bash",
-            () => _session.abortBash(),
-            () =>
-              _session
-                .executeBash(intent.command, undefined, {
-                  ...(intent.excludeFromContext !== undefined
-                    ? { excludeFromContext: intent.excludeFromContext }
-                    : {}),
-                })
-                .then((result) => ({
-                  started: true,
-                  ...(typeof result?.output === "string" ? { output: result.output } : {}),
-                  ...(Number.isInteger(result?.exitCode) ? { exitCode: result.exitCode } : {}),
-                  ...(typeof result?.cancelled === "boolean"
-                    ? { cancelled: result.cancelled }
-                    : {}),
-                  ...(typeof result?.truncated === "boolean"
-                    ? { truncated: result.truncated }
-                    : {}),
-                })),
-          );
+          // Bash can run arbitrarily long; settle it off-scheduler too.
+          return {
+            deferredOutcome: trackInterruptibleOperation(
+              "bash",
+              () => _session.abortBash(),
+              () =>
+                _session
+                  .executeBash(intent.command, undefined, {
+                    ...(intent.excludeFromContext !== undefined
+                      ? { excludeFromContext: intent.excludeFromContext }
+                      : {}),
+                  })
+                  .then((result) => ({
+                    started: true,
+                    ...(typeof result?.output === "string" ? { output: result.output } : {}),
+                    ...(Number.isInteger(result?.exitCode) ? { exitCode: result.exitCode } : {}),
+                    ...(typeof result?.cancelled === "boolean"
+                      ? { cancelled: result.cancelled }
+                      : {}),
+                    ...(typeof result?.truncated === "boolean"
+                      ? { truncated: result.truncated }
+                      : {}),
+                  })),
+            ),
+          };
         case "navigate": {
+          // Renderer idle is observation context only. Recheck the public SDK
+          // getter inside serialized child execution so a prompt admitted
+          // after that observation cannot race navigateTree and corrupt an
+          // active turn.
+          if (!_session.isIdle) {
+            throw new Error("Wait for the current operation to finish before switching branches.");
+          }
           // Capture the empty pre-navigation editor once. Navigation can await
           // summarization, so a patch made while it runs must make this
           // compare-and-apply fail rather than lose the newer draft.
@@ -964,7 +993,11 @@ export function setupCommandBridge({
             editor.alternateConflictText === undefined &&
             (editor.alternateConflictAttachments?.length ?? 0) === 0 &&
             (editor.additionalConflictCandidates?.length ?? 0) === 0;
-          return authority
+          // runNavigation opens the navigation barrier synchronously; the
+          // navigation itself (which can await a branch summarization) then
+          // settles as a deferred outcome so serialized ingress keeps
+          // flowing and later prompts join navigation custody.
+          const navigationOperation = authority
             .runNavigation(() =>
               _session.navigateTree(intent.targetId, { summarize: intent.summarize }),
             )
@@ -1011,6 +1044,7 @@ export function setupCommandBridge({
                 ...(!cancelled ? { branch: [..._session.sessionManager.getBranch()] } : {}),
               };
             });
+          return { deferredOutcome: navigationOperation };
         }
         case "setModel": {
           const models = await _session.modelRegistry.getAvailable();

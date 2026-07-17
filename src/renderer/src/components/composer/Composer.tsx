@@ -40,12 +40,14 @@ import {
   hasAuthoritativeSemanticState,
   isNewSessionPending,
   isSessionWorking,
+  sessionCompactionActivity,
   sessionHasHistory,
   submissionDispositionKey,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { useTreeStore } from "../../stores/tree-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { Spinner } from "../common/Spinner.js";
 import { IconClose, IconComment, IconFile } from "../common/icons.js";
 import "./Composer.css";
 
@@ -174,6 +176,35 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   // a distinct command/prompt typed while an earlier operation is finishing is
   // a legitimate rapid submission and must still reach host custody.
   const submissionsInFlightRef = useRef(new Set<string>());
+  // Prompt-in-flight UI state: true from Enter until the host accepts the
+  // prompt (every acceptance path clears the composer text) or the submission
+  // settles/fails. Deliberately renderer-local component state — never
+  // persisted — so it cannot survive an app restart.
+  const [submitPending, setSubmitPending] = useState(false);
+  const submitPendingRef = useRef(false);
+  const markSubmitPending = useCallback((value: boolean) => {
+    submitPendingRef.current = value;
+    setSubmitPending(value);
+  }, []);
+  // Subtle denial cue: briefly tint the composer ring when a submission is
+  // refused during compaction. Self-clearing by timeout; deliberately not a
+  // toast the user would then have to dismiss.
+  const [submitDenied, setSubmitDenied] = useState(false);
+  const submitDenyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashSubmitDenial = useCallback(() => {
+    setSubmitDenied(true);
+    if (submitDenyTimerRef.current) clearTimeout(submitDenyTimerRef.current);
+    submitDenyTimerRef.current = setTimeout(() => {
+      submitDenyTimerRef.current = null;
+      setSubmitDenied(false);
+    }, 700);
+  }, []);
+  useEffect(
+    () => () => {
+      if (submitDenyTimerRef.current) clearTimeout(submitDenyTimerRef.current);
+    },
+    [],
+  );
   const editorRevisionRef = useRef(0);
   // Host snapshots may advance the editor revision when an accepted submit
   // clears custody. Track renderer-originated edits separately so that
@@ -185,6 +216,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const editorPatchEpochRef = useRef(0);
   const editorPatchRetryNeededRef = useRef(false);
   const replicatedAttachmentsRef = useRef<ReplicatedComposerAttachment[]>([]);
+  const localEditAwaitingAuthorityRef = useRef(false);
+  const authorityRebaseInFlightRef = useRef(false);
   const pendingOrdinaryPromptRef = useRef<
     | {
         intentId: string;
@@ -223,16 +256,25 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   const editorHostInstanceId = semanticSnapshot?.owner.hostInstanceId;
   const editorSessionEpoch = semanticSnapshot?.owner.sessionEpoch;
+  const seededEditorOwnerRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    // Re-seed from the latest replicated value whenever composer custody moves
-    // to another session/host generation. Reading through the store avoids
-    // resetting the serialized patch chain on every snapshot revision.
+    // A temporary semantic fence is not an owner change. Never clear local
+    // attachment custody merely because the authoritative snapshot is absent.
+    if (editorHostInstanceId === undefined || editorSessionEpoch === undefined) return;
+    const ownerKey = `${sessionId}\u0000${editorHostInstanceId}\u0000${editorSessionEpoch}`;
+    if (seededEditorOwnerRef.current === ownerKey) return;
+    seededEditorOwnerRef.current = ownerKey;
+
+    // Re-seed from the latest replicated value only for a concrete initial or
+    // successor owner. If fenced local edits exist, keep their complete
+    // text+attachment candidate and rebase it through the successor protocol.
     const current = useSessionsStore.getState().sessions.get(sessionId);
     const currentSnapshot = authoritySnapshotFor(current);
     editorRevisionRef.current = currentSnapshot?.editor.revision ?? 0;
     editorPatchEpochRef.current++;
     editorPatchRetryNeededRef.current = false;
     editorPatchTailRef.current = Promise.resolve("accepted");
+    if (localEditAwaitingAuthorityRef.current) return;
     const restored = parseReplicatedAttachments(currentSnapshot?.editor.attachments ?? []);
     replicatedAttachmentsRef.current = serializeComposerAttachments(
       restored.images,
@@ -240,9 +282,53 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     );
     setAttachments(restored.images);
     setFileAttachments(restored.files);
-    void editorHostInstanceId;
-    void editorSessionEpoch;
   }, [sessionId, editorHostInstanceId, editorSessionEpoch]);
+
+  const candidateSessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    if (candidateSessionIdRef.current === sessionId) return;
+    candidateSessionIdRef.current = sessionId;
+    authorityRebaseInFlightRef.current = false;
+    pendingOrdinaryPromptRef.current = undefined;
+    seededEditorOwnerRef.current = undefined;
+    markSubmitPending(false);
+
+    // Rehydrate only this session's renderer-owned candidate. Fenced payloads
+    // were staged before runtime admission, so private attachments from the
+    // previous session can never cross this boundary.
+    const current = useSessionsStore.getState().sessions.get(sessionId);
+    const draft = isNewSessionPending(current)
+      ? (useSessionsStore.getState().newSessionDrafts.get(current?.workspacePath ?? "") ?? "")
+      : (useSessionsStore.getState().sessionDrafts.get(sessionId) ?? "");
+    const restored = parseReplicatedAttachments(current?.editorAttachments ?? []);
+    const replicated = serializeComposerAttachments(restored.images, restored.files);
+    textRef.current = draft;
+    replicatedAttachmentsRef.current = replicated;
+    setText(draft);
+    setAttachments(restored.images);
+    setFileAttachments(restored.files);
+    localEditAwaitingAuthorityRef.current =
+      !authoritySnapshotFor(current) && (draft !== "" || replicated.length > 0);
+  }, [sessionId, markSubmitPending]);
+
+  // Every acceptance path (disposition receipt, custody-clear editor
+  // injection, first-echo promotion, terminal completion) empties the
+  // composer text — that emptying is the single authoritative end of the
+  // pending-submission presentation.
+  useEffect(() => {
+    if (submitPending && text === "") markSubmitPending(false);
+  }, [submitPending, text, markSubmitPending]);
+
+  // Disabling the textarea mid-send drops focus to <body>; give it back when
+  // the send settles so the user can type the next prompt immediately.
+  const wasSubmitPendingRef = useRef(false);
+  useEffect(() => {
+    const was = wasSubmitPendingRef.current;
+    wasSubmitPendingRef.current = submitPending;
+    if (!was || submitPending) return;
+    const el = textareaRef.current;
+    if (el && mayFocusComposer(el)) el.focus();
+  }, [submitPending]);
 
   const authoritativeEditorRevision = semanticSnapshot?.editor.revision;
   useEffect(() => {
@@ -263,15 +349,20 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       const revision = baseRevision + 1;
       const patchEpoch = editorPatchEpochRef.current;
       const runtimeIdentity = useSessionsStore.getState().sessions.get(sessionId);
+      // Stage the complete attachment candidate before checking authority so a
+      // session switch cannot lose fenced attachment additions/removals.
+      useSessionsStore.getState().stageEditorAttachments(sessionId, nextAttachments);
       const runtimeSnapshot = authoritySnapshotFor(runtimeIdentity);
-      if (!runtimeSnapshot) return baseRevision;
+      if (!runtimeSnapshot) {
+        // Text and attachments are one revisioned editor payload. Any edit
+        // accepted while authority is fenced must be retained for rebase,
+        // regardless of which UI path produced it.
+        localEditAwaitingAuthorityRef.current = true;
+        return baseRevision;
+      }
       const expectedHostInstanceId = runtimeSnapshot.owner.hostInstanceId;
       const expectedSessionEpoch = runtimeSnapshot.owner.sessionEpoch;
       editorRevisionRef.current = revision;
-      // Component-local file/image objects are a retention root immediately,
-      // before the async host acknowledgement, so a rapid session switch
-      // cannot reap an attachment-only pending composer.
-      useSessionsStore.getState().stageEditorAttachments(sessionId, nextAttachments);
       useSessionsStore.getState().beginEditorPatch(sessionId);
       editorPatchTailRef.current = editorPatchTailRef.current.then(async () => {
         try {
@@ -440,8 +531,36 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
     } else {
       seededWorkspaceRef.current = null;
-      const draft = useSessionsStore.getState().sessionDrafts.get(sessionId) ?? "";
-      setText(draft);
+      const store = useSessionsStore.getState();
+      const current = store.sessions.get(sessionId);
+      const submitted = pendingOrdinaryPromptRef.current;
+      const matchingFirstEcho =
+        submitted &&
+        current?.transcript.authoritativeUserEchoes.some(
+          (echo) => echo.intentId === submitted.intentId,
+        );
+      const submittedPayloadStillVisible =
+        submitted &&
+        textRef.current === submitted.text &&
+        JSON.stringify(replicatedAttachmentsRef.current) === submitted.attachmentsKey &&
+        localEditGenerationRef.current === submitted.localEditGeneration;
+      if (matchingFirstEcho && submittedPayloadStillVisible) {
+        // The first authoritative user echo can promote a pending session
+        // before its disposition reaches Composer. Retire only the exact
+        // intent/generation it proves delivered; a newer local draft remains.
+        pendingOrdinaryPromptRef.current = undefined;
+        textRef.current = "";
+        setText("");
+        if (submitted.clearPromptAttachments) {
+          setAttachments([]);
+          setFileAttachments([]);
+          replicatedAttachmentsRef.current = [];
+        }
+        store.setSessionDraft(sessionId, "");
+      } else {
+        const draft = store.sessionDrafts.get(sessionId) ?? "";
+        setText(draft);
+      }
     }
   }, [pending, workspacePath, sessionId]);
   const editorInjectionText = session?.editorInjection?.text;
@@ -464,9 +583,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const clearSubmittedDiffComments = useSessionsStore((s) => s.clearSubmittedDiffComments);
 
   const worktreeCreating = session?.worktreeCreating ?? false;
-  // The composer is interactive only when the session is live AND we're not
-  // mid worktree-creation (the submit is already in flight — the input is
-  // frozen so it reads as "sending", not "still unsubmitted text").
+  // Runtime-backed controls require following semantic authority. The textarea
+  // deliberately does not: `/tree` is a local overlay command and must remain
+  // invokable through compaction/abort synchronization and host failure. All
+  // non-local submissions are still fenced in handleSubmit.
   const live = session?.status === "ready" && !!semanticSnapshot && !worktreeCreating;
 
   // Image-attach capability. Pi only forwards image content to models whose
@@ -490,10 +610,42 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     : true;
   const modelLabel = currentModelInfo?.name ?? semanticSnapshot?.model?.id ?? "This model";
 
+  // Edits made while authority is fenced stay renderer-owned. Once a following
+  // owner returns, serialize that exact local value through the revisioned
+  // editor protocol before allowing an authority injection to replace it. A
+  // conflict therefore preserves both values instead of silently losing input.
+  useEffect(() => {
+    if (
+      !semanticSnapshot ||
+      !localEditAwaitingAuthorityRef.current ||
+      authorityRebaseInFlightRef.current
+    )
+      return;
+    authorityRebaseInFlightRef.current = true;
+    const localText = textRef.current;
+    const localAttachments = replicatedAttachmentsRef.current;
+    synchronizeEditorText(localText, localAttachments);
+    void editorPatchTailRef.current.then((result) => {
+      authorityRebaseInFlightRef.current = false;
+      if (
+        result !== "failed" &&
+        textRef.current === localText &&
+        JSON.stringify(replicatedAttachmentsRef.current) === JSON.stringify(localAttachments)
+      ) {
+        localEditAwaitingAuthorityRef.current = false;
+      }
+    });
+  }, [semanticSnapshot, synchronizeEditorText]);
+
   // Editor injection is keyed by its monotonic nonce so a catalog refresh or
   // other render cannot apply the same host value twice.
   useEffect(() => {
-    if (editorInjectionNonce === undefined || editorInjectionText === undefined) return;
+    if (
+      editorInjectionNonce === undefined ||
+      editorInjectionText === undefined ||
+      localEditAwaitingAuthorityRef.current
+    )
+      return;
     const injectionKey = `${sessionId}:${editorInjectionNonce}`;
     if (processedEditorInjectionRef.current === injectionKey) return;
     processedEditorInjectionRef.current = injectionKey;
@@ -613,6 +765,16 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       submissionDispositionKey(pending.intentId, pending.owner),
     );
     if (
+      receipt &&
+      ["in_custody", "consumed"].includes(receipt.disposition) &&
+      receipt.editorRevision === pending.editorRevision
+    ) {
+      // The host accepted this exact submission: the "sending" freeze ends
+      // here even when a newer local payload below means the visible text
+      // must be preserved rather than cleared.
+      markSubmitPending(false);
+    }
+    if (
       !receipt ||
       !["in_custody", "consumed"].includes(receipt.disposition) ||
       receipt.editorRevision !== pending.editorRevision ||
@@ -642,7 +804,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     if (current?.editorInjection?.nonce === pending.editorInjectionNonce) {
       useSessionsStore.getState().clearEditorInjection(sessionId);
     }
-  }, [sessionId, submissionDispositions]);
+  }, [sessionId, submissionDispositions, markSubmitPending]);
 
   // ── Attachment handling ─────────────────────────────────────────────
 
@@ -922,17 +1084,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
 
   const handleSubmit = useCallback(
     async (overrideContent?: string) => {
+      // A prompt is already in flight and the input is frozen as "sending";
+      // any Enter that still reaches here is a no-op until it settles.
+      if (submitPendingRef.current) return;
       const content = overrideContent ?? text;
       if (overrideContent !== undefined) textRef.current = overrideContent;
       const store = useSessionsStore.getState();
-      if (!hasAuthoritativeSemanticState(store.sessions.get(sessionId))) {
-        store.addToast(sessionId, "Session semantic state is synchronizing", "warning");
-        return;
-      }
-      if ((store.sessions.get(sessionId)?.editorAttachmentReads ?? 0) > 0) {
-        store.addToast(sessionId, "Wait for image attachments to finish loading", "warning");
-        return;
-      }
       const pendingDiffComments = store.getDiffCommentsForPrompt(sessionId);
       if (
         !content.trim() &&
@@ -942,6 +1099,67 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       )
         return;
       const parsedAction = parseComposerInput(content, { discovered });
+
+      // Opening the tree is renderer-local. It is intentionally classified
+      // before every runtime/editor gate so `/tree` can always open, even while
+      // compaction, an abort, attach repair, startup, or host failure has fenced
+      // semantic authority. Tree reads/navigation apply their own owner/idle
+      // checks and show a retryable unavailable state when necessary.
+      if (parsedAction.kind === "open-tree") {
+        void useTreeStore.getState().openTreeForSession(sessionId);
+        // Serialize a clear behind any in-flight `/tree` text patch when an
+        // owner is available. While fenced, the empty renderer draft is
+        // retained and rebased by the authority-recovery effect above.
+        localEditAwaitingAuthorityRef.current = true;
+        const clearCanEnqueue = hasAuthoritativeSemanticState(store.sessions.get(sessionId));
+        if (clearCanEnqueue) authorityRebaseInFlightRef.current = true;
+        synchronizeEditorText("", replicatedAttachmentsRef.current);
+        // With no owner, synchronizeEditorText only stages the candidate; do
+        // not mistake an older resolved patch tail for acceptance of this clear.
+        if (clearCanEnqueue) {
+          void editorPatchTailRef.current.then((result) => {
+            authorityRebaseInFlightRef.current = false;
+            if (result === "accepted" && textRef.current === "") {
+              localEditAwaitingAuthorityRef.current = false;
+            }
+          });
+        }
+        textRef.current = "";
+        setText("");
+        setSlashIndex(0);
+        const current = store.sessions.get(sessionId);
+        if (current?.isNewPending && workspacePathRef.current) {
+          store.clearNewSessionDraft(workspacePathRef.current);
+        } else {
+          store.setSessionDraft(sessionId, "");
+        }
+        return;
+      }
+
+      if (worktreeCreating) {
+        store.addToast(sessionId, "Wait for worktree creation to finish", "warning");
+        return;
+      }
+      if (!hasAuthoritativeSemanticState(store.sessions.get(sessionId))) {
+        store.addToast(sessionId, "Session semantic state is synchronizing", "warning");
+        return;
+      }
+      if ((store.sessions.get(sessionId)?.editorAttachmentReads ?? 0) > 0) {
+        store.addToast(sessionId, "Wait for image attachments to finish loading", "warning");
+        return;
+      }
+      // Compaction is a long operation: keep the composer typable, but deny
+      // prompt-transport work with a brief, self-clearing ring tint instead
+      // of queueing it silently or raising a notification.
+      if (
+        sessionCompactionActivity(store.sessions.get(sessionId)) !== undefined &&
+        (parsedAction.kind === "send-prompt" ||
+          parsedAction.kind === "bash" ||
+          parsedAction.kind === "compact")
+      ) {
+        flashSubmitDenial();
+        return;
+      }
       const isSlashCommand = content.startsWith("/");
       const isRealPrompt = parsedAction.kind === "send-prompt" && !isSlashCommand;
       // Comments and attachments are staged prompt context. Slash commands may
@@ -1032,6 +1250,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           return;
         }
       }
+
+      // Freeze the input as "sending" until the host accepts the prompt
+      // (which clears the text) or the submission settles/fails below.
+      if (isRealPrompt) markSubmitPending(true);
 
       try {
         // No-model guard: only for plain user prompts. /model (which fixes
@@ -1339,6 +1561,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         throw err;
       } finally {
         submissionsInFlightRef.current.delete(submissionInFlightKey);
+        // Acceptance normally ended this earlier (the composer text cleared);
+        // this covers rejection/failure paths, which preserve the text.
+        if (isRealPrompt) markSubmitPending(false);
       }
     },
     [
@@ -1355,9 +1580,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       fileAttachments,
       modelSupportsImages,
       modelLabel,
+      worktreeCreating,
       semanticSnapshot?.model,
       clearSubmittedDiffComments,
       synchronizeEditorText,
+      markSubmitPending,
+      flashSubmitDenial,
     ],
   );
 
@@ -1579,7 +1807,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             </div>
           </div>
         )}
-        <div className="composer__input-box">
+        <div
+          className={`composer__input-box${submitPending ? " composer__input-box--pending" : ""}${submitDenied ? " composer__input-box--denied" : ""}`}
+        >
           {/* Image previews live inside the input card, above the typed text,
               so attachments read as part of the pending message rather than a
               separate horizontal tray. */}
@@ -1685,7 +1915,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
               onClick={handleAttachClick}
               aria-label="Attach files"
               title="Attach files"
-              disabled={!live}
+              disabled={!live || submitPending}
             >
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path
@@ -1705,8 +1935,15 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
                 aria-label="Message pi"
-                disabled={!live}
+                disabled={submitPending}
               />
+              {submitPending && (
+                <Spinner
+                  className="composer__pending-spinner"
+                  role="status"
+                  aria-label="Sending prompt"
+                />
+              )}
             </div>
           </div>
         </div>

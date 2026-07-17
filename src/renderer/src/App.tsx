@@ -749,9 +749,23 @@ export function App(): React.ReactElement {
     attachReadySessions();
     const onFocus = () => {
       attachReadySessions();
+      // Switching to a session is what normally reactivates a dead one, so a
+      // host that failed while its session stayed active (sleep/wake, crash
+      // after the automatic respawn also failed) has no other retry trigger.
+      const state = useSessionsStore.getState();
+      if (state.activeSessionId) void state.reactivateSession(state.activeSessionId);
+    };
+    // Wake-from-sleep can surface the window as visible without a focus
+    // event; treat both as the "user is back" recovery signal.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") onFocus();
     };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [liveSessionIdsKey, requestAttach]);
 
   const handlePiRecheck = useCallback(async () => {

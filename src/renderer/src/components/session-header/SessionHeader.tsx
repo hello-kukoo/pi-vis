@@ -20,7 +20,7 @@ import {
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
-import { IconCheck, IconChevronDown } from "../common/icons.js";
+import { IconAlert, IconCheck, IconChevronDown } from "../common/icons.js";
 import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
 import { NotificationBellButton } from "../notifications/NotificationStack.js";
 import { ContextMeter } from "./ContextMeter.js";
@@ -1033,7 +1033,7 @@ export function SessionControls({
 // ghost button matching the model/thinking picker style with a live
 // badge showing the changed-file count, or just `±` dimmed when the
 // working tree is clean.
-function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElement | null {
+export function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElement | null {
   const live = useSessionsStore((s) => {
     const st = s.sessions.get(sessionId)?.status;
     return st === "ready" || st === "starting";
@@ -1078,24 +1078,39 @@ function ChangesButton({ sessionId }: { sessionId: SessionId }): React.ReactElem
 
   // Don't render when the workspace is not a repo (badge resolved
   // "not-a-repo" or "git-missing") or when the badge is still loading.
+  // A FAILED badge scan keeps the button visible with an error marker:
+  // silently hiding it made a transient git failure look like the feature
+  // vanished. Pressing it still opens the viewer, whose own refresh path
+  // shows the actual error and offers retry.
+  const badgeError = badgeKind === "error";
   if (badgeKind === "not-a-repo" || badgeKind === "git-missing") return null;
-  if (badge === null) return null;
+  if (badge === null && !badgeError) return null;
 
-  const hasChanges = badge.fileCount > 0;
-  const countLabel = badge.truncated
-    ? `>${(badge.fileCount - 1).toLocaleString()}`
-    : badge.fileCount.toLocaleString();
+  const hasChanges = (badge?.fileCount ?? 0) > 0;
+  const countLabel = badge
+    ? badge.truncated
+      ? `>${(badge.fileCount - 1).toLocaleString()}`
+      : badge.fileCount.toLocaleString()
+    : "";
   return (
     <button
       type="button"
-      className={`session-header__picker-btn session-header__changes-btn${hasChanges ? "" : " session-header__changes-btn--clean"}`}
+      className={`session-header__picker-btn session-header__changes-btn${hasChanges || badgeError ? "" : " session-header__changes-btn--clean"}`}
       onClick={() => openDiffForSession(sessionId)}
-      title="View changes (⌘G)"
+      title={
+        badgeError
+          ? "Couldn't read git changes — open the diff viewer for details (⌘G)"
+          : "View changes (⌘G)"
+      }
       aria-label="View changes"
       data-testid="changes-button"
     >
       <span aria-hidden>±</span>
-      {hasChanges && <span className="session-header__changes-count">{countLabel}</span>}
+      {badgeError ? (
+        <IconAlert className="session-header__changes-error" size="0.9em" />
+      ) : (
+        hasChanges && <span className="session-header__changes-count">{countLabel}</span>
+      )}
     </button>
   );
 }

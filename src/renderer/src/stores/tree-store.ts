@@ -18,7 +18,7 @@ import { create } from "zustand";
 import { buildNestedTree } from "../components/tree/tree-flatten.js";
 import { describeIpcError } from "../lib/ipc-errors.js";
 import { dispatchSessionIntent, querySession } from "../lib/session-intent.js";
-import { authoritySnapshotFor, isSessionWorking, useSessionsStore } from "./sessions-store.js";
+import { authoritySnapshotFor, useSessionsStore } from "./sessions-store.js";
 
 interface TreeObservation {
   owner: RuntimeIdentity;
@@ -150,11 +150,11 @@ interface TreeStore {
 // feature gate (review S2).
 const UNSUPPORTED_MESSAGE = "Tree view requires the SDK host — update pi or reload the session.";
 
-// Mid-turn guard copy. Mirrors executeReload's wording (execute.ts:562).
-// pi's navigateTree has no internal streaming guard and overwrites agent
-// state, so navigating mid-stream corrupts the active turn (review B1).
-const STREAMING_GUARD_MESSAGE =
-  "Wait for the current response to finish before switching branches.";
+// Pi's navigateTree has no internal busy guard and overwrites agent state.
+// Opening/reading the viewer is always allowed, but branch mutation waits for
+// the complete SDK idle fact (streaming, compaction, retry, bash, and other
+// barriers all make isIdle false).
+const BUSY_GUARD_MESSAGE = "Wait for the current operation to finish before switching branches.";
 
 export const useTreeStore = create<TreeStore>((set, get) => ({
   open: false,
@@ -225,13 +225,12 @@ export const useTreeStore = create<TreeStore>((set, get) => ({
     const sessionId = get().sessionId;
     if (!sessionId) return;
 
-    // Mid-turn guard. Mirror executeReload: bail with a toast before
-    // sending the command so pi's in-memory agent state can't be
-    // clobbered mid-stream (review B1).
-    const sessions = useSessionsStore.getState().sessions;
-    const session = sessions.get(sessionId);
-    if (isSessionWorking(session)) {
-      useSessionsStore.getState().addToast(sessionId, STREAMING_GUARD_MESSAGE, "warning");
+    // Branch mutation is idle-only. `/tree` opening is deliberately not:
+    // users must always be able to enter the viewer and inspect/retry it.
+    const session = useSessionsStore.getState().sessions.get(sessionId);
+    const snapshot = authoritySnapshotFor(session);
+    if (snapshot && !snapshot.sdk.isIdle) {
+      useSessionsStore.getState().addToast(sessionId, BUSY_GUARD_MESSAGE, "warning");
       return;
     }
     const observation = currentObservation(sessionId);

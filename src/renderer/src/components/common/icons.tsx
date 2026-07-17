@@ -147,6 +147,17 @@ export function IconPencil(props: IconProps): React.ReactElement {
   );
 }
 
+/** Alert — exclamation triangle for inline error indicators. */
+export function IconAlert(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M6 1.9 10.6 10H1.4z" />
+      <path d="M6 4.9v2.3" />
+      <path d="M6 8.9v0.01" />
+    </Icon>
+  );
+}
+
 /** Copy — duplicate documents, used for clipboard actions. */
 export function IconCopy(props: IconProps): React.ReactElement {
   return (

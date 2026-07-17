@@ -1341,6 +1341,10 @@ interface SessionsStore {
 
   /** Resolves false only when a visit-triggered activation fails. State selection is synchronous. */
   setActiveSession: (sessionId: SessionId | null) => Promise<boolean>;
+  /** Retry activation for an already-active failed/exited session. Switching
+   *  to a session is what normally reactivates it, so a session that dies
+   *  while active (host crash, sleep/wake) needs this explicit recovery. */
+  reactivateSession: (sessionId: SessionId) => Promise<boolean>;
   setActiveWorkspace: (path: string | null) => void;
 }
 
@@ -1761,6 +1765,16 @@ const buildSessionsStore = (
           if (detectTurnError(event.message).isError) turnErrored = true;
         }
         if (event.type === "auto_retry_end" && event.success === false) turnErrored = true;
+        // A retry starts a fresh attempt. Do not let the failed attempt color a
+        // later successful terminal result.
+        if (event.type === "agent_end" && event.willRetry) turnErrored = false;
+        // agent_settled is Pi's session-level terminal boundary: no automatic
+        // retry, compaction, or queued continuation remains. The semantic frame
+        // still owns liveness; this transcript-plane marker only preserves the
+        // completed result as a solid sidebar notification once flashing stops.
+        if (event.type === "agent_settled") {
+          unreadStatus = turnErrored ? "error" : "done";
+        }
         const transcript = applyPiEvent(current.transcript, event);
         const authoritativeUserEcho =
           transcript.userMessageSequence > current.transcript.userMessageSequence
@@ -4334,6 +4348,46 @@ const buildSessionsStore = (
     }
     releasePrevious();
     return true;
+  },
+
+  reactivateSession: async (sessionId) => {
+    const target = get().sessions.get(sessionId);
+    if (!target) return false;
+    // Only a dead runtime is eligible: live/starting sessions and cold
+    // activation-visit flows own their own lifecycles.
+    if (target.status !== "failed" && target.status !== "exited") return false;
+    if (target.activationVisitId || target.activationVisitReleasePending) return false;
+    if (typeof window === "undefined" || !window.pivis) return false;
+    const activationVisitId = crypto.randomUUID();
+    set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, {
+        ...current,
+        activationVisitId,
+        activationVisitReleasePending: undefined,
+      });
+      return { sessions };
+    });
+    try {
+      await window.pivis.invoke("session.activate", { sessionId, activationVisitId });
+      return true;
+    } catch (err) {
+      set((state) => {
+        const current = state.sessions.get(sessionId);
+        if (!current || current.activationVisitId !== activationVisitId) return {};
+        const sessions = new Map(state.sessions);
+        sessions.set(sessionId, {
+          ...current,
+          activationVisitId: undefined,
+          activationVisitReleasePending: undefined,
+        });
+        return { sessions };
+      });
+      get().setSessionStatus(sessionId, "failed", String(err));
+      return false;
+    }
   },
 
   setActiveWorkspace: (path) => {

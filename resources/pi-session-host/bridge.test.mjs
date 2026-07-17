@@ -503,6 +503,96 @@ describe("setupCommandBridge — target intent dispatch", () => {
     expect(runtime.newSession).not.toHaveBeenCalled();
   });
 
+  it("keeps intent ingress responsive while an intent-invoked compaction runs", async () => {
+    let resolveCompact;
+    const compact = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveCompact = resolve;
+        }),
+    );
+    const { session, send, dispatchIntent } = setup({ compact });
+    session.prompt.mockImplementation(async (_text, options) => options.preflightResult(true));
+
+    await expect(
+      dispatchIntent(envelope("intent-compact-long", { kind: "compact" })),
+    ).resolves.toMatchObject({ status: "admitted" });
+    await vi.waitFor(() => expect(session.compact).toHaveBeenCalled());
+
+    // A prompt dispatched mid-compaction must reach custody immediately —
+    // never sit behind the whole compaction in the serialized scheduler.
+    await expect(
+      dispatchIntent(
+        envelope("intent-mid-compaction", {
+          kind: "submit",
+          editorRevision: 0,
+          text: "queued during compaction",
+          images: [],
+          requestedMode: "followUp",
+          surface: "composer",
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "admitted" });
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "submission_disposition",
+          result: expect.objectContaining({
+            intentId: "intent-mid-compaction",
+            disposition: "in_custody",
+          }),
+        }),
+      ),
+    );
+    expect(session.prompt).not.toHaveBeenCalled();
+
+    // Settling the compaction publishes its terminal outcome and drains the
+    // held custody prefix into Pi's prompt path.
+    resolveCompact();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "intent-compact-long",
+            kind: "compact",
+            state: "completed",
+          }),
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(session.prompt).toHaveBeenCalledWith("queued during compaction", expect.any(Object)),
+    );
+  });
+
+  it("rechecks SDK idle inside child execution before navigateTree", async () => {
+    const navigateTree = vi.fn(async () => ({ cancelled: false }));
+    const { session, send, dispatchIntent } = setup({ isIdle: false, navigateTree });
+
+    await expect(
+      dispatchIntent({
+        intentId: "navigate-busy-child",
+        expectedOwner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+        intent: { kind: "navigate", targetId: "leaf-9" },
+      }),
+    ).resolves.toMatchObject({ status: "admitted" });
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "navigate-busy-child",
+            kind: "navigate",
+            state: "failed",
+          }),
+        }),
+      ),
+    );
+    expect(session.navigateTree).not.toHaveBeenCalled();
+  });
+
   it("publishes navigate intent post-state only after successful Pi navigation", async () => {
     const sendFrame = vi.fn();
     const branch = [

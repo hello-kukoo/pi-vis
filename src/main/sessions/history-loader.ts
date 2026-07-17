@@ -261,10 +261,13 @@ export async function entriesToTranscript(
   // Persisted history is only hydrated once the runtime is idle, so any
   // unresolved tool call is an interrupted turn, never a live one. Sweep the
   // blocks rather than toolCallsById because duplicate ids shadow older calls.
+  // This reads a presentation field on a persisted transcript block, not a
+  // live Pi liveness getter.
   for (const block of blocks) {
     if (block.type !== "tool_call") continue;
     const data = block.data as Record<string, unknown>;
-    if (data["isStreaming"] === true) {
+    const streamingPresentation = data["isStreaming"];
+    if (streamingPresentation === true) {
       data["isStreaming"] = false;
       data["interrupted"] = true;
     }

@@ -330,6 +330,13 @@ export class SessionHost extends EventEmitter {
   private transportFenced = false;
   private resyncRequestIds = new Set<string>();
   private controlWatchdog: ReturnType<typeof setInterval> | null = null;
+  /** Last watchdog tick — a large inter-tick gap means the whole event loop
+   * (and the equally suspended host child) slept, not that the host went
+   * silent. */
+  private lastWatchdogTickAt = Date.now();
+  /** Inter-tick gap (ms) beyond which the process is considered to have been
+   * suspended (the interval runs every 500ms). */
+  private static readonly WATCHDOG_SUSPEND_GAP_MS = 5_000;
   private silenceResyncPending = false;
   private silenceUnavailableEmitted = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -497,9 +504,21 @@ export class SessionHost extends EventEmitter {
     this.sendChildMessage(initMsg);
 
     this.armStartupTimer();
+    this.lastWatchdogTickAt = Date.now();
     this.controlWatchdog = setInterval(() => {
+      const now = Date.now();
+      const tickGap = now - this.lastWatchdogTickAt;
+      this.lastWatchdogTickAt = now;
+      if (tickGap > SessionHost.WATCHDOG_SUSPEND_GAP_MS) {
+        // The watchdog itself was suspended (system sleep froze this event
+        // loop), so the host child was equally suspended: elapsed wall-clock
+        // time is not host silence. Reset the baseline and let the normal
+        // probe re-establish liveness instead of killing a healthy host.
+        this.lastControlAt = now;
+        return;
+      }
       if (!this.ready || this.transitionUiBlockers.size > 0) return;
-      const silentFor = Date.now() - this.lastControlAt;
+      const silentFor = now - this.lastControlAt;
       if (silentFor > 8_000) {
         this.emit("unresponsive");
         this.stop();

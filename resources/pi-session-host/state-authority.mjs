@@ -1753,6 +1753,42 @@ export function createStateAuthority({
     dispatchedIntents.set(key, entry);
     commitSemanticFrame([{ type: "intent_admitted", intentId, owner, kind: intent.kind }]);
 
+    const settleFromResult = (result) => {
+      // submit/invokeCommand settle when their existing child admission
+      // lifecycle produces a terminal submission result. Immediate refusal
+      // is terminal here; consumed/custody are not completion.
+      if (intent.kind === "submit" || intent.kind === "invokeCommand") {
+        const disposition = result?.disposition;
+        if (["consumed", "in_custody", "admitting"].includes(disposition)) return;
+        const state =
+          disposition === "outcome_unknown"
+            ? "outcome_unknown"
+            : disposition === "extension_error"
+              ? "failed"
+              : disposition === "rejected" || disposition === "not_submitted"
+                ? "rejected"
+                : "completed";
+        settleDispatchedIntent(intentId, owner, intent.kind, state, result);
+        return;
+      }
+      const state =
+        result?.cancelled === true || result?.aborted === true ? "cancelled" : "completed";
+      settleDispatchedIntent(intentId, owner, intent.kind, state, result);
+    };
+    const settleFromError = (error) => {
+      settleDispatchedIntent(intentId, owner, intent.kind, "failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    };
+    // commitTransition already emitted the single successor baseline.
+    // A trailing snapshot would create a second empty successor frame for
+    // the predecessor's initiating intent.
+    const publishIfOwner = () => {
+      if (owner.hostInstanceId === hostInstanceId && owner.sessionEpoch === sessionEpoch) {
+        publishSnapshot();
+      }
+    };
+
     void schedule("ingress", async () => {
       try {
         // Transitions never inherit queued ingress. Do not run a delayed
@@ -1774,37 +1810,23 @@ export function createStateAuthority({
           });
         }
         const result = await execute(intent, owner);
-        // submit/invokeCommand settle when their existing child admission
-        // lifecycle produces a terminal submission result. Immediate refusal
-        // is terminal here; consumed/custody are not completion.
-        if (intent.kind === "submit" || intent.kind === "invokeCommand") {
-          const disposition = result?.disposition;
-          if (["consumed", "in_custody", "admitting"].includes(disposition)) return;
-          const state =
-            disposition === "outcome_unknown"
-              ? "outcome_unknown"
-              : disposition === "extension_error"
-                ? "failed"
-                : disposition === "rejected" || disposition === "not_submitted"
-                  ? "rejected"
-                  : "completed";
-          settleDispatchedIntent(intentId, owner, intent.kind, state, result);
+        // A long-running SDK operation (compaction, bash, navigation) must
+        // not hold this serialized scheduler until it completes: its
+        // admission barrier is already open, and later ingress — prompts
+        // entering custody, other intents — must keep flowing. The executor
+        // returns { deferredOutcome } once the operation has started;
+        // settlement follows that promise off-scheduler.
+        if (result && typeof result.deferredOutcome?.then === "function") {
+          void result.deferredOutcome
+            .then(settleFromResult, settleFromError)
+            .finally(publishIfOwner);
           return;
         }
-        const state =
-          result?.cancelled === true || result?.aborted === true ? "cancelled" : "completed";
-        settleDispatchedIntent(intentId, owner, intent.kind, state, result);
+        settleFromResult(result);
       } catch (error) {
-        settleDispatchedIntent(intentId, owner, intent.kind, "failed", {
-          message: error instanceof Error ? error.message : String(error),
-        });
+        settleFromError(error);
       } finally {
-        // commitTransition already emitted the single successor baseline.
-        // A trailing finally snapshot would create a second empty successor
-        // frame for the predecessor's initiating intent.
-        if (owner.hostInstanceId === hostInstanceId && owner.sessionEpoch === sessionEpoch) {
-          publishSnapshot();
-        }
+        publishIfOwner();
       }
     });
     return Promise.resolve({ status: "admitted", intentId, owner: structuredClone(owner) });

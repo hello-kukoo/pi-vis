@@ -113,20 +113,24 @@ export function TreeViewerHost({ sessionId }: TreeViewerHostProps): React.ReactE
   // already showing a good tree. This also catches the original transient:
   // if the first /tree raced a host restart, the next ready re-fetches.
   const sessionStatus = useSessionsStore((s) => s.sessions.get(sessionId)?.status);
+  const semanticSyncState = useSessionsStore(
+    (s) => s.sessions.get(sessionId)?.authorityProjection?.semantic.state,
+  );
   const prevStatusRef = useRef<string | undefined>(sessionStatus);
+  const prevSemanticSyncRef = useRef<string | undefined>(semanticSyncState);
   useEffect(() => {
-    const prev = prevStatusRef.current;
+    const prevStatus = prevStatusRef.current;
+    const prevSemanticSync = prevSemanticSyncRef.current;
     prevStatusRef.current = sessionStatus;
+    prevSemanticSyncRef.current = semanticSyncState;
     if (!visible) return;
-    if (
-      prev === "starting" &&
-      sessionStatus === "ready" &&
-      phase !== "ready" &&
-      phase !== "loading"
-    ) {
+    const hostBecameReady = prevStatus === "starting" && sessionStatus === "ready";
+    const authorityRecovered =
+      prevSemanticSync !== "following" && semanticSyncState === "following";
+    if ((hostBecameReady || authorityRecovered) && phase !== "ready" && phase !== "loading") {
       void refresh();
     }
-  }, [sessionStatus, visible, phase, refresh]);
+  }, [sessionStatus, semanticSyncState, visible, phase, refresh]);
 
   // ── Visible rows: flatten the tree honoring folded + filter + search ──
   const visibleRows = useMemo(() => {

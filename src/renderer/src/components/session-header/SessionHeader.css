@@ -223,6 +223,9 @@
 .session-header__changes-count {
   color: var(--warning);
 }
+.session-header__changes-error {
+  color: var(--danger);
+}
 
 /* Popup card — same vocabulary as the command pickers and slash
    suggestions: a raised padded card whose inner list scrolls with rounded

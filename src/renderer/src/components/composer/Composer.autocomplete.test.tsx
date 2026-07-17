@@ -12,6 +12,7 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useOverlayStore } from "../../stores/overlay-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { useTreeStore } from "../../stores/tree-store.js";
 import { Composer } from "./Composer.js";
 
 const SID = "session-a" as SessionId;
@@ -285,6 +286,20 @@ describe("Composer autocomplete and authority intents", () => {
 
   beforeEach(() => {
     useOverlayStore.setState({ count: 0 });
+    useTreeStore.setState({
+      open: false,
+      sessionId: null,
+      phase: "loading",
+      errorMessage: null,
+      nodes: [],
+      leafId: null,
+      filterMode: "default",
+      search: "",
+      selectedId: null,
+      summarizeOnSwitch: false,
+      foldedIds: new Set(),
+      navigating: false,
+    });
     useSessionsStore.setState({
       sessions: new Map(),
       activeSessionId: SID,
@@ -326,7 +341,148 @@ describe("Composer autocomplete and authority intents", () => {
     document.body.innerHTML = "";
   });
 
-  it("disables submission controls while semantic authority is synchronizing", () => {
+  it.each(["compaction repair", "abort repair"])(
+    "keeps /tree invokable during %s while runtime-backed controls stay fenced",
+    async () => {
+      const projection = followingAuthority();
+      setSessionField({
+        authorityProjection: {
+          ...projection,
+          semantic: {
+            state: "synchronizing",
+            lastCursor: projection.semantic.cursor,
+            reason: "gap",
+          },
+          staleDiagnosticSnapshot: projection.authoritativeSnapshot,
+          authoritativeSnapshot: undefined,
+        },
+      });
+      const composer = mount();
+      expect(composer.textarea().disabled).toBe(false);
+      expect(
+        composer.container.querySelector<HTMLButtonElement>(".composer__attach-btn")?.disabled,
+      ).toBe(true);
+
+      type(composer.textarea(), "/tree");
+      key(composer.textarea(), "Enter");
+      await vi.waitFor(() =>
+        expect(useTreeStore.getState()).toMatchObject({ open: true, sessionId: SID }),
+      );
+      expect(composer.textarea().value).toBe("");
+      expect(intentCalls(invoke)).toHaveLength(0);
+      composer.unmount();
+    },
+  );
+
+  it("serializes an authoritative editor clear after opening /tree", async () => {
+    const composer = mount();
+    type(composer.textarea(), "/tree");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() => {
+      const patches = invoke.mock.calls
+        .filter(([channel]) => channel === "session.editorPatch")
+        .map(([, payload]) => (payload as { text: string }).text);
+      expect(patches).toContain("/tree");
+      expect(patches.at(-1)).toBe("");
+    });
+    expect(composer.textarea().value).toBe("");
+    composer.unmount();
+  });
+
+  it("rebases an unavailable /tree clear when authority recovers", async () => {
+    const prior = followingAuthority();
+    setSessionField({
+      authorityProjection: {
+        ...prior,
+        semantic: { state: "synchronizing", lastCursor: prior.semantic.cursor, reason: "gap" },
+        staleDiagnosticSnapshot: prior.authoritativeSnapshot,
+        authoritativeSnapshot: undefined,
+      },
+    });
+    const composer = mount();
+    type(composer.textarea(), "/tree");
+    key(composer.textarea(), "Enter");
+    expect(composer.textarea().value).toBe("");
+    expect(invoke.mock.calls.filter(([channel]) => channel === "session.editorPatch")).toHaveLength(
+      0,
+    );
+
+    const recovered = followingAuthority();
+    recovered.authoritativeSnapshot.editor = { revision: 1, text: "/tree", attachments: [] };
+    patchSession({
+      editorRevision: 1,
+      editorInjection: { text: "/tree", nonce: 100, revision: 1 },
+      authorityProjection: recovered,
+    });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.editorPatch",
+        expect.objectContaining({ text: "" }),
+      ),
+    );
+    expect(composer.textarea().value).toBe("");
+    composer.unmount();
+  });
+
+  it("retains the /tree editor clear across runtime loss and recovery", async () => {
+    let patchCount = 0;
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        patchCount++;
+        if (patchCount === 2) {
+          return Promise.resolve({
+            accepted: false,
+            rejection: "runtime_unavailable",
+            revision: (payload as { baseRevision: number }).baseRevision,
+            text: "/tree",
+            attachments: [],
+          });
+        }
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.query") {
+        return Promise.resolve({ status: "unavailable", reason: "repairing" });
+      }
+      return Promise.resolve({ success: true });
+    });
+    const composer = mount();
+    type(composer.textarea(), "/tree");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(patchCount).toBe(2));
+    expect(composer.textarea().value).toBe("");
+
+    const prior = followingAuthority();
+    patchSession({
+      authorityProjection: {
+        ...prior,
+        semantic: { state: "synchronizing", lastCursor: prior.semantic.cursor, reason: "gap" },
+        staleDiagnosticSnapshot: prior.authoritativeSnapshot,
+        authoritativeSnapshot: undefined,
+      },
+    });
+    const recovered = followingAuthority();
+    recovered.authoritativeSnapshot.editor = { revision: 1, text: "/tree", attachments: [] };
+    patchSession({
+      editorRevision: 1,
+      editorInjection: { text: "/tree", nonce: 101, revision: 1 },
+      authorityProjection: recovered,
+    });
+
+    await vi.waitFor(() => expect(patchCount).toBeGreaterThanOrEqual(3));
+    const finalPatch = invoke.mock.calls
+      .filter(([channel]) => channel === "session.editorPatch")
+      .at(-1)?.[1] as { text: string };
+    expect(finalPatch.text).toBe("");
+    expect(composer.textarea().value).toBe("");
+    composer.unmount();
+  });
+
+  it("preserves fenced local edits while rebasing them when authority returns", async () => {
     const projection = followingAuthority();
     setSessionField({
       authorityProjection: {
@@ -337,10 +493,149 @@ describe("Composer autocomplete and authority intents", () => {
       },
     });
     const composer = mount();
-    expect(composer.textarea().disabled).toBe(true);
+    type(composer.textarea(), "local fenced draft");
+
+    const recovered = followingAuthority();
+    recovered.authoritativeSnapshot.editor = {
+      revision: 1,
+      text: "host-side edit",
+      attachments: [],
+    };
+    patchSession({
+      editorRevision: 1,
+      editorInjection: { text: "host-side edit", nonce: 99, revision: 1 },
+      authorityProjection: recovered,
+    });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.editorPatch",
+        expect.objectContaining({ text: "local fenced draft" }),
+      ),
+    );
+    expect(composer.textarea().value).toBe("local fenced draft");
+    composer.unmount();
+  });
+
+  it("preserves attachment removal while authority is fenced and rebases the full payload", async () => {
+    setAuthorityAttachments([{ kind: "file", name: "draft.txt", path: "/tmp/draft.txt" }]);
+    const composer = mount();
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(
+        1,
+      ),
+    );
+
+    const prior = followingAuthority();
+    prior.authoritativeSnapshot.editor.attachments = [
+      { kind: "file", name: "draft.txt", path: "/tmp/draft.txt" },
+    ] as never;
+    patchSession({
+      authorityProjection: {
+        ...prior,
+        semantic: { state: "synchronizing", lastCursor: prior.semantic.cursor, reason: "gap" },
+        staleDiagnosticSnapshot: prior.authoritativeSnapshot,
+        authoritativeSnapshot: undefined,
+      },
+    });
+    const remove = composer.container.querySelector<HTMLButtonElement>(
+      ".composer__attachment-item--file .composer__attachment-remove",
+    );
+    act(() => remove?.click());
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(0);
+
+    const recovered = followingAuthority();
+    recovered.authoritativeSnapshot.editor = {
+      revision: 1,
+      text: "",
+      attachments: [{ kind: "file", name: "draft.txt", path: "/tmp/draft.txt" }] as never,
+    };
+    patchSession({ authorityProjection: recovered, editorRevision: 1 });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.editorPatch",
+        expect.objectContaining({ attachments: [] }),
+      ),
+    );
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(0);
+    composer.unmount();
+  });
+
+  it("keeps fenced session candidates isolated across a mounted session switch", async () => {
+    const fencedA = followingAuthority();
+    setSessionField({
+      authorityProjection: {
+        ...fencedA,
+        semantic: { state: "synchronizing", lastCursor: fencedA.semantic.cursor, reason: "gap" },
+        staleDiagnosticSnapshot: fencedA.authoritativeSnapshot,
+        authoritativeSnapshot: undefined,
+      },
+    });
+    useSessionsStore.getState().createSession(SID_B, WORKSPACE, "/tmp/session-b.jsonl");
+    const fencedB = followingAuthority();
+    setSessionField(
+      {
+        status: "ready",
+        availability: "available",
+        hostInstanceId: OWNER.hostInstanceId,
+        sessionEpoch: OWNER.sessionEpoch,
+        authorityProjection: {
+          ...fencedB,
+          semantic: {
+            state: "synchronizing",
+            lastCursor: fencedB.semantic.cursor,
+            reason: "gap",
+          },
+          staleDiagnosticSnapshot: fencedB.authoritativeSnapshot,
+          authoritativeSnapshot: undefined,
+        },
+      },
+      SID_B,
+    );
+
+    const composer = mount(SID);
+    type(composer.textarea(), "private A draft");
+    const input = composer.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    selectFiles(input, [pickedFile("private.txt", "text/plain", "/tmp/private.txt")]);
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(
+        1,
+      ),
+    );
+
+    act(() => flushSync(() => composer.root.render(<Composer sessionId={SID_B} />)));
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(0);
+
+    const recoveredB = followingAuthority();
+    patchSession({ authorityProjection: recoveredB }, SID_B);
+    await Promise.resolve();
     expect(
-      composer.container.querySelector<HTMLButtonElement>(".composer__attach-btn")?.disabled,
-    ).toBe(true);
+      invoke.mock.calls.some(
+        ([channel, payload]) =>
+          channel === "session.editorPatch" &&
+          ((payload as { text?: string }).text === "private A draft" ||
+            JSON.stringify((payload as { attachments?: unknown }).attachments).includes(
+              "private.txt",
+            )),
+      ),
+    ).toBe(false);
+
+    act(() => flushSync(() => composer.root.render(<Composer sessionId={SID} />)));
+    expect(composer.textarea().value).toBe("private A draft");
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(1);
+    const recoveredA = followingAuthority();
+    patchSession({ authorityProjection: recoveredA }, SID);
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.editorPatch",
+        expect.objectContaining({
+          text: "private A draft",
+          attachments: expect.arrayContaining([expect.objectContaining({ name: "private.txt" })]),
+        }),
+      ),
+    );
     composer.unmount();
   });
 
@@ -373,6 +668,169 @@ describe("Composer autocomplete and authority intents", () => {
         }
       ).revision,
     ).toBe((envelope.intent as { editorRevision: number }).editorRevision);
+    composer.unmount();
+  });
+
+  it("clears a new session's first prompt when its authoritative user echo promotes the session", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "first prompt");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+
+    expect(composer.textarea().value).toBe("first prompt");
+    act(() =>
+      useSessionsStore.getState().applyEvent(SID, {
+        type: "message_start",
+        message: { role: "user", content: "first prompt" },
+        queueIntentId: envelope.intentId,
+      }),
+    );
+
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(useSessionsStore.getState().sessions.get(SID)?.isNewPending).toBe(false);
+    expect(useSessionsStore.getState().sessionDrafts.get(SID)).toBeUndefined();
+    composer.unmount();
+  });
+
+  it("preserves a newer draft when the first prompt echo promotes the session", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "first prompt");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+
+    type(composer.textarea(), "newer draft");
+    act(() =>
+      useSessionsStore.getState().applyEvent(SID, {
+        type: "message_start",
+        message: { role: "user", content: "first prompt" },
+        queueIntentId: envelope.intentId,
+      }),
+    );
+
+    expect(composer.textarea().value).toBe("newer draft");
+    expect(useSessionsStore.getState().sessionDrafts.get(SID)).toBe("newer draft");
+    composer.unmount();
+  });
+
+  it("retires an ambiguously delivered first prompt when its delayed echo proves delivery", async () => {
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.dispatchIntent") {
+        const envelope = payload as Envelope;
+        return Promise.resolve({
+          status: "delivery_unknown",
+          intentId: envelope.intentId,
+          owner: OWNER,
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+    const composer = mount();
+    type(composer.textarea(), "maybe delivered");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+    expect(composer.textarea().value).toBe("maybe delivered");
+
+    act(() =>
+      useSessionsStore.getState().applyEvent(SID, {
+        type: "message_start",
+        message: { role: "user", content: "maybe delivered" },
+        queueIntentId: envelope.intentId,
+      }),
+    );
+
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(useSessionsStore.getState().sessionDrafts.get(SID) ?? "").toBe("");
+    composer.unmount();
+  });
+
+  it("freezes the composer with a spinner from submit until acceptance clears it", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "hello");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+
+    // In flight: input is frozen and reads as "sending", not unsubmitted text.
+    expect(composer.textarea().disabled).toBe(true);
+    expect(composer.textarea().value).toBe("hello");
+    expect(composer.container.querySelector(".composer__pending-spinner")).not.toBeNull();
+
+    act(() =>
+      useSessionsStore.getState().applySubmissionDisposition(SID, {
+        intentId: envelope.intentId,
+        hostInstanceId: OWNER.hostInstanceId,
+        sessionEpoch: OWNER.sessionEpoch,
+        editorRevision: (envelope.intent as Extract<SessionIntent, { kind: "submit" }>)
+          .editorRevision,
+        disposition: "in_custody",
+      }),
+    );
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(composer.textarea().disabled).toBe(false);
+    expect(composer.container.querySelector(".composer__pending-spinner")).toBeNull();
+    composer.unmount();
+  });
+
+  it("re-enables the composer and keeps the prompt when dispatch is refused", async () => {
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.dispatchIntent") {
+        const envelope = payload as Envelope;
+        return Promise.resolve({
+          status: "not_admitted",
+          intentId: envelope.intentId,
+          reason: "transitioning",
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+    const composer = mount();
+    type(composer.textarea(), "kept on refusal");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() => expect(composer.textarea().disabled).toBe(false));
+    expect(composer.textarea().value).toBe("kept on refusal");
+    expect(composer.container.querySelector(".composer__pending-spinner")).toBeNull();
+    composer.unmount();
+  });
+
+  it("denies prompt submission during compaction with a transient ring, not a toast", async () => {
+    const projection = followingAuthority();
+    projection.authoritativeSnapshot.activity = {
+      compaction: { kind: "compaction", state: "active", attempt: 1 },
+    } as never;
+    setSessionField({ authorityProjection: projection });
+    const composer = mount();
+    type(composer.textarea(), "typed during compaction");
+    key(composer.textarea(), "Enter");
+
+    // No dispatch, no toast, typing stays enabled; the ring flashes and fades.
+    expect(intentCalls(invoke)).toHaveLength(0);
+    expect(composer.textarea().disabled).toBe(false);
+    expect(composer.textarea().value).toBe("typed during compaction");
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts ?? []).toHaveLength(0);
+    expect(composer.container.querySelector(".composer__input-box--denied")).not.toBeNull();
+    await vi.waitFor(
+      () => expect(composer.container.querySelector(".composer__input-box--denied")).toBeNull(),
+      { timeout: 2_000 },
+    );
     composer.unmount();
   });
 
@@ -958,16 +1416,39 @@ describe("Composer attachments under authority outcomes", () => {
 
   it("allows the same text again when its attachment payload changes and refuses submit during an image read", async () => {
     installInvoke(invoke, false);
+    const acceptPending = async (envelope: Envelope): Promise<void> => {
+      // Acceptance receipts end the "sending" freeze; the first submission's
+      // terminal outcome is still pending, so the same-text dedupe key only
+      // releases for a distinct payload.
+      act(() =>
+        useSessionsStore.getState().applySubmissionDisposition(SID, {
+          intentId: envelope.intentId,
+          hostInstanceId: OWNER.hostInstanceId,
+          sessionEpoch: OWNER.sessionEpoch,
+          editorRevision: (envelope.intent as Extract<SessionIntent, { kind: "submit" }>)
+            .editorRevision,
+          disposition: "in_custody",
+        }),
+      );
+    };
     const composer = mount();
     type(composer.textarea(), "same text");
     key(composer.textarea(), "Enter");
     await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    await acceptPending(intentCalls(invoke)[0]!);
+    await vi.waitFor(() => expect(composer.textarea().disabled).toBe(false));
+
+    type(composer.textarea(), "same text");
     selectFiles(composer.container.querySelector<HTMLInputElement>('input[type="file"]')!, [
       pickedFile("second.txt", "text/plain", "/tmp/second.txt"),
     ]);
     key(composer.textarea(), "Enter");
     await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(2));
     expect(intentCalls(invoke)[1]!.intent).toMatchObject({ text: "/tmp/second.txt\nsame text" });
+    await acceptPending(intentCalls(invoke)[1]!);
+    await vi.waitFor(() => expect(composer.textarea().disabled).toBe(false));
+
+    type(composer.textarea(), "third prompt");
     useSessionsStore.getState().beginEditorAttachmentRead(SID);
     key(composer.textarea(), "Enter");
     await Promise.resolve();

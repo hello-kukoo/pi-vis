@@ -186,6 +186,26 @@ function getInvoke(): (channel: string, payload: unknown) => Promise<unknown> {
 }
 
 describe("tree-store — open / refresh", () => {
+  it("opens in a retryable unavailable state even when semantic authority is fenced", async () => {
+    useSessionsStore.getState().markAuthorityUnavailable(SESSION_A, "post-abort repair");
+
+    await useTreeStore.getState().openTreeForSession(SESSION_A);
+
+    expect(useTreeStore.getState()).toMatchObject({
+      open: true,
+      sessionId: SESSION_A,
+      phase: "error",
+      errorMessage: "Session runtime is unavailable",
+    });
+    expect(
+      calls.some(
+        (call) =>
+          call.channel === "session.query" &&
+          (call.payload as { query?: { type?: string } }).query?.type === "get_tree",
+      ),
+    ).toBe(false);
+  });
+
   it("openTreeForSession sends get_tree and re-nests the flat response into ready", async () => {
     // The host sends a FLAT (parentId-keyed) node list (see FlatTreeNode / the
     // contextBridge nesting-limit fix). The store re-nests it via buildNestedTree
@@ -475,7 +495,10 @@ describe("tree-store — navigateTo", () => {
     return { navigation, intentId };
   }
 
-  it("blocks with a toast when the session is mid-turn (review B1)", async () => {
+  it.each([
+    { label: "streaming", sdk: { isStreaming: true, isCompacting: false } },
+    { label: "compaction", sdk: { isStreaming: false, isCompacting: true } },
+  ])("blocks branch mutation during $label while leaving the viewer open", async ({ sdk }) => {
     useTreeStore.setState({ open: true, sessionId: SESSION_A });
     const prior = useSessionsStore.getState().sessions.get(SESSION_A)
       ?.authorityProjection?.authoritativeSnapshot;
@@ -494,7 +517,7 @@ describe("tree-store — navigateTo", () => {
         terminalSnapshot: {
           ...prior,
           snapshotSequence: 2,
-          sdk: { ...prior.sdk, isStreaming: true, isIdle: false },
+          sdk: { ...prior.sdk, ...sdk, isIdle: false },
         },
       },
     } as RendererPublication);
@@ -503,6 +526,7 @@ describe("tree-store — navigateTo", () => {
     expect(calls.find((c) => c.channel === "session.dispatchIntent")).toBeUndefined();
     const toasts = useSessionsStore.getState().sessions.get(SESSION_A)?.toasts ?? [];
     expect(toasts.some((t) => /wait/i.test(t.message) && t.type === "warning")).toBe(true);
+    expect(useTreeStore.getState().open).toBe(true);
   });
 
   it("waits for the matching terminal frame; a receipt alone does not close", async () => {

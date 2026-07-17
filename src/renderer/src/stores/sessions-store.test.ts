@@ -985,6 +985,53 @@ describe("sessions store - runtime turn-result status", () => {
     store.applyRuntimeState(SESSION_A, runtimeState(false, 2));
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
   });
+
+  it("promotes a background turn from flashing to a solid done marker at agent_settled", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    expect(store.sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
+
+    store.applyEvent(SESSION_A, { type: "agent_settled" });
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("done");
+  });
+
+  it("keeps retry failures transient but retains a terminal error marker", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvents(SESSION_A, [
+      { type: "agent_start" },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "provider failed",
+        },
+      },
+      { type: "agent_end", willRetry: true },
+      { type: "agent_start" },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "provider failed again",
+        },
+      },
+      { type: "agent_settled" },
+    ]);
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBe("error");
+  });
+
+  it("clears the solid marker when a new turn starts", () => {
+    const store = useSessionsStore.getState();
+    store.applyEvent(SESSION_A, { type: "agent_settled" });
+    store.applyEvent(SESSION_A, { type: "agent_start" });
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unreadStatus).toBeUndefined();
+  });
 });
 
 describe("sessions store - workspace expand / reorder model", () => {
@@ -1158,6 +1205,55 @@ describe("sessions store - workspace expand / reorder model", () => {
         useSessionsStore.getState().sessions.get(SESSION_A)?.activationVisitId,
       ).toBeUndefined(),
     );
+    vi.unstubAllGlobals();
+  });
+
+  it("reactivateSession retries activation only for a dead already-active session", async () => {
+    const invoke = vi.fn((_channel: string) => Promise.resolve(undefined));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WS_A, "/f/a.jsonl", undefined, undefined, "ready");
+
+    // A live session is never re-activated.
+    await expect(store.reactivateSession(SESSION_A)).resolves.toBe(false);
+    expect(invoke).not.toHaveBeenCalledWith("session.activate", expect.anything());
+
+    // A failed session (host died while active, e.g. across sleep/wake)
+    // gets a fresh activation visit.
+    store.setSessionStatus(SESSION_A, "failed", "host lost");
+    await expect(store.reactivateSession(SESSION_A)).resolves.toBe(true);
+    const visitId = useSessionsStore.getState().sessions.get(SESSION_A)?.activationVisitId;
+    expect(visitId).toEqual(expect.any(String));
+    expect(invoke).toHaveBeenCalledWith("session.activate", {
+      sessionId: SESSION_A,
+      activationVisitId: visitId,
+    });
+
+    // An in-flight/held visit is not duplicated.
+    await expect(store.reactivateSession(SESSION_A)).resolves.toBe(false);
+    expect(invoke.mock.calls.filter(([channel]) => channel === "session.activate")).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("reactivateSession restores failed status when activation itself fails", async () => {
+    const invoke = vi.fn((channel: string) =>
+      channel === "session.activate"
+        ? Promise.reject(new Error("spawn failed"))
+        : Promise.resolve(undefined),
+    );
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WS_A, "/f/a.jsonl", undefined, undefined, "ready");
+    store.setSessionStatus(SESSION_A, "failed", "host lost");
+
+    await expect(store.reactivateSession(SESSION_A)).resolves.toBe(false);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.status).toBe("failed");
+    expect(session?.activationVisitId).toBeUndefined();
+    // The visit slot was released, so a later focus retry may try again.
+    await expect(useSessionsStore.getState().reactivateSession(SESSION_A)).resolves.toBe(false);
+    expect(invoke.mock.calls.filter(([channel]) => channel === "session.activate")).toHaveLength(2);
     vi.unstubAllGlobals();
   });
 });
