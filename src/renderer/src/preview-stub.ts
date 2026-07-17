@@ -1256,8 +1256,6 @@ const settingsState = {
   themeMode: "system" as "light" | "dark" | "system",
   diffMaxFileSizeMiB: 5,
   statusBarVisible: true,
-  updateCheckEnabled: true,
-  lastDismissedPiVersion: null,
   sidebarWidth: 220,
   sidebarCollapsed: false,
   sessionSearchEnabled: true,
@@ -1276,8 +1274,8 @@ const settingsState = {
 const stub = {
   invoke: async (channel: string, req?: unknown) => {
     switch (channel) {
-      case "pi.locate":
-        return { path: "/usr/local/bin/pi", version: "1.0.0-stub" };
+      case "pi.info":
+        return { version: "0.80.10-stub" };
       case "settings.get":
         return settingsState;
       case "settings.set":
@@ -1795,49 +1793,6 @@ const stub = {
             { name: "origin/develop", remote: true, current: false },
           ],
         };
-
-      // ── Update stubs ────────────────────────────────────────────
-      case "update.check":
-        return {
-          pi: { current: "0.79.3", latest: "0.80.0", updateAvailable: true },
-          extensions: [
-            {
-              source: "npm:@pi/mcp",
-              name: "@pi/mcp",
-              current: "1.2.0",
-              latest: "1.3.0",
-              updateAvailable: true,
-              kind: "npm",
-            },
-            {
-              source: "npm:@pi/fs",
-              name: "@pi/fs",
-              current: "0.5.1",
-              latest: "0.5.1",
-              updateAvailable: false,
-              kind: "npm",
-            },
-            {
-              source: "local:../../src/pi-architect",
-              name: "pi-architect",
-              current: "0.2.0",
-              latest: undefined,
-              updateAvailable: false,
-              kind: "local",
-            },
-            {
-              source: "git:github.com/user/mcp-extra",
-              name: "mcp-extra",
-              current: undefined,
-              latest: undefined,
-              updateAvailable: false,
-              kind: "git",
-            },
-          ],
-          checkedAt: Date.now(),
-        };
-      case "update.run":
-        return { runId: "stub-run" };
 
       default:
         return undefined;

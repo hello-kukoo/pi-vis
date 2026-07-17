@@ -20,16 +20,13 @@ import { AppPickerHost } from "./components/pickers/AppPickerHost.js";
 import { SessionSubBar } from "./components/session-header/SessionSubBar.js";
 import { SessionSearchModal } from "./components/session-search/SessionSearchModal.js";
 import { SettingsView } from "./components/settings/SettingsView.js";
-import { PiNotFound } from "./components/setup/PiNotFound.js";
 import { Dock } from "./components/shell/Dock.js";
 import { Sidebar } from "./components/shell/Sidebar.js";
 import { StatusBar } from "./components/shell/StatusBar.js";
 import { TitleBar } from "./components/shell/TitleBar.js";
-import { UpdateBanner } from "./components/shell/UpdateBanner.js";
 import { TranscriptView } from "./components/transcript/TranscriptView.js";
 import { TreeViewerHost } from "./components/tree/TreeViewerHost.js";
 import { AppUpdatePrompt } from "./components/updates/AppUpdatePrompt.js";
-import { UpdateProgress } from "./components/updates/UpdateProgress.js";
 import { useEscapeClaim } from "./hooks/useEscapeClaim.js";
 import { useGlobalEscapeInterrupt } from "./hooks/useGlobalEscapeInterrupt.js";
 import { AuthorityAttachRetry } from "./lib/authority-attach-retry.js";
@@ -39,7 +36,6 @@ import type { RendererAuthorityState } from "./stores/authority-reducer.js";
 import { openDiffForSession, useDiffStore } from "./stores/diff-store.js";
 import { sessionMatchesRuntime, useSessionsStore } from "./stores/sessions-store.js";
 import { useSettingsStore } from "./stores/settings-store.js";
-import { useUpdatesStore } from "./stores/updates-store.js";
 import "./App.css";
 
 function authorityNeedsBaseline(projection: RendererAuthorityState | undefined): boolean {
@@ -90,7 +86,6 @@ export function App(): React.ReactElement {
   const persistedSidebarWidth = useSettingsStore((s) => s.settings.sidebarWidth);
   const sidebarCollapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
   const updateSettings = useSettingsStore((s) => s.update);
-  const [piFound, setPiFound] = useState<boolean | null>(null);
   const [sessionSearchAvailable, setSessionSearchAvailable] = useState(false);
   const authorityAttachRetryRef = useRef<AuthorityAttachRetry | null>(null);
   if (!authorityAttachRetryRef.current) {
@@ -341,15 +336,9 @@ export function App(): React.ReactElement {
 
   const customPanelSlotActive = hasOpenPanel && !hasPendingDialog;
 
-  // Boot: load settings and check for pi
+  // Boot: load settings
   useEffect(() => {
     loadSettings();
-    window.pivis
-      .invoke("pi.locate", undefined)
-      .then((info) => {
-        setPiFound(info !== null);
-      })
-      .catch(() => setPiFound(false));
     window.pivis
       .invoke("sessionSearch.available", undefined)
       .then(setSessionSearchAvailable)
@@ -371,22 +360,9 @@ export function App(): React.ReactElement {
     };
     window.addEventListener("pivis:open-login", loginHandler);
 
-    // pivis:run-update — trigger update from the UpdateBanner
-    const runUpdateHandler = (e: Event) => {
-      const target =
-        (e as CustomEvent<{ target: "all" | "pi" | { extension: string } }>).detail?.target ??
-        "all";
-      void (async () => {
-        const { runId } = await window.pivis.invoke("update.run", { target });
-        useUpdatesStore.getState().setActiveRun({ runId, lines: [] });
-      })();
-    };
-    window.addEventListener("pivis:run-update", runUpdateHandler);
-
     return () => {
       window.removeEventListener("pivis:open-settings", handler);
       window.removeEventListener("pivis:open-login", loginHandler);
-      window.removeEventListener("pivis:run-update", runUpdateHandler);
     };
   }, []);
 
@@ -651,30 +627,6 @@ export function App(): React.ReactElement {
       },
     );
 
-    // Update events
-    const unsubUpdateAvailable = window.pivis.on("update.available", (status) => {
-      useUpdatesStore.getState().setStatus(status);
-    });
-
-    const unsubUpdateProgress = window.pivis.on("update.progress", ({ runId, chunk }) => {
-      const store = useUpdatesStore.getState();
-      if (store.activeRun?.runId === runId) {
-        store.appendOutput(runId, chunk);
-      }
-    });
-
-    const unsubUpdateDone = window.pivis.on("update.done", ({ runId, exitCode, status }) => {
-      const store = useUpdatesStore.getState();
-      store.setStatus(status);
-      store.markDone(runId, exitCode);
-      if (store.activeRun?.runId === runId) {
-        store.appendOutput(
-          runId,
-          `\n\n${exitCode === 0 ? "✓ Update complete" : "✗ Update failed"}\n`,
-        );
-      }
-    });
-
     const unsubAppUpdateStatus = window.pivis.on("appUpdate.status", (status) => {
       useAppUpdatesStore.getState().setStatus(status);
     });
@@ -702,9 +654,6 @@ export function App(): React.ReactElement {
       unsubWorktreeOperation();
       unsubWorktree();
       unsubFileChanged();
-      unsubUpdateAvailable();
-      unsubUpdateProgress();
-      unsubUpdateDone();
       unsubAppUpdateStatus();
       unsubAuthChanged();
       unsubPanel();
@@ -768,11 +717,6 @@ export function App(): React.ReactElement {
     };
   }, [liveSessionIdsKey, requestAttach]);
 
-  const handlePiRecheck = useCallback(async () => {
-    const info = await window.pivis.invoke("pi.locate", undefined);
-    setPiFound(info !== null);
-  }, []);
-
   const handleOpenSearchResult = useCallback(
     async (targetId: SearchTargetId): Promise<boolean> => {
       const resolved = await window.pivis.invoke("sessionSearch.open", {
@@ -789,23 +733,6 @@ export function App(): React.ReactElement {
     },
     [openSessionTab],
   );
-
-  if (piFound === null) {
-    return (
-      <div className="app-loading">
-        <span className="app-loading__text">Loading…</span>
-      </div>
-    );
-  }
-
-  if (piFound === false) {
-    return (
-      <div className="app app--setup">
-        <PiNotFound onRecheck={handlePiRecheck} />
-        <AppUpdatePrompt />
-      </div>
-    );
-  }
 
   return (
     <div
@@ -936,9 +863,6 @@ export function App(): React.ReactElement {
                 Select a workspace in the sidebar, then open or resume a session to start working.
               </p>
             </div>
-            {/* No composer here to sit above, so the update notice floats in
-                the bottom-right corner of the empty area instead. */}
-            <UpdateBanner floating />
           </div>
         )}
       </main>
@@ -962,7 +886,6 @@ export function App(): React.ReactElement {
         />
       )}
       {sessionSearchAvailable && <SessionSearchModal onOpenResult={handleOpenSearchResult} />}
-      <UpdateProgress />
       <AppUpdatePrompt />
       <ChangelogModal />
       <ImageLightbox />

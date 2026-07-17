@@ -2,7 +2,7 @@
 
 ## Runtime architecture
 
-Pi-Vis is an Electron GUI for pi. A live session has one execution authority: the SDK-direct `AgentSession` hosted by `resources/pi-session-host/host.mjs`. Main forks one host per active session; the host imports the user's installed pi public SDK and owns the live `AgentSession`, extension runtime, command admission, and direct state reads. There is **no RPC session fallback**.
+Pi-Vis is an Electron GUI for pi. A live session has one execution authority: the SDK-direct `AgentSession` hosted by `resources/pi-session-host/host.mjs`. Main forks one host per active session; the host imports the public SDK of the pi runtime bundled with the app (an exact pinned version — see `src/main/pi/pinned-pi.ts`) and owns the live `AgentSession`, extension runtime, command admission, and direct state reads. There is **no RPC session fallback**.
 
 The renderer talks only to main through the typed `window.pivis` contract. Main forwards host records, validates host identity/epoch/transport sequence, and never reconstructs session liveness from transcript events. Session files remain the persisted history source; they are not live-state authority.
 

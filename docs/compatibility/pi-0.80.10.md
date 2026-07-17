@@ -1,6 +1,6 @@
 # Pi 0.80.3 → 0.80.10 compatibility audit
 
-Audited against upstream `v0.80.3` through `v0.80.10` on 2026-07-16. Production Pi-Vis requires the user-selected Pi public SDK surfaces used by the SDK host; an incompatible runtime fails activation rather than switching to another session transport. Tests independently pin `@earendil-works/pi-coding-agent` to exactly `0.80.10` as a dev dependency and never substitute that fixture for the user's production runtime. The production minimum remains `0.80.6`; the exact test pin gates compatibility with the newest audited release.
+Audited against upstream `v0.80.3` through `v0.80.10` on 2026-07-16. Production Pi-Vis bundles and runs exactly `@earendil-works/pi-coding-agent@0.80.10` (a production dependency; see `src/main/pi/pinned-pi.ts`) — the user's own pi install is never detected or used, because upstream ships breaking SDK changes in patch releases. Tests run against the same pinned package. Changing the pin is a Pi-Vis release decision and requires re-auditing this document against the new version. The host's 0.80.6–0.80.7 adapter paths remain in the code but are unreachable in production while the pin is 0.80.10.
 
 ## Integration-significant handling
 

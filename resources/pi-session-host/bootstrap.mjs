@@ -1,8 +1,8 @@
 /**
  * pi-session-host: Bootstrap helpers for the SDK host subprocess.
  *
- * All functions receive `piPath` (resolved by locate-pi in main process) so
- * imports are resolved from the user's actual pi installation.
+ * All functions receive `piPath` (the pinned pi resolved by pinned-pi.ts in
+ * the main process) so imports are resolved from that exact runtime.
  */
 
 import { realpathSync } from "node:fs";
@@ -36,9 +36,9 @@ import { pathToFileURL } from "node:url";
 }
 
 // ─── Pi import helper ─────────────────────────────────────────────────────────
-// piPath is the pi binary resolved by locate-pi (e.g., /opt/homebrew/bin/pi).
-// It's a symlink to .../pi-coding-agent/dist/cli.js. We resolve the real path
-// and derive the dist/index.js entry and bundled deps from there.
+// piPath is the pinned pi cli (…/pi-coding-agent/dist/cli.js, or a symlink to
+// it when the test seam overrides the path). We resolve the real path and
+// derive the dist/index.js entry and bundled deps from there.
 
 export function resolvePiEntry(piPath) {
   // Resolve symlink to get real path: .../pi-coding-agent/dist/cli.js
@@ -56,7 +56,7 @@ export function resolvePiDependency(piPath, depName) {
 }
 
 /**
- * Import pi's public SDK from the user's installation.
+ * Import pi's public SDK from the resolved runtime.
  * Returns the pi module object (public index.d.ts surface).
  */
 export async function importPi(piPath) {

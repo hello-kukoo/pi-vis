@@ -18,6 +18,10 @@ files:
   - "!{.mocharc,.prettierrc}.{js,cjs,yml,yaml}"
 asarUnpack:
   - resources/**
+  # The pinned pi runtime must be real files: the SDK host is forked (possibly
+  # under system Node) and pty spawns dist/cli.js directly — neither can read
+  # inside app.asar.
+  - node_modules/@earendil-works/**
   - out/resources/pi-session-host/**
   - out/main/session-search-worker.js
   - out/main/chunks/**

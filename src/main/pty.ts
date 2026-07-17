@@ -12,7 +12,7 @@
 import os from "node:os";
 import { getSubprocessEnv } from "./auth.js";
 import { mergeUserPiEnv } from "./pi-env.js";
-import { locatePi } from "./pi/locate-pi.js";
+import { getPinnedPi } from "./pi/pinned-pi.js";
 import { getSettings } from "./settings-store.js";
 
 // Dynamic import for node-pty — it's a native module that may not be
@@ -95,9 +95,9 @@ export async function startPty(opts: {
   }
 
   const settings = getSettings();
-  const piInfo = await locatePi(settings.piBinaryPath);
+  const piInfo = getPinnedPi(settings.piBinaryPath);
   if (!piInfo) {
-    throw new Error("pi binary not found. Please install pi or set the path in settings.");
+    throw new Error("Bundled pi runtime not found (broken install)");
   }
 
   const env: Record<string, string> = {

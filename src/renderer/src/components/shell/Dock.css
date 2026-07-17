@@ -1,8 +1,7 @@
 /* ── Dock — the above-composer tray ──────────────────────────────────────
    A bordered, rounded tray that collects every above-composer
-   notification/control (extension widget lines today, the update
-   notification, and — reserved — a future Input/Extension toggle) into one
-   surface. It shares the composer's always-visible border and sits flush on
+   notification/control (extension widget lines today, and — reserved — a
+   future Input/Extension toggle) into one surface. It shares the composer's always-visible border and sits flush on
    top of the composer's input box — the tray's flat bottom edge meets the
    composer's top border, so the two read as one connected unit (the composer
    flattens its top corners when the tray is present; see Composer.css
@@ -28,7 +27,6 @@
   border: 1px solid var(--border-strong);
   border-bottom: none;
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  /* Positioning context for the update item's popover. */
   position: relative;
   /* Rigid row in the session dock; only the transcript absorbs vertical
      pressure. Pills flow inline and wrap to additional rows when narrow. */
@@ -55,17 +53,18 @@
   }
 }
 
-/* ── Floating pill — the shared per-item vocabulary ─────────────────────
+/* ── Widget pill (extension setWidget text) ─────────────────────────────
    Every item in the tray is its own pill so the eye can tell items apart. The
    fill is a recessed background tone (base — darker than the surface0 tray),
    not a mid-surface, so the pill reads with real contrast against the tray
    instead of blending into it; a border-strong outline + soft elevation keep
    it defined and lifted. */
-.dock__widget,
-.dock__update {
+.dock__widget {
   display: inline-flex;
-  align-items: center;
-  gap: 0.429rem;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.071rem;
   min-width: 0;
   background: var(--bg);
   border: 1px solid var(--border-strong);
@@ -73,147 +72,9 @@
   padding: 0.286rem 0.643rem;
 }
 
-/* ── Widget pill (extension setWidget text) ─────────────────────────────── */
-.dock__widget {
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.071rem;
-}
-
 .dock__widget-line {
   font-family: var(--font-code);
   font-size: var(--font-size-small);
   color: var(--text-muted);
   max-width: 100%;
-}
-
-/* ── Update pill ────────────────────────────────────────────────────────
-   Collapsed: a summary line with an inline "Update now" action, a disclosure
-   affordance, and a dismiss. Expanded: the per-extension detail list opens as
-   a floating popover anchored above the pill, so expansion never reflows the
-   tray height. Sits at the right of the tray (margin-left: auto). */
-.dock__update {
-  margin-left: auto;
-  position: relative;
-  /* Tighter right padding so the dismiss "×" sits comfortably inside the pill. */
-  padding-right: 0.286rem;
-}
-
-.dock__update-text {
-  color: var(--success);
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.dock__btn {
-  background: var(--accent-fill);
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--on-accent);
-  cursor: pointer;
-  font-family: var(--font-display);
-  font-size: 0.857em;
-  font-weight: 500;
-  line-height: var(--leading-label);
-  padding: 0.214rem 0.643rem;
-  white-space: nowrap;
-}
-
-.dock__btn:hover {
-  background: var(--accent-soft);
-}
-
-.dock__btn--secondary {
-  background: var(--surface-2);
-  color: var(--text-muted);
-}
-
-.dock__btn--secondary:hover {
-  background: var(--surface-3);
-  color: var(--text);
-}
-
-/* Expand toggle — shared IconChevronDown, flipped when expanded. */
-.dock__chevron-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.429rem;
-  padding: 0.214rem 0;
-}
-
-.dock__chevron {
-  display: block;
-  transition: transform 0.15s ease;
-}
-
-.dock__chevron--up {
-  transform: rotate(180deg);
-}
-
-/* Dismiss chrome comes from the global .icon-btn treatment; compact size
-   fits the tray strip. */
-.dock__dismiss {
-  width: 1.286rem;
-  height: 1.286rem;
-}
-
-/* Expanded detail popover — floats above the item so the tray height is
-   unaffected by expansion. Anchored to the item's right edge, opening
-   upward (bottom: 100%). */
-.dock__update-popover {
-  position: absolute;
-  right: 0;
-  bottom: 100%;
-  margin-bottom: 0.643rem;
-  z-index: 3;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--elevation-2);
-  padding: 0.429rem;
-  min-width: 16rem;
-  max-width: 22rem;
-  animation: dock-rise 0.18s ease-out;
-}
-
-.dock__update-details {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.143rem;
-  min-width: 0;
-  max-height: 11rem;
-  overflow-y: auto;
-}
-
-.dock__update-detail-row {
-  display: flex;
-  align-items: center;
-  gap: 0.571rem;
-  padding: 0.143rem 0;
-  min-width: 0;
-}
-
-.dock__update-detail-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--text);
-  font-weight: 500;
-}
-
-.dock__update-detail-version {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-family: var(--font-code);
-  font-size: 0.857em;
-  white-space: nowrap;
-}
-
-.dock__update-detail-btn {
-  flex: 0 0 auto;
-  padding: 0.143rem 0.571rem;
 }

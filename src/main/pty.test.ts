@@ -4,8 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./settings-store.js", () => ({
   getSettings: () => ({ piBinaryPath: undefined, piEnv: "" }),
 }));
-vi.mock("./pi/locate-pi.js", () => ({
-  locatePi: async () => ({ path: "/fake/pi" }),
+vi.mock("./pi/pinned-pi.js", () => ({
+  getPinnedPi: () => ({ path: "/fake/pi", version: "0.0.0-test" }),
 }));
 vi.mock("./auth.js", () => ({
   getSubprocessEnv: async () => ({}),

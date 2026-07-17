@@ -49,7 +49,7 @@ import {
 } from "./git/git.js";
 import { readPiChangelog } from "./pi-changelog.js";
 import { mergeUserPiEnv } from "./pi-env.js";
-import { clearPiLocationCache, locatePi } from "./pi/locate-pi.js";
+import { getPinnedPi } from "./pi/pinned-pi.js";
 import { initPty, killAllPtys, killPty, resizePty, startPty, writePty } from "./pty.js";
 import { loadBoundHistory } from "./sessions/bound-history.js";
 import { createEventBatcher } from "./sessions/event-batcher.js";
@@ -69,7 +69,6 @@ import {
   piThemeColorIndices,
   piThemeForSchemeId,
 } from "./theme-loader.js";
-import { checkForUpdates, startUpdate } from "./updates.js";
 import {
   getOrderedWorkspaces,
   pickWorkspace,
@@ -426,10 +425,9 @@ export function initIpc(win: BrowserWindow): void {
     safeSend("auth.changed", { providers });
   });
 
-  ipcMain.handle("pi.locate", async () => {
-    clearPiLocationCache();
-    const settings = getSettings();
-    return locatePi(settings.piBinaryPath);
+  ipcMain.handle("pi.info", async () => {
+    const piInfo = getPinnedPi(getSettings().piBinaryPath);
+    return piInfo ? { version: piInfo.version } : null;
   });
 
   ipcMain.handle("workspace.pick", async () => {
@@ -510,9 +508,8 @@ export function initIpc(win: BrowserWindow): void {
     async (_evt, args: { sessionId: SessionId; activationVisitId?: string | undefined }) => {
       logTestIpcInvocation("session.activate", args);
       const settings = getSettings();
-      const piInfo = await locatePi(settings.piBinaryPath);
-      if (!piInfo)
-        throw new Error("pi binary not found. Please install pi or set the path in settings.");
+      const piInfo = getPinnedPi(settings.piBinaryPath);
+      if (!piInfo) throw new Error("Bundled pi runtime not found (broken install)");
       const loginShellEnv = await getHostEnv();
       const record = registry?.getSession(args.sessionId);
       if (record?.status === "cold" && record.worktreePath) {
@@ -622,8 +619,8 @@ export function initIpc(win: BrowserWindow): void {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
       const settings = getSettings();
-      const piInfo = await locatePi(settings.piBinaryPath);
-      if (!piInfo) return { ok: false, error: "pi binary not found" };
+      const piInfo = getPinnedPi(settings.piBinaryPath);
+      if (!piInfo) return { ok: false, error: "Bundled pi runtime not found" };
       const loginShellEnv = await getHostEnv();
       if (activeWorktreeOperations.has(args.sessionId)) {
         return { ok: false, error: "A worktree switch is already in progress" };
@@ -813,8 +810,8 @@ export function initIpc(win: BrowserWindow): void {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
       const settings = getSettings();
-      const piInfo = await locatePi(settings.piBinaryPath);
-      if (!piInfo) return { ok: false, error: "pi binary not found" };
+      const piInfo = getPinnedPi(settings.piBinaryPath);
+      if (!piInfo) return { ok: false, error: "Bundled pi runtime not found" };
       const loginShellEnv = await getHostEnv();
       if (activeWorktreeOperations.has(args.sessionId)) {
         return { ok: false, error: "A worktree switch is already in progress" };
@@ -991,8 +988,8 @@ export function initIpc(win: BrowserWindow): void {
   // renders it as a custom_message block.
   ipcMain.handle("pi.changelog", async () => {
     const settings = getSettings();
-    const piInfo = await locatePi(settings.piBinaryPath);
-    if (!piInfo) return { ok: false, error: "pi binary not found" };
+    const piInfo = getPinnedPi(settings.piBinaryPath);
+    if (!piInfo) return { ok: false, error: "Bundled pi runtime not found" };
     return readPiChangelog(piInfo.path);
   });
 
@@ -1586,36 +1583,6 @@ export function initIpc(win: BrowserWindow): void {
   ipcMain.handle("pty.kill", async (_evt, args: { ptyId: string }) => {
     killPty(args.ptyId);
   });
-
-  // ── Update IPC ────────────────────────────────────────────────────────
-
-  ipcMain.handle("update.check", async () => {
-    try {
-      return await checkForUpdates();
-    } catch {
-      return {
-        pi: { current: "unknown", updateAvailable: false },
-        extensions: [],
-        checkedAt: Date.now(),
-      };
-    }
-  });
-
-  ipcMain.handle(
-    "update.run",
-    async (_evt, args: { target: "all" | "pi" | { extension: string } }) => {
-      const { runId } = startUpdate(
-        args.target,
-        (id, chunk) => {
-          safeSend("update.progress", { runId: id, chunk });
-        },
-        (id, exitCode, status) => {
-          safeSend("update.done", { runId: id, exitCode, status });
-        },
-      );
-      return { runId };
-    },
-  );
 }
 
 export function stopAllSessions(): void {
@@ -1634,25 +1601,6 @@ export function stopAllSessions(): void {
   void sessionSearchService?.stop();
   sessionSearchService = null;
   registry?.stopAll();
-}
-
-/**
- * Exported for background check at app start. Called from index.ts
- * after window is ready. Delays the check by 3s to let the UI settle.
- */
-export function triggerBackgroundUpdateCheck(): void {
-  setTimeout(async () => {
-    try {
-      const settings = getSettings();
-      if (!settings.updateCheckEnabled) return;
-      const status = await checkForUpdates();
-      if (status.pi.updateAvailable || status.extensions.some((e) => e.updateAvailable)) {
-        safeSend("update.available", status);
-      }
-    } catch {
-      // silent — updates are best-effort
-    }
-  }, 3000);
 }
 
 export function triggerBackgroundAppUpdateCheck(): void {

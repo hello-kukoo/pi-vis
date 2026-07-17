@@ -27,7 +27,7 @@
  *   { type: "panel_clear_all" }
  *   { type: "response", id, success, data?, error? }
  *
- * All imports are from the user's installed pi (resolved via piPath), and
+ * All imports are from the pinned pi bundled with the app (resolved via piPath), and
  * only its PUBLIC surface — zero non-exported pi imports (enforced by
  * src/main/pi/host-imports.test.ts).
  */

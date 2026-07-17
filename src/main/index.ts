@@ -1,11 +1,6 @@
 import path from "node:path";
 import { BrowserWindow, app, screen, session, shell } from "electron";
-import {
-  initIpc,
-  stopAllSessions,
-  triggerBackgroundAppUpdateCheck,
-  triggerBackgroundUpdateCheck,
-} from "./ipc.js";
+import { initIpc, stopAllSessions, triggerBackgroundAppUpdateCheck } from "./ipc.js";
 import { loadSettings, saveSettings } from "./settings-store.js";
 
 // A forcibly interrupted E2E parent can close Electron's captured output pipes
@@ -211,8 +206,7 @@ if (!hasSingleInstanceLock) {
 
     createWindow();
 
-    // Background update checks (delayed, non-blocking)
-    triggerBackgroundUpdateCheck();
+    // Background app-update check (delayed, non-blocking)
     triggerBackgroundAppUpdateCheck();
 
     app.on("activate", () => {

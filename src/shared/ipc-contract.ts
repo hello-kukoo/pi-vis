@@ -48,7 +48,6 @@ import type {
 } from "./session-search.js";
 import type { AppSettings } from "./settings.js";
 import type { Theme } from "./theme/index.js";
-import type { UpdateStatus } from "./updates.js";
 
 export interface SessionSummary {
   filePath: string;
@@ -103,7 +102,8 @@ export interface TranscriptBlock {
 
 // Every invoke channel: request type → response type
 export interface IpcInvokeContract {
-  "pi.locate": { req: undefined; res: { path: string; version: string } | null };
+  /** Version of the pinned pi runtime bundled with the app (null only on a broken install). */
+  "pi.info": { req: undefined; res: { version: string } | null };
   "workspace.pick": { req: undefined; res: string | null };
   "workspace.list": { req: undefined; res: string[] };
   "workspace.remove": { req: { workspacePath: string }; res: string[] };
@@ -520,11 +520,6 @@ export interface IpcInvokeContract {
   "pty.kill": { req: { ptyId: string }; res: undefined };
 
   // ── Updates ─────────────────────────────────────────────────────────
-  "update.check": { req: undefined; res: UpdateStatus };
-  "update.run": {
-    req: { target: "all" | "pi" | { extension: string } };
-    res: { runId: string };
-  };
   "appUpdate.status": { req: undefined; res: AppUpdateStatus };
   "appUpdate.check": { req: undefined; res: AppUpdateStatus };
   "appUpdate.install": { req: undefined; res: AppUpdateStatus };
@@ -595,9 +590,6 @@ export interface IpcEventContract {
   "pty.exit": { ptyId: string; exitCode: number };
 
   // ── Updates ─────────────────────────────────────────────────────────
-  "update.available": UpdateStatus;
-  "update.progress": { runId: string; chunk: string };
-  "update.done": { runId: string; exitCode: number; status: UpdateStatus };
   "appUpdate.status": AppUpdateStatus;
 
   // ── Window ─────────────────────────────────────────────────────────

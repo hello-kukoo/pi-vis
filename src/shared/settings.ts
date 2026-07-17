@@ -20,6 +20,9 @@ const CodeFontSettingsSchema = z.object({
 });
 
 export const AppSettingsSchema = z.object({
+  // TEST-ONLY seam: e2e fixtures point this at fake-pi scripts. Production
+  // always runs the bundled pinned pi (see src/main/pi/pinned-pi.ts); there is
+  // no user-facing override and no UI writes this key.
   piBinaryPath: z.string().nullable().default(null),
   // User-configured environment variables merged into every pi session spawn
   // SDK-host spawn, after the login-shell env and before
@@ -130,9 +133,6 @@ export const AppSettingsSchema = z.object({
   // archivedSessions' trade-off.
   pinnedSessions: z.array(z.string()).default([]),
   archivedSessions: z.array(z.string()).default([]),
-  lastDismissedPiVersion: z.string().nullable().default(null),
-  // Checks for updates to the user's pi binary and installed pi extensions.
-  updateCheckEnabled: z.boolean().default(true),
   // Checks for updates to the packaged Pi-Vis desktop app via Electron's
   // built-in autoUpdater. Separate from pi/extension updates because it uses
   // a signed app release feed and installs by restarting the app.

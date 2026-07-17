@@ -33,6 +33,7 @@
     "site:screenshots": "node scripts/site-screenshots.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10",
     "@fontsource/fraunces": "^5.2.9",
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-serif": "^5.2.7",
@@ -53,7 +54,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
-    "@earendil-works/pi-coding-agent": "0.80.10",
     "@electron-toolkit/preload": "^3.0.0",
     "@electron-toolkit/utils": "^3.0.0",
     "@electron/notarize": "^3.1.1",

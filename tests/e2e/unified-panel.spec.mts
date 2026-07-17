@@ -3,7 +3,7 @@
  *
  * Self-contained (no real pi / no real SDK / no PI_E2E gate): launches the REAL
  * app with two test fixtures:
- *   - fake-pi.mjs            → satisfies locate-pi (the app needs a pi binary)
+ *   - fake-pi.mjs            → piBinaryPath test-seam target (overrides the bundled pi)
  *   - fake-unified-host.mjs  → substituted for host.mjs via PIVIS_TEST_HOST_SCRIPT,
  *                              speaks the SessionHost wire protocol and drives the
  *                              factory-setWidget flow: panel_open{unified:true} +

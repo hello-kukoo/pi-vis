@@ -42,7 +42,7 @@ if (!root) throw new Error("No #root element");
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     {/* Top-level safety net: any uncaught render error in the app shell
-        (TitleBar, Sidebar, UpdateBanner, Settings, modals, …) shows a
+        (TitleBar, Sidebar, Settings, modals, …) shows a
         reloadable error card instead of silently white-screening the whole
         window. The per-session ErrorBoundary inside App stays for granular
         recovery of transcript/composer crashes. */}

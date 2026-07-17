@@ -2,13 +2,11 @@ import type { AppUpdateStatus } from "@shared/app-updates.js";
 import type { ProviderAuthStatus } from "@shared/auth.js";
 import { PROVIDERS } from "@shared/auth.js";
 import type { ThemeMode, TranscriptStyle } from "@shared/settings.js";
-import type { UpdateStatus } from "@shared/updates.js";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatMiB, parseSizeToMiB } from "../../lib/file-size.js";
 import { useAppUpdatesStore } from "../../stores/app-updates-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
-import { useUpdatesStore } from "../../stores/updates-store.js";
 import { listThemes } from "../../theme/registry.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
 import { IconCheck, IconChevronDown, IconClose } from "../common/icons.js";
@@ -349,9 +347,8 @@ function appUpdateMessage(status: AppUpdateStatus): string {
 export function SettingsView({ onClose, initialSection }: SettingsViewProps): React.ReactElement {
   const { settings, update } = useSettingsStore();
   const [localFonts, setLocalFonts] = useState<FontFamily[]>([]);
-  const [piInfo, setPiInfo] = useState<{ path: string; version: string } | null>(null);
+  const [piInfo, setPiInfo] = useState<{ version: string } | null>(null);
   const [userThemesDir, setUserThemesDir] = useState("");
-  const [recheckMsg, setRecheckMsg] = useState("");
   const accountRef = useRef<HTMLElement>(null);
 
   // ── Auth state ─────────────────────────────────────────────────────────
@@ -364,12 +361,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   const [initialAuthSnapshot, setInitialAuthSnapshot] = useState<ProviderAuthStatus[]>([]);
 
   // ── Update state ───────────────────────────────────────────────────────
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
-  const [updateCheckMsg, setUpdateCheckMsg] = useState("");
-  const updatesStatus = useUpdatesStore((s) => s.status);
-  const setStatus = useUpdatesStore((s) => s.setStatus);
-  const setActiveRun = useUpdatesStore((s) => s.setActiveRun);
-  const [checking, setChecking] = useState(false);
   const appUpdateStatus = useAppUpdatesStore((s) => s.status);
   const setAppUpdateStatus = useAppUpdatesStore((s) => s.setStatus);
   const [appChecking, setAppChecking] = useState(false);
@@ -388,7 +379,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
     }
 
     window.pivis
-      .invoke("pi.locate", undefined)
+      .invoke("pi.info", undefined)
       .then(setPiInfo)
       .catch(() => {});
 
@@ -423,39 +414,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
       accountRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [initialSection]);
-
-  // Seed update status from store on mount, auto-check if stale
-  useEffect(() => {
-    if (updatesStatus) {
-      setUpdateStatus(updatesStatus);
-    }
-    // Auto-check on mount if no status yet
-    if (!updatesStatus) {
-      setChecking(true);
-      window.pivis
-        .invoke("update.check", undefined)
-        .then((status) => {
-          setUpdateStatus(status);
-          setStatus(status);
-          setUpdateCheckMsg("");
-        })
-        .catch(() => {
-          setUpdateCheckMsg("Check failed");
-        })
-        .finally(() => {
-          setChecking(false);
-        });
-    }
-  }, [setStatus, updatesStatus]);
-
-  // ── Pi recheck ────────────────────────────────────────────────────────
-
-  const handleRecheck = async () => {
-    setRecheckMsg("Checking…");
-    const info = await window.pivis.invoke("pi.locate", undefined);
-    setPiInfo(info);
-    setRecheckMsg(info ? `Found: ${info.path}` : "Not found");
-  };
 
   // ── Auth handlers ─────────────────────────────────────────────────────
 
@@ -494,44 +452,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
 
   // ── Update helpers ──────────────────────────────────────────────────
 
-  const fmtTimeAgo = (ts: number): string => {
-    const sec = Math.round((Date.now() - ts) / 1000);
-    if (sec < 60) return `${sec}s ago`;
-    const min = Math.round(sec / 60);
-    if (min < 60) {
-      if (min === 1) return "1m ago";
-      return `${min}m ago`;
-    }
-    const hr = Math.round(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    return `${Math.round(hr / 24)}d ago`;
-  };
-
-  const handleCheckUpdates = useCallback(async () => {
-    setChecking(true);
-    setUpdateCheckMsg("Checking…");
-    try {
-      const status = await window.pivis.invoke("update.check", undefined);
-      setUpdateStatus(status);
-      setStatus(status);
-      setUpdateCheckMsg("");
-    } catch (err) {
-      setUpdateCheckMsg("Check failed");
-    } finally {
-      setChecking(false);
-    }
-  }, [setStatus]);
-
-  const handleRunUpdate = useCallback(
-    (target: "all" | "pi" | { extension: string }) => {
-      void (async () => {
-        const { runId } = await window.pivis.invoke("update.run", { target });
-        setActiveRun({ runId, lines: [] });
-      })();
-    },
-    [setActiveRun],
-  );
-
   const handleCheckAppUpdate = useCallback(async () => {
     setAppChecking(true);
     setAppUpdateMsg("Checking…");
@@ -550,23 +470,17 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
     void window.pivis.invoke("appUpdate.install", undefined);
   }, []);
 
-  // Subscribe to update completion
+  // Subscribe to app-update status changes
   useEffect(() => {
-    const unsubDone = window.pivis.on("update.done", ({ runId, exitCode, status }) => {
-      setUpdateStatus(status);
-      setStatus(status);
-      setUpdateCheckMsg(exitCode === 0 ? "Update successful" : "Update failed");
-    });
     const unsubAppUpdate = window.pivis.on("appUpdate.status", (status) => {
       setAppUpdateStatus(status);
       setAppChecking(isAppUpdateBusy(status));
       setAppUpdateMsg(appUpdateMessage(status));
     });
     return () => {
-      unsubDone();
       unsubAppUpdate();
     };
-  }, [setAppUpdateStatus, setStatus]);
+  }, [setAppUpdateStatus]);
 
   const appUpdateBusy = appChecking || isAppUpdateBusy(appUpdateStatus);
   const themes = listThemes();
@@ -624,25 +538,16 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
           </div>
 
           <div className="settings-panel__body">
-            {/* Pi binary */}
+            {/* Pi runtime */}
             <section className="settings-section">
-              <h3 className="settings-section__title">pi binary</h3>
+              <h3 className="settings-section__title">pi runtime</h3>
               <div className="settings-row">
-                <span className="settings-label">Path</span>
+                <span className="settings-label">Version</span>
                 <span className="settings-value settings-value--mono">
-                  {piInfo?.path ?? "not found"}
+                  {piInfo?.version ?? "—"}
                 </span>
-                <button type="button" className="settings-btn" onClick={handleRecheck}>
-                  Re-detect
-                </button>
-                {recheckMsg && <span className="settings-hint">{recheckMsg}</span>}
+                <span className="settings-hint">Bundled with Pi-Vis</span>
               </div>
-              {piInfo && (
-                <div className="settings-row">
-                  <span className="settings-label">Version</span>
-                  <span className="settings-value settings-value--mono">{piInfo.version}</span>
-                </div>
-              )}
             </section>
 
             {/* Pi environment */}
@@ -997,151 +902,6 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                   type="button"
                   className={`settings-toggle ${settings.appUpdateCheckEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}
                   onClick={() => update({ appUpdateCheckEnabled: !settings.appUpdateCheckEnabled })}
-                >
-                  <span className="settings-toggle__knob" />
-                </button>
-              </div>
-
-              {/* Last checked indicator */}
-              {updateStatus && (
-                <div className="settings-update-meta">
-                  <span className="settings-hint">
-                    Last checked {fmtTimeAgo(updateStatus.checkedAt)}
-                  </span>
-                  {checking && (
-                    <span className="settings-hint settings-hint--checking">Checking…</span>
-                  )}
-                </div>
-              )}
-
-              {/* Legend header */}
-              <div className="settings-update-header">
-                <span className="settings-update-col-pkg">Package</span>
-                <span className="settings-update-col-current">Installed</span>
-                <span className="settings-update-col-target">Latest</span>
-                <span className="settings-update-col-action">Status</span>
-              </div>
-
-              {/* pi row */}
-              {(() => {
-                const st = updateStatus?.pi;
-                const current = st?.current ?? piInfo?.version;
-                const latest = st?.latest;
-                const available = st?.updateAvailable === true;
-                const upToDate = st && !available && current != null;
-                return (
-                  <div
-                    key="pi"
-                    className={`settings-update-row ${available ? "settings-update-row--actionable" : "settings-update-row--uptodate"}`}
-                  >
-                    <span className="settings-update-col-pkg settings-update-col-pkg--pi">pi</span>
-                    <span className="settings-update-col-current settings-value--mono">
-                      {current ?? "—"}
-                    </span>
-                    <span className="settings-update-col-target settings-value--mono">
-                      {available && latest ? latest : "—"}
-                    </span>
-                    <span className="settings-update-col-action">
-                      {checking ? (
-                        <span className="settings-update-badge settings-update-badge--checking">
-                          …
-                        </span>
-                      ) : available ? (
-                        <button
-                          type="button"
-                          className="settings-btn"
-                          onClick={() => handleRunUpdate("pi")}
-                        >
-                          Update
-                        </button>
-                      ) : current ? (
-                        <span className="settings-update-badge settings-update-badge--ok">
-                          <IconCheck /> Up to date
-                        </span>
-                      ) : (
-                        <span className="settings-update-badge settings-update-badge--na">
-                          Unknown
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                );
-              })()}
-
-              {/* Extension rows */}
-              {updateStatus?.extensions.map((ext) => {
-                const available = ext.updateAvailable && ext.latest != null;
-                const upToDate = !ext.updateAvailable && ext.current != null;
-                const isLocal = ext.kind === "local";
-                return (
-                  <div
-                    key={ext.source}
-                    className={`settings-update-row ${available ? "settings-update-row--actionable" : upToDate ? "settings-update-row--uptodate" : "settings-update-row--unknown"}`}
-                  >
-                    <span className="settings-update-col-pkg">{ext.name}</span>
-                    <span className="settings-update-col-current settings-value--mono">
-                      {ext.current ?? "—"}
-                    </span>
-                    <span className="settings-update-col-target settings-value--mono">
-                      {available && ext.latest ? ext.latest : "—"}
-                    </span>
-                    <span className="settings-update-col-action">
-                      {isLocal ? (
-                        <span className="settings-update-badge settings-update-badge--local">
-                          Local
-                        </span>
-                      ) : available ? (
-                        <button
-                          type="button"
-                          className="settings-btn"
-                          onClick={() => handleRunUpdate({ extension: ext.source })}
-                        >
-                          Update
-                        </button>
-                      ) : upToDate ? (
-                        <span className="settings-update-badge settings-update-badge--ok">
-                          <IconCheck /> Up to date
-                        </span>
-                      ) : (
-                        <span className="settings-update-badge settings-update-badge--na">
-                          Not installed
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-
-              <div className="settings-row" style={{ marginTop: "0.571rem" }}>
-                <button
-                  type="button"
-                  className="settings-btn"
-                  onClick={handleCheckUpdates}
-                  disabled={checking}
-                >
-                  {checking ? "Checking…" : "Check now"}
-                </button>
-                <button
-                  type="button"
-                  className="settings-btn"
-                  onClick={() => handleRunUpdate("all")}
-                  disabled={
-                    !updateStatus ||
-                    (!updateStatus.pi.updateAvailable &&
-                      !updateStatus.extensions.some((e) => e.updateAvailable))
-                  }
-                >
-                  Update all
-                </button>
-                {updateCheckMsg && <span className="settings-hint">{updateCheckMsg}</span>}
-              </div>
-
-              <div className="settings-row">
-                <span className="settings-label">Check pi/extensions on launch</span>
-                <button
-                  type="button"
-                  className={`settings-toggle ${settings.updateCheckEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}
-                  onClick={() => update({ updateCheckEnabled: !settings.updateCheckEnabled })}
                 >
                   <span className="settings-toggle__knob" />
                 </button>

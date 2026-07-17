@@ -41,7 +41,7 @@ test.describe("Pi-Vis e2e", () => {
     const window = await app.firstWindow();
     await window.waitForLoadState("domcontentloaded");
 
-    // The app should render (not show PiNotFound since piBinaryPath is set)
+    // The app should render against the bundled pinned pi runtime
     // fake-pi supplies only executable discovery/version behavior; live
     // sessions use the direct child-IPC fake host configured above.
     // Check the app loaded

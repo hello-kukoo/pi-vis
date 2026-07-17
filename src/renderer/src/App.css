@@ -180,17 +180,6 @@
   --transcript-pad-top: 2rem;
 }
 
-.app--setup {
-  background: var(--color-bg);
-  /* No title bar / sidebar in setup mode — override the app grid so the
-     PiNotFound screen fills and centers in the whole window instead of
-     being crammed into the (empty) sidebar column. */
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 1fr;
-  grid-template-areas: "main";
-  place-items: center;
-}
-
 .titlebar {
   grid-area: titlebar;
   min-width: 0;
@@ -392,17 +381,4 @@
   line-height: var(--leading-body);
   color: var(--text-muted);
   margin: 0;
-}
-
-.app-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  background: var(--bg);
-}
-
-.app-loading__text {
-  color: var(--text-ghost);
-  font-size: 1em;
 }

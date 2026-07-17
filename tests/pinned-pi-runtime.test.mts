@@ -6,11 +6,10 @@ import projectPackage from "../package.json";
 
 const PINNED_PI_VERSION = "0.80.10";
 
-describe("test-only real Pi runtime pin", () => {
+describe("pinned Pi runtime", () => {
   it("keeps the manifest, installed package, and executable layout pinned exactly", () => {
-    expect(projectPackage.devDependencies["@earendil-works/pi-coding-agent"]).toBe(
-      PINNED_PI_VERSION,
-    );
+    // Production dependency: the app ships this exact pi and runs nothing else.
+    expect(projectPackage.dependencies["@earendil-works/pi-coding-agent"]).toBe(PINNED_PI_VERSION);
     expect(installedPiPackage.version).toBe(PINNED_PI_VERSION);
     expect(
       fs.existsSync(
