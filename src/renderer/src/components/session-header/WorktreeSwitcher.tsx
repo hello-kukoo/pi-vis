@@ -3,7 +3,11 @@ import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { runWorktreeOperation } from "../../lib/worktree-operation.js";
-import { authoritySnapshotFor, useSessionsStore } from "../../stores/sessions-store.js";
+import {
+  authoritySnapshotFor,
+  isNewSessionPending,
+  useSessionsStore,
+} from "../../stores/sessions-store.js";
 import { FadeText } from "../common/FadeText.js";
 import { WorktreeAttachField } from "../common/WorktreeAttachField.js";
 import { IconBranch, IconChevronDown, IconCopy } from "../common/icons.js";
@@ -71,7 +75,17 @@ export function WorktreeSwitcher({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [close, open]);
 
-  if (!session || (!session.worktreePath && !session.sessionFile)) return null;
+  // A fresh root-checkout session receives its JSONL file during startup,
+  // before the first user message is sent. Keep the established-session
+  // switcher hidden until that first message promotes it; sessionFile alone is
+  // not proof that the session is non-empty. Once a worktree is established,
+  // however, the location switcher is useful immediately.
+  if (
+    !session ||
+    (!session.worktreePath && (isNewSessionPending(session) || !session.sessionFile))
+  ) {
+    return null;
+  }
 
   const path = session.worktreePath ?? session.workspacePath;
   const locationName = session.worktreeName ?? "Workspace";

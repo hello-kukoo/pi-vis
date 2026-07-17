@@ -181,6 +181,21 @@ describe("WorktreeSwitcher", () => {
     second.unmount();
   });
 
+  it("keeps a file-backed new session empty until its first user message", () => {
+    setSession({ hasTreeHistory: false, isNewPending: true });
+    const { container, unmount } = mount(<WorktreeSwitcher sessionId={sessionId} />);
+    expect(container.querySelector("[data-testid='worktree-switcher-trigger']")).toBeNull();
+
+    act(() => {
+      useSessionsStore.getState().addUserMessage(sessionId, "first prompt");
+    });
+
+    expect(
+      container.querySelector("[data-testid='worktree-switcher-trigger']")?.textContent,
+    ).toContain("Workspace");
+    unmount();
+  });
+
   it("offers creation and attachment when the session is still in Workspace", () => {
     setSession();
     const { container, unmount } = mount(<WorktreeSwitcher sessionId={sessionId} />);

@@ -94,6 +94,12 @@ test.describe("Active-session worktree switching", () => {
     await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
       timeout: 15_000,
     });
+    // Startup may create the JSONL file before the first prompt. The
+    // pre-send worktree bar must remain available until the user actually
+    // starts the session; the established-session Workspace switcher must not
+    // replace it early.
+    await expect(window.locator(".worktree-bar")).toBeVisible({ timeout: 15_000 });
+    await expect(window.locator('[data-testid="worktree-switcher-trigger"]')).toHaveCount(0);
     const composer = window.locator(".composer__textarea");
     await composer.fill("Keep this conversation while creating a worktree.");
     await composer.press("Enter");

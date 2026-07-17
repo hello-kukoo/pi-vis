@@ -3,7 +3,9 @@
 ### Worktree-per-session
 
 A **WorktreeBar** above the composer appears in brand-new sessions (empty transcript).
-It is a 3-way **segmented control**: `[In Workspace] [New Worktree] [Existing Worktree]`. The segment
+A session remains empty until its first user message is sent; Pi may create and report the
+JSONL file during startup, so `sessionFile` alone does not establish the session. It is a
+3-way **segmented control**: `[In Workspace] [New Worktree] [Existing Worktree]`. The segment
 selection drives which controls appear below it:
 
 - **Workspace** (`worktreeMode = "none"`, default): run the session in the

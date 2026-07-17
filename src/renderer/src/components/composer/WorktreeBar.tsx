@@ -3,7 +3,7 @@ import type { SessionId } from "@shared/ids.js";
 import { useEffect, useMemo, useState } from "react";
 import {
   gitRootForSession,
-  sessionHasHistory,
+  isNewSessionPending,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { BranchDropdown } from "../common/BranchDropdown.js";
@@ -96,14 +96,14 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
     [],
   );
 
-  // Self-gate: hide once a worktree already exists for this session (so it
-  // never reappears after the transcript resets via /new, /fork, /clone),
-  // once the session has an authoritative file (including a resumed
-  // header-only session), if it has any other known transcript/tree history,
-  // or if we're not in a git repo context (no branches to base from).
+  // Self-gate: only a still-empty, brand-new session gets this pre-send bar.
+  // Pi can create and report the JSONL file during startup, before the first
+  // user message is sent, so sessionFile is not evidence that the session is
+  // established. The canonical pending predicate also keeps resumed,
+  // header-only sessions out of the bar.
   if (!session) return null;
   if (session.worktreePath) return null;
-  if (session.sessionFile || sessionHasHistory(session)) return null;
+  if (!isNewSessionPending(session)) return null;
   if (loading) return null;
   if (loadError || branches.length === 0) return null;
 
