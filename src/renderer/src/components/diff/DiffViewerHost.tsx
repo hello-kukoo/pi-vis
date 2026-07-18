@@ -387,6 +387,10 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
       // j/k navigation, Escape, etc. should still work in the diff
       // viewer while a question is pending.
       if (document.querySelector(".picker-overlay")) return;
+      // These popup controls are nested inside the viewer, so their own
+      // Escape handlers run after this window capture listener. Defer before
+      // the viewer can consume Escape and close itself.
+      if (document.querySelector(".branch-dropdown__dropdown, .commit-range-picker__popup")) return;
       const target = e.target as HTMLElement | null;
       const isInFilter = target?.classList.contains("diff-rail__search-input") ?? false;
       const isInSearch = target?.classList.contains("diff-search__input") ?? false;

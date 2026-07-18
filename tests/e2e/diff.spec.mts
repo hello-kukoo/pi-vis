@@ -396,9 +396,17 @@ test.describe("Diff viewer", () => {
     // inclusive range without an Apply/Cancel step.
     const base = viewer.getByRole("button", { name: "Compare against base branch" });
     await base.click();
+    await window.keyboard.press("Escape");
+    await expect(base).toHaveAttribute("aria-expanded", "false");
+    await expect(viewer).toBeVisible();
+    await base.click();
     await viewer.getByRole("option", { name: /main/ }).click();
     const range = viewer.getByRole("button", { name: "Choose commit range" });
     await expect(range).toBeVisible({ timeout: 10_000 });
+    await range.click();
+    await window.keyboard.press("Escape");
+    await expect(viewer.getByRole("dialog", { name: "Commit range" })).toHaveCount(0);
+    await expect(viewer).toBeVisible();
     await range.click();
     await viewer.getByRole("option", { name: /Second feature commit/ }).click();
     await expect(range).toContainText("1 commit");

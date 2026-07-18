@@ -231,7 +231,16 @@ export function BranchDropdown({
   const label = triggerLabel ?? value ?? currentBranch ?? "branch";
 
   return (
-    <div className="branch-dropdown__picker" ref={dropdownRef}>
+    <div
+      className="branch-dropdown__picker"
+      ref={dropdownRef}
+      onKeyDown={(event) => {
+        // Most keyboard interaction is handled by the search input, but
+        // Escape must also close the popup when focus is on a branch row or
+        // remote-branches checkbox.
+        if (open && event.key === "Escape") handleKeyDown(event);
+      }}
+    >
       <button
         type="button"
         className="branch-dropdown__trigger fade-scope"
