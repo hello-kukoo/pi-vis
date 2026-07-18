@@ -39,6 +39,20 @@ export function loadSettings(): AppSettings {
         workspaceOrder: (json as Record<string, unknown>).recentWorkspaces,
       };
     }
+    // The pinned-runtime migration temporarily removed extension update
+    // checking along with pi self-updates. Preserve the old launch preference
+    // when restoring extension-only checks under its explicit new name.
+    if (
+      json &&
+      typeof json === "object" &&
+      !("extensionUpdateCheckEnabled" in (json as Record<string, unknown>)) &&
+      typeof (json as Record<string, unknown>).updateCheckEnabled === "boolean"
+    ) {
+      json = {
+        ...json,
+        extensionUpdateCheckEnabled: (json as Record<string, unknown>).updateCheckEnabled,
+      };
+    }
     json = migrateLegacyThemeSettings(json);
     const parsed = AppSettingsSchema.safeParse(json);
     if (parsed.success) {

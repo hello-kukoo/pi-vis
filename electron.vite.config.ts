@@ -16,6 +16,7 @@ export default defineConfig({
             "src/main/sessions/session-search/benchmark-api.ts",
           ),
           "session-search-worker": resolve("src/main/sessions/session-search/index-worker.ts"),
+          "extension-update-worker": resolve("src/main/extension-update-worker.ts"),
         },
         output: { entryFileNames: "[name].js" },
       },

@@ -105,6 +105,12 @@ export interface SessionRecord {
   workspacePath: string;
   worktreePath?: string | undefined;
   sessionFile?: string | undefined;
+  /**
+   * True only for the untouched session record opened without a persisted
+   * file. Pi may report an initial JSONL path during startup, so sessionFile
+   * itself cannot distinguish that pending session from resumed history.
+   */
+  _initialWorktreeEligible: boolean;
   /** Search-open file identity pinned across the cold activation IPC gap. */
   _confinedSessionDescriptor?: number | undefined;
   _confinedSessionRoot?: string | undefined;
@@ -439,6 +445,7 @@ export class SessionRegistry {
       workspacePath,
       worktreePath,
       sessionFile,
+      _initialWorktreeEligible: sessionFile === undefined,
       ...(confinedSessionDescriptor !== undefined
         ? {
             _confinedSessionDescriptor: confinedSessionDescriptor,
@@ -638,6 +645,9 @@ export class SessionRegistry {
     const current = () => this.sessions.get(record.sessionId) === record && record.proc === proc;
     proc.on("event", (event) => {
       if (!current()) return;
+      if (event.type === "message_start" && "message" in event && event.message.role === "user") {
+        record._initialWorktreeEligible = false;
+      }
       record.lastActiveAt = Date.now();
       record._mutationSequence++;
       this.onEvent(record.sessionId, event);
@@ -3098,6 +3108,12 @@ export class SessionRegistry {
     if (!record) throw new Error(`Unknown session: ${sessionId}`);
     this.assertWorktreeRespawnEligible(record);
     this.markActivationVisitInteracted(record);
+  }
+
+  /** Whether this record still owns the fresh-session WorktreeBar flow. */
+  canCreateInitialWorktree(sessionId: SessionId): boolean {
+    const record = this.sessions.get(sessionId);
+    return record?._initialWorktreeEligible === true && record.worktreePath === undefined;
   }
 
   /** Fast authoritative preflight for IPC callers before git worktree work. */

@@ -32,6 +32,13 @@ import {
   stopAuthWatch,
 } from "./auth.js";
 import {
+  checkForExtensionUpdates,
+  getExtensionUpdateStatus,
+  initExtensionUpdates,
+  runExtensionUpdate,
+  scheduleBackgroundExtensionUpdateCheck,
+} from "./extension-updates.js";
+import {
   type CheckoutChangesSnapshot,
   type CheckoutIdentity,
   applyCheckoutChanges,
@@ -431,9 +438,10 @@ export function initIpc(win: BrowserWindow): void {
   }
   win.on("focus", () => sessionSearchService?.onAppFocus());
 
-  // Init PTY and app-update support (must be after safeSend is wired)
+  // Init PTY and update support (must be after safeSend is wired)
   initPty(safeSend);
   initAppUpdates((status) => safeSend("appUpdate.status", status));
+  initExtensionUpdates((status) => safeSend("extensionUpdates.status", status));
 
   // Start watching auth.json for external changes
   startAuthWatch((providers) => {
@@ -637,7 +645,12 @@ export function initIpc(win: BrowserWindow): void {
     async (
       _evt,
       args:
-        | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
+        | {
+            sessionId: SessionId;
+            base: string;
+            copyUncommitted: false;
+            fromCurrentCheckout?: false;
+          }
         | {
             sessionId: SessionId;
             fromCurrentCheckout: true;
@@ -645,17 +658,22 @@ export function initIpc(win: BrowserWindow): void {
             base?: never;
           },
     ) => {
+      logTestIpcInvocation("session.createWorktree", args);
       const activeRegistry = registry;
       if (!activeRegistry) return { ok: false, error: "Session not found" };
       const rec = activeRegistry.getSession(args.sessionId);
       if (!rec) return { ok: false, error: "Session not found" };
-      if (args.fromCurrentCheckout && !rec.sessionFile) {
-        return { ok: false, error: "The session has not started yet" };
-      }
-      if (args.fromCurrentCheckout && typeof args.copyUncommitted !== "boolean") {
+      const initialWorktree = activeRegistry.canCreateInitialWorktree(args.sessionId);
+      if (typeof args.copyUncommitted !== "boolean") {
         return { ok: false, error: "Choose whether to copy uncommitted changes" };
       }
-      if (!args.fromCurrentCheckout && rec.sessionFile) {
+      if (!args.fromCurrentCheckout && args.copyUncommitted) {
+        return {
+          ok: false,
+          error: "Copying uncommitted changes requires branching from the current checkout",
+        };
+      }
+      if (!args.fromCurrentCheckout && !initialWorktree) {
         return { ok: false, error: "Established sessions must branch from their current checkout" };
       }
       try {
@@ -680,18 +698,18 @@ export function initIpc(win: BrowserWindow): void {
       try {
         let base = args.fromCurrentCheckout ? "HEAD" : args.base;
         const sourceCheckout = rec.worktreePath ?? rec.workspacePath;
-        if (args.fromCurrentCheckout) {
-          if (args.copyUncommitted) {
-            const captured = await captureCheckoutChanges(sourceCheckout);
-            if (captured.kind === "error") throw new Error(captured.message);
-            checkoutSnapshot = captured.snapshot;
+        if (args.copyUncommitted) {
+          const captured = await captureCheckoutChanges(sourceCheckout);
+          if (captured.kind === "error") throw new Error(captured.message);
+          checkoutSnapshot = captured.snapshot;
+          if (args.fromCurrentCheckout) {
             base = checkoutSnapshot.head;
-          } else {
-            const captured = await readCheckoutIdentity(sourceCheckout);
-            if (captured.kind === "error") throw new Error(captured.message);
-            checkoutIdentity = captured.identity;
-            base = checkoutIdentity.head;
           }
+        } else if (args.fromCurrentCheckout) {
+          const captured = await readCheckoutIdentity(sourceCheckout);
+          if (captured.kind === "error") throw new Error(captured.message);
+          checkoutIdentity = captured.identity;
+          base = checkoutIdentity.head;
         }
         if (!base) throw new Error("A base branch is required");
         const result = await createWorktree(
@@ -707,8 +725,10 @@ export function initIpc(win: BrowserWindow): void {
           },
         );
         if (result.kind === "error") throw new Error(result.message);
-        if (checkoutSnapshot) result.base = checkoutSnapshot.baseLabel;
-        if (checkoutIdentity) result.base = checkoutIdentity.baseLabel;
+        if (args.fromCurrentCheckout && checkoutSnapshot) {
+          result.base = checkoutSnapshot.baseLabel;
+        }
+        if (args.fromCurrentCheckout && checkoutIdentity) result.base = checkoutIdentity.baseLabel;
         // Persist only after the respawn succeeds, merging at the commit
         // point so overlapping worktree operations cannot drop each other.
         // If eligibility changes during the potentially-long checkout, remove
@@ -739,6 +759,14 @@ export function initIpc(win: BrowserWindow): void {
                 loginShellEnv,
                 {
                   onImmediatelyBeforeDetach: async () => {
+                    if (
+                      !args.fromCurrentCheckout &&
+                      !activeRegistry.canCreateInitialWorktree(args.sessionId)
+                    ) {
+                      throw new Error(
+                        "Established sessions must branch from their current checkout",
+                      );
+                    }
                     if (checkoutSnapshot) {
                       const current = await checkoutStillMatchesSnapshot(
                         sourceCheckout,
@@ -824,6 +852,10 @@ export function initIpc(win: BrowserWindow): void {
         };
       } catch (err) {
         operationError = err instanceof Error ? err.message : String(err);
+        logTestIpcInvocation("session.createWorktree.error", {
+          sessionId: args.sessionId,
+          error: operationError,
+        });
         lastWorktreeOperationErrors.set(args.sessionId, operationError);
         return {
           ok: false,
@@ -1427,6 +1459,12 @@ export function initIpc(win: BrowserWindow): void {
     };
   });
 
+  ipcMain.handle("extensionUpdates.status", async () => getExtensionUpdateStatus());
+
+  ipcMain.handle("extensionUpdates.check", async () => checkForExtensionUpdates());
+
+  ipcMain.handle("extensionUpdates.run", async (_evt, { target }) => runExtensionUpdate(target));
+
   ipcMain.handle("appUpdate.status", async () => getAppUpdateStatus());
 
   ipcMain.handle("appUpdate.check", async () => checkForAppUpdate());
@@ -1676,4 +1714,8 @@ export function triggerBackgroundAppUpdateCheck(): void {
       // silent — app updates are best-effort
     }
   }, 5000);
+}
+
+export function triggerBackgroundExtensionUpdateCheck(): void {
+  scheduleBackgroundExtensionUpdateCheck(() => getSettings().extensionUpdateCheckEnabled);
 }

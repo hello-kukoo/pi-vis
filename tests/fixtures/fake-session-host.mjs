@@ -1505,7 +1505,10 @@ async function handleMessage(message) {
       cwd = message.cwd || cwd;
       sessionId = crypto.randomUUID();
       if (message.sessionFile) loadSession(message.sessionFile);
-      else sessionFile = allocateSessionPath();
+      else {
+        sessionFile = allocateSessionPath();
+        if (process.env.PIVIS_TEST_HOST_CREATE_INITIAL_SESSION_FILE === "1") ensureFile();
+      }
       if (process.env.PIVIS_TEST_HOST_SPAWN_LOG) {
         fs.appendFileSync(
           process.env.PIVIS_TEST_HOST_SPAWN_LOG,

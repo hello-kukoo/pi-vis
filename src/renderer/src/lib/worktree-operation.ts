@@ -46,7 +46,7 @@ export async function runWorktreeOperation({
             "session.createWorktree",
             fromCurrentCheckout
               ? { sessionId, fromCurrentCheckout: true, copyUncommitted: copyUncommitted ?? true }
-              : { sessionId, base: base ?? "HEAD" },
+              : { sessionId, base: base ?? "HEAD", copyUncommitted: false },
           )
         : await window.pivis.invoke("session.attachWorktree", { sessionId, path: path!.trim() });
     if (!result.ok) {

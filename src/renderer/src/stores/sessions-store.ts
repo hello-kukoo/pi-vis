@@ -222,6 +222,8 @@ export interface SessionViewState {
   worktreeAttachPath?: string | undefined;
   /** The base branch the user selected in the WorktreeBar. */
   worktreeBase?: string | null | undefined;
+  /** Whether a fresh worktree should receive the workspace's local changes. */
+  worktreeCopyUncommitted?: boolean | undefined;
   /** True while the worktree creation IPC is in flight. */
   worktreeCreating?: boolean | undefined;
   /** Monotonic main-process identity revision used to fence reload races. */
@@ -428,6 +430,7 @@ interface PendingNewSessionSetup {
   worktreeMode?: "none" | "create" | "attach" | undefined;
   worktreeAttachPath?: string | undefined;
   worktreeBase?: string | null | undefined;
+  worktreeCopyUncommitted?: boolean | undefined;
 }
 
 /**
@@ -611,6 +614,7 @@ function capturePendingNewSessionSetup(s: SessionViewState): PendingNewSessionSe
     worktreeMode: s.worktreeMode,
     worktreeAttachPath: s.worktreeAttachPath,
     worktreeBase: s.worktreeBase,
+    worktreeCopyUncommitted: s.worktreeCopyUncommitted,
   };
 }
 
@@ -985,6 +989,12 @@ function applyAuthoritySemanticProjection(
   authorityProjection: RendererAuthorityState,
 ): SessionViewState {
   const snapshot = authorityProjection.authoritativeSnapshot;
+  // Restore instructions carry renderer-owned attachment custody until the
+  // mounted Composer has staged the complete candidate. A baseline can race
+  // that effect during startup, so do not replace an unconsumed restoration
+  // with an empty authoritative editor projection.
+  const rendererOwnedEditorInjection =
+    current.editorInjection?.attachments !== undefined ? current.editorInjection : undefined;
   const extensionPresentation =
     authorityProjection.extensionUi.state === "following"
       ? {
@@ -1010,7 +1020,7 @@ function applyAuthoritySemanticProjection(
       pendingQueueMessages: undefined,
       queuedMessages: undefined,
       ...extensionPresentation,
-      editorInjection: undefined,
+      editorInjection: rendererOwnedEditorInjection,
     };
   }
   const priorOwner =
@@ -1030,7 +1040,8 @@ function applyAuthoritySemanticProjection(
   // is represented explicitly by snapshot.editor conflict candidates.
   const editorRevisionChanged = ownerChanged || snapshot.editor.revision !== current.editorRevision;
   const editorInjection =
-    snapshot.editor.conflictText !== undefined || current.editorPatchPending > 0
+    rendererOwnedEditorInjection ??
+    (snapshot.editor.conflictText !== undefined || current.editorPatchPending > 0
       ? undefined
       : editorRevisionChanged
         ? {
@@ -1039,7 +1050,7 @@ function applyAuthoritySemanticProjection(
             revision: snapshot.editor.revision,
             ...(ownerChanged && snapshot.editor.text === "" ? { preserveRendererDraft: true } : {}),
           }
-        : current.editorInjection;
+        : current.editorInjection);
 
   // This is deliberately one object construction: frame records and every
   // compatibility projection of its terminal semantic snapshot commit together.
@@ -1344,6 +1355,7 @@ interface SessionsStore {
    *  any prior `worktreeError`. */
   setWorktreeAttachPath: (sessionId: SessionId, path: string) => void;
   setWorktreeBase: (sessionId: SessionId, base: string | null) => void;
+  setWorktreeCopyUncommitted: (sessionId: SessionId, copy: boolean) => void;
   setWorktreeCreating: (sessionId: SessionId, v: boolean) => void;
   /** Set (or clear, with null) the inline worktree-creation error. */
   setWorktreeError: (sessionId: SessionId, message: string | null) => void;
@@ -1676,6 +1688,7 @@ const buildSessionsStore = (
         worktreeMode: pendingSetup?.worktreeMode,
         worktreeAttachPath: pendingSetup?.worktreeAttachPath,
         worktreeBase: pendingSetup?.worktreeBase,
+        worktreeCopyUncommitted: pendingSetup?.worktreeCopyUncommitted,
         worktreeCreating: undefined,
         worktreeIdentityRevision: 0,
         worktreeError: undefined,
@@ -3681,6 +3694,20 @@ const buildSessionsStore = (
     });
   },
 
+  setWorktreeCopyUncommitted: (sessionId, copy) => {
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const s = sessions.get(sessionId);
+      if (!s) return {};
+      sessions.set(sessionId, {
+        ...s,
+        worktreeCopyUncommitted: copy,
+        worktreeError: undefined,
+      });
+      return { sessions };
+    });
+  },
+
   setWorktreeCreating: (sessionId, v) => {
     set((state) => {
       const sessions = new Map(state.sessions);
@@ -3750,6 +3777,7 @@ const buildSessionsStore = (
         worktreeMode: undefined,
         worktreeAttachPath: undefined,
         worktreeBase: undefined,
+        worktreeCopyUncommitted: undefined,
         worktreeCreating: undefined,
         worktreeError: undefined,
       });

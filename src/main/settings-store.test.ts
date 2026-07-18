@@ -53,6 +53,18 @@ describe("loadSettings — workspace migration & recovery", () => {
     expect(loadSettings().workspaceOrder).toEqual(["/x", "/y"]);
   });
 
+  it("migrates the legacy pi/extensions launch preference to extension-only checks", () => {
+    writeSettings({ updateCheckEnabled: false });
+    const settings = loadSettings();
+    expect(settings.extensionUpdateCheckEnabled).toBe(false);
+    expect("updateCheckEnabled" in settings).toBe(false);
+  });
+
+  it("prefers an explicit extension launch preference over the legacy value", () => {
+    writeSettings({ updateCheckEnabled: false, extensionUpdateCheckEnabled: true });
+    expect(loadSettings().extensionUpdateCheckEnabled).toBe(true);
+  });
+
   it("recovers lastActiveWorkspace into an empty workspaceOrder", () => {
     // Reproduces the data-loss case: recentWorkspaces was already stripped by
     // a pre-migration build, leaving an empty order but a valid last-active.

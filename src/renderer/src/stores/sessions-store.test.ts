@@ -2207,6 +2207,7 @@ describe("sessions store - worktree mode / attach path", () => {
     expect(session?.worktreeMode).toBeUndefined();
     expect(session?.worktreeAttachPath).toBeUndefined();
     expect(session?.worktreeBase).toBeUndefined();
+    expect(session?.worktreeCopyUncommitted).toBeUndefined();
     expect(session?.worktreeCreating).toBeUndefined();
     expect(session?.worktreeError).toBeUndefined();
   });
@@ -2255,11 +2256,20 @@ describe("sessions store - worktree mode / attach path", () => {
     expect(useSessionsStore.getState().sessions.has("unknown" as SessionId)).toBe(false);
   });
 
+  it("setWorktreeCopyUncommitted updates the fresh-session choice and clears errors", () => {
+    useSessionsStore.getState().setWorktreeError(SESSION_A, "stale failure");
+    useSessionsStore.getState().setWorktreeCopyUncommitted(SESSION_A, true);
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.worktreeCopyUncommitted).toBe(true);
+    expect(session?.worktreeError).toBeUndefined();
+  });
+
   it("clearWorktreeIntent resets worktreeMode + worktreeAttachPath (and the other worktree fields)", () => {
     // Set every worktree field so we can confirm the clear is exhaustive.
     useSessionsStore.getState().setWorktreeMode(SESSION_A, "attach");
     useSessionsStore.getState().setWorktreeAttachPath(SESSION_A, "/path/to/wt");
     useSessionsStore.getState().setWorktreeBase(SESSION_A, "main");
+    useSessionsStore.getState().setWorktreeCopyUncommitted(SESSION_A, true);
     useSessionsStore.getState().setWorktreeCreating(SESSION_A, true);
     useSessionsStore.getState().setWorktreeError(SESSION_A, "stale");
 
@@ -2268,6 +2278,7 @@ describe("sessions store - worktree mode / attach path", () => {
     expect(session?.worktreeMode).toBeUndefined();
     expect(session?.worktreeAttachPath).toBeUndefined();
     expect(session?.worktreeBase).toBeUndefined();
+    expect(session?.worktreeCopyUncommitted).toBeUndefined();
     expect(session?.worktreeCreating).toBeUndefined();
     expect(session?.worktreeError).toBeUndefined();
   });
@@ -2515,6 +2526,7 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     store.setWorktreeMode(SESSION_A, "attach");
     store.setWorktreeAttachPath(SESSION_A, "/tmp/worktree-a");
     store.setWorktreeBase(SESSION_A, "main");
+    store.setWorktreeCopyUncommitted(SESSION_A, true);
     useSessionsStore.setState({ activeSessionId: SESSION_A, activeWorkspacePath: WORKSPACE });
 
     store.setActiveSession(SESSION_B);
@@ -2530,6 +2542,7 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     expect(nextPending?.worktreeMode).toBe("attach");
     expect(nextPending?.worktreeAttachPath).toBe("/tmp/worktree-a");
     expect(nextPending?.worktreeBase).toBe("main");
+    expect(nextPending?.worktreeCopyUncommitted).toBe(true);
   });
 
   it("does not reap a pending session once a send is in flight", async () => {
@@ -3435,6 +3448,32 @@ describe("sessions store - queue restoration", () => {
       ],
     });
     expect(session?.queueRestorations).toBeUndefined();
+  });
+
+  it("retains an unconsumed restored candidate across the initial authority baseline", () => {
+    vi.stubGlobal("window", { pivis: { invoke: vi.fn(async () => ({ acknowledged: true })) } });
+    useSessionsStore.setState({ sessions: new Map(), activeSessionId: null });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WORKSPACE);
+    store.applyRestoreDraft(SESSION_A, {
+      restorationId: "restore-before-attach",
+      text: "restored before attach",
+      attachments: [{ mimeType: "image/png", data: "base64" }],
+      disposition: "restore",
+    });
+
+    store.applyAuthorityAttach(SESSION_A, authorityAttach());
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.editorInjection).toMatchObject({
+      text: "restored before attach",
+      attachments: [
+        expect.objectContaining({
+          kind: "image",
+          name: "restored-image-1.png",
+          dataUrl: "data:image/png;base64,base64",
+        }),
+      ],
+    });
   });
 
   it("deduplicates replay and never overwrites newer draft text", () => {

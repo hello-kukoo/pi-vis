@@ -11,10 +11,19 @@ selection drives which controls appear below it:
 - **Workspace** (`worktreeMode = "none"`, default): run the session in the
   workspace cwd, no worktree.
 - **New** (`worktreeMode = "create"`): show the shared `BranchDropdown` for the
-  base branch. On first send, `session.createWorktree` IPC creates a git
+  base branch and a **Copy uncommitted changes** checkbox. It is unchecked by
+  default because a fresh-session worktree normally represents clean isolation;
+  unlike the checked established-session switcher default, there is no active
+  conversation context to preserve yet. The choice follows the workspace-scoped
+  pending-session setup when the user switches away and back. On first send,
+  `session.createWorktree` IPC creates a git
   worktree in a sibling `<repoName>-worktrees/<friendlyName>` directory on a
   fresh `pi-vis-<friendlyName>` branch (e.g. `pi-vis-swift-otter`), cutting
-  from the selected base branch.
+  from the selected base branch. When copy is selected, the base picker resets
+  to the current branch and disables: main pins the workspace's exact current
+  HEAD, then copies its staged, unstaged, intent-to-add, and non-ignored
+  untracked changes without mutating the workspace. This avoids applying a
+  HEAD-relative patch to a divergent selected branch. Ignored files remain local.
 - **Existing** (`worktreeMode = "attach"`): show a path **text input** plus a
   **"Browse…"** button (native directory picker via `worktree.pickDirectory`,
   defaulting to the repo's sibling `<repoName>-worktrees` dir when it exists).
@@ -200,7 +209,14 @@ forces `live=false`, disabling the textarea) so the in-flight send reads as
 "sending", not stuck unsubmitted text. On failure the reason is shown **inline
 and durably** in the WorktreeBar (`session.worktreeError` → `.worktree-bar__error`,
 selectable, persists until the user retries or edits the inputs), and the
-prompt text is preserved for retry — not lost behind an ephemeral toast.
+prompt text is preserved for retry — not lost behind an ephemeral toast. The
+renderer fences the complete first-prompt candidate before replacement and
+lets App's single-flight renderer/authority attach install the successor
+baseline; Composer never starts a competing attach. It then seeds the editor
+revision chain against that exact successor, patches the preserved candidate,
+re-evaluates the successor's model availability and image capability, and
+dispatches only after the patch is accepted. Failure or attach timeout leaves
+the input in renderer custody for an explicit retry.
 
 **Responsive reflow**: At narrow widths the secondary controls (model picker,
 thinking level, changes badge, context meter) drop into a **SessionSubBar** below the

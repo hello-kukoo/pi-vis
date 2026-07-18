@@ -1,6 +1,11 @@
 import type { AppUpdateStatus } from "./app-updates.js";
 import type { ProviderAuthStatus } from "./auth.js";
 import type {
+  ExtensionUpdateRunResult,
+  ExtensionUpdateStatus,
+  ExtensionUpdateTarget,
+} from "./extension-updates.js";
+import type {
   GitBranchesResult,
   GitChangedFile,
   GitChangesCountResult,
@@ -195,14 +200,19 @@ export interface IpcInvokeContract {
     req: undefined;
     res: { ok: true; markdown: string } | { ok: false; error: string };
   };
-  // Fresh-session creation supplies `base`. Active-session switching instead
-  // supplies `fromCurrentCheckout`; main ignores any renderer base and resolves
-  // the exact HEAD of that session's authoritative current checkout. The
-  // renderer must explicitly say whether local staged/unstaged/untracked
-  // contents should be copied; main pins and revalidates the source either way.
+  // Clean fresh-session creation supplies `base`. Copying fresh workspace
+  // changes uses the same `fromCurrentCheckout` variant as active-session
+  // switching: main ignores any renderer base and pins the exact source HEAD,
+  // because patches cannot safely be transferred onto a divergent selected
+  // branch. The renderer must explicitly supply the copy choice.
   "session.createWorktree": {
     req:
-      | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
+      | {
+          sessionId: SessionId;
+          base: string;
+          copyUncommitted: false;
+          fromCurrentCheckout?: false;
+        }
       | {
           sessionId: SessionId;
           fromCurrentCheckout: true;
@@ -527,6 +537,12 @@ export interface IpcInvokeContract {
   "pty.kill": { req: { ptyId: string }; res: undefined };
 
   // ── Updates ─────────────────────────────────────────────────────────
+  "extensionUpdates.status": { req: undefined; res: ExtensionUpdateStatus | null };
+  "extensionUpdates.check": { req: undefined; res: ExtensionUpdateStatus };
+  "extensionUpdates.run": {
+    req: { target: ExtensionUpdateTarget };
+    res: ExtensionUpdateRunResult;
+  };
   "appUpdate.status": { req: undefined; res: AppUpdateStatus };
   "appUpdate.check": { req: undefined; res: AppUpdateStatus };
   "appUpdate.install": { req: undefined; res: AppUpdateStatus };
@@ -597,6 +613,7 @@ export interface IpcEventContract {
   "pty.exit": { ptyId: string; exitCode: number };
 
   // ── Updates ─────────────────────────────────────────────────────────
+  "extensionUpdates.status": ExtensionUpdateStatus;
   "appUpdate.status": AppUpdateStatus;
 
   // ── Window ─────────────────────────────────────────────────────────

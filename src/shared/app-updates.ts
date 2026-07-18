@@ -1,8 +1,9 @@
 /**
  * Update types for the Pi-Vis desktop app itself.
  *
- * This is intentionally separate from updates.ts, which tracks the user's
- * installed pi binary and pi extensions.
+ * This is intentionally separate from extension-updates.ts, which tracks
+ * user-installed Pi extension packages. The Pi runtime itself is pinned to
+ * the Pi-Vis release and has no in-app self-update contract.
  */
 
 export type AppUpdateState =

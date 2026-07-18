@@ -3,6 +3,7 @@ import type { ModelInfo } from "@shared/pi-protocol/responses.js";
 import type {
   IntentOutcome,
   RuntimeIdentity,
+  SemanticSnapshot,
   SessionIntent,
   SessionQuery,
 } from "@shared/pi-protocol/runtime-state.js";
@@ -60,7 +61,48 @@ type FileWithLegacyPath = File & { path?: string };
 
 const IMAGE_FILE_EXTENSION = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i;
 const MAX_IMAGE_ATTACHMENTS = 8;
+const SUCCESSOR_AUTHORITY_TIMEOUT_MS = 15_000;
 type QueueDeliveryMode = "steer" | "followUp";
+
+function runtimeIdentityMatches(left: RuntimeIdentity, right: RuntimeIdentity): boolean {
+  return left.hostInstanceId === right.hostInstanceId && left.sessionEpoch === right.sessionEpoch;
+}
+
+function editorOwnerKey(sessionId: SessionId, owner: RuntimeIdentity): string {
+  return `${sessionId}\u0000${owner.hostInstanceId}\u0000${owner.sessionEpoch}`;
+}
+
+/** Wait for App's single-flight attach path to publish the replacement host baseline. */
+function waitForSuccessorAuthority(
+  sessionId: SessionId,
+  predecessor: RuntimeIdentity,
+): Promise<SemanticSnapshot | undefined> {
+  const readSuccessor = (): SemanticSnapshot | undefined => {
+    const snapshot = authoritySnapshotFor(useSessionsStore.getState().sessions.get(sessionId));
+    return snapshot && !runtimeIdentityMatches(snapshot.owner, predecessor) ? snapshot : undefined;
+  };
+  const immediate = readSuccessor();
+  if (immediate) return Promise.resolve(immediate);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (snapshot?: SemanticSnapshot): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      unsubscribe();
+      resolve(snapshot);
+    };
+    const unsubscribe = useSessionsStore.subscribe(() => {
+      const snapshot = readSuccessor();
+      if (snapshot) finish(snapshot);
+      else if (!useSessionsStore.getState().sessions.has(sessionId)) finish();
+    });
+    const timeout = setTimeout(() => finish(), SUCCESSOR_AUTHORITY_TIMEOUT_MS);
+    // Close the subscribe/check gap without issuing a competing attach.
+    const afterSubscribe = readSuccessor();
+    if (afterSubscribe) finish(afterSubscribe);
+  });
+}
 
 function isImageFile(file: File): boolean {
   return file.type.startsWith("image/") || IMAGE_FILE_EXTENSION.test(file.name);
@@ -274,7 +316,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     // A temporary semantic fence is not an owner change. Never clear local
     // attachment custody merely because the authoritative snapshot is absent.
     if (editorHostInstanceId === undefined || editorSessionEpoch === undefined) return;
-    const ownerKey = `${sessionId}\u0000${editorHostInstanceId}\u0000${editorSessionEpoch}`;
+    const ownerKey = editorOwnerKey(sessionId, {
+      hostInstanceId: editorHostInstanceId,
+      sessionEpoch: editorSessionEpoch,
+    });
     if (seededEditorOwnerRef.current === ownerKey) return;
     seededEditorOwnerRef.current = ownerKey;
 
@@ -584,6 +629,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   }, [pending, workspacePath, sessionId]);
   const editorInjectionText = session?.editorInjection?.text;
   const editorInjectionAttachments = session?.editorInjection?.attachments;
+  const editorInjectionIsRendererOwned = editorInjectionAttachments !== undefined;
 
   const addUserMessage = useSessionsStore((s) => s.addUserMessage);
   const addToast = useSessionsStore((s) => s.addToast);
@@ -665,7 +711,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     if (
       editorInjectionNonce === undefined ||
       editorInjectionText === undefined ||
-      localEditAwaitingAuthorityRef.current
+      (localEditAwaitingAuthorityRef.current && !editorInjectionIsRendererOwned)
     )
       return;
     const injectionKey = `${sessionId}:${editorInjectionNonce}`;
@@ -722,8 +768,32 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
         useSessionsStore.getState().sessions.get(sessionId)?.editorAttachments ??
         [],
     );
+    const nextFileAttachments = injectedFiles ?? restored.files;
+    const replicated = serializeComposerAttachments(restored.images, nextFileAttachments);
+    // Keep the ref in lockstep with the state updates below. In particular, a
+    // restore-draft instruction may arrive before the first authority baseline;
+    // the owner-seed/rebase effects must see its complete text+attachment
+    // candidate instead of the prior empty attachment snapshot.
+    replicatedAttachmentsRef.current = replicated;
     setAttachments(restored.images);
-    setFileAttachments(injectedFiles ?? restored.files);
+    setFileAttachments(nextFileAttachments);
+    if (editorInjectionIsRendererOwned) {
+      // Explicit injection attachments are renderer-owned restoration custody,
+      // not a host editor projection. Stage and reconcile that whole payload so
+      // a late initial owner cannot replace restored images with its empty
+      // baseline while the separately persisted draft text survives.
+      synchronizeEditorText(nextText, replicated);
+      const currentInjection = useSessionsStore.getState().sessions.get(sessionId)?.editorInjection;
+      if (
+        currentInjection?.nonce === editorInjectionNonce &&
+        currentInjection.attachments !== undefined
+      ) {
+        // The draft store and staged editor attachments now own the candidate;
+        // retire the transient injection so later authority frames can project
+        // normally without replaying the restoration.
+        clearEditorInjection(sessionId);
+      }
+    }
     const textarea = textareaRef.current;
     if (textarea && mayFocusComposer(textarea)) textarea.focus();
   }, [
@@ -731,6 +801,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     editorInjectionText,
     editorInjectionMayPreserveDraft,
     editorInjectionAttachments,
+    editorInjectionIsRendererOwned,
+    clearEditorInjection,
     discovered,
     sessionId,
     synchronizeEditorText,
@@ -1268,7 +1340,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       // use the prompt transport for extension/template dispatch, but they must
       // receive only their command text and leave that context for a later
       // ordinary prompt.
-      let effectiveImages = isRealPrompt ? attachments : [];
+      const effectiveImages = isRealPrompt ? attachments : [];
       const attachedFilePaths = fileAttachments.map((attachment) => attachment.path);
       let effectivePromptText = parsedAction.kind === "send-prompt" ? parsedAction.text : content;
       if (parsedAction.kind !== "send-prompt" && !isSlashCommand && attachedFilePaths.length > 0) {
@@ -1281,89 +1353,168 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       if (isRealPrompt && pendingDiffComments.length > 0) {
         effectivePromptText = prependCodeCommentsToPrompt(effectivePromptText, pendingDiffComments);
       }
-      if (isRealPrompt && effectiveImages.length > 0 && !modelSupportsImages) {
-        addToast(
-          sessionId,
-          `${modelLabel} doesn't support image input — sending image file paths instead`,
-          "warning",
-        );
-        effectivePromptText = textWithAppendedFilePaths(
-          effectivePromptText,
-          effectiveImages.map((attachment) => attachment.path),
-        );
-        effectiveImages = [];
-      }
-      const finalAction =
-        parsedAction.kind === "send-prompt"
-          ? {
-              ...parsedAction,
-              text: effectivePromptText,
-              ...(effectiveImages.length > 0
-                ? {
-                    images: runtimeImagesFromAttachments(effectiveImages),
-                  }
-                : {}),
-            }
-          : parsedAction;
       // Drop only an exact duplicate effective payload. Same text with
       // different files/images remains a distinct intent and reaches host
       // custody with its own explicit disposition.
-      const submissionInFlightKey = JSON.stringify(finalAction);
+      const submissionInFlightKey = JSON.stringify({
+        parsedAction,
+        effectivePromptText,
+        effectiveImages,
+      });
       if (submissionsInFlightRef.current.has(submissionInFlightKey)) return;
       submissionsInFlightRef.current.add(submissionInFlightKey);
+      let dispatchSemanticSnapshot = semanticSnapshot;
 
-      // ── Worktree creation / attachment on first send ──
-      // Only run when this session has not already been placed in a
-      // worktree (worktreePath unset). After `/new` etc. the transcript
-      // resets to empty, so guarding on the transcript alone would
-      // re-create a worktree for a session that already has one.
-      //
-      // `worktreeMode` is the segmented-control selection in the
-      // WorktreeBar:
-      //   - "none"   → no pre-send action (run in the workspace).
-      //   - "create" → cut a fresh worktree (the original checkbox flow).
-      //   - "attach" → re-point this session into an existing worktree
-      //                on disk. The IPC is the authoritative validation
-      //                gate — no client-side path check; an invalid path
-      //                just comes back `{ok:false}` and the inline error
-      //                shows up in the bar.
-      const isNewSession = !sessionHasHistory(session);
-      // Truthy-check on `session?.worktreeMode` narrows `session` to
-      // defined inside this block (TS flow analysis), so the `session.*`
-      // accesses below don't need optional chaining.
-      const worktreeMode = session?.worktreeMode;
-      if (
-        session &&
-        isNewSession &&
-        !session.worktreePath &&
-        (worktreeMode === "create" || worktreeMode === "attach")
-      ) {
-        const operation = await runWorktreeOperation({
-          sessionId,
-          mode: worktreeMode,
-          // HEAD is the safe detached/no-branch fallback; never assume main.
-          ...(worktreeMode === "create"
-            ? { base: session.worktreeBase ?? "HEAD" }
-            : { path: session.worktreeAttachPath }),
-        });
-        if (!operation.ok) {
-          // Keep the submission text and release this intent for a retry.
-          submissionsInFlightRef.current.delete(submissionInFlightKey);
-          return;
-        }
-      }
-
-      // Freeze the input as "sending" until the host accepts the prompt
-      // (which clears the text) or the submission settles/fails below.
+      // Freeze the exact candidate before a worktree replacement can fence the
+      // old owner. Failure paths below preserve the text and release the UI in
+      // `finally`; only authoritative admission clears it.
       if (isRealPrompt) markSubmitPending(true);
 
       try {
+        // ── Worktree creation / attachment on first send ──
+        // Only run when this session has not already been placed in a
+        // worktree (worktreePath unset). After `/new` etc. the transcript
+        // resets to empty, so guarding on the transcript alone would
+        // re-create a worktree for a session that already has one.
+        //
+        // `worktreeMode` is the segmented-control selection in the
+        // WorktreeBar:
+        //   - "none"   → no pre-send action (run in the workspace).
+        //   - "create" → cut a fresh worktree (the original checkbox flow).
+        //   - "attach" → re-point this session into an existing worktree
+        //                on disk. The IPC is the authoritative validation
+        //                gate — no client-side path check; an invalid path
+        //                just comes back `{ok:false}` and the inline error
+        //                shows up in the bar.
+        const isNewSession = !sessionHasHistory(session);
+        // Truthy-check on `session?.worktreeMode` narrows `session` to
+        // defined inside this block (TS flow analysis), so the `session.*`
+        // accesses below don't need optional chaining.
+        const worktreeMode = session?.worktreeMode;
+        if (
+          session &&
+          isNewSession &&
+          !session.worktreePath &&
+          (worktreeMode === "create" || worktreeMode === "attach")
+        ) {
+          const predecessor = authoritySnapshotFor(
+            useSessionsStore.getState().sessions.get(sessionId),
+          );
+          if (!predecessor) return;
+          // The replacement can publish its baseline before the create IPC
+          // resolves. Fence the complete renderer candidate first so the
+          // owner-change effect never hydrates an empty successor editor over
+          // the first prompt or its attachments.
+          localEditAwaitingAuthorityRef.current = true;
+          const operation = await runWorktreeOperation({
+            sessionId,
+            mode: worktreeMode,
+            // HEAD is the safe detached/no-branch fallback; never assume main.
+            ...(worktreeMode === "create"
+              ? session.worktreeCopyUncommitted
+                ? { fromCurrentCheckout: true, copyUncommitted: true }
+                : { base: session.worktreeBase ?? "HEAD", copyUncommitted: false }
+              : { path: session.worktreeAttachPath }),
+          });
+          if (!operation.ok) {
+            const current = authoritySnapshotFor(
+              useSessionsStore.getState().sessions.get(sessionId),
+            );
+            if (current && runtimeIdentityMatches(current.owner, predecessor.owner)) {
+              localEditAwaitingAuthorityRef.current = false;
+            }
+            return;
+          }
+
+          // App owns renderer/authority attachment and de-duplicates lifecycle
+          // retries. Wait for its published successor baseline instead of
+          // issuing a competing direct authorityAttach from Composer.
+          const successor = await waitForSuccessorAuthority(sessionId, predecessor.owner);
+          if (!successor) {
+            addToast(
+              sessionId,
+              "The worktree was created, but its session is still starting; input was not sent",
+              "warning",
+            );
+            return;
+          }
+          dispatchSemanticSnapshot = successor;
+
+          const successorKey = editorOwnerKey(sessionId, successor.owner);
+          if (seededEditorOwnerRef.current !== successorKey) {
+            // The attach reached Zustand before React's owner-change effect.
+            // Seed synchronously and claim the key so that later effect cannot
+            // reset this newly queued patch chain.
+            seededEditorOwnerRef.current = successorKey;
+            editorRevisionRef.current = successor.editor.revision;
+            editorPatchEpochRef.current++;
+            editorPatchRetryNeededRef.current = false;
+            editorPatchTailRef.current = Promise.resolve("accepted");
+            authorityRebaseInFlightRef.current = false;
+          }
+          if (localEditAwaitingAuthorityRef.current && !authorityRebaseInFlightRef.current) {
+            authorityRebaseInFlightRef.current = true;
+            synchronizeEditorText(textRef.current, replicatedAttachmentsRef.current);
+          }
+          const successorPatchTail = editorPatchTailRef.current;
+          const successorPatchOutcome = await successorPatchTail;
+          if (editorPatchTailRef.current === successorPatchTail) {
+            authorityRebaseInFlightRef.current = false;
+            if (successorPatchOutcome === "accepted" && textRef.current === content) {
+              localEditAwaitingAuthorityRef.current = false;
+            }
+          }
+          if (successorPatchOutcome !== "accepted") return;
+        }
+
+        // Project-local model configuration can change when the worktree host
+        // replaces its predecessor. Build the transport payload only after
+        // that successor baseline is installed, so model availability and
+        // image fallback belong to the owner that will receive the prompt.
+        const dispatchSession = useSessionsStore.getState().sessions.get(sessionId);
+        const dispatchModelInfo = findCurrentModel(
+          dispatchSession?.availableModels ?? [],
+          dispatchSemanticSnapshot?.model?.id,
+          dispatchSemanticSnapshot?.model?.provider,
+        );
+        const dispatchModelSupportsImages = dispatchModelInfo?.input
+          ? dispatchModelInfo.input.includes("image")
+          : true;
+        let dispatchPromptText = effectivePromptText;
+        let dispatchImages = effectiveImages;
+        if (isRealPrompt && dispatchImages.length > 0 && !dispatchModelSupportsImages) {
+          const dispatchModelLabel =
+            dispatchModelInfo?.name ?? dispatchSemanticSnapshot?.model?.id ?? "This model";
+          addToast(
+            sessionId,
+            `${dispatchModelLabel} doesn't support image input — sending image file paths instead`,
+            "warning",
+          );
+          dispatchPromptText = textWithAppendedFilePaths(
+            dispatchPromptText,
+            dispatchImages.map((attachment) => attachment.path),
+          );
+          dispatchImages = [];
+        }
+        const finalAction =
+          parsedAction.kind === "send-prompt"
+            ? {
+                ...parsedAction,
+                text: dispatchPromptText,
+                ...(dispatchImages.length > 0
+                  ? {
+                      images: runtimeImagesFromAttachments(dispatchImages),
+                    }
+                  : {}),
+              }
+            : parsedAction;
+
         // No-model guard: only for plain user prompts. /model (which fixes
         // the guard!) and bash bypass it. Must run inside `try` so the
         // `finally` below still resets `submittingRef`.
         if (
           finalAction.kind === "send-prompt" &&
-          !semanticSnapshot?.model &&
+          !dispatchSemanticSnapshot?.model &&
           finalAction.commandSource === undefined
         ) {
           addToast(sessionId, "No model selected", "error");
@@ -1708,10 +1859,8 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       closeSessionTab,
       attachments,
       fileAttachments,
-      modelSupportsImages,
-      modelLabel,
       worktreeCreating,
-      semanticSnapshot?.model,
+      semanticSnapshot,
       registerPendingComposerSubmission,
       clearSubmittedDiffComments,
       synchronizeEditorText,

@@ -70,6 +70,10 @@ const previewHooks = {
   abortCalls: 0,
   /** Explicit search opens; preview selection/context never increments this. */
   searchOpenCalls: 0,
+  /** Extension update checks dispatched by Settings-open or manual refresh. */
+  extensionUpdateCheckCalls: 0,
+  /** Extension-only update targets dispatched from Settings. */
+  extensionUpdateTargets: [] as Array<"all" | { extension: string }>,
   /** Current ESC claim count for render-test synchronization. */
   escapeClaimCount(): number {
     return useOverlayStore.getState().count;
@@ -1377,6 +1381,7 @@ const settingsState = {
   sidebarWidth: 220,
   sidebarCollapsed: false,
   sessionSearchEnabled: true,
+  extensionUpdateCheckEnabled: true,
   pinnedSessions: [] as string[],
   archivedSessions: [] as string[],
   worktrees: {},
@@ -1389,11 +1394,50 @@ const settingsState = {
   window: undefined,
 };
 
+let previewExtensionUpdates = [
+  {
+    source: "npm:@pi/mcp",
+    displayName: "@pi/mcp",
+    type: "npm" as const,
+    scope: "user" as const,
+  },
+  {
+    source: "git:github.com/example/pi-tools",
+    displayName: "github.com/example/pi-tools",
+    type: "git" as const,
+    scope: "user" as const,
+  },
+];
+let previewExtensionUpdateStatus: {
+  updates: typeof previewExtensionUpdates;
+  checkedAt: number;
+} | null = null;
+
 const stub = {
   invoke: async (channel: string, req?: unknown) => {
     switch (channel) {
       case "pi.info":
         return { version: "0.80.10-stub" };
+      case "extensionUpdates.status":
+        return previewExtensionUpdateStatus;
+      case "extensionUpdates.check": {
+        previewHooks.extensionUpdateCheckCalls++;
+        previewExtensionUpdateStatus = {
+          updates: previewExtensionUpdates,
+          checkedAt: Date.now(),
+        };
+        emit("extensionUpdates.status", previewExtensionUpdateStatus);
+        return previewExtensionUpdateStatus;
+      }
+      case "extensionUpdates.run": {
+        const { target } = req as { target: "all" | { extension: string } };
+        previewHooks.extensionUpdateTargets.push(target);
+        previewExtensionUpdates =
+          target === "all"
+            ? []
+            : previewExtensionUpdates.filter((update) => update.source !== target.extension);
+        return { exitCode: 0, timedOut: false };
+      }
       case "settings.get":
         return settingsState;
       case "settings.set":

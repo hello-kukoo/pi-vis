@@ -134,9 +134,14 @@ export const AppSettingsSchema = z.object({
   pinnedSessions: z.array(z.string()).default([]),
   archivedSessions: z.array(z.string()).default([]),
   // Checks for updates to the packaged Pi-Vis desktop app via Electron's
-  // built-in autoUpdater. Separate from pi/extension updates because it uses
-  // a signed app release feed and installs by restarting the app.
+  // built-in autoUpdater. Separate from extension-package updates because it
+  // uses a signed app release feed and installs by restarting the app; the
+  // pinned pi runtime itself has no in-app update setting.
   appUpdateCheckEnabled: z.boolean().default(true),
+  // Checks user-scoped Pi extension packages in the background after launch.
+  // Opening Settings still performs a check when no cached result exists,
+  // even when this launch-only preference is disabled.
+  extensionUpdateCheckEnabled: z.boolean().default(true),
   diffRailWidth: z.number().default(280),
   // Whether the diff viewer's file-listing sidebar is shown. Toggled from
   // the viewer header; persisted so the preference survives reopen/relaunch.

@@ -87,6 +87,52 @@
   cursor: not-allowed;
 }
 
+.worktree-bar__copy-changes {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.429rem;
+  color: var(--text-muted);
+  font-size: 0.857em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.worktree-bar__copy-changes input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 0.929rem;
+  height: 0.929rem;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.worktree-bar__copy-changes input[type="checkbox"]:checked {
+  border-color: var(--accent-fill);
+  background: var(--accent-fill);
+}
+
+.worktree-bar__copy-changes input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  top: 0.107rem;
+  left: 0.286rem;
+  width: 0.214rem;
+  height: 0.45rem;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.worktree-bar__copy-changes input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* ── Spinner (shared by create + attach busy states) ────────────── */
 
 .worktree-bar__spinner {

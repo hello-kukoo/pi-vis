@@ -45,6 +45,259 @@ test.describe("Active-session worktree switching", () => {
     fs.chmodSync(FAKE_SESSION_HOST, 0o755);
   });
 
+  test("creates a clean fresh worktree after startup reports its session file", async () => {
+    test.setTimeout(90_000);
+    const settingsDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-clean-settings-")),
+    );
+    const workspaceDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-clean-repo-")),
+    );
+    const piSessionsDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-clean-pi-")),
+    );
+    setupWorkspaceRepo(workspaceDir);
+    const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+    }).trim();
+
+    const settingsPath = join(settingsDir, "settings.json");
+    const ipcLog = join(settingsDir, "ipc.log");
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        piBinaryPath: FAKE_PI,
+        workspaceOrder: [workspaceDir],
+        fonts: {
+          display: { sizePx: 14 },
+          code: { family: "monospace", sizePx: 13 },
+        },
+      }),
+    );
+
+    const app = await launchElectron({
+      args: [APP_ENTRY],
+      env: {
+        ...process.env,
+        PIVIS_SETTINGS_DIR: settingsDir,
+        FAKE_PI_SESSIONS_DIR: piSessionsDir,
+        PIVIS_SESSIONS_DIR: piSessionsDir,
+        PIVIS_TEST_HOST_SCRIPT: FAKE_SESSION_HOST,
+        PIVIS_TEST_HOST_CREATE_INITIAL_SESSION_FILE: "1",
+        PIVIS_TEST_IPC_INVOCATION_LOG: ipcLog,
+        ELECTRON_RENDERER_URL: undefined,
+      },
+    });
+    app.process().stderr?.on("data", () => {});
+    const window = await app.firstWindow();
+    await window.waitForLoadState("domcontentloaded");
+    await window.setViewportSize({ width: 1440, height: 900 });
+    await expect(window.locator(".sidebar, .pi-not-found").first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await window.getByRole("button", { name: "New session" }).click();
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
+    await expect(window.locator(".worktree-bar")).toBeVisible({ timeout: 15_000 });
+    await window.getByRole("button", { name: "New Worktree" }).click();
+    await expect(
+      window.getByRole("checkbox", { name: "Copy uncommitted changes" }),
+    ).not.toBeChecked();
+
+    const composer = window.locator(".composer__textarea");
+    await composer.fill("Start this session in a clean worktree.");
+    await composer.press("Enter");
+    await expect(window.locator(".transcript-block--user").first()).toContainText(
+      "Start this session in a clean worktree.",
+      { timeout: 20_000 },
+    );
+    await expect(
+      window.getByText("Established sessions must branch from their current checkout"),
+    ).toHaveCount(0);
+    await expect
+      .poll(() => {
+        if (!fs.existsSync(ipcLog)) return undefined;
+        return fs
+          .readFileSync(ipcLog, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { channel: string; payload: unknown })
+          .find(({ channel }) => channel === "session.createWorktree")?.payload;
+      })
+      .toMatchObject({ base: "main", copyUncommitted: false });
+
+    let generatedPath = "";
+    let generatedBranch = "";
+    await expect
+      .poll(() => {
+        const persisted = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+          worktrees?: Record<string, { branch: string }>;
+        };
+        const entry = Object.entries(persisted.worktrees ?? {})[0];
+        generatedPath = entry?.[0] ?? "";
+        generatedBranch = entry?.[1].branch ?? "";
+        return generatedPath;
+      })
+      .not.toBe("");
+    expect(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: generatedPath,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(sourceHead);
+    expect(
+      execFileSync("git", ["status", "--porcelain=v1"], {
+        cwd: generatedPath,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("");
+
+    await app.close();
+    execFileSync("git", ["worktree", "remove", "--force", generatedPath], { cwd: workspaceDir });
+    execFileSync("git", ["branch", "-D", generatedBranch], { cwd: workspaceDir });
+    rmrf(settingsDir);
+    rmrf(workspaceDir);
+    rmrf(piSessionsDir);
+  });
+
+  test("creates a fresh-session worktree after startup and copies changes when selected", async () => {
+    test.setTimeout(90_000);
+    const settingsDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-settings-")),
+    );
+    const workspaceDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-repo-")),
+    );
+    const piSessionsDir = fs.realpathSync(
+      fs.mkdtempSync(join(os.tmpdir(), "pivis-e2e-wt-fresh-pi-")),
+    );
+    setupWorkspaceRepo(workspaceDir);
+    execFileSync("git", ["checkout", "-b", "divergent"], { cwd: workspaceDir });
+    fs.writeFileSync(join(workspaceDir, "divergent-only.txt"), "different base\n");
+    execFileSync("git", ["add", "divergent-only.txt"], { cwd: workspaceDir });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=Worktree Tester", "commit", "-m", "Diverge"],
+      { cwd: workspaceDir },
+    );
+    execFileSync("git", ["checkout", "main"], { cwd: workspaceDir });
+    const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+    }).trim();
+    fs.writeFileSync(join(workspaceDir, "README.md"), "fresh staged change\n");
+    execFileSync("git", ["add", "README.md"], { cwd: workspaceDir });
+    fs.appendFileSync(join(workspaceDir, "README.md"), "fresh unstaged change\n");
+    fs.writeFileSync(join(workspaceDir, "fresh-notes.txt"), "fresh untracked\n");
+    const sourceStatus = execFileSync("git", ["status", "--porcelain=v1"], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+    }).trim();
+
+    const settingsPath = join(settingsDir, "settings.json");
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        piBinaryPath: FAKE_PI,
+        workspaceOrder: [workspaceDir],
+        fonts: {
+          display: { sizePx: 14 },
+          code: { family: "monospace", sizePx: 13 },
+        },
+      }),
+    );
+
+    const app = await launchElectron({
+      args: [APP_ENTRY],
+      env: {
+        ...process.env,
+        PIVIS_SETTINGS_DIR: settingsDir,
+        FAKE_PI_SESSIONS_DIR: piSessionsDir,
+        PIVIS_SESSIONS_DIR: piSessionsDir,
+        PIVIS_TEST_HOST_SCRIPT: FAKE_SESSION_HOST,
+        PIVIS_TEST_HOST_CREATE_INITIAL_SESSION_FILE: "1",
+        ELECTRON_RENDERER_URL: undefined,
+      },
+    });
+    app.process().stderr?.on("data", () => {});
+    const window = await app.firstWindow();
+    await window.waitForLoadState("domcontentloaded");
+    await window.setViewportSize({ width: 1440, height: 900 });
+    await expect(window.locator(".sidebar, .pi-not-found").first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await window.getByRole("button", { name: "New session" }).click();
+    await expect(window.locator(".session-header__model-btn")).toContainText("Fake Model [fake]", {
+      timeout: 15_000,
+    });
+    await expect(window.locator(".worktree-bar")).toBeVisible({ timeout: 15_000 });
+    await window.getByRole("button", { name: "New Worktree" }).click();
+    const basePicker = window.getByRole("button", { name: "Choose worktree base branch" });
+    await basePicker.click();
+    await window.getByRole("option", { name: "divergent" }).click();
+    await expect(basePicker).toContainText("divergent");
+    const copyChanges = window.getByRole("checkbox", { name: "Copy uncommitted changes" });
+    await expect(copyChanges).not.toBeChecked();
+    await copyChanges.check();
+    await expect(basePicker).toBeDisabled();
+    await expect(basePicker).toContainText("main");
+
+    const composer = window.locator(".composer__textarea");
+    await composer.fill("Start this session in the copied worktree.");
+    await composer.press("Enter");
+    await expect(window.locator(".transcript-block--user").first()).toContainText(
+      "Start this session in the copied worktree.",
+      { timeout: 20_000 },
+    );
+    await expect(
+      window.getByText("Established sessions must branch from their current checkout"),
+    ).toHaveCount(0);
+
+    let generatedPath = "";
+    let generatedBranch = "";
+    await expect
+      .poll(() => {
+        const persisted = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+          worktrees?: Record<string, { branch: string }>;
+        };
+        const entry = Object.entries(persisted.worktrees ?? {})[0];
+        generatedPath = entry?.[0] ?? "";
+        generatedBranch = entry?.[1].branch ?? "";
+        return generatedPath;
+      })
+      .not.toBe("");
+    expect(
+      execFileSync("git", ["status", "--porcelain=v1"], {
+        cwd: generatedPath,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(sourceStatus);
+    expect(fs.readFileSync(join(generatedPath, "README.md"), "utf8")).toContain(
+      "fresh unstaged change",
+    );
+    expect(fs.readFileSync(join(generatedPath, "fresh-notes.txt"), "utf8")).toBe(
+      "fresh untracked\n",
+    );
+    expect(fs.existsSync(join(generatedPath, "divergent-only.txt"))).toBe(false);
+    expect(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: generatedPath,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(sourceHead);
+
+    await app.close();
+    execFileSync("git", ["worktree", "remove", "--force", generatedPath], { cwd: workspaceDir });
+    execFileSync("git", ["branch", "-D", generatedBranch], { cwd: workspaceDir });
+    rmrf(settingsDir);
+    rmrf(workspaceDir);
+    rmrf(piSessionsDir);
+  });
+
   test("creates from the current checkout and carries local changes", async () => {
     test.setTimeout(90_000);
     const settingsDir = fs.realpathSync(

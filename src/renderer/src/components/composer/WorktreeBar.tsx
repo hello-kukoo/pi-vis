@@ -22,6 +22,7 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
   const setWorktreeMode = useSessionsStore((s) => s.setWorktreeMode);
   const setWorktreeAttachPath = useSessionsStore((s) => s.setWorktreeAttachPath);
   const setWorktreeBase = useSessionsStore((s) => s.setWorktreeBase);
+  const setWorktreeCopyUncommitted = useSessionsStore((s) => s.setWorktreeCopyUncommitted);
   const gitRoot = gitRootForSession(session);
 
   // Load branches via IPC (used by the "New" mode's BranchDropdown).
@@ -110,7 +111,9 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
   const mode = (session.worktreeMode ?? "none") as WorktreeMode;
   const creating = session.worktreeCreating ?? false;
   const worktreeError = session.worktreeError ?? null;
-  const base = session.worktreeBase ?? currentBranch;
+  const copyUncommitted = session.worktreeCopyUncommitted ?? false;
+  const base = copyUncommitted ? currentBranch : (session.worktreeBase ?? currentBranch);
+  const baseLabel = copyUncommitted ? (currentBranch ?? "HEAD") : (base ?? "branch");
 
   return (
     <div className="worktree-bar">
@@ -138,20 +141,35 @@ export function WorktreeBar({ sessionId }: WorktreeBarProps): React.ReactElement
         {/* Mode-specific controls — sit next to the segmented control so
             the whole bar reads as one row when the window is wide. */}
         {mode === "create" && (
-          <BranchDropdown
-            branches={branches}
-            currentBranch={currentBranch}
-            value={base}
-            onChange={(b) => {
-              if (b !== null) setWorktreeBase(sessionId, b);
-            }}
-            includeRemoteBranches={includeRemote}
-            onToggleRemote={handleToggleRemote}
-            disabled={creating}
-            triggerLabel={base ?? "branch"}
-            ariaLabel="Choose worktree base branch"
-            placement="top"
-          />
+          <>
+            <BranchDropdown
+              branches={branches}
+              currentBranch={currentBranch}
+              value={base}
+              onChange={(b) => {
+                if (b !== null) setWorktreeBase(sessionId, b);
+              }}
+              includeRemoteBranches={includeRemote}
+              onToggleRemote={handleToggleRemote}
+              disabled={creating || copyUncommitted}
+              triggerLabel={baseLabel}
+              ariaLabel="Choose worktree base branch"
+              placement="top"
+            />
+            <label className="worktree-bar__copy-changes">
+              <input
+                type="checkbox"
+                checked={copyUncommitted}
+                disabled={creating}
+                onChange={(event) => {
+                  const copy = event.currentTarget.checked;
+                  if (copy) setWorktreeBase(sessionId, currentBranch);
+                  setWorktreeCopyUncommitted(sessionId, copy);
+                }}
+              />
+              <span>Copy uncommitted changes</span>
+            </label>
+          </>
         )}
 
         {mode === "attach" && (

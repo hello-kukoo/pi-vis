@@ -96,7 +96,7 @@ function dispatchFileDrag(
 function outcomeFor(envelope: Envelope, patch: Partial<IntentOutcome> = {}): IntentOutcome {
   const base = {
     intentId: envelope.intentId,
-    owner: OWNER,
+    owner: envelope.expectedOwner,
     state: "completed" as const,
     ...patch,
   };
@@ -209,18 +209,18 @@ function patchSession(patch: Record<string, unknown>, sessionId = SID): void {
   });
 }
 
-function followingAuthority(modelId = "model") {
-  const cursor = { ...OWNER, transportSequence: 1, snapshotSequence: 1 };
+function followingAuthority(modelId = "model", owner = OWNER) {
+  const cursor = { ...owner, transportSequence: 1, snapshotSequence: 1 };
   return {
     rendererGeneration: 1,
     publicationSequence: 0,
-    owner: OWNER,
+    owner,
     semantic: { state: "following" as const, cursor },
     transcript: { state: "following" as const, cursor },
     extensionUi: { state: "following" as const, cursor },
     panels: new Map(),
     authoritativeSnapshot: {
-      owner: OWNER,
+      owner,
       snapshotSequence: 1,
       capturedAt: Date.now(),
       sdk: {
@@ -1156,6 +1156,266 @@ describe("Composer autocomplete and authority intents", () => {
     composer.unmount();
   });
 
+  it("rebases and dispatches the first worktree prompt through App's successor authority", async () => {
+    const successor = {
+      hostInstanceId: "22222222-2222-4222-8222-222222222222",
+      sessionEpoch: 1,
+    };
+    setSessionField({ worktreeMode: "create", worktreeBase: "main" });
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.createWorktree") {
+        // Reproduce the lifecycle race: App applies the successor baseline
+        // before the create IPC response resumes Composer's submit coroutine.
+        return new Promise((resolve) => {
+          queueMicrotask(() => {
+            const authority = followingAuthority("model", successor);
+            authority.authoritativeSnapshot.editor = { revision: 7, text: "", attachments: [] };
+            patchSession({
+              hostInstanceId: successor.hostInstanceId,
+              sessionEpoch: successor.sessionEpoch,
+              editorRevision: 7,
+              authorityProjection: authority,
+            });
+            resolve({
+              ok: true,
+              worktreePath: "/tmp/ws-worktrees/fresh",
+              branch: "worktree/fresh",
+              name: "fresh",
+              base: "main",
+            });
+          });
+        });
+      }
+      if (channel === "session.dispatchIntent") {
+        const envelope = payload as Envelope;
+        queueMicrotask(() => publishOutcome(envelope));
+        return Promise.resolve({
+          status: "admitted",
+          intentId: envelope.intentId,
+          owner: successor,
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const composer = mount();
+    type(composer.textarea(), "first prompt in worktree");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const successorPatches = invoke.mock.calls.filter(
+      ([channel, payload]) =>
+        channel === "session.editorPatch" &&
+        (payload as { expectedHostInstanceId?: string }).expectedHostInstanceId ===
+          successor.hostInstanceId,
+    );
+    expect(successorPatches).toHaveLength(1);
+    expect(successorPatches[0]?.[1]).toMatchObject({
+      baseRevision: 7,
+      revision: 8,
+      text: "first prompt in worktree",
+    });
+    expect(intentCalls(invoke)[0]).toMatchObject({
+      expectedOwner: successor,
+      intent: { kind: "submit", editorRevision: 8, text: "first prompt in worktree" },
+    });
+    await vi.waitFor(() => expect(composer.textarea().value).toBe(""));
+    expect(invoke.mock.calls.some(([channel]) => channel === "session.authorityAttach")).toBe(
+      false,
+    );
+    composer.unmount();
+  });
+
+  it("uses the successor model guard for the first worktree prompt", async () => {
+    const successor = {
+      hostInstanceId: "44444444-4444-4444-8444-444444444444",
+      sessionEpoch: 1,
+    };
+    setSessionField({ worktreeMode: "create", worktreeBase: "main" });
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.createWorktree") {
+        return new Promise((resolve) => {
+          queueMicrotask(() => {
+            const authority = followingAuthority("model", successor);
+            (authority.authoritativeSnapshot as { model: { id: string } | undefined }).model =
+              undefined;
+            patchSession({
+              currentModel: undefined,
+              hostInstanceId: successor.hostInstanceId,
+              sessionEpoch: successor.sessionEpoch,
+              authorityProjection: authority,
+            });
+            resolve({
+              ok: true,
+              worktreePath: "/tmp/ws-worktrees/no-model",
+              branch: "worktree/no-model",
+              name: "no-model",
+              base: "main",
+            });
+          });
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const composer = mount();
+    type(composer.textarea(), "keep until a model is selected");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() =>
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toBe(
+        "No model selected",
+      ),
+    );
+    expect(intentCalls(invoke)).toHaveLength(0);
+    expect(composer.textarea().value).toBe("keep until a model is selected");
+    await vi.waitFor(() => expect(composer.textarea().disabled).toBe(false));
+    composer.unmount();
+  });
+
+  it("recomputes image fallback from the successor worktree model", async () => {
+    const successor = {
+      hostInstanceId: "55555555-5555-4555-8555-555555555555",
+      sessionEpoch: 1,
+    };
+    setSessionField({
+      worktreeMode: "create",
+      worktreeBase: "main",
+      availableModels: [{ id: "model", name: "Vision", input: ["text", "image"] }],
+    });
+    setAuthorityAttachments([
+      {
+        kind: "image",
+        name: "diagram.png",
+        path: "/tmp/diagram.png",
+        dataUrl: "data:image/png;base64,eA==",
+      },
+    ]);
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        return Promise.resolve({
+          accepted: true,
+          revision: (payload as { revision: number }).revision,
+        });
+      }
+      if (channel === "session.createWorktree") {
+        return new Promise((resolve) => {
+          queueMicrotask(() => {
+            const authority = followingAuthority("text-model", successor);
+            patchSession({
+              currentModel: "text-model",
+              availableModels: [{ id: "text-model", name: "Text", input: ["text"] }],
+              hostInstanceId: successor.hostInstanceId,
+              sessionEpoch: successor.sessionEpoch,
+              authorityProjection: authority,
+            });
+            resolve({
+              ok: true,
+              worktreePath: "/tmp/ws-worktrees/text-model",
+              branch: "worktree/text-model",
+              name: "text-model",
+              base: "main",
+            });
+          });
+        });
+      }
+      if (channel === "session.dispatchIntent") {
+        const envelope = payload as Envelope;
+        queueMicrotask(() => publishOutcome(envelope));
+        return Promise.resolve({
+          status: "admitted",
+          intentId: envelope.intentId,
+          owner: successor,
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const composer = mount();
+    await vi.waitFor(() =>
+      expect(composer.container.querySelectorAll(".composer__attachment-item")).toHaveLength(1),
+    );
+    type(composer.textarea(), "inspect");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    expect(intentCalls(invoke)[0]).toMatchObject({
+      expectedOwner: successor,
+      intent: {
+        kind: "submit",
+        text: "inspect\n/tmp/diagram.png",
+      },
+    });
+    expect((intentCalls(invoke)[0]!.intent as { images?: unknown[] }).images).toEqual([]);
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+      "Text doesn't support image input",
+    );
+    composer.unmount();
+  });
+
+  it("preserves the first worktree prompt when successor editor custody fails", async () => {
+    const successor = {
+      hostInstanceId: "33333333-3333-4333-8333-333333333333",
+      sessionEpoch: 1,
+    };
+    setSessionField({ worktreeMode: "create", worktreeBase: "main" });
+    invoke.mockImplementation((channel: string, payload: unknown) => {
+      if (channel === "session.editorPatch") {
+        const patch = payload as { expectedHostInstanceId: string; revision: number };
+        if (patch.expectedHostInstanceId === successor.hostInstanceId) {
+          return Promise.reject(new Error("successor editor transport failed"));
+        }
+        return Promise.resolve({ accepted: true, revision: patch.revision });
+      }
+      if (channel === "session.createWorktree") {
+        return new Promise((resolve) => {
+          queueMicrotask(() => {
+            const authority = followingAuthority("model", successor);
+            patchSession({
+              hostInstanceId: successor.hostInstanceId,
+              sessionEpoch: successor.sessionEpoch,
+              authorityProjection: authority,
+            });
+            resolve({
+              ok: true,
+              worktreePath: "/tmp/ws-worktrees/fresh-failure",
+              branch: "worktree/fresh-failure",
+              name: "fresh-failure",
+              base: "main",
+            });
+          });
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    const composer = mount();
+    type(composer.textarea(), "keep this first prompt");
+    key(composer.textarea(), "Enter");
+
+    await vi.waitFor(() =>
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+        "synchronization failed",
+      ),
+    );
+    expect(intentCalls(invoke)).toHaveLength(0);
+    expect(composer.textarea().value).toBe("keep this first prompt");
+    await vi.waitFor(() => expect(composer.textarea().disabled).toBe(false));
+    composer.unmount();
+  });
+
   it("keeps an admission-cleared command cleared when its terminal outcome fails", async () => {
     // A post-admission failure is a domain error (e.g. real Pi's "Nothing to
     // compact") that the user already sees in the transcript and toasts.
@@ -1341,6 +1601,66 @@ describe("Composer autocomplete and authority intents", () => {
       ),
     ).toHaveLength(1);
     externalRename.remove();
+    composer.unmount();
+  });
+
+  it("keeps a restored image with its draft when initial authority attaches late", async () => {
+    setSessionField({
+      status: "starting",
+      hostInstanceId: undefined,
+      sessionEpoch: undefined,
+      authorityProjection: undefined,
+    });
+    const composer = mount();
+
+    act(() =>
+      useSessionsStore.getState().applyRestoreDraft(SID, {
+        restorationId: "late-authority-restore",
+        text: "restored before authority",
+        attachments: [{ mimeType: "image/png", data: "base64" }],
+        disposition: "restore",
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(composer.textarea().value).toBe("restored before authority");
+      expect(composer.container.querySelectorAll(".composer__attachment-thumb")).toHaveLength(1);
+    });
+    expect(invoke.mock.calls.filter(([channel]) => channel === "session.editorPatch")).toHaveLength(
+      0,
+    );
+
+    patchSession({
+      status: "ready",
+      hostInstanceId: OWNER.hostInstanceId,
+      sessionEpoch: OWNER.sessionEpoch,
+      editorRevision: 0,
+      editorAttachments: [],
+      editorInjection: {
+        text: "",
+        nonce: 10_001,
+        revision: 0,
+        preserveRendererDraft: true,
+      },
+      authorityProjection: followingAuthority(),
+    });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.editorPatch",
+        expect.objectContaining({
+          text: "restored before authority",
+          attachments: [
+            expect.objectContaining({
+              kind: "image",
+              name: "restored-image-1.png",
+              dataUrl: "data:image/png;base64,base64",
+            }),
+          ],
+        }),
+      ),
+    );
+    expect(composer.textarea().value).toBe("restored before authority");
+    expect(composer.container.querySelectorAll(".composer__attachment-thumb")).toHaveLength(1);
     composer.unmount();
   });
 

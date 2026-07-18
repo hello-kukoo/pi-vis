@@ -78,6 +78,10 @@ function mount(node: React.ReactElement): { container: HTMLDivElement; unmount: 
   };
 }
 
+function click(element: Element): void {
+  act(() => element.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+}
+
 describe("WorktreeBar", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -124,6 +128,53 @@ describe("WorktreeBar", () => {
       await Promise.resolve();
     });
     expect(container.querySelector(".worktree-bar")).toBeNull();
+    unmount();
+  });
+
+  it("shows an unchecked copy-changes checkbox only for New Worktree", async () => {
+    setSession();
+    const { container, unmount } = mount(<WorktreeBar sessionId={sessionId} />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const newWorktree = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "New Worktree",
+    );
+    expect(newWorktree).toBeTruthy();
+    click(newWorktree!);
+
+    const checkbox = container.querySelector<HTMLInputElement>(
+      ".worktree-bar__copy-changes input[type='checkbox']",
+    );
+    expect(checkbox).toBeTruthy();
+    expect(checkbox?.checked).toBe(false);
+
+    click(checkbox!);
+    expect(useSessionsStore.getState().sessions.get(sessionId)?.worktreeCopyUncommitted).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>("[aria-label='Choose worktree base branch']")
+        ?.disabled,
+    ).toBe(true);
+    expect(useSessionsStore.getState().sessions.get(sessionId)?.worktreeBase).toBe("main");
+    act(() => useSessionsStore.getState().setWorktreeBase(sessionId, "stale-restored-base"));
+    expect(
+      container.querySelector<HTMLButtonElement>("[aria-label='Choose worktree base branch']")
+        ?.textContent,
+    ).toContain("main");
+
+    const existing = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Existing Worktree",
+    );
+    click(existing!);
+    expect(container.querySelector(".worktree-bar__copy-changes")).toBeNull();
+    click(newWorktree!);
+    expect(
+      container.querySelector<HTMLInputElement>(
+        ".worktree-bar__copy-changes input[type='checkbox']",
+      )?.checked,
+    ).toBe(true);
     unmount();
   });
 });

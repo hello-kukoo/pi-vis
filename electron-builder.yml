@@ -28,6 +28,7 @@ asarUnpack:
   - node_modules/**
   - out/resources/pi-session-host/**
   - out/main/session-search-worker.js
+  - out/main/extension-update-worker.js
   - out/main/chunks/**
 mac:
   entitlements: build/entitlements.mac.plist

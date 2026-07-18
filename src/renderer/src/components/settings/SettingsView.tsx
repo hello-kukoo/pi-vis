@@ -1,14 +1,20 @@
 import type { AppUpdateStatus } from "@shared/app-updates.js";
 import type { ProviderAuthStatus } from "@shared/auth.js";
 import { PROVIDERS } from "@shared/auth.js";
+import type { ExtensionUpdateTarget } from "@shared/extension-updates.js";
 import type { ThemeMode, TranscriptStyle } from "@shared/settings.js";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatMiB, parseSizeToMiB } from "../../lib/file-size.js";
 import { useAppUpdatesStore } from "../../stores/app-updates-store.js";
+import {
+  checkExtensionUpdates,
+  useExtensionUpdatesStore,
+} from "../../stores/extension-updates-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { listThemes } from "../../theme/registry.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
+import { FadeText } from "../common/FadeText.js";
 import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconCheck, IconChevronDown, IconClose } from "../common/icons.js";
 import "./SettingsView.css";
@@ -373,6 +379,11 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   const setAppUpdateStatus = useAppUpdatesStore((s) => s.setStatus);
   const [appChecking, setAppChecking] = useState(false);
   const [appUpdateMsg, setAppUpdateMsg] = useState("");
+  const extensionUpdateStatus = useExtensionUpdatesStore((s) => s.status);
+  const extensionChecking = useExtensionUpdatesStore((s) => s.checking);
+  const [extensionUpdating, setExtensionUpdating] = useState<string | null>(null);
+  const [extensionUpdateMsg, setExtensionUpdateMsg] = useState("");
+  const extensionAutoCheckStartedRef = useRef(false);
 
   // ── Load on mount ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -477,6 +488,61 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
   const handleInstallAppUpdate = useCallback(() => {
     void window.pivis.invoke("appUpdate.install", undefined);
   }, []);
+
+  const handleCheckExtensionUpdates = useCallback(async () => {
+    setExtensionUpdateMsg("Checking…");
+    try {
+      const status = await checkExtensionUpdates();
+      setExtensionUpdateMsg(
+        status.updates.length === 0
+          ? "No user extension updates found"
+          : `${status.updates.length} update${status.updates.length === 1 ? "" : "s"} available`,
+      );
+    } catch {
+      setExtensionUpdateMsg("Extension check failed");
+    }
+  }, []);
+
+  const handleRunExtensionUpdate = useCallback(async (target: ExtensionUpdateTarget) => {
+    const targetKey = target === "all" ? "all" : target.extension;
+    setExtensionUpdating(targetKey);
+    setExtensionUpdateMsg("Updating…");
+    try {
+      const result = await window.pivis.invoke("extensionUpdates.run", { target });
+      if (result.exitCode !== 0) {
+        setExtensionUpdateMsg(result.timedOut ? "Extension update timed out" : "Update failed");
+        return;
+      }
+      const status = await checkExtensionUpdates();
+      setExtensionUpdateMsg(
+        status.updates.length === 0
+          ? "Update completed; no remaining updates found"
+          : `${status.updates.length} update${status.updates.length === 1 ? "" : "s"} still available`,
+      );
+    } catch {
+      setExtensionUpdateMsg("Update failed");
+    } finally {
+      setExtensionUpdating(null);
+    }
+  }, []);
+
+  // Restore the pre-pin behavior: opening Settings initiates extension
+  // awareness when the delayed launch check has not already populated cache.
+  // The renderer and main single-flight claims make Strict Mode and a launch
+  // race join the same underlying package-manager pass.
+  useEffect(() => {
+    if (extensionAutoCheckStartedRef.current) return;
+    extensionAutoCheckStartedRef.current = true;
+    if (extensionUpdateStatus) {
+      setExtensionUpdateMsg(
+        extensionUpdateStatus.updates.length === 0
+          ? "No user extension updates found"
+          : `${extensionUpdateStatus.updates.length} update${extensionUpdateStatus.updates.length === 1 ? "" : "s"} available`,
+      );
+      return;
+    }
+    void handleCheckExtensionUpdates();
+  }, [extensionUpdateStatus, handleCheckExtensionUpdates]);
 
   // Subscribe to app-update status changes
   useEffect(() => {
@@ -918,6 +984,71 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                   <span className="settings-toggle__knob" />
                 </button>
               </div>
+
+              <div className="settings-row">
+                <span className="settings-label">Pi extensions</span>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={handleCheckExtensionUpdates}
+                  disabled={extensionChecking || extensionUpdating !== null}
+                >
+                  {extensionChecking ? "Checking…" : "Check extensions"}
+                </button>
+                {extensionUpdateMsg && <span className="settings-hint">{extensionUpdateMsg}</span>}
+              </div>
+
+              <div className="settings-row">
+                <span className="settings-label">Check extensions on launch</span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${settings.extensionUpdateCheckEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}
+                  onClick={() =>
+                    update({
+                      extensionUpdateCheckEnabled: !settings.extensionUpdateCheckEnabled,
+                    })
+                  }
+                >
+                  <span className="settings-toggle__knob" />
+                </button>
+              </div>
+
+              {extensionUpdateStatus && extensionUpdateStatus.updates.length > 0 && (
+                <div className="settings-extension-updates" aria-live="polite">
+                  {extensionUpdateStatus.updates.map((extension) => (
+                    <div className="settings-extension-update" key={extension.source}>
+                      <FadeText
+                        className="settings-extension-update__name"
+                        title={extension.source}
+                      >
+                        {extension.displayName}
+                      </FadeText>
+                      <span className="settings-hint">{extension.type}</span>
+                      <button
+                        type="button"
+                        className="settings-btn settings-btn--small"
+                        aria-label={`Update ${extension.displayName}`}
+                        disabled={extensionUpdating !== null}
+                        onClick={() =>
+                          void handleRunExtensionUpdate({ extension: extension.source })
+                        }
+                      >
+                        {extensionUpdating === extension.source ? "Updating…" : "Update"}
+                      </button>
+                    </div>
+                  ))}
+                  {extensionUpdateStatus.updates.length > 1 && (
+                    <button
+                      type="button"
+                      className="settings-btn settings-extension-updates__all"
+                      disabled={extensionUpdating !== null}
+                      onClick={() => void handleRunExtensionUpdate("all")}
+                    >
+                      {extensionUpdating === "all" ? "Updating…" : "Update all extensions"}
+                    </button>
+                  )}
+                </div>
+              )}
             </section>
           </ScrollFadeFrame>
         </div>

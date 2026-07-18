@@ -35,6 +35,7 @@ import { RENDERER_GENERATION } from "./lib/renderer-generation.js";
 import { useAppUpdatesStore } from "./stores/app-updates-store.js";
 import type { RendererAuthorityState } from "./stores/authority-reducer.js";
 import { openDiffForSession, useDiffStore } from "./stores/diff-store.js";
+import { useExtensionUpdatesStore } from "./stores/extension-updates-store.js";
 import { sessionMatchesRuntime, useSessionsStore } from "./stores/sessions-store.js";
 import { useSettingsStore } from "./stores/settings-store.js";
 import "./App.css";
@@ -87,6 +88,7 @@ export function App(): React.ReactElement {
   const persistedSidebarWidth = useSettingsStore((s) => s.settings.sidebarWidth);
   const sidebarCollapsed = useSettingsStore((s) => s.settings.sidebarCollapsed);
   const updateSettings = useSettingsStore((s) => s.update);
+  const setExtensionUpdateStatus = useExtensionUpdatesStore((s) => s.setStatus);
   const [sessionSearchAvailable, setSessionSearchAvailable] = useState(false);
   const authorityAttachRetryRef = useRef<AuthorityAttachRetry | null>(null);
   if (!authorityAttachRetryRef.current) {
@@ -345,6 +347,19 @@ export function App(): React.ReactElement {
       .then(setSessionSearchAvailable)
       .catch(() => setSessionSearchAvailable(false));
   }, [loadSettings]);
+
+  // Subscribe before reading main's cache so a fast launch check cannot land
+  // between the two operations and leave the renderer with stale status.
+  useEffect(() => {
+    const unsubscribe = window.pivis.on("extensionUpdates.status", setExtensionUpdateStatus);
+    void window.pivis
+      .invoke("extensionUpdates.status", undefined)
+      .then((status) => {
+        if (status) setExtensionUpdateStatus(status);
+      })
+      .catch(() => {});
+    return unsubscribe;
+  }, [setExtensionUpdateStatus]);
 
   // The Composer fires a custom DOM event rather than drilling a callback
   // prop through the App. This keeps the panel state owned by the App

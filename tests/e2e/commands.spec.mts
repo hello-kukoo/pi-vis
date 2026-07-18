@@ -504,12 +504,14 @@ test.describe("Slash commands", () => {
     // the selected completion on slower full-suite runs.
     await textarea.press("Escape");
     await textarea.press("Enter");
-    await expect(window.locator("body")).toContainText("Started a fresh session", {
-      timeout: 10_000,
-    });
+
+    // Replacement success is the adopted file plus an empty editor and
+    // transcript. The predecessor-owned toast can race the atomic owner swap
+    // after the command has already completed, so it is not a safe boundary.
     await expect
-      .poll(() => countJsonlFiles(folders.piSessionsDir), { timeout: 5_000 })
+      .poll(() => countJsonlFiles(folders.piSessionsDir), { timeout: 10_000 })
       .toBeGreaterThan(filesBeforeNew);
+    await expect(textarea).toHaveValue("", { timeout: 5_000 });
     // Transcript is empty after /new.
     await expect(window.locator(".transcript-block--assistant")).toHaveCount(0, { timeout: 5_000 });
 

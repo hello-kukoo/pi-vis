@@ -537,6 +537,7 @@ describe("SessionRegistry direct AgentSession authority", () => {
     await writeFile(sessionFile, "");
     const first = harness({ initialSessionFile: sessionFile });
     const firstId = first.registry.openSession(dir);
+    expect(first.registry.canCreateInitialWorktree(firstId)).toBe(true);
     let second: ReturnType<typeof harness> | undefined;
     let secondId: SessionId | undefined;
     try {
@@ -548,6 +549,7 @@ describe("SessionRegistry direct AgentSession authority", () => {
         _hasLock: true,
         status: "ready",
       });
+      expect(first.registry.canCreateInitialWorktree(firstId)).toBe(true);
       expect(first.availableRuntimeLocks.length).toBeGreaterThan(0);
       expect(first.availableRuntimeLocks.every(Boolean)).toBe(true);
       expect(first.readyLocks).toEqual([true]);
@@ -582,6 +584,24 @@ describe("SessionRegistry direct AgentSession authority", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("retires fresh-worktree eligibility only after the first user message starts", async () => {
+    const h = harness();
+    const freshId = h.registry.openSession("/tmp/project");
+    const resumedId = h.registry.openSession("/tmp/project", "/tmp/resumed.jsonl");
+    expect(h.registry.canCreateInitialWorktree(freshId)).toBe(true);
+    expect(h.registry.canCreateInitialWorktree(resumedId)).toBe(false);
+
+    await h.registry.activateSession(freshId, "/tmp/pi", {});
+    h.fakes[0]!.emitWire({
+      type: "event",
+      event: { type: "message_start", message: { role: "user", content: "hello" } },
+    });
+    await tick();
+
+    expect(h.registry.canCreateInitialWorktree(freshId)).toBe(false);
+    h.registry.stopAll();
   });
 
   it("fails closed when the primary advisory lock is compromised", async () => {
