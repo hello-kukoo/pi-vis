@@ -238,6 +238,134 @@ describe("Sidebar boot workspace restore", () => {
     unmount();
   });
 
+  it("requires confirmation before archiving a stored session", async () => {
+    const filePath = "/tmp/archive-me.jsonl";
+    const persistedSettings = { ...defaultSettings };
+    const invoke = vi.fn(async (channel: string, payload: Record<string, unknown> = {}) => {
+      switch (channel) {
+        case "workspace.list":
+          return [];
+        case "workspace.listSessions":
+          return [];
+        case "settings.get":
+          return persistedSettings;
+        case "settings.set":
+          Object.assign(persistedSettings, payload);
+          return persistedSettings;
+        default:
+          throw new Error(`Unexpected IPC channel ${channel}`);
+      }
+    });
+    (globalThis.window as unknown as { pivis?: unknown }).pivis = { invoke };
+
+    useSessionsStore.getState().addWorkspace(WS_A);
+    useSessionsStore.getState().setExpandedWorkspaces([WS_A]);
+    useSessionsStore.getState().setWorkspaceSessions(WS_A, [
+      {
+        id: "archive-me",
+        cwd: WS_A,
+        filePath,
+        name: "A carefully named session",
+        preview: "Archive fixture",
+        mtime: 1,
+        messageCount: 1,
+      },
+    ]);
+
+    const { container, unmount } = mount(<Sidebar onOpenSettings={() => {}} />);
+    await flushEffects();
+
+    const archiveButton = container.querySelector<HTMLButtonElement>(".sidebar__session-archive");
+    expect(archiveButton).toBeTruthy();
+    act(() => archiveButton!.click());
+
+    const dialog = document.querySelector<HTMLElement>(".confirm-dialog");
+    expect(dialog?.textContent).toContain("Archive session?");
+    expect(dialog?.textContent).toContain("A carefully named session");
+    expect(invoke).not.toHaveBeenCalledWith("settings.get", undefined);
+
+    const cancelButton = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "Cancel",
+    );
+    act(() => cancelButton!.click());
+    expect(document.querySelector(".confirm-dialog")).toBeNull();
+    expect(container.querySelector(".sidebar__session")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith("settings.get", undefined);
+
+    act(() => archiveButton!.click());
+    const confirmButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".confirm-dialog button"),
+    ).find((button) => button.textContent === "Archive");
+    await act(async () => {
+      confirmButton!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(invoke).toHaveBeenCalledWith("settings.set", { archivedSessions: [filePath] });
+    expect(document.querySelector(".confirm-dialog")).toBeNull();
+    unmount();
+  });
+
+  it("preserves the live-session archive persistence, close, and refresh sequence", async () => {
+    const sessionId = "archive-live" as SessionId;
+    const filePath = "/tmp/archive-live.jsonl";
+    const invoke = vi.fn(async (channel: string) => {
+      switch (channel) {
+        case "workspace.list":
+        case "workspace.listSessions":
+          return [];
+        case "settings.get":
+          return defaultSettings;
+        case "settings.set":
+        case "session.close":
+          return undefined;
+        default:
+          throw new Error(`Unexpected IPC channel ${channel}`);
+      }
+    });
+    (globalThis.window as unknown as { pivis?: unknown }).pivis = { invoke };
+
+    useSessionsStore.getState().addWorkspace(WS_A);
+    useSessionsStore.getState().setExpandedWorkspaces([WS_A]);
+    useSessionsStore
+      .getState()
+      .createSession(sessionId, WS_A, filePath, "Live archive fixture", undefined, "ready");
+    useSessionsStore.getState().addUserMessage(sessionId, "keep this history", undefined, {
+      registerEcho: false,
+    });
+
+    const { container, unmount } = mount(<Sidebar onOpenSettings={() => {}} />);
+    await flushEffects();
+
+    const archiveButton = container.querySelector<HTMLButtonElement>(".sidebar__session-archive");
+    act(() => archiveButton!.click());
+    expect(invoke).not.toHaveBeenCalledWith("settings.get", undefined);
+
+    const confirmButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".confirm-dialog button"),
+    ).find((button) => button.textContent === "Archive");
+    act(() => confirmButton!.click());
+
+    await vi.waitFor(() => {
+      expect(useSessionsStore.getState().sessions.has(sessionId)).toBe(false);
+    });
+    const archiveChannels = invoke.mock.calls
+      .map(([channel]) => channel)
+      .filter((channel) =>
+        ["settings.get", "settings.set", "session.close", "workspace.listSessions"].includes(
+          channel,
+        ),
+      );
+    expect(archiveChannels).toEqual([
+      "settings.get",
+      "settings.set",
+      "session.close",
+      "workspace.listSessions",
+    ]);
+    unmount();
+  });
+
   it("waits for the full workspace list before restoring the last active workspace", async () => {
     let resolveWorkspaceList!: (value: string[]) => void;
     const workspaceList = new Promise<string[]>((resolve) => {

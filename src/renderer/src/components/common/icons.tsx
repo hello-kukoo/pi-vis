@@ -96,6 +96,17 @@ export function IconSearch(props: IconProps): React.ReactElement {
   );
 }
 
+/** Archive box — session archival and retention actions. */
+export function IconArchive(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M1.75 2.25h8.5v2.25h-8.5z" />
+      <path d="M2.5 4.5v5.25h7V4.5" />
+      <path d="M4.5 6.75h3" />
+    </Icon>
+  );
+}
+
 /** File — generic pending composer attachment. */
 export function IconFile(props: IconProps): React.ReactElement {
   return (

@@ -11,12 +11,31 @@ import {
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
-import { IconChevronRight, IconClose, IconSearch } from "../common/icons.js";
+import { IconArchive, IconChevronRight, IconClose, IconSearch } from "../common/icons.js";
 import { openSessionSearch } from "../session-search/SessionSearchModal.js";
+import { ConfirmDialog } from "./ConfirmDialog.js";
 import "./Sidebar.css";
 
 const VISIBLE_PAGE_SIZE = 30;
 const STREAMING_DOT_ANIMATION_MS = 1000;
+
+interface PendingArchive {
+  sessionId: SessionId | undefined;
+  filePath: string;
+  workspacePath: string;
+  name: string;
+  returnFocus: HTMLButtonElement;
+  fallbackFocus: HTMLElement | null;
+}
+
+function archiveFocusFallback(button: HTMLButtonElement): HTMLElement | null {
+  const row = button.closest<HTMLElement>(".sidebar__session");
+  const list = row?.closest<HTMLElement>(".sidebar__sessions");
+  if (!row || !list) return null;
+  const rows = Array.from(list.querySelectorAll<HTMLElement>(".sidebar__session"));
+  const index = rows.indexOf(row);
+  return rows[index + 1] ?? rows[index - 1] ?? list.querySelector(".sidebar__new-session");
+}
 
 function useSyncedAnimationDelay(durationMs: number): string {
   const [delay] = useState(() => `-${Date.now() % durationMs}ms`);
@@ -54,24 +73,6 @@ function StatusDot({
 
 interface WorkingDotProps {
   working: boolean;
-}
-
-function ArchiveIcon(): React.ReactElement {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="2" y="3" width="12" height="3" rx="0.75" />
-      <path d="M3 6v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6" />
-      <path d="M6.5 9h3" />
-    </svg>
-  );
 }
 
 function PinIcon({ filled }: { filled: boolean }): React.ReactElement {
@@ -141,6 +142,8 @@ export function Sidebar({
   const sidebarRef = useRef<HTMLElement>(null);
   const dragIndexRef = useRef<number | null>(null);
   const pinnedDragKeyRef = useRef<string | null>(null);
+  const [pendingArchive, setPendingArchive] = useState<PendingArchive | null>(null);
+  const [archiveInProgress, setArchiveInProgress] = useState(false);
 
   // Pinned sessions (by file path) as a Set for O(1) lookup during render.
   const pinnedSet = useMemo(() => new Set(pinnedSessions), [pinnedSessions]);
@@ -691,14 +694,18 @@ export function Sidebar({
                                   title="Archive session"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    void archiveSession(
-                                      entry.sessionId,
-                                      entry.filePath ?? "",
-                                      ws.path,
-                                    );
+                                    setPendingArchive({
+                                      sessionId: entry.sessionId,
+                                      filePath: entry.filePath ?? "",
+                                      workspacePath: ws.path,
+                                      name: entry.name,
+                                      returnFocus: e.currentTarget,
+                                      fallbackFocus: archiveFocusFallback(e.currentTarget),
+                                    });
                                   }}
+                                  onKeyDown={(e) => e.stopPropagation()}
                                 >
-                                  <ArchiveIcon />
+                                  <IconArchive />
                                 </button>
                                 {entry.filePath && (
                                   <button
@@ -773,10 +780,18 @@ export function Sidebar({
                                 title="Archive session"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void archiveSession(undefined, entry.filePath, ws.path);
+                                  setPendingArchive({
+                                    sessionId: undefined,
+                                    filePath: entry.filePath,
+                                    workspacePath: ws.path,
+                                    name: entry.name,
+                                    returnFocus: e.currentTarget,
+                                    fallbackFocus: archiveFocusFallback(e.currentTarget),
+                                  });
                                 }}
+                                onKeyDown={(e) => e.stopPropagation()}
                               >
-                                <ArchiveIcon />
+                                <IconArchive />
                               </button>
                               <button
                                 type="button"
@@ -850,6 +865,37 @@ export function Sidebar({
           <span className="sidebar__statusbar-icon" aria-hidden="true" />
         </button>
       </div>
+
+      {pendingArchive && (
+        <ConfirmDialog
+          title="Archive session?"
+          subject={pendingArchive.name}
+          message="This session will disappear from your sidebar, but its file will remain on your computer. You can’t undo this in Pi-Vis."
+          icon={<IconArchive />}
+          tone="danger"
+          initialFocus="cancel"
+          returnFocus={pendingArchive.returnFocus}
+          busy={archiveInProgress}
+          busyLabel="Archiving…"
+          confirmLabel="Archive"
+          onConfirm={() => {
+            if (archiveInProgress) return;
+            const target = pendingArchive;
+            setArchiveInProgress(true);
+            void archiveSession(target.sessionId, target.filePath, target.workspacePath).finally(
+              () => {
+                setPendingArchive(null);
+                setArchiveInProgress(false);
+                const focusTarget = target.returnFocus.isConnected
+                  ? target.returnFocus
+                  : target.fallbackFocus;
+                if (focusTarget?.isConnected) requestAnimationFrame(() => focusTarget.focus());
+              },
+            );
+          }}
+          onCancel={() => setPendingArchive(null)}
+        />
+      )}
     </aside>
   );
 }

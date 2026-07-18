@@ -48,6 +48,18 @@ sit at the front of the unified list and pagination slices from the front
 (`visibleSessions = unifiedSessions.slice(0, visibleCount)`), pinned rows are never
 pushed off the first page by newer unpinned sessions.
 
+**Archiving requires explicit confirmation.** The hover-revealed archive action on
+both live and stored session rows opens the app-owned `ConfirmDialog` before any
+settings or session mutation. The dialog names the selected session, explains that
+the file remains on disk but Pi-Vis has no in-app restore flow, and defaults focus
+to **Cancel**. Escape and backdrop click cancel without leaking Escape to the active
+session; cancel restores focus to the invoking archive button. While confirmation
+is being applied, the dialog stays mounted with disabled actions. Confirming follows
+the existing archive path: persist the file key in `archivedSessions`, close a live
+tab when present, then refresh the workspace session list. Focus then returns to the
+original button if the operation failed and its row survived, or to the nearest
+surviving session/new-session control after a successful archive.
+
 ### Session activity indicators
 
 The flashing sidebar dot means **working**, not merely model streaming. Its single
