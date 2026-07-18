@@ -47,6 +47,7 @@
      to the TranscriptView first; the scroll only kicks in on screens
      too short for even that. */
   overflow-y: auto;
+  overflow-x: hidden;
   /* Soft entry: the dialog swaps in where the composer was, so a
      gentle slide + fade tells the eye "something just asked for your
      attention" without resorting to a scrim. */
@@ -138,6 +139,11 @@
   gap: 0.286rem;
   max-height: 28.571rem; /* ≈400px @ 14px root */
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.ext-dialog__options-frame {
+  --scroll-fade-surface: var(--surface);
 }
 
 .ext-dialog__option {

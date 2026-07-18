@@ -44,6 +44,7 @@ function resetStoreWithTexts(oldText: string, newText: string, status: "A" | "M"
       },
     ],
     selectedPath: FILE,
+    workingTreeScope: "base",
     commitRange: null,
     editSession: null,
     fileState: new Map([
@@ -290,6 +291,7 @@ describe("diff-store commit ranges", () => {
       sessionId: "range-session" as never,
       root: "/repo",
       selectedBase: "main",
+      workingTreeScope: "base",
       commitRange: null,
       historicalContext: null,
       files: [],
@@ -326,6 +328,18 @@ describe("diff-store commit ranges", () => {
 
     expect(useDiffStore.getState().selectedBase).toBe("feature");
     expect(useDiffStore.getState().commitRange).toBeNull();
+  });
+
+  it("keeps the selected base visible while requesting uncommitted-only changes from HEAD", () => {
+    useDiffStore.getState().showUncommittedChanges();
+
+    expect(useDiffStore.getState()).toMatchObject({
+      selectedBase: "main",
+      workingTreeScope: "uncommitted",
+      commitRange: null,
+    });
+    const changesCall = invoke.mock.calls.find((call) => call[0] === "git.changes");
+    expect(changesCall?.[1]).toEqual({ root: "/repo" });
   });
 
   it("does not change comparison while an unsaved comment editor is open", () => {

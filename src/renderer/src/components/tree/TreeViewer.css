@@ -262,6 +262,11 @@
 
 /* Tree column ──────────────────────────────────────────────────────── */
 
+.tree-viewer__tree-frame {
+  --scroll-fade-surface: var(--bg);
+  padding: 0 var(--space-1) var(--space-1);
+}
+
 .tree-viewer__tree {
   flex: 1;
   overflow-y: auto;

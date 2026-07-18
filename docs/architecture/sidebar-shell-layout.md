@@ -48,6 +48,15 @@ sit at the front of the unified list and pagination slices from the front
 (`visibleSessions = unifiedSessions.slice(0, visibleCount)`), pinned rows are never
 pushed off the first page by newer unpinned sessions.
 
+### Session activity indicators
+
+The flashing sidebar dot means **working**, not merely model streaming. Its single
+selector includes authority-following streaming and every visible context-compaction
+phase (active, cancelling, and retry-wait), while extension UI that is waiting on the
+user suppresses the streaming interpretation. Terminal `agent_settled` results remain
+solid done/error dots. Sidebar rows must use this shared selector rather than reading a
+raw SDK boolean, so compaction cannot disappear from the session list.
+
 ### Shell layout (canvas + floating content card)
 
 The window is a single unified **canvas** (`.app` background = `mantle`). The title bar
@@ -81,6 +90,8 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
 - **Title bar layout**: the session name is left-aligned and sized to its text
   (`flex: 0 1 auto`, not `1`) — a modern editor convention, and it leaves the slack to
   its right as part of the title bar's `-webkit-app-region: drag` region. The
+  rename input snapshots that clicked label's rendered width and matches its
+  accent-font weight, so entering edit mode does not shift or crop the title.
   worktree chip lives with the right-side controls (before the unified view toggle
   and changes/diff button), not beside the title. Only the name button / chip /
   controls are `no-drag`. In sidebar-visible mode, the left
@@ -91,7 +102,10 @@ The app is fully usable from the enforced floor (`minWidth: 480`, `minHeight: 40
   Full-window viewers such as the diff and tree overlays render as direct
   `.app` children; in collapsed mode their scrim spans the whole titlebar+main
   area with no top/bottom inset, while the viewer panel itself supplies the
-  traffic-light-clearing margins. A
+  traffic-light-clearing margins. The title bar normally remains below that
+  overlay plane, but raises above it only while one of its dropdown/context/
+  worktree cards is mounted, keeping those user-opened cards interactive without
+  permanently placing title chrome over a viewer. A
   full-width centered title would otherwise cover the whole bar as a no-drag element,
   leaving nothing to grab the window by.
 - **Fluid transcript**: `.app__main` is a size-query container (`container: mainpane /

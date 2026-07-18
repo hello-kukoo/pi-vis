@@ -158,6 +158,9 @@
   --radius-lg: 0.875rem; /* cards, panels, menus */
   --radius-xl: 1.125rem; /* modals, large surfaces */
   --radius-pill: 999px;
+  /* One fixed lane for every visible app scrollbar. Component layouts may
+     reserve/exclude this lane, but never redefine the thumb itself. */
+  --scrollbar-size: 10px;
 }
 
 *,
@@ -197,12 +200,23 @@ body {
    scroller — UI lists, code blocks, xterm viewports — gets the same bar
    regardless of the element's own font size (the old 0.4em varied). */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* The thumb should read as a pill nested inside its owner, never as chrome
+   jammed into a rounded corner. Axis-aware end margins apply the same inset
+   to every surface without component-specific scrollbar restyling. */
+::-webkit-scrollbar-track:vertical {
+  margin-block: var(--space-1);
+}
+
+::-webkit-scrollbar-track:horizontal {
+  margin-inline: var(--space-1);
 }
 
 ::-webkit-scrollbar-thumb {

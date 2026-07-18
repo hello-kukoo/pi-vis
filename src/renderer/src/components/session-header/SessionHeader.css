@@ -44,6 +44,14 @@
   z-index: 10;
 }
 
+/* Full-window viewers sit at z=150. The title bar itself should remain below
+   their scrim, but a title-bar popup must escape that viewer plane. Raising
+   the header only for the lifetime of an actual popup preserves both rules
+   without leaving the whole title bar permanently above modal viewers. */
+.session-header:has(.session-header__dropdown, .context-dropdown, .worktree-switcher__card) {
+  z-index: 200;
+}
+
 .session-header__name {
   flex: 1;
   min-width: 0;
@@ -86,15 +94,24 @@
 
 .session-header__name-input {
   background: var(--surface);
-  border: 1px solid var(--accent);
+  /* Preserve the clicked button's exact content plane. A real border would
+     consume 1px per side inside the measured border-box and make the title
+     jump inward; an inset ring paints the focus boundary without geometry. */
+  border: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
   border-radius: var(--radius-sm);
   color: var(--text);
   font-family: var(--font-accent);
   font-size: 1em;
+  font-weight: 600;
   letter-spacing: var(--font-accent-tracking);
   padding: 0.286rem 0.429rem;
   outline: none;
+  /* JS snapshots the clicked label's rendered width. This fallback is used
+     only when layout measurement is unavailable (for example jsdom). */
   width: 12.857rem;
+  max-width: 100%;
+  min-width: 0;
   /* Editable input inside the titlebar's drag region. */
   -webkit-app-region: no-drag;
 }
@@ -257,11 +274,18 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 0.143rem;
-  padding: 0.143rem var(--space-2) var(--space-2);
+  padding: 0.143rem 0 0;
+}
+
+.session-header__dropdown-list-frame,
+.session-header__provider-menu {
+  --scroll-fade-surface: var(--surface);
+  padding: 0 var(--space-2) var(--space-2);
 }
 
 .session-header__dropdown-list--virtual {

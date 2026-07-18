@@ -63,13 +63,43 @@ const ThinkingEndEventSchema = z
   })
   .passthrough();
 
+// These stream lifecycle/tool-call events do not directly change transcript
+// presentation: tool_execution_* owns tool cards, while message_end owns the
+// final assistant snapshot. They are nevertheless valid AssistantMessageEvent
+// variants and must keep their containing message_update on the transcript
+// plane. Omitting them made KnownPiEventSchema fall through to the outer
+// unknown-event schema and drop perfectly valid Pi traffic (notably every
+// toolcall_start in the checked-in real wire captures).
+const StreamStartEventSchema = z.object({ type: z.literal("start") }).passthrough();
+const ToolCallStartEventSchema = z
+  .object({ type: z.literal("toolcall_start"), contentIndex: z.number().optional() })
+  .passthrough();
+const ToolCallDeltaEventSchema = z
+  .object({
+    type: z.literal("toolcall_delta"),
+    contentIndex: z.number().optional(),
+    delta: z.string().optional(),
+  })
+  .passthrough();
+const ToolCallEndEventSchema = z
+  .object({ type: z.literal("toolcall_end"), contentIndex: z.number().optional() })
+  .passthrough();
+const StreamDoneEventSchema = z.object({ type: z.literal("done") }).passthrough();
+const StreamErrorEventSchema = z.object({ type: z.literal("error") }).passthrough();
+
 export const AssistantMessageEventSchema = z.discriminatedUnion("type", [
+  StreamStartEventSchema,
   TextStartEventSchema,
   TextDeltaEventSchema,
   TextEndEventSchema,
   ThinkingStartEventSchema,
   ThinkingDeltaEventSchema,
   ThinkingEndEventSchema,
+  ToolCallStartEventSchema,
+  ToolCallDeltaEventSchema,
+  ToolCallEndEventSchema,
+  StreamDoneEventSchema,
+  StreamErrorEventSchema,
 ]);
 
 export type AssistantMessageEvent = z.infer<typeof AssistantMessageEventSchema>;
@@ -108,7 +138,8 @@ export const TurnEndEventSchema = z.object({
 export const MessageStartEventSchema = z.object({
   type: z.literal("message_start"),
   message: WireAgentMessageSchema,
-  /** Host-owned identity of the GUI queue slot delivered by this event. */
+  /** Host-owned identity of the GUI submission delivered by this event.
+   *  The legacy field name covers both queued and idle-direct delivery. */
   queueIntentId: z.string().optional(),
 });
 

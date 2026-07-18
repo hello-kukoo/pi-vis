@@ -7,6 +7,7 @@ export type WorktreeOperation = {
   mode: "create" | "attach";
   base?: string | undefined;
   fromCurrentCheckout?: boolean | undefined;
+  copyUncommitted?: boolean | undefined;
   path?: string | undefined;
 };
 
@@ -19,6 +20,7 @@ export async function runWorktreeOperation({
   mode,
   base,
   fromCurrentCheckout,
+  copyUncommitted,
   path,
 }: WorktreeOperation): Promise<{ ok: true } | { ok: false }> {
   const store = useSessionsStore.getState();
@@ -43,7 +45,7 @@ export async function runWorktreeOperation({
         ? await window.pivis.invoke(
             "session.createWorktree",
             fromCurrentCheckout
-              ? { sessionId, fromCurrentCheckout: true }
+              ? { sessionId, fromCurrentCheckout: true, copyUncommitted: copyUncommitted ?? true }
               : { sessionId, base: base ?? "HEAD" },
           )
         : await window.pivis.invoke("session.attachWorktree", { sessionId, path: path!.trim() });

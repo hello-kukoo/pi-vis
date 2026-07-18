@@ -289,9 +289,9 @@ test.describe("Diff inline edit", () => {
       const probe = window.locator(".diff-row .diff-row__code").first();
       await probe.waitFor();
       const before = await probe.boundingBox();
-      const selectedGlyphBefore = await firstGlyphRect(
+      const editorStartGlyphBefore = await firstGlyphRect(
         window,
-        `.diff-row--add[data-line-idx="${fromIdx}"] .diff-row__code`,
+        `.diff-row--add[data-line-idx="${addIdxs[0]!}"] .diff-row__code`,
       );
 
       await selectRange(window, fromIdx, toIdx);
@@ -334,7 +334,34 @@ test.describe("Diff inline edit", () => {
       ).toHaveCSS("opacity", "1");
 
       await bubble.click();
-      await expect(window.getByTestId("diff-edit-card")).toBeVisible({ timeout: 5_000 });
+      const card = window.getByTestId("diff-edit-card");
+      await expect(card).toBeVisible({ timeout: 5_000 });
+
+      // The user selected EDIT_2..EDIT_3; the editor deliberately includes
+      // one non-whitespace working-tree line on either side for context.
+      const editorText = await card.locator(".diff-edit-textarea").first().inputValue();
+      expect(editorText).toContain("EDIT_1");
+      expect(editorText).toContain("EDIT_2");
+      expect(editorText).toContain("EDIT_3");
+      expect(editorText).toContain("EDIT_4");
+      expect(editorText).not.toContain("EDIT_5");
+
+      // The save/cancel pill is wholly outside the editable text plane, while
+      // the body reserves enough room that it remains inside the file section.
+      const footerGeometry = await card.evaluate((element) => {
+        const footer = element.querySelector<HTMLElement>(".diff-edit-card__footer");
+        const textareas = [...element.querySelectorAll<HTMLElement>(".diff-edit-textarea")];
+        const body = element.closest<HTMLElement>(".diff-file__body");
+        if (!footer || textareas.length === 0 || !body) throw new Error("missing edit geometry");
+        return {
+          footerTop: footer.getBoundingClientRect().top,
+          footerBottom: footer.getBoundingClientRect().bottom,
+          editableBottom: Math.max(...textareas.map((item) => item.getBoundingClientRect().bottom)),
+          bodyBottom: body.getBoundingClientRect().bottom,
+        };
+      });
+      expect(footerGeometry.footerTop).toBeGreaterThanOrEqual(footerGeometry.editableBottom + 2);
+      expect(footerGeometry.footerBottom).toBeLessThanOrEqual(footerGeometry.bodyBottom + 1);
 
       // Zero-shift: the probe row did not move when the card opened. A real
       // layout shift would be multiple pixels; a sub-pixel fractional change
@@ -342,9 +369,9 @@ test.describe("Diff inline edit", () => {
       const after = await probe.boundingBox();
       expect(Math.abs((after?.x ?? 0) - (before?.x ?? 0))).toBeLessThan(1);
       expect(Math.abs((after?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(1);
-      const selectedGlyphAfter = await firstGlyphRect(window, ".diff-edit-pre");
-      expect(Math.abs(selectedGlyphAfter.x - selectedGlyphBefore.x)).toBeLessThan(1);
-      expect(Math.abs(selectedGlyphAfter.y - selectedGlyphBefore.y)).toBeLessThan(1);
+      const editorStartGlyphAfter = await firstGlyphRect(window, ".diff-edit-pre");
+      expect(Math.abs(editorStartGlyphAfter.x - editorStartGlyphBefore.x)).toBeLessThan(1);
+      expect(Math.abs(editorStartGlyphAfter.y - editorStartGlyphBefore.y)).toBeLessThan(1);
     } finally {
       await app.close();
       rmrf(folders.settingsDir);
@@ -382,11 +409,10 @@ test.describe("Diff inline edit", () => {
       await bubble.click();
       const ta = window.locator(".diff-edit-textarea").first();
       await expect(ta).toBeFocused({ timeout: 5_000 });
-      const cursor = await ta.evaluate((el) => ({
-        start: el.selectionStart,
-        end: el.selectionEnd,
-      }));
-      expect(cursor).toEqual({ start, end });
+      const selectedText = await ta.evaluate((el) =>
+        el.value.slice(el.selectionStart, el.selectionEnd),
+      );
+      expect(selectedText).toBe("EDIT_2");
     } finally {
       await app.close();
       rmrf(folders.settingsDir);

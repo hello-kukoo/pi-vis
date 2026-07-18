@@ -157,39 +157,16 @@
 }
 
 .notification-stack__list-wrap {
-  position: relative;
   min-height: 0;
   flex: 1 1 auto;
   overflow: hidden;
+  --scroll-fade-size: 1rem;
+  --scroll-fade-surface: color-mix(in srgb, var(--bg-sunken) 76%, transparent);
 }
 
-.notification-stack__list-wrap::before,
-.notification-stack__list-wrap::after {
-  content: "";
-  position: absolute;
-  left: 0;
+.notification-stack__list-wrap .scroll-fade-frame__edge {
+  /* This list intentionally hides its scrollbar, so no lane is reserved. */
   right: 0;
-  height: 1rem;
-  z-index: 2;
-  pointer-events: none;
-}
-
-.notification-stack__list-wrap::before {
-  top: 0;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--bg-sunken) 76%, transparent),
-    transparent
-  );
-}
-
-.notification-stack__list-wrap::after {
-  bottom: 0;
-  background: linear-gradient(
-    to top,
-    color-mix(in srgb, var(--bg-sunken) 76%, transparent),
-    transparent
-  );
 }
 
 .notification-stack__list {
@@ -197,6 +174,7 @@
   max-height: 100%;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: none;
   display: flex;
   flex-direction: column;

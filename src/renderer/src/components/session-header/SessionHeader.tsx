@@ -20,6 +20,7 @@ import {
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconAlert, IconCheck, IconChevronDown } from "../common/icons.js";
 import { UnifiedViewToggle } from "../ext-ui/UnifiedViewToggle.js";
 import { NotificationBellButton } from "../notifications/NotificationStack.js";
@@ -75,6 +76,10 @@ function observationOwnerIsCurrent(
   return !!current && sameOwner(observation.owner, current.owner);
 }
 
+export function shouldRefreshSessionStats(events: readonly { type: string }[]): boolean {
+  return events.some((event) => event.type === "agent_end" || event.type === "compaction_end");
+}
+
 /** Mirror pi-ai's getSupportedThinkingLevels without importing pi internals. */
 export function thinkingLevelsForModel(model?: ModelInfo): readonly ThinkingLevel[] {
   if (model?.reasoning === false) return ["off"];
@@ -97,7 +102,9 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
 
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
+  const [nameInputWidth, setNameInputWidth] = useState<number | null>(null);
   const [pendingRename, setPendingRename] = useState<PendingIntent<string> | null>(null);
+  const nameButtonRef = useRef<HTMLButtonElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Claim ESC while the rename field is open so a background streaming
@@ -149,9 +156,10 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
       .catch(() => {});
   }, [sessionId, live, readObservation]);
 
-  // Poll stats after each agent_end and periodically while streaming. Queries
-  // carry the observed cursor and only write their result while it remains the
-  // current semantic owner/cursor.
+  // Refresh after every boundary that can change context accounting and keep
+  // a slow safety poll. Manual compaction has no agent_end, so listening only
+  // for turn settlement left the ContextMeter stale until the next minute.
+  // Queries carry the observed owner and only write while it remains current.
   const fetchStats = useCallback(
     (capturedObservation: AuthorityObservation) => {
       void querySession(sessionId, { type: "get_session_stats" }, capturedObservation)
@@ -184,11 +192,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
 
   useEffect(() => {
     return window.pivis.on("session.events", ({ sessionId: sid, events }) => {
-      if (
-        sid === sessionId &&
-        events.some((event) => event.type === "agent_end") &&
-        readObservation
-      ) {
+      if (sid === sessionId && shouldRefreshSessionStats(events) && readObservation) {
         fetchStats(readObservation);
       }
     });
@@ -200,6 +204,8 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
 
   const handleRenameStart = useCallback(() => {
     if (!observation) return;
+    const clickedWidth = nameButtonRef.current?.getBoundingClientRect().width ?? 0;
+    setNameInputWidth(clickedWidth > 0 ? Math.ceil(clickedWidth) : null);
     setNameInput(session?.sessionName ?? session?.sessionTitle ?? "");
     setEditingName(true);
     setTimeout(() => nameInputRef.current?.focus(), 10);
@@ -288,6 +294,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
             <input
               ref={nameInputRef}
               className="session-header__name-input"
+              style={nameInputWidth === null ? undefined : { width: nameInputWidth }}
               value={nameInput}
               onChange={(e) => setNameInput(e.target.value)}
               onBlur={() => void handleRenameConfirm()}
@@ -298,6 +305,7 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
             />
           ) : (
             <button
+              ref={nameButtonRef}
               type="button"
               className="session-header__name-btn fade-scope"
               onClick={handleRenameStart}
@@ -828,102 +836,101 @@ export function SessionControls({
               />
             </div>
             {showProviderGroups ? (
-              <div className="session-header__provider-menu">
-                <div
-                  role="listbox"
-                  id="model-listbox"
-                  className="session-header__dropdown-list session-header__provider-list"
-                >
-                  {providerGroups.map((group) => {
-                    const active = group.key === activeProviderKey;
-                    const providerHighlighted =
-                      groupedHighlight?.type === "provider" &&
-                      groupedHighlight.providerKey === group.key;
-                    const selected = group.models.some(
-                      (model) =>
-                        currentModelInfo != null && modelKey(model) === modelKey(currentModelInfo),
-                    );
-                    return (
-                      <div key={group.key} className="session-header__provider-group">
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          aria-expanded={active}
-                          className={`session-header__dropdown-item session-header__provider-item${providerHighlighted ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
-                          onClick={() => {
-                            setGroupedHighlight({ type: "provider", providerKey: group.key });
-                            setActiveProviderKey(active ? null : group.key);
-                          }}
-                          onMouseEnter={() => {
-                            setGroupedHighlight({ type: "provider", providerKey: group.key });
-                          }}
-                        >
-                          <span className="session-header__dropdown-item-check" aria-hidden>
-                            {selected ? <IconCheck /> : null}
-                          </span>
-                          <span className="session-header__dropdown-item-label" title={group.label}>
-                            {group.label}
-                          </span>
-                          <span className="session-header__provider-count">
-                            {group.models.length.toLocaleString()}
-                          </span>
-                          <IconChevronDown className="session-header__provider-caret" />
-                        </button>
-                        {active && (
-                          <div className="session-header__provider-model-list" role="group">
-                            {group.models.map((m) => {
-                              const label = modelDisplayName(m);
-                              const key = modelKey(m);
-                              const modelSelected =
-                                currentModelInfo != null && key === modelKey(currentModelInfo);
-                              const modelHighlighted =
-                                groupedHighlight?.type === "model" &&
-                                groupedHighlight.modelKey === key;
-                              return (
-                                <button
-                                  type="button"
-                                  key={key}
-                                  role="option"
-                                  aria-selected={modelSelected}
-                                  className={`session-header__dropdown-item session-header__provider-model-item fade-scope${modelHighlighted ? " session-header__dropdown-item--highlighted" : ""}${modelSelected ? " session-header__dropdown-item--active" : ""}`}
-                                  onClick={() => void handleModelChange(m)}
-                                  onMouseEnter={() => {
-                                    setGroupedHighlight({
-                                      type: "model",
-                                      providerKey: group.key,
-                                      modelKey: key,
-                                    });
-                                  }}
-                                >
-                                  <span className="session-header__dropdown-item-check" aria-hidden>
-                                    {modelSelected ? <IconCheck /> : null}
-                                  </span>
-                                  <span
-                                    className="session-header__dropdown-item-label"
-                                    title={label}
-                                  >
-                                    {label}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              <ScrollFadeFrame
+                frameClassName="session-header__provider-menu"
+                role="listbox"
+                id="model-listbox"
+                className="session-header__dropdown-list session-header__provider-list"
+                fill
+              >
+                {providerGroups.map((group) => {
+                  const active = group.key === activeProviderKey;
+                  const providerHighlighted =
+                    groupedHighlight?.type === "provider" &&
+                    groupedHighlight.providerKey === group.key;
+                  const selected = group.models.some(
+                    (model) =>
+                      currentModelInfo != null && modelKey(model) === modelKey(currentModelInfo),
+                  );
+                  return (
+                    <div key={group.key} className="session-header__provider-group">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        aria-expanded={active}
+                        className={`session-header__dropdown-item session-header__provider-item${providerHighlighted ? " session-header__dropdown-item--highlighted" : ""}${selected ? " session-header__dropdown-item--active" : ""}`}
+                        onClick={() => {
+                          setGroupedHighlight({ type: "provider", providerKey: group.key });
+                          setActiveProviderKey(active ? null : group.key);
+                        }}
+                        onMouseEnter={() => {
+                          setGroupedHighlight({ type: "provider", providerKey: group.key });
+                        }}
+                      >
+                        <span className="session-header__dropdown-item-check" aria-hidden>
+                          {selected ? <IconCheck /> : null}
+                        </span>
+                        <span className="session-header__dropdown-item-label" title={group.label}>
+                          {group.label}
+                        </span>
+                        <span className="session-header__provider-count">
+                          {group.models.length.toLocaleString()}
+                        </span>
+                        <IconChevronDown className="session-header__provider-caret" />
+                      </button>
+                      {active && (
+                        <div className="session-header__provider-model-list" role="group">
+                          {group.models.map((m) => {
+                            const label = modelDisplayName(m);
+                            const key = modelKey(m);
+                            const modelSelected =
+                              currentModelInfo != null && key === modelKey(currentModelInfo);
+                            const modelHighlighted =
+                              groupedHighlight?.type === "model" &&
+                              groupedHighlight.modelKey === key;
+                            return (
+                              <button
+                                type="button"
+                                key={key}
+                                role="option"
+                                aria-selected={modelSelected}
+                                className={`session-header__dropdown-item session-header__provider-model-item fade-scope${modelHighlighted ? " session-header__dropdown-item--highlighted" : ""}${modelSelected ? " session-header__dropdown-item--active" : ""}`}
+                                onClick={() => void handleModelChange(m)}
+                                onMouseEnter={() => {
+                                  setGroupedHighlight({
+                                    type: "model",
+                                    providerKey: group.key,
+                                    modelKey: key,
+                                  });
+                                }}
+                              >
+                                <span className="session-header__dropdown-item-check" aria-hidden>
+                                  {modelSelected ? <IconCheck /> : null}
+                                </span>
+                                <span className="session-header__dropdown-item-label" title={label}>
+                                  {label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </ScrollFadeFrame>
             ) : filteredModels.length === 0 ? (
               <div className="session-header__dropdown-empty">No models found</div>
             ) : (
-              <div
-                ref={modelVirtualList.containerRef}
+              <ScrollFadeFrame
+                frameClassName="session-header__dropdown-list-frame"
+                scrollerRef={modelVirtualList.containerRef}
                 onScroll={modelVirtualList.onScroll}
                 role="listbox"
                 id="model-listbox"
                 className="session-header__dropdown-list session-header__dropdown-list--virtual"
+                fill
               >
                 <div
                   className="session-header__virtual-spacer"
@@ -970,7 +977,7 @@ export function SessionControls({
                     })}
                   </div>
                 </div>
-              </div>
+              </ScrollFadeFrame>
             )}
           </div>
         )}
@@ -997,7 +1004,11 @@ export function SessionControls({
         </button>
         {thinkingOpen && !thinkingDisabled && (
           <div className="session-header__dropdown">
-            <div className="session-header__dropdown-list">
+            <ScrollFadeFrame
+              frameClassName="session-header__dropdown-list-frame"
+              className="session-header__dropdown-list"
+              fill
+            >
               {thinkingOptions.map((l) => {
                 const selected = currentThinkingLevel === l;
                 return (
@@ -1016,7 +1027,7 @@ export function SessionControls({
                   </button>
                 );
               })}
-            </div>
+            </ScrollFadeFrame>
           </div>
         )}
       </div>

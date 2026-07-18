@@ -206,6 +206,11 @@ describe("WorktreeSwitcher", () => {
     expect(buttonWithText(container, "Existing")).toBeTruthy();
     expect(container.querySelector("[aria-label='Choose worktree base branch']")).toBeNull();
     expect(container.querySelector(".worktree-switcher__helper")).toBeNull();
+    expect(
+      container.querySelector<HTMLInputElement>(
+        ".worktree-switcher__copy-changes input[type='checkbox']",
+      )?.checked,
+    ).toBe(true);
     unmount();
   });
 
@@ -253,10 +258,47 @@ describe("WorktreeSwitcher", () => {
     expect(invoke).toHaveBeenCalledWith("session.createWorktree", {
       sessionId,
       fromCurrentCheckout: true,
+      copyUncommitted: true,
     });
     expect(useSessionsStore.getState().sessions.get(sessionId)).toMatchObject({
       worktreePath: "/tmp/project-worktrees/current-head",
       worktreeBranch: "pi-vis-current-head",
+    });
+    unmount();
+  });
+
+  it("can create a clean worktree without copying current checkout changes", async () => {
+    setSession();
+    const invoke = installInvoke(async (channel: string) => {
+      if (channel === "session.createWorktree") {
+        return {
+          ok: true,
+          worktreePath: "/tmp/project-worktrees/clean-head",
+          branch: "pi-vis-clean-head",
+          name: "clean-head",
+          base: "main",
+        };
+      }
+      return { ok: true };
+    });
+    const { container, unmount } = mount(<WorktreeSwitcher sessionId={sessionId} />);
+    click(container.querySelector("[data-testid='worktree-switcher-trigger']")!);
+    const copy = container.querySelector<HTMLInputElement>(
+      ".worktree-switcher__copy-changes input[type='checkbox']",
+    )!;
+    click(copy);
+    expect(copy.checked).toBe(false);
+
+    await act(async () => {
+      buttonWithText(container, "Create & switch").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(invoke).toHaveBeenCalledWith("session.createWorktree", {
+      sessionId,
+      fromCurrentCheckout: true,
+      copyUncommitted: false,
     });
     unmount();
   });

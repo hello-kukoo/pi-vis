@@ -52,6 +52,7 @@ function clickText(container: HTMLDivElement, text: string): void {
 
 describe("CommitRangePicker", () => {
   let setCommitRange: ReturnType<typeof vi.fn>;
+  let showUncommittedChanges: ReturnType<typeof vi.fn>;
 
   afterEach(() => {
     document.body.innerHTML = "";
@@ -60,6 +61,7 @@ describe("CommitRangePicker", () => {
 
   function setup(base: string | null = "main", commitList = commits): void {
     setCommitRange = vi.fn();
+    showUncommittedChanges = vi.fn();
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -79,10 +81,12 @@ describe("CommitRangePicker", () => {
     useDiffStore.setState({
       root: "/repo",
       selectedBase: base,
+      workingTreeScope: "base",
       commitRange: null,
       editSession: null,
       commentEditorFiles: new Set(),
       setCommitRange,
+      showUncommittedChanges,
     });
   }
 
@@ -109,6 +113,21 @@ describe("CommitRangePicker", () => {
     await openPicker(view.container);
     clickText(view.container, "Working tree");
     expect(setCommitRange).toHaveBeenCalledWith(null);
+    view.unmount();
+  });
+
+  it("offers uncommitted changes as a distinct live comparison", async () => {
+    setup();
+    const view = mount(<CommitRangePicker />);
+    await settle();
+    await openPicker(view.container);
+
+    expect(view.container.querySelector(".commit-range-picker__popup")?.textContent).toContain(
+      "Uncommitted changes",
+    );
+    clickText(view.container, "Uncommitted changes");
+    expect(showUncommittedChanges).toHaveBeenCalledOnce();
+    expect(setCommitRange).not.toHaveBeenCalled();
     view.unmount();
   });
 
@@ -144,13 +163,14 @@ describe("CommitRangePicker", () => {
     });
 
     act(() => listbox.dispatchEvent(new Event("scroll", { bubbles: true })));
-    expect(listbox.classList.contains("commit-range-picker__list--fade-top")).toBe(false);
-    expect(listbox.classList.contains("commit-range-picker__list--fade-bottom")).toBe(true);
+    expect(view.container.querySelector(".scroll-fade-frame__edge--top")).toBeNull();
+    expect(view.container.querySelector(".scroll-fade-frame__edge--bottom")).not.toBeNull();
+    expect(listbox.classList.contains("commit-range-picker__list")).toBe(true);
 
     listbox.scrollTop = 100;
     act(() => listbox.dispatchEvent(new Event("scroll", { bubbles: true })));
-    expect(listbox.classList.contains("commit-range-picker__list--fade-top")).toBe(true);
-    expect(listbox.classList.contains("commit-range-picker__list--fade-bottom")).toBe(true);
+    expect(view.container.querySelector(".scroll-fade-frame__edge--top")).not.toBeNull();
+    expect(view.container.querySelector(".scroll-fade-frame__edge--bottom")).not.toBeNull();
     view.unmount();
   });
 

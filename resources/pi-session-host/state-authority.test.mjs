@@ -367,6 +367,33 @@ describe("state authority", () => {
     promptDone.resolve();
   });
 
+  it("decorates an idle prompt's re-entrant direct user echo with its stable intent", async () => {
+    const promptDone = deferred();
+    const { authority, sendRecord } = setup({
+      prompt: vi.fn((_text, options) => {
+        options.preflightResult(true);
+        authority.observeEvent({
+          type: "message_start",
+          message: { role: "user", content: "extension-transformed direct prompt" },
+        });
+        return promptDone.promise;
+      }),
+    });
+
+    const submission = authority.submit(makeRequest("direct-intent", { text: "original" }));
+    await flush();
+    expect(sendRecord).toHaveBeenCalledWith({
+      type: "event",
+      event: {
+        type: "message_start",
+        message: { role: "user", content: "extension-transformed direct prompt" },
+        queueIntentId: "direct-intent",
+      },
+    });
+    promptDone.resolve();
+    await submission;
+  });
+
   it("synchronizes external queue additions before capturing the admission baseline", async () => {
     const promptDone = deferred();
     let steering = [];
@@ -864,6 +891,43 @@ describe("state authority", () => {
     expect(sendRecord).toHaveBeenCalledWith(
       expect.objectContaining({ type: "queue_restoration", followUp: ["recover me"] }),
     );
+  });
+
+  it("does not turn Pi's branch-summarization getter into a phantom compaction", async () => {
+    const navigation = deferred();
+    const { authority, session } = setup();
+    const navigating = authority.runNavigation(() => {
+      // Pi's public isCompacting covers branch summarization as well as real
+      // context compaction. Navigation is the operation-specific evidence.
+      session.isCompacting = true;
+      return navigation.promise;
+    });
+    await flush();
+
+    authority.publishSnapshot();
+    expect(authority.semanticSnapshot().activity).toMatchObject({
+      navigation: { kind: "navigation", state: "active" },
+    });
+    // The SDK diagnostic remains raw, proving semantic consumers must not use
+    // its branch-summary bit as context-compaction authority.
+    expect(authority.semanticSnapshot().sdk.isCompacting).toBe(true);
+    expect(authority.semanticSnapshot().activity.compaction).toBeUndefined();
+    expect(authority.snapshot().hostFacts.actualCompaction).toBe(false);
+    await expect(authority.requestEscape("cancel-navigation")).resolves.toMatchObject({
+      target: "navigation",
+    });
+
+    session.isCompacting = false;
+    navigation.resolve({ cancelled: true });
+    await navigating;
+    expect(authority.semanticSnapshot().activity.compaction).toBeUndefined();
+    expect(authority.snapshot().compaction).toMatchObject({
+      phase: "inactive",
+      barrierOpen: false,
+    });
+    await expect(authority.requestEscape("after-navigation")).resolves.not.toMatchObject({
+      target: "compaction",
+    });
   });
 
   it("retires a consumed extension failure from custody instead of executing it twice", async () => {

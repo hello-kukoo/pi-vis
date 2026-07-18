@@ -24,6 +24,7 @@ export function WorktreeSwitcher({
   const setWorktreeError = useSessionsStore((state) => state.setWorktreeError);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<SwitchMode>("create");
+  const [copyUncommitted, setCopyUncommitted] = useState(true);
   const popupRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const createModeRef = useRef<HTMLButtonElement>(null);
@@ -138,7 +139,9 @@ export function WorktreeSwitcher({
     const result = await runWorktreeOperation({
       sessionId,
       mode,
-      ...(mode === "create" ? { fromCurrentCheckout: true } : { path: session.worktreeAttachPath }),
+      ...(mode === "create"
+        ? { fromCurrentCheckout: true, copyUncommitted }
+        : { path: session.worktreeAttachPath }),
     });
     if (result.ok) close();
   };
@@ -220,6 +223,20 @@ export function WorktreeSwitcher({
                 disabled={!!session.worktreeCreating}
               />
             </div>
+          )}
+          {mode === "create" && (
+            <label className="worktree-switcher__copy-changes">
+              <input
+                type="checkbox"
+                checked={copyUncommitted}
+                disabled={!!session.worktreeCreating}
+                onChange={(event) => setCopyUncommitted(event.currentTarget.checked)}
+              />
+              <span className="worktree-switcher__copy-changes-text">
+                <strong>Copy uncommitted changes</strong>
+                <span>Includes staged, unstaged, and non-ignored untracked files.</span>
+              </span>
+            </label>
           )}
           {session.worktreeError && (
             <div className="worktree-switcher__error" role="alert">

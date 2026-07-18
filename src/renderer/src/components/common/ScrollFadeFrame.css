@@ -1,0 +1,53 @@
+.scroll-fade-frame {
+  --scroll-fade-size: 1.25rem;
+  --scroll-fade-surface: var(--surface);
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.scroll-fade-frame--fill {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.scroll-fade-frame__viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.scroll-fade-frame--fill > .scroll-fade-frame__viewport {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.scroll-fade-frame--fill .scroll-fade-frame__scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.scroll-fade-frame__edge {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: var(--scrollbar-size);
+  height: var(--scroll-fade-size);
+  pointer-events: none;
+}
+
+.scroll-fade-frame__edge--top {
+  top: 0;
+  background: linear-gradient(to bottom, var(--scroll-fade-surface), transparent);
+}
+
+.scroll-fade-frame__edge--bottom {
+  bottom: 0;
+  background: linear-gradient(to top, var(--scroll-fade-surface), transparent);
+}
+
+.scroll-fade-frame--horizontal .scroll-fade-frame__edge--bottom {
+  bottom: var(--scrollbar-size);
+}

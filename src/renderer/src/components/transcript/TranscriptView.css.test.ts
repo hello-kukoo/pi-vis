@@ -18,6 +18,27 @@ describe("TranscriptView CSS", () => {
     expect(css).not.toContain(".show-earlier-btn");
   });
 
+  it("paints scroll fades beside rather than over the scrollbar lane", () => {
+    const css = readFileSync(new URL("./TranscriptView.css", import.meta.url), "utf8");
+    const frameCss = readFileSync(
+      new URL("../common/ScrollFadeFrame.css", import.meta.url),
+      "utf8",
+    );
+    const fadeRule =
+      css.match(/\.transcript-region::before,\s*\.transcript-region::after\s*{(?<body>[^}]*)}/s)
+        ?.groups?.body ?? "";
+
+    expect(fadeRule).toContain("right: var(--scrollbar-size);");
+    expect(css).not.toMatch(/\.transcript-view[^{}]*{[^}]*mask-image:/s);
+
+    expect(frameCss).toMatch(/\.scroll-fade-frame__edge\s*{[^}]*right: var\(--scrollbar-size\);/s);
+    expect(frameCss).toMatch(
+      /\.scroll-fade-frame--horizontal \.scroll-fade-frame__edge--bottom\s*{[^}]*bottom: var\(--scrollbar-size\);/s,
+    );
+    expect(css).toMatch(/\.tool-card__output-frame\s*{[^}]*overflow: hidden;/s);
+    expect(css).not.toContain(".tool-card__output-frame::before");
+  });
+
   it("renders the working timer like compact transcript summaries", () => {
     const css = readFileSync(new URL("./TranscriptView.css", import.meta.url), "utf8");
 

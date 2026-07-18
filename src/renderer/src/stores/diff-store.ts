@@ -44,6 +44,7 @@ import { useSettingsStore } from "./settings-store.js";
 // ── Phases / state shape ──────────────────────────────────────────────
 
 export type DiffPhase = "loading" | "ready" | "not-a-repo" | "git-missing" | "error";
+export type WorkingTreeScope = "base" | "uncommitted";
 
 export interface FileState {
   status: "idle" | "loading" | "ready" | "error";
@@ -155,7 +156,11 @@ export interface DiffStore {
   branches: GitBranch[];
   currentBranch: string | null;
   selectedBase: string | null; // null = HEAD
-  /** Ephemeral inclusive historical commit band; null is the working tree. */
+  /** Which live comparison to use while commitRange is null. `base` compares
+   * the selected base through the working tree; `uncommitted` compares HEAD
+   * through the working tree and therefore excludes committed branch work. */
+  workingTreeScope: WorkingTreeScope;
+  /** Ephemeral inclusive historical commit band; null is a live working tree. */
   commitRange: GitCommitRange | null;
   /** Concrete object IDs issued with the current historical manifest. */
   historicalContext: GitHistoricalContext | null;
@@ -200,10 +205,15 @@ export interface DiffStore {
   loadBranches: () => Promise<void>;
   /** Atomically switch both comparison dimensions. A changed comparison has
    * exactly one invalidation and refresh. */
-  setComparison: (comparison: { base: string | null; range: GitCommitRange | null }) => void;
+  setComparison: (comparison: {
+    base: string | null;
+    range: GitCommitRange | null;
+    workingTreeScope?: WorkingTreeScope;
+  }) => void;
   /** Compatibility wrappers for existing callers. */
   setBase: (base: string | null) => void;
   setCommitRange: (range: GitCommitRange | null) => void;
+  showUncommittedChanges: () => void;
   setIncludeRemoteBranches: (v: boolean) => void;
 
   // in-diff find
@@ -330,6 +340,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     branches: [],
     currentBranch: null,
     selectedBase: null,
+    workingTreeScope: "base",
     commitRange: null,
     historicalContext: null,
     includeRemoteBranches: false,
@@ -367,6 +378,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         editCancelNonce: 0,
         // Restore the branch selected for this session during the current app run.
         selectedBase: selectedBaseBySession.get(sessionId) ?? null,
+        workingTreeScope: "base",
         commitRange: null,
         historicalContext: null,
         includeRemoteBranches: includeRemote,
@@ -402,6 +414,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
         commentEditorFiles: new Set(),
         editCancelNonce: 0,
         refreshing: false,
+        workingTreeScope: "base",
         commitRange: null,
         historicalContext: null,
         stale: false,
@@ -416,6 +429,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       const root = get().root;
       if (root === null) return;
       const baseAtStart = get().selectedBase;
+      const workingTreeScopeAtStart = get().workingTreeScope;
       const rangeAtStart = get().commitRange;
       const historicalContextAtStart = get().historicalContext;
       const myComparison = comparisonGeneration;
@@ -438,7 +452,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       }
       let res: GitChangesResult;
       try {
-        const base = baseAtStart ?? undefined;
+        const base =
+          rangeAtStart !== null || workingTreeScopeAtStart === "base"
+            ? (baseAtStart ?? undefined)
+            : undefined;
         res = await window.pivis.invoke("git.changes", {
           root,
           ...(base !== undefined ? { base } : {}),
@@ -480,6 +497,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       const myComparison = comparisonGeneration;
       const rootAtStart = get().root;
       const baseAtStart = get().selectedBase;
+      const workingTreeScopeAtStart = get().workingTreeScope;
       const rangeAtStart = get().commitRange;
       const historicalContextAtStart = get().historicalContext;
       fileGenerations.set(path, myGen);
@@ -493,7 +511,10 @@ export const useDiffStore = create<DiffStore>((set, get) => {
 
       let res: GitFileDiffResult;
       try {
-        const base = baseAtStart ?? undefined;
+        const base =
+          rangeAtStart !== null || workingTreeScopeAtStart === "base"
+            ? (baseAtStart ?? undefined)
+            : undefined;
         const params: {
           root: string;
           base?: string;
@@ -718,6 +739,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
               branches: res.branches,
               currentBranch: res.current,
               selectedBase: null,
+              workingTreeScope: "base",
               commitRange: null,
               historicalContext: null,
               files: [],
@@ -737,11 +759,12 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       }
     },
 
-    setComparison: ({ base, range }) => {
+    setComparison: ({ base, range, workingTreeScope = "base" }) => {
       if (get().editSession || get().commentEditorFiles.size > 0) return;
       const current = get();
       if (
         current.selectedBase === base &&
+        current.workingTreeScope === workingTreeScope &&
         current.commitRange?.start === range?.start &&
         current.commitRange?.end === range?.end
       ) {
@@ -754,6 +777,7 @@ export const useDiffStore = create<DiffStore>((set, get) => {
       for (const [path, token] of fileGenerations) fileGenerations.set(path, token + 1);
       set({
         selectedBase: base,
+        workingTreeScope,
         commitRange: range,
         historicalContext: null,
         files: [],
@@ -769,11 +793,19 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     },
 
     setBase: (base) => {
-      get().setComparison({ base, range: null });
+      get().setComparison({ base, range: null, workingTreeScope: "base" });
     },
 
     setCommitRange: (range) => {
-      get().setComparison({ base: get().selectedBase, range });
+      get().setComparison({ base: get().selectedBase, range, workingTreeScope: "base" });
+    },
+
+    showUncommittedChanges: () => {
+      get().setComparison({
+        base: get().selectedBase,
+        range: null,
+        workingTreeScope: "uncommitted",
+      });
     },
 
     setIncludeRemoteBranches: (v) => {
@@ -1052,7 +1084,8 @@ export const useDiffStore = create<DiffStore>((set, get) => {
     let freshNewText: string | null = null;
     if (file) {
       try {
-        const base = get().selectedBase ?? undefined;
+        const base =
+          get().workingTreeScope === "base" ? (get().selectedBase ?? undefined) : undefined;
         const params: {
           root: string;
           path: string;

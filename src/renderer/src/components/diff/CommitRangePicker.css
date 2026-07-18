@@ -58,11 +58,17 @@
 }
 
 .commit-range-picker__working {
-  width: calc(100% - var(--space-4));
-  margin: 0.286rem var(--space-2);
+  width: 100%;
   padding: 0.5rem 0.571rem;
   border-radius: var(--radius-md);
   font: 0.857em / 1.4 var(--font-code);
+}
+
+.commit-range-picker__scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.143rem;
+  padding: 0.286rem var(--space-2);
 }
 
 .commit-range-picker__working:hover,
@@ -73,56 +79,17 @@
   background: var(--surface-2);
 }
 
-.commit-range-picker__list {
-  --commit-range-scroll-fade: 1.25rem;
-  max-height: min(22rem, calc(100vh - 15rem));
-  overflow: auto;
+.commit-range-picker__list-shell {
+  --scroll-fade-surface: var(--surface);
   padding: 0 var(--space-2) var(--space-2);
+}
+
+.commit-range-picker__list {
+  max-height: min(22rem, calc(100vh - 15rem));
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0;
   outline: none;
-}
-.commit-range-picker__list--fade-top {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--commit-range-scroll-fade),
-    #000 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--commit-range-scroll-fade),
-    #000 100%
-  );
-}
-.commit-range-picker__list--fade-bottom {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - var(--commit-range-scroll-fade)),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 calc(100% - var(--commit-range-scroll-fade)),
-    transparent 100%
-  );
-}
-.commit-range-picker__list--fade-top.commit-range-picker__list--fade-bottom {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--commit-range-scroll-fade),
-    #000 calc(100% - var(--commit-range-scroll-fade)),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    #000 var(--commit-range-scroll-fade),
-    #000 calc(100% - var(--commit-range-scroll-fade)),
-    transparent 100%
-  );
 }
 
 .commit-range-picker__list:focus-visible {

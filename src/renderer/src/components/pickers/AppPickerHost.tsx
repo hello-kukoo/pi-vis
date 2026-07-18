@@ -14,6 +14,7 @@ import {
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import "./AppPickerHost.css";
 
 interface PickerHostProps {
@@ -358,11 +359,13 @@ function ModelPicker({
           }}
         />
       </div>
-      <div
-        ref={virtualList.containerRef}
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        scrollerRef={virtualList.containerRef}
         onScroll={virtualList.onScroll}
         className="picker__list picker__list--virtual"
         role="listbox"
+        fill
       >
         {filtered.length === 0 && <div className="picker__empty">No models found</div>}
         {filtered.length > 0 && (
@@ -402,7 +405,7 @@ function ModelPicker({
             </div>
           </div>
         )}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <button type="button" className="picker__btn picker__btn--cancel" onClick={onClose}>
           Cancel
@@ -470,7 +473,13 @@ function ForkPicker({
       }}
     >
       <div className="picker__title">Fork from user message</div>
-      <div className="picker__list" ref={listRef} role="listbox">
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        scrollerRef={listRef}
+        className="picker__list"
+        role="listbox"
+        fill
+      >
         {messages.map((m, idx) => {
           const preview = m.text.split("\n", 1)[0] ?? m.text;
           const truncated = preview.length > 96 ? `${preview.slice(0, 96)}…` : preview;
@@ -495,7 +504,7 @@ function ForkPicker({
             </button>
           );
         })}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <button type="button" className="picker__btn picker__btn--cancel" onClick={onClose}>
           Cancel
@@ -566,7 +575,12 @@ function ResumePicker({
           }}
         />
       </div>
-      <div className="picker__list" role="listbox">
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        className="picker__list"
+        role="listbox"
+        fill
+      >
         {filtered.length === 0 && <div className="picker__empty">No sessions found</div>}
         {filtered.map((s, idx) => (
           <button
@@ -588,7 +602,7 @@ function ResumePicker({
             <span className="picker__item-meta">{s.messageCount} messages</span>
           </button>
         ))}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <button type="button" className="picker__btn picker__btn--cancel" onClick={onClose}>
           Cancel
@@ -724,11 +738,13 @@ function ScopedModelsPicker({
           }}
         />
       </div>
-      <div
-        ref={virtualList.containerRef}
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        scrollerRef={virtualList.containerRef}
         onScroll={virtualList.onScroll}
         className="picker__list picker__list--virtual"
         role="listbox"
+        fill
       >
         {filtered.length === 0 && <div className="picker__empty">No models found</div>}
         {filtered.length > 0 && (
@@ -770,7 +786,7 @@ function ScopedModelsPicker({
             </div>
           </div>
         )}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <span className="picker__count">
           {selectedCount} of {models.length} selected
@@ -886,7 +902,12 @@ function LogoutPicker({
           }}
         />
       </div>
-      <div className="picker__list" role="listbox">
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        className="picker__list"
+        role="listbox"
+        fill
+      >
         {filtered.length === 0 && <div className="picker__empty">No providers found</div>}
         {filtered.map((p, idx) => (
           <button
@@ -911,7 +932,7 @@ function LogoutPicker({
             </span>
           </button>
         ))}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <button type="button" className="picker__btn picker__btn--cancel" onClick={onClose}>
           Cancel
@@ -1072,12 +1093,14 @@ function TrustPicker({
             : "Currently untrusted (this folder)"}
         {!projectTrusted && " · global default: untrusted"}
       </div>
-      <div
-        ref={listRef}
+      <ScrollFadeFrame
+        frameClassName="picker__list-frame"
+        scrollerRef={listRef}
         className="picker__list"
         role="listbox"
         aria-label="Trust options"
         tabIndex={0}
+        fill
         onKeyDown={(e) => {
           if (e.key === "ArrowDown") {
             e.preventDefault();
@@ -1116,7 +1139,7 @@ function TrustPicker({
             <span className="picker__item-meta">{option.trusted ? "trusted" : "untrusted"}</span>
           </button>
         ))}
-      </div>
+      </ScrollFadeFrame>
       <div className="picker__footer">
         <button
           type="button"

@@ -197,11 +197,18 @@ export interface IpcInvokeContract {
   };
   // Fresh-session creation supplies `base`. Active-session switching instead
   // supplies `fromCurrentCheckout`; main ignores any renderer base and resolves
-  // the exact HEAD of that session's authoritative current checkout.
+  // the exact HEAD of that session's authoritative current checkout. The
+  // renderer must explicitly say whether local staged/unstaged/untracked
+  // contents should be copied; main pins and revalidates the source either way.
   "session.createWorktree": {
     req:
       | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
-      | { sessionId: SessionId; fromCurrentCheckout: true; base?: never };
+      | {
+          sessionId: SessionId;
+          fromCurrentCheckout: true;
+          copyUncommitted: boolean;
+          base?: never;
+        };
     res:
       | {
           ok: true;

@@ -254,6 +254,12 @@ test.describe("Pinned real Pi 0.80.10 regressions", () => {
         await expect(window.locator(".sidebar__session--active .sidebar__session-name")).toHaveText(
           NAME,
         );
+        // Session entry focus targets whichever composer surface that session
+        // actually owns. The first session last showed its Unified TUI, so its
+        // xterm helper must receive focus without an extra click in the panel.
+        await expect(window.locator(".unified-panel:visible .xterm-helper-textarea")).toBeFocused({
+          timeout: 30_000,
+        });
         const restoredPanel = await extensionView(window);
         await expect(restoredPanel.locator(".xterm-rows")).toContainText(
           firstText.match(/session=\S+/)![0]!,
@@ -379,6 +385,10 @@ test.describe("Pinned real Pi 0.80.10 regressions", () => {
           window.locator(".transcript-block--user").filter({ hasText: "TREE-BRANCH-ALTERNATE" }),
         ).toHaveCount(0);
         await expect(window.locator(".composer__textarea")).toHaveValue("");
+        // Pi reports branch summarization through its generic isCompacting
+        // getter. It must remain navigation authority, not leave a phantom
+        // context-compaction row/barrier after the branch switch settles.
+        await expect(window.locator(".working-row")).toHaveCount(0, { timeout: 30_000 });
       });
 
       const users = fixture
@@ -454,6 +464,9 @@ test.describe("Pinned real Pi 0.80.10 regressions", () => {
         await expect(window.locator(".working-row")).toContainText("Compacting…", {
           timeout: 30_000,
         });
+        await expect(
+          window.locator(".sidebar__session--active .status-dot--streaming"),
+        ).toBeVisible();
         // Admission transfers command custody immediately. It must not remain
         // in the editor while the native compact request is in flight.
         await expect(textarea).toHaveValue("");
@@ -480,6 +493,9 @@ test.describe("Pinned real Pi 0.80.10 regressions", () => {
           window.getByText("REAL-REGRESSION-COMPACT-SUMMARY", { exact: false }).first(),
         ).toBeVisible({ timeout: 60_000 });
         await expect(window.locator(".working-row")).toHaveCount(0);
+        await expect(
+          window.locator(".sidebar__session--active .status-dot--streaming"),
+        ).toHaveCount(0);
         await expect(window.getByText(/Compaction failed|Nothing to compact/)).toHaveCount(0);
         await expect(textarea).toHaveValue("");
         await expect

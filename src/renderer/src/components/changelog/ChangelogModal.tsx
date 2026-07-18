@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { Markdown } from "../../lib/markdown.js";
 import { useChangelogStore } from "../../stores/changelog-store.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconClose } from "../common/icons.js";
 import "./ChangelogModal.css";
 
@@ -58,9 +59,13 @@ export function ChangelogModal(): React.ReactElement | null {
             <IconClose />
           </button>
         </div>
-        <div className="changelog-modal__body markdown-body">
+        <ScrollFadeFrame
+          frameClassName="changelog-modal__body-frame"
+          className="changelog-modal__body markdown-body"
+          fill
+        >
           <Markdown>{markdown}</Markdown>
-        </div>
+        </ScrollFadeFrame>
         <div className="changelog-modal__footer">
           <button type="button" className="changelog-modal__btn" onClick={handleClose}>
             Close

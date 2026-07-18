@@ -6,10 +6,18 @@ import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
-import { ChangesButton } from "./SessionHeader.js";
+import { ChangesButton, shouldRefreshSessionStats } from "./SessionHeader.js";
 
 const SID = "session-a" as SessionId;
 const WORKSPACE = "/tmp/ws";
+
+describe("session stats refresh boundaries", () => {
+  it("refreshes for manual compaction as well as agent settlement", () => {
+    expect(shouldRefreshSessionStats([{ type: "compaction_end" }])).toBe(true);
+    expect(shouldRefreshSessionStats([{ type: "agent_end" }])).toBe(true);
+    expect(shouldRefreshSessionStats([{ type: "message_end" }])).toBe(false);
+  });
+});
 
 function mount(): { container: HTMLDivElement; unmount: () => void } {
   const container = document.createElement("div");

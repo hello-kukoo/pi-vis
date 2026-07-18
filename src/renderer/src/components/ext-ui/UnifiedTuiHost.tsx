@@ -24,21 +24,29 @@ import type { SessionId } from "@shared/ids.js";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type React from "react";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRoutedEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import type { PanelInputIdentity } from "../../lib/panel-input-buffer.js";
 import {
-  type PanelInputIdentity,
-  type PendingPanelInput,
-  bufferPanelInput,
-  reconcilePanelInputBuffer,
-  samePanelInputIdentity,
-} from "../../lib/panel-input-buffer.js";
-import {
+  type PanelInputGenerationHandle,
   acknowledgePanelInput,
+  enqueuePanelInputAttempt,
+  isPanelInputBlocked,
+  isPanelInputGenerationCurrent,
   nextPanelInputSequence,
   panelInputGapMessage,
+  queuePanelInput,
+  releaseQueuedPanelInput,
   resetPanelInputSequenceToAcknowledged,
 } from "../../lib/panel-input-sequence.js";
+import {
+  type AppliedPanelOutput,
+  PANEL_REPLAY_CLEAR_ANSI,
+  initialAppliedPanelOutput,
+  panelOutputActionRequiresDrain,
+  reconcilePanelOutput,
+} from "../../lib/panel-output-reconciler.js";
+import { useOverlayStore } from "../../stores/overlay-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { getTheme } from "../../theme/registry.js";
@@ -58,6 +66,25 @@ interface UnifiedTuiHostProps {
 function resolveMonoFont(): string {
   const fromVar = getComputedStyle(document.documentElement).getPropertyValue("--font-code").trim();
   return fromVar || "ui-monospace, Menlo, monospace";
+}
+
+function mayExplicitlyFocusTerminal(container: HTMLElement): boolean {
+  const active = document.activeElement;
+  if (
+    !active ||
+    active === document.body ||
+    active === document.documentElement ||
+    container.contains(active)
+  )
+    return true;
+  if (!(active instanceof HTMLElement)) return false;
+  // A session row/button is an entry control and may hand focus to the target
+  // surface. Never pull it from another typing surface or composer replacement.
+  return !(
+    active.isContentEditable ||
+    /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) ||
+    active.closest(".composer, .custom-panel, .ext-dialog, .picker-slot")
+  );
 }
 
 // ─── Component ────────────────────────────────────────────────────────────
@@ -83,16 +110,21 @@ export function UnifiedTuiHost({
     outputSequence?: number;
     outputKind?: "keyframe" | "delta" | "reset";
     outputAnsi?: string;
+    inputAcknowledgedThrough?: number;
     syncState?: "following" | "synchronizing" | "unavailable";
   } | null>(null);
-  const renderedOutputSequenceRef = useRef<number | null>(null);
-  const renderedKeyframeRevisionRef = useRef<number | null>(null);
+  const appliedOutputRef = useRef<AppliedPanelOutput | null>(null);
+  // Identity of the authority projection that has actually drained through
+  // xterm. A safe projection in React state is not enough: input must remain
+  // fenced until its anchor/keyframe is present in the terminal grid.
+  const replayReadyRef = useRef<string | null>(null);
+  const [replayReadyGeneration, setReplayReadyGeneration] = useState(0);
   const authorityAckRef = useRef<string | null>(null);
   const authorityRepaintRequestRef = useRef<string | null>(null);
+  const replayRepaintRequestRef = useRef<string | null>(null);
   const dispatchPanelInputRef = useRef<((data: string) => void) | null>(null);
-  const panelInputTailRef = useRef<Promise<void>>(Promise.resolve());
-  const panelInputBlockedRef = useRef<PanelInputIdentity | null>(null);
-  const pendingInputRef = useRef<PendingPanelInput | null>(null);
+  const panelIpcRetryTimerRef = useRef<number | null>(null);
+  const [panelIpcRetryGeneration, setPanelIpcRetryGeneration] = useState(0);
   // The current sizing pass, exposed by the lifecycle effect so the mode-change
   // effect below can re-run it without taking sync's deps.
   const syncRef = useRef<(() => void) | null>(null);
@@ -103,6 +135,9 @@ export function UnifiedTuiHost({
   visibleRef.current = visible;
   const focusAfterRevealRef = useRef(false);
   const { unifiedPanel } = useSessionsStore((s) => s.sessions.get(sessionId)) ?? {};
+  const composerFocusRequest = useSessionsStore((s) => s.composerFocusRequest);
+  const consumeComposerFocus = useSessionsStore((s) => s.consumeComposerFocus);
+  const escapeClaimCount = useOverlayStore((s) => s.count);
   // Keep panelRef in sync so the lifecycle effect (dep = panelId only) can read
   // the current buffer without taking it as a reactive dep (which would rebuild
   // xterm on every streamed frame).
@@ -112,8 +147,79 @@ export function UnifiedTuiHost({
   const panelSessionEpoch = unifiedPanel?.sessionEpoch;
   const panelMode = unifiedPanel?.mode ?? "content";
   modeRef.current = panelMode;
+  const panelIdentityKey = unifiedPanel
+    ? `${unifiedPanel.hostInstanceId}:${unifiedPanel.sessionEpoch}:${unifiedPanel.id}`
+    : null;
+  const appliedOutput = appliedOutputRef.current;
+  const terminalPanel = termPanelRef.current;
+  const terminalOwnsProjection =
+    unifiedPanel !== undefined &&
+    terminalPanel?.hostInstanceId === unifiedPanel.hostInstanceId &&
+    terminalPanel.sessionEpoch === unifiedPanel.sessionEpoch &&
+    terminalPanel.id === unifiedPanel.id;
+  const pendingOutputReconciliation =
+    unifiedPanel && appliedOutput && terminalOwnsProjection
+      ? reconcilePanelOutput(appliedOutput, unifiedPanel)
+      : null;
+  const replayProjectionReady =
+    unifiedPanel?.authority !== true ||
+    !(pendingOutputReconciliation
+      ? pendingOutputReconciliation.applied.repaintRequired
+      : initialAppliedPanelOutput(unifiedPanel).repaintRequired);
+  const replayReplacementPending = pendingOutputReconciliation
+    ? panelOutputActionRequiresDrain(pendingOutputReconciliation.action)
+    : false;
+  const replayAppliedToTerminal =
+    unifiedPanel?.authority !== true ||
+    (terminalOwnsProjection &&
+      replayProjectionReady &&
+      !replayReplacementPending &&
+      replayReadyRef.current === panelIdentityKey);
+
+  // Input can arrive between DOM commit and passive effects. Close the gate in
+  // the synchronous commit phase when the next projection is unsafe, replaces
+  // the grid, or changes owner. Keeping this mutation out of render also means
+  // an abandoned concurrent render cannot fence the committed terminal forever.
+  // A reconstructable hard-clear/keyframe is safe to queue, but only its xterm
+  // drain callback may reopen input.
+  useLayoutEffect(() => {
+    if (!terminalOwnsProjection || !replayProjectionReady || replayReplacementPending) {
+      replayReadyRef.current = null;
+    }
+  }, [terminalOwnsProjection, replayProjectionReady, replayReplacementPending]);
+
+  const schedulePanelIpcRetry = useCallback(() => {
+    if (panelIpcRetryTimerRef.current !== null) return;
+    panelIpcRetryTimerRef.current = window.setTimeout(() => {
+      panelIpcRetryTimerRef.current = null;
+      setPanelIpcRetryGeneration((generation) => generation + 1);
+    }, 100);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (panelIpcRetryTimerRef.current !== null) {
+        window.clearTimeout(panelIpcRetryTimerRef.current);
+        panelIpcRetryTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
+    // A write-drain callback increments this token to re-run input-buffer
+    // reconciliation after it opens replayReadyRef.
+    void replayReadyGeneration;
+    void panelIpcRetryGeneration;
+    if (unifiedPanel?.inputAcknowledgedThrough !== undefined) {
+      acknowledgePanelInput(
+        sessionId,
+        unifiedPanel.hostInstanceId,
+        unifiedPanel.sessionEpoch,
+        unifiedPanel.id,
+        unifiedPanel.inputAcknowledgedThrough,
+      );
+    }
     const term = termRef.current;
     if (!term || !unifiedPanel) return;
     const repaintKey = `${unifiedPanel.hostInstanceId}:${unifiedPanel.sessionEpoch}:${unifiedPanel.id}`;
@@ -138,29 +244,47 @@ export function UnifiedTuiHost({
         .catch(() => {
           if (authorityRepaintRequestRef.current === repaintKey)
             authorityRepaintRequestRef.current = null;
+          schedulePanelIpcRetry();
         });
     }
-    const outputSequence = unifiedPanel.outputSequence;
-    if (
-      outputSequence !== undefined &&
-      renderedOutputSequenceRef.current !== outputSequence &&
-      unifiedPanel.outputKind
-    ) {
-      if (unifiedPanel.outputKind === "reset") {
-        term.reset();
-        term.clear();
-        renderedKeyframeRevisionRef.current = null;
-      } else if (unifiedPanel.outputKind === "keyframe") {
-        if (renderedKeyframeRevisionRef.current !== unifiedPanel.renderRevision) {
-          term.reset();
-          term.clear();
-          term.write(unifiedPanel.outputAnsi ?? "");
-          renderedKeyframeRevisionRef.current = unifiedPanel.renderRevision ?? null;
-        }
-      } else {
-        term.write(unifiedPanel.outputAnsi ?? "");
+    let requestReplayRepaint: string | null = null;
+    let releaseReplayAfterDrain: AppliedPanelOutput | null = null;
+    const applied = appliedOutputRef.current;
+    if (applied) {
+      const reconciliation = reconcilePanelOutput(applied, unifiedPanel);
+      appliedOutputRef.current = reconciliation.applied;
+      if (reconciliation.applied.repaintRequired) {
+        replayReadyRef.current = null;
+      } else if (unifiedPanel.authority === true && replayReadyRef.current !== repaintKey) {
+        releaseReplayAfterDrain = reconciliation.applied;
       }
-      renderedOutputSequenceRef.current = outputSequence;
+      switch (reconciliation.action.kind) {
+        case "append":
+          term.write(reconciliation.action.ansi);
+          break;
+        case "replace":
+          // Queue the clear with the replay. Unlike term.reset(), this cannot
+          // race already-queued writes and does not disable Kitty keyboard mode.
+          term.write(`${PANEL_REPLAY_CLEAR_ANSI}${reconciliation.action.ansi}`);
+          replayRepaintRequestRef.current = null;
+          break;
+        case "clear":
+          term.write(PANEL_REPLAY_CLEAR_ANSI);
+          break;
+        case "request_repaint": {
+          term.write(PANEL_REPLAY_CLEAR_ANSI);
+          break;
+        }
+        case "none":
+          break;
+      }
+      if (reconciliation.applied.repaintRequired) {
+        const key = `${repaintKey}:${unifiedPanel.outputSequence ?? 0}`;
+        if (replayRepaintRequestRef.current !== key) {
+          replayRepaintRequestRef.current = key;
+          requestReplayRepaint = key;
+        }
+      }
     }
     const ackKey = `${unifiedPanel.hostInstanceId}:${unifiedPanel.sessionEpoch}:${unifiedPanel.id}:${unifiedPanel.renderRevision ?? 0}`;
     const shouldAcknowledge =
@@ -171,6 +295,51 @@ export function UnifiedTuiHost({
     if (shouldAcknowledge) authorityAckRef.current = ackKey;
     term.write("", () => {
       if (visibleRef.current) syncRef.current?.();
+      if (releaseReplayAfterDrain) {
+        const active = panelRef.current;
+        const currentApplied = appliedOutputRef.current;
+        if (
+          active &&
+          active.hostInstanceId === unifiedPanel.hostInstanceId &&
+          active.sessionEpoch === unifiedPanel.sessionEpoch &&
+          active.id === unifiedPanel.id &&
+          currentApplied === releaseReplayAfterDrain &&
+          !currentApplied.repaintRequired &&
+          (active.outputSequence ?? null) === currentApplied.sequence &&
+          (active.renderRevision ?? null) === currentApplied.renderRevision &&
+          replayReadyRef.current !== repaintKey
+        ) {
+          replayReadyRef.current = repaintKey;
+          setReplayReadyGeneration((generation) => generation + 1);
+        }
+      }
+      if (requestReplayRepaint) {
+        const active = panelRef.current;
+        if (
+          active &&
+          active.hostInstanceId === unifiedPanel.hostInstanceId &&
+          active.sessionEpoch === unifiedPanel.sessionEpoch &&
+          active.id === unifiedPanel.id &&
+          replayRepaintRequestRef.current === requestReplayRepaint
+        ) {
+          void window.pivis
+            .invoke("session.panelResize", {
+              sessionId,
+              expectedHostInstanceId: unifiedPanel.hostInstanceId,
+              expectedSessionEpoch: unifiedPanel.sessionEpoch,
+              panelId: unifiedPanel.id,
+              cols: term.cols,
+              rows: term.rows,
+              force: true,
+            })
+            .catch(() => {
+              if (replayRepaintRequestRef.current === requestReplayRepaint) {
+                replayRepaintRequestRef.current = null;
+              }
+              schedulePanelIpcRetry();
+            });
+        }
+      }
       if (!shouldAcknowledge) return;
       const active = panelRef.current;
       if (
@@ -190,11 +359,14 @@ export function UnifiedTuiHost({
           revision: unifiedPanel.renderRevision ?? 0,
         })
         .then((result) => {
-          if (!result.acknowledged && authorityAckRef.current === ackKey)
+          if (!result.acknowledged && authorityAckRef.current === ackKey) {
             authorityAckRef.current = null;
+            schedulePanelIpcRetry();
+          }
         })
         .catch(() => {
           if (authorityAckRef.current === ackKey) authorityAckRef.current = null;
+          schedulePanelIpcRetry();
         });
     });
 
@@ -202,21 +374,23 @@ export function UnifiedTuiHost({
       unifiedPanel.authority === true &&
       unifiedPanel.syncState === "following" &&
       unifiedPanel.inputEnabled === true &&
-      unifiedPanel.renderRevision !== undefined;
-    const reconciled = reconcilePanelInputBuffer(
-      {
-        hostInstanceId: unifiedPanel.hostInstanceId,
-        sessionEpoch: unifiedPanel.sessionEpoch,
-        panelId: unifiedPanel.id,
-      },
-      authorityReady,
-      panelInputBlockedRef.current,
-      pendingInputRef.current,
-    );
-    panelInputBlockedRef.current = reconciled.blocked;
-    pendingInputRef.current = reconciled.pending;
-    for (const chunk of reconciled.replay) dispatchPanelInputRef.current?.(chunk);
-  }, [sessionId, unifiedPanel]);
+      unifiedPanel.renderRevision !== undefined &&
+      replayReadyRef.current === repaintKey;
+    const inputIdentity = {
+      hostInstanceId: unifiedPanel.hostInstanceId,
+      sessionEpoch: unifiedPanel.sessionEpoch,
+      panelId: unifiedPanel.id,
+    };
+    for (const chunk of releaseQueuedPanelInput(sessionId, inputIdentity, authorityReady)) {
+      dispatchPanelInputRef.current?.(chunk);
+    }
+  }, [
+    panelIpcRetryGeneration,
+    replayReadyGeneration,
+    schedulePanelIpcRetry,
+    sessionId,
+    unifiedPanel,
+  ]);
 
   // Viewport mode is a pi-tui overlay. Its Escape must traverse xterm's
   // onData sequencer rather than defer to a DOM event that may be fenced while
@@ -245,7 +419,10 @@ export function UnifiedTuiHost({
     unifiedPanel?.authority === true &&
     unifiedPanel.syncState === "following" &&
     unifiedPanel.inputEnabled === true &&
-    unifiedPanel.renderRevision !== undefined;
+    unifiedPanel.renderRevision !== undefined &&
+    replayAppliedToTerminal;
+  const panelFocusReady =
+    unifiedPanel !== undefined && (unifiedPanel.authority !== true || panelInputReady);
   useEffect(() => {
     // Read the mode explicitly: its value is not otherwise needed, but each
     // mode transition must trigger this sizing pass.
@@ -272,12 +449,9 @@ export function UnifiedTuiHost({
     if (!container) return;
     const currentPanel = panelRef.current;
     if (!currentPanel) return;
+    const currentPanelKey = `${currentPanel.hostInstanceId}:${currentPanel.sessionEpoch}:${currentPanel.id}`;
     // This lifecycle is identity-bound. Never carry blocked or buffered input
     // into a replacement owner that reuses the numeric panel id.
-    panelInputTailRef.current = Promise.resolve();
-    panelInputBlockedRef.current = null;
-    pendingInputRef.current = null;
-
     let disposed = false;
     let unsubPanel: (() => void) | null = null;
     let repaintRevision = 0;
@@ -382,13 +556,31 @@ export function UnifiedTuiHost({
     // the sizer enough content to choose a sane first height for tall panels;
     // the first resize report still carries force:true, so the host immediately
     // replaces the replay with an authoritative complete repaint.
-    for (const chunk of currentPanel.buffer) term.write(chunk);
-    renderedOutputSequenceRef.current = currentPanel.outputSequence ?? null;
-    renderedKeyframeRevisionRef.current =
-      currentPanel.outputKind === "keyframe" ? (currentPanel.renderRevision ?? null) : null;
+    const initialOutput = initialAppliedPanelOutput(currentPanel);
+    appliedOutputRef.current = initialOutput;
+    replayReadyRef.current = null;
+    if (!initialOutput.repaintRequired) {
+      for (const chunk of currentPanel.buffer) term.write(chunk);
+    }
     term.write("", () => {
       if (disposed) return;
       sizer.scheduleSync();
+      const active = panelRef.current;
+      if (
+        currentPanel.authority === true &&
+        !initialOutput.repaintRequired &&
+        active &&
+        active.hostInstanceId === currentPanel.hostInstanceId &&
+        active.sessionEpoch === currentPanel.sessionEpoch &&
+        active.id === currentPanel.id &&
+        appliedOutputRef.current === initialOutput &&
+        (active.outputSequence ?? null) === initialOutput.sequence &&
+        (active.renderRevision ?? null) === initialOutput.renderRevision &&
+        replayReadyRef.current !== currentPanelKey
+      ) {
+        replayReadyRef.current = currentPanelKey;
+        setReplayReadyGeneration((generation) => generation + 1);
+      }
       const ackKey = `${currentPanel.hostInstanceId}:${currentPanel.sessionEpoch}:${currentPanel.id}:${currentPanel.renderRevision ?? 0}`;
       if (
         currentPanel.authority &&
@@ -406,11 +598,14 @@ export function UnifiedTuiHost({
             revision: currentPanel.renderRevision ?? 0,
           })
           .then((result) => {
-            if (!result.acknowledged && authorityAckRef.current === ackKey)
+            if (!result.acknowledged && authorityAckRef.current === ackKey) {
               authorityAckRef.current = null;
+              schedulePanelIpcRetry();
+            }
           })
           .catch(() => {
             if (authorityAckRef.current === ackKey) authorityAckRef.current = null;
+            schedulePanelIpcRetry();
           });
       }
     });
@@ -457,19 +652,14 @@ export function UnifiedTuiHost({
               )
                 return;
               repaintAcknowledged = true;
-              const reconciled = reconcilePanelInputBuffer(
-                {
-                  hostInstanceId: currentPanel.hostInstanceId,
-                  sessionEpoch: currentPanel.sessionEpoch,
-                  panelId: currentPanel.id,
-                },
-                true,
-                panelInputBlockedRef.current,
-                pendingInputRef.current,
-              );
-              panelInputBlockedRef.current = reconciled.blocked;
-              pendingInputRef.current = reconciled.pending;
-              for (const chunk of reconciled.replay) dispatchPanelInputRef.current?.(chunk);
+              const inputIdentity = {
+                hostInstanceId: currentPanel.hostInstanceId,
+                sessionEpoch: currentPanel.sessionEpoch,
+                panelId: currentPanel.id,
+              };
+              for (const chunk of releaseQueuedPanelInput(sessionId, inputIdentity, true)) {
+                dispatchPanelInputRef.current?.(chunk);
+              }
             })
             .catch(() => {});
         });
@@ -479,26 +669,26 @@ export function UnifiedTuiHost({
     // User keystrokes → host TUI (panelInput is shared with custom() panels).
     const dispatchPanelInput = (data: string): void => {
       const activePanel = panelRef.current ?? currentPanel;
+      const activePanelKey = `${activePanel.hostInstanceId}:${activePanel.sessionEpoch}:${activePanel.id}`;
       const authorityReady =
         activePanel.authority === true &&
         activePanel.syncState === "following" &&
         activePanel.inputEnabled === true &&
-        activePanel.renderRevision !== undefined;
+        activePanel.renderRevision !== undefined &&
+        replayReadyRef.current === activePanelKey;
       const identity = {
         hostInstanceId: activePanel.hostInstanceId,
         sessionEpoch: activePanel.sessionEpoch,
         panelId: activePanel.id,
       };
       const bufferInput = (): void => {
-        pendingInputRef.current = bufferPanelInput(pendingInputRef.current, identity, data);
+        queuePanelInput(sessionId, identity, data);
       };
       if (activePanel.authority && !authorityReady) {
-        panelInputBlockedRef.current = identity;
         bufferInput();
         return;
       }
       if (!activePanel.authority && !repaintAcknowledged) {
-        panelInputBlockedRef.current = identity;
         bufferInput();
         return;
       }
@@ -506,32 +696,72 @@ export function UnifiedTuiHost({
         ...identity,
         revision: activePanel.authority ? activePanel.renderRevision! : repaintRevision,
       };
-      panelInputTailRef.current = panelInputTailRef.current
-        .then(async () => {
-          const latest = panelRef.current;
-          if (
-            !latest ||
-            latest.hostInstanceId !== target.hostInstanceId ||
-            latest.sessionEpoch !== target.sessionEpoch ||
-            latest.id !== target.panelId
-          )
-            return;
-          const blocked = panelInputBlockedRef.current;
-          if (blocked && samePanelInputIdentity(blocked, target)) {
-            bufferInput();
-            return;
-          }
-          if (blocked) {
-            panelInputBlockedRef.current = null;
-            pendingInputRef.current = null;
-          }
-          const sequence = nextPanelInputSequence(
+      const forceInputRecoveryRepaint = (generation: PanelInputGenerationHandle): void => {
+        if (!isPanelInputGenerationCurrent(generation)) return;
+        const active = useSessionsStore.getState().sessions.get(sessionId)?.unifiedPanel;
+        if (
+          !active ||
+          active.hostInstanceId !== target.hostInstanceId ||
+          active.sessionEpoch !== target.sessionEpoch ||
+          active.id !== target.panelId
+        )
+          return;
+        void window.pivis
+          .invoke("session.panelResize", {
             sessionId,
-            target.hostInstanceId,
-            target.sessionEpoch,
-            target.panelId,
-          );
-          const result = await window.pivis.invoke("session.panelInput", {
+            expectedHostInstanceId: target.hostInstanceId,
+            expectedSessionEpoch: target.sessionEpoch,
+            panelId: target.panelId,
+            cols: term.cols,
+            rows: term.rows,
+            force: true,
+          })
+          .catch(() => {
+            // The queued input is identity-owned and survives this component.
+            // Retry the reconstruction request while that exact panel remains
+            // live; a session switch must not turn one IPC failure into a
+            // permanently fenced keyboard.
+            window.setTimeout(() => forceInputRecoveryRepaint(generation), 250);
+          });
+      };
+      enqueuePanelInputAttempt(sessionId, identity, async (inputGeneration) => {
+        const latest = panelRef.current;
+        if (
+          !latest ||
+          latest.hostInstanceId !== target.hostInstanceId ||
+          latest.sessionEpoch !== target.sessionEpoch ||
+          latest.id !== target.panelId
+        )
+          return;
+        const latestAuthorityReady =
+          latest.authority !== true ||
+          (latest.syncState === "following" &&
+            latest.inputEnabled === true &&
+            latest.renderRevision !== undefined &&
+            replayReadyRef.current ===
+              `${latest.hostInstanceId}:${latest.sessionEpoch}:${latest.id}`);
+        if (!latestAuthorityReady) {
+          bufferInput();
+          return;
+        }
+        if (isPanelInputBlocked(sessionId, identity)) {
+          bufferInput();
+          return;
+        }
+        const sequence = nextPanelInputSequence(
+          sessionId,
+          target.hostInstanceId,
+          target.sessionEpoch,
+          target.panelId,
+          inputGeneration,
+        );
+        let result: {
+          acknowledgedThrough: number;
+          gap?: { expected: number; received: number };
+          repaintRequired?: { revision: number; repaintRequired: boolean };
+        };
+        try {
+          result = await window.pivis.invoke("session.panelInput", {
             sessionId,
             expectedHostInstanceId: target.hostInstanceId,
             expectedSessionEpoch: target.sessionEpoch,
@@ -540,53 +770,64 @@ export function UnifiedTuiHost({
             sequence,
             data,
           });
-          acknowledgePanelInput(
-            sessionId,
-            target.hostInstanceId,
-            target.sessionEpoch,
-            target.panelId,
-            result.acknowledgedThrough,
-          );
-          const afterInput = panelRef.current;
+        } catch (error) {
+          if (!isPanelInputGenerationCurrent(inputGeneration)) return;
+          const failedPanel = panelRef.current;
           if (
-            !afterInput ||
-            afterInput.hostInstanceId !== target.hostInstanceId ||
-            afterInput.sessionEpoch !== target.sessionEpoch ||
-            afterInput.id !== target.panelId
-          )
-            return;
-          if (result.acknowledgedThrough < sequence && result.repaintRequired) {
-            panelInputBlockedRef.current = identity;
+            failedPanel &&
+            failedPanel.hostInstanceId === target.hostInstanceId &&
+            failedPanel.sessionEpoch === target.sessionEpoch &&
+            failedPanel.id === target.panelId
+          ) {
             resetPanelInputSequenceToAcknowledged(
               sessionId,
               target.hostInstanceId,
               target.sessionEpoch,
               target.panelId,
-              result.acknowledgedThrough,
+              Math.max(0, sequence - 1),
+              inputGeneration,
             );
             bufferInput();
-            const terminal = termRef.current;
-            if (terminal) {
-              void window.pivis.invoke("session.panelResize", {
-                sessionId,
-                expectedHostInstanceId: target.hostInstanceId,
-                expectedSessionEpoch: target.sessionEpoch,
-                panelId: target.panelId,
-                cols: terminal.cols,
-                rows: terminal.rows,
-                force: true,
-              });
-            }
+            forceInputRecoveryRepaint(inputGeneration);
           }
-          if (result.gap) {
-            useSessionsStore
-              .getState()
-              .addToast(sessionId, panelInputGapMessage(result.gap), "warning");
-          }
-        })
-        .catch((error) => {
           useSessionsStore.getState().addToast(sessionId, String(error), "error");
-        });
+          return;
+        }
+        if (!isPanelInputGenerationCurrent(inputGeneration)) return;
+        acknowledgePanelInput(
+          sessionId,
+          target.hostInstanceId,
+          target.sessionEpoch,
+          target.panelId,
+          result.acknowledgedThrough,
+          inputGeneration,
+        );
+        const afterInput = panelRef.current;
+        if (
+          !afterInput ||
+          afterInput.hostInstanceId !== target.hostInstanceId ||
+          afterInput.sessionEpoch !== target.sessionEpoch ||
+          afterInput.id !== target.panelId
+        )
+          return;
+        if (result.acknowledgedThrough < sequence) {
+          resetPanelInputSequenceToAcknowledged(
+            sessionId,
+            target.hostInstanceId,
+            target.sessionEpoch,
+            target.panelId,
+            result.acknowledgedThrough,
+            inputGeneration,
+          );
+          bufferInput();
+          forceInputRecoveryRepaint(inputGeneration);
+        }
+        if (result.gap) {
+          useSessionsStore
+            .getState()
+            .addToast(sessionId, panelInputGapMessage(result.gap), "warning");
+        }
+      });
     };
     dispatchPanelInputRef.current = dispatchPanelInput;
     // Preserve complete xterm chunks (user keys, routed Escape, and terminal
@@ -623,21 +864,49 @@ export function UnifiedTuiHost({
       if (dispatchPanelInputRef.current === dispatchPanelInput) {
         dispatchPanelInputRef.current = null;
       }
-      const pending = pendingInputRef.current;
-      if (
-        pending?.hostInstanceId === currentPanel.hostInstanceId &&
-        pending.sessionEpoch === currentPanel.sessionEpoch &&
-        pending.panelId === currentPanel.id
-      ) {
-        pendingInputRef.current = null;
-      }
       if (termRef.current === term) {
         termRef.current = null;
         termPanelRef.current = null;
         fitAddonRef.current = null;
+        appliedOutputRef.current = null;
+        replayReadyRef.current = null;
+        replayRepaintRequestRef.current = null;
+        authorityRepaintRequestRef.current = null;
+        authorityAckRef.current = null;
       }
     };
   }, [sessionId, panelId, panelHostInstanceId, panelSessionEpoch]);
+
+  // Sidebar/session-entry focus is a surface request, even though the legacy
+  // store name says Composer. Consume it only once the visible terminal can
+  // accept input. This preserves the background-mount guard above
+  // while allowing an explicit session click to transfer focus from its button.
+  useEffect(() => {
+    const request = composerFocusRequest;
+    const container = containerRef.current;
+    const term = termRef.current;
+    if (
+      !request ||
+      request.sessionId !== sessionId ||
+      !visible ||
+      !panelFocusReady ||
+      !container ||
+      !term
+    )
+      return;
+    consumeComposerFocus(sessionId, request.nonce);
+    const ownRoutedEscapeClaim = panelMode === "viewport" ? 1 : 0;
+    if (escapeClaimCount > ownRoutedEscapeClaim) return;
+    if (mayExplicitlyFocusTerminal(container)) term.focus();
+  }, [
+    composerFocusRequest,
+    consumeComposerFocus,
+    escapeClaimCount,
+    panelFocusReady,
+    panelMode,
+    sessionId,
+    visible,
+  ]);
 
   return (
     <div
@@ -645,7 +914,7 @@ export function UnifiedTuiHost({
       hidden={!visible}
       aria-hidden={!visible}
       data-sync-state={unifiedPanel?.syncState}
-      data-input-enabled={unifiedPanel?.inputEnabled === true ? "true" : "false"}
+      data-input-enabled={panelInputReady ? "true" : "false"}
     >
       {/* No header/close button: the unified panel is persistent and the
           extension owns its lifecycle (setWidget(key, undefined) → panel_close).

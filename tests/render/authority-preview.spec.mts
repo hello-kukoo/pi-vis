@@ -43,6 +43,15 @@ test("preview implements owner-bound query/intent frames without legacy commands
     const unsubscribe = stub.on("session.publication", (publication) =>
       publications.push(publication),
     );
+    const matchingPublications = () =>
+      publications.filter(
+        (publication) =>
+          publication.plane === "semantic" &&
+          publication.payload.records.some(
+            (record) =>
+              record.type === "intent_outcome" && record.outcome.intentId === "preview-set-model",
+          ),
+      );
     const receipt = await stub.invoke<IntentReceipt>("session.dispatchIntent", {
       sessionId,
       intentId: "preview-set-model",
@@ -51,10 +60,10 @@ test("preview implements owner-bound query/intent frames without legacy commands
       observedCursor: attach.baseline.semantic.sync.cursor,
       intent: { kind: "setModel", provider: "anthropic", modelId: "claude-fable-5" },
     });
-    const publicationCountAtReceipt = publications.length;
+    const matchingPublicationCountAtReceipt = matchingPublications().length;
     await new Promise<void>((resolve) => {
       const timer = window.setInterval(() => {
-        if (publications.length > 0) {
+        if (matchingPublications().length > 0) {
           window.clearInterval(timer);
           resolve();
         }
@@ -69,14 +78,14 @@ test("preview implements owner-bound query/intent frames without legacy commands
       intent: { kind: "setModel", provider: "anthropic", modelId: "claude-fable-5" },
     });
     const legacy = await stub.invoke<undefined>("session.sendCommand", {});
-    const publication = publications[0];
+    const publication = matchingPublications()[0];
     if (!publication) throw new Error("missing authority publication");
     unsubscribe();
     return {
       attach,
       query,
       receipt,
-      publicationCountAtReceipt,
+      matchingPublicationCountAtReceipt,
       publication,
       duplicate,
       legacy,
@@ -97,7 +106,7 @@ test("preview implements owner-bound query/intent frames without legacy commands
     intentId: "preview-set-model",
   });
   // Receipt admission is not an authority completion or a projection mutation.
-  expect(result.publicationCountAtReceipt).toBe(0);
+  expect(result.matchingPublicationCountAtReceipt).toBe(0);
   expect(result.publication).toMatchObject({
     plane: "semantic",
     owner: result.attach.baseline.owner,

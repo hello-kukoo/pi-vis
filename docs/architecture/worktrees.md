@@ -40,14 +40,16 @@ Both New and Existing converge on the same plumbing:
    browsed/pasted existing worktree. Its create flow intentionally has no base
    picker: renderer sends `fromCurrentCheckout`, and
    main resolves the exact `HEAD` of the session's current checkout while still
-   placing the new worktree beside the owning workspace. It then reproduces the
-   source checkout's staged patch, unstaged patch, intent-to-add entries, and
-   non-ignored untracked files in the new worktree without mutating the source;
-   ignored files remain
-   local. Fixing the base to the exact source commit makes that transfer
+   placing the new worktree beside the owning workspace. The user chooses
+   whether to copy the source checkout's staged patch, unstaged patch,
+   intent-to-add entries, and non-ignored untracked files into the new worktree
+   without mutating the source; the checked default preserves the existing
+   copy behavior, while clearing it creates a clean checkout. Ignored files
+   always remain local. Fixing the base to the exact source commit makes that transfer
    deterministic instead of attempting to apply it to an arbitrary, potentially
-   divergent branch. Immediately before detaching the host, main captures the
-   source a second time and compares its HEAD, branch label, patches, modes,
+   divergent branch. Immediately before detaching the host, main rechecks the
+   source. When copy is enabled it captures the source a second time and
+   compares its HEAD, branch label, patches, modes,
    symlinks, intent-to-add paths, and untracked payload digest with the original
    snapshot. Capture first resolves the canonical Git toplevel and runs every
    path-producing command from that coordinate system, so configured nested
@@ -60,8 +62,10 @@ Both New and Existing converge on the same plumbing:
    semantic index entries (including explicit missing markers for deletions),
    then only cheap metadata/ref checks finish the guard, avoiding a long
    temp-only blind interval. Modes for wholly untracked parent directories are
-   captured and restored after payload copying, including restrictive parents. Any intervening checkout change
-   aborts and removes the destination.
+   captured and restored after payload copying, including restrictive parents.
+   Any intervening checkout change aborts and removes the destination. When
+   copy is disabled, main reads and rechecks only the source HEAD and branch
+   label, so uncommitted payload is neither copied nor needlessly captured.
    Applying either choice moves the same session to that worktree; its
    conversation and draft recovery state are preserved. Apply is available only
    for a ready, available, authoritatively idle runtime; main repeats that

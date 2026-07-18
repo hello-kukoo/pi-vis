@@ -268,7 +268,7 @@ test.describe("workspace saved-session search", () => {
     }
   });
 
-  test("keeps verified preview and the previous activation visit when target activation fails", async () => {
+  test("opens persisted history even when target runtime activation fails", async () => {
     // The fixture deliberately exits this target host before ready; the UI
     // assertion below verifies activation failure is contained.
     allowInvariant("main-stderr", "Host process exited with code 23 before ready");
@@ -328,6 +328,9 @@ test.describe("workspace saved-session search", () => {
       await expect(
         page.locator(".sidebar__workspace--active .sidebar__workspace-name"),
       ).toContainText("workspace-beta");
+      const bootActivation = ipcCalls(ipcLog).find((call) => call.channel === "session.activate");
+      const bootSessionId = bootActivation?.payload["sessionId"];
+      expect(bootSessionId).toEqual(expect.any(String));
       fs.writeFileSync(spawnLog, "");
       fs.writeFileSync(ipcLog, "");
 
@@ -342,23 +345,33 @@ test.describe("workspace saved-session search", () => {
       await result.click();
       await page.getByRole("button", { name: "Open session" }).click();
 
-      await expect(page.locator(".session-search-overlay")).toBeVisible();
-      await expect(page.locator(".session-search__notice--error")).toContainText(
-        "Could not open this session",
-        { timeout: 20_000 },
-      );
-      await expect(page.locator(".session-search__context-item--target")).toContainText(
-        "juniper alternate-only branch evidence",
-      );
+      await expect(page.locator(".session-search-overlay")).toHaveCount(0);
       await expect(
         page.locator(".sidebar__workspace--active .sidebar__workspace-name"),
-      ).toContainText("workspace-beta");
+      ).toContainText("workspace-alpha");
+      await expect(page.locator(".session-header__name-btn")).toContainText(
+        "Ancient lifecycle investigation",
+      );
+      await expect(page.locator(".composer__textarea")).toBeEnabled();
+      await expect(page.locator(".transcript-view")).toContainText(
+        "latest persisted path material",
+        {
+          timeout: 20_000,
+        },
+      );
       await expect.poll(() => lines(spawnLog).length, { timeout: 15_000 }).toBe(1);
       const calls = ipcCalls(ipcLog);
       expect(calls.filter((call) => call.channel === "session.activate")).toHaveLength(1);
+      // Boot owns an unused pending-new record rather than a resumable saved
+      // session. Switching to the validated result closes that exact record;
+      // activation-visit release is reserved for a retained saved-session tab
+      // that can be revisited, and must not race this stronger close path.
       expect(
         calls.filter((call) => call.channel === "session.releaseActivationVisit"),
       ).toHaveLength(0);
+      expect(calls.filter((call) => call.channel === "session.close")).toEqual([
+        { channel: "session.close", payload: { sessionId: bootSessionId } },
+      ]);
     } finally {
       await app?.close().catch(() => undefined);
       fs.rmSync(root, { recursive: true, force: true });

@@ -150,8 +150,10 @@
 .diff-edit-card__footer {
   position: absolute;
   right: 0.857rem;
-  top: 100%;
-  transform: translateY(-50%);
+  /* The action pill belongs to the editor, but never to its text plane. Keep
+     the whole pill below the card rather than centering it over the final
+     editable line. The file body reserves this overhang below. */
+  top: calc(100% + 0.286rem);
   z-index: 3;
   display: flex;
   align-items: center;
@@ -216,7 +218,7 @@
    bottom padding to the body equal to the overhang (space below only — shifts no
    glyph above). */
 .diff-file__body--editing {
-  padding-bottom: 1.5rem;
+  padding-bottom: 2.5rem;
 }
 
 /* ── Edit bubble (selection range action rail) ───────────────────── */

@@ -18,10 +18,13 @@ the `git.writeWorkingFile` IPC.
 The header keeps separate compact controls: **BaseBranchDropdown** selects
 HEAD or a branch, and **CommitRangePicker** is shown only for a concrete base
 with at least one `git.commits` candidate. The base trigger contains only the
-branch/HEAD name. The range trigger contains only **Working tree**, **1 commit**,
-or **N commits**. Its popup has a Working tree row followed by the newest-first,
+branch/HEAD name. The range trigger contains only **Working tree**,
+**Uncommitted**, **1 commit**, or **N commits**. Its popup has separate
+**Working tree** (selected base through the live checkout) and **Uncommitted
+changes** (HEAD through the live checkout) rows followed by the newest-first,
 virtualized 500-candidate commit list; it has no header, guidance dead-end, or
-Apply/Cancel footer. Working tree applies immediately. The first commit click
+Apply/Cancel footer. Both live scopes apply immediately without discarding the
+selected base. The first commit click
 immediately applies a one-commit range and remains as the optional second-click
 anchor; the second click applies the normalized inclusive `{start, end}` range.
 Outside click and Escape only dismiss the popup and never roll back or otherwise
@@ -107,6 +110,11 @@ into an **ordered block sequence** (`lib/diff/edit-range.ts`):
 
 `resolveEditRange` returns `null` for a hidden (collapsed-gap) line inside the
 range, or a range with zero context/add (editable) lines (del-only selection).
+The diff selection entry point asks it to widen the selected slice to the
+nearest non-whitespace editable line above and below. Intervening blank lines
+come with that context; removed rows are skipped because they have no writable
+new-side line. The original DOM selection still determines the initial
+textarea selection, so typing replaces only what the user highlighted.
 
 Selections that include removed lines usually still become one contiguous
 editable block: the removed rows are suppressed, and the replacement lines are
@@ -230,8 +238,10 @@ segment subscribes to the active color scheme and re-tokenizes its current
 uncontrolled textarea value on scheme changes without marking the edit dirty.
 
 The card adds **no flow chrome**: the background matches the diff code canvas,
-the ring is an inset `box-shadow`, and the footer is absolutely positioned.
-Opening it shifts no surrounding glyph.
+the ring is an inset `box-shadow`, and the footer is absolutely positioned
+wholly below the editable text plane. The file body reserves only the footer's
+bottom overhang, so the action pill cannot cover code while opening the editor
+still shifts no surrounding glyph.
 
 ## Keyboard / ESC ownership (invariants 11–13)
 

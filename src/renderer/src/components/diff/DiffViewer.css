@@ -453,11 +453,17 @@
 
 .diff-rail__list {
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 0 0.429rem 0.571rem;
   display: flex;
   flex-direction: column;
   gap: 0.143rem;
   flex: 1;
+}
+
+.diff-rail__list-frame {
+  --scroll-fade-surface: var(--bg-sunken);
+  padding-bottom: var(--space-1);
 }
 
 .diff-rail__empty {
@@ -613,10 +619,20 @@
 }
 
 /* Content */
+.diff-content-shell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 var(--space-1) var(--space-1) 0;
+  background: var(--bg);
+}
+
 .diff-content {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   background: var(--bg);
   /* Positioning context for the edit bubble, which is absolutely anchored in

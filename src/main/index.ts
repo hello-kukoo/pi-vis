@@ -1,6 +1,7 @@
 import path from "node:path";
 import { BrowserWindow, app, screen, session, shell } from "electron";
 import { initIpc, stopAllSessions, triggerBackgroundAppUpdateCheck } from "./ipc.js";
+import { isRendererReloadShortcut } from "./renderer-navigation.js";
 import { loadSettings, saveSettings } from "./settings-store.js";
 
 // A forcibly interrupted E2E parent can close Electron's captured output pipes
@@ -105,6 +106,14 @@ if (!hasSingleInstanceLock) {
         sandbox: false,
         contextIsolation: true,
       },
+    });
+
+    // A renderer refresh abandons generation-fenced UI custody while the SDK
+    // hosts continue running. Consume both Cmd/Ctrl+R and the shifted hard-
+    // refresh variant before Chromium or an application-menu accelerator can
+    // reload the document.
+    win.webContents.on("before-input-event", (event, input) => {
+      if (isRendererReloadShortcut(input)) event.preventDefault();
     });
 
     // Allow queryLocalFonts (permission name "local-fonts" may not be in Electron's typed union)

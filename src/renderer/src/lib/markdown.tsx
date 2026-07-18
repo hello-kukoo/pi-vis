@@ -196,6 +196,13 @@ const components: Components = {
       {children}
     </code>
   ),
+  table: ({ node: _node, children, ...props }) => (
+    <div className="markdown-table-shell">
+      <div className="markdown-table-scroll">
+        <table {...props}>{children}</table>
+      </div>
+    </div>
+  ),
   a: ({ node, href, children, ...props }) => {
     const child = node?.children?.[0];
     if (node?.children?.length === 1 && child?.type === "element" && child.tagName === "img") {

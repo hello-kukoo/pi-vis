@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { stripVTControlCharacters } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { createDialogResolver, createUIContext } from "./ui-context.mjs";
 
@@ -170,7 +171,7 @@ describe("uiContext fire-and-forget + no-op methods", () => {
 const PNG_1X1 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-function makeHarness() {
+function makeHarness(tuiModuleOverrides = {}) {
   const sendToMain = vi.fn();
   let panelCounter = 0;
   const panelBridge = {
@@ -264,6 +265,12 @@ function makeHarness() {
     Editor,
     KeybindingsManager,
     TUI_KEYBINDINGS: {},
+    visibleWidth: (text) => text.length,
+    truncateToWidth: (text, width, ellipsis = "...") =>
+      text.length <= width
+        ? text
+        : `${text.slice(0, Math.max(0, width - ellipsis.length))}${ellipsis.slice(0, width)}`,
+    ...tuiModuleOverrides,
   };
 
   const bundle = createUIContext({
@@ -298,6 +305,10 @@ function makeFactory(label = "widget") {
   return factory;
 }
 
+function renderedWidgetLines(container) {
+  return container.children.flatMap((component) => component.render(80));
+}
+
 /** Pull the id from the most recent unified_submit_request sendToMain call. */
 function lastSubmitId(sendToMain) {
   const reqs = sendToMain.mock.calls
@@ -324,26 +335,26 @@ describe("unified TUI: setWidget factory routing", () => {
     expect(factory).toHaveBeenCalledWith(h.tui, expect.anything());
     // layout: [widgetAbove, editorContainer, widgetBelow]
     const below = h.tui.children[2];
-    expect(below.children).toContain(factory.component);
+    expect(renderedWidgetLines(below)).toContain("fleet");
     // the editor is focused
     expect(h.tui.focused).toBe(h.editor);
     // NOT routed through the static-string setWidget path
     expect(h.sendToMain).not.toHaveBeenCalledWith(expect.objectContaining({ method: "setWidget" }));
   });
 
-  it("default placement (no options) is belowEditor", () => {
+  it("default placement (no options) matches pi and is aboveEditor", () => {
     const h = makeHarness();
     const factory = makeFactory();
     h.context.setWidget("k", factory);
-    expect(h.tui.children[2].children).toContain(factory.component);
-    expect(h.tui.children[0].children).not.toContain(factory.component);
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("widget");
+    expect(renderedWidgetLines(h.tui.children[2])).not.toContain("widget");
   });
 
   it("placement: aboveEditor puts the component above the editor", () => {
     const h = makeHarness();
     const factory = makeFactory("agent");
     h.context.setWidget("agent", factory, { placement: "aboveEditor" });
-    expect(h.tui.children[0].children).toContain(factory.component);
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("agent");
   });
 
   it("replacing a factory widget for the same key disposes the old component and adds the new one", () => {
@@ -354,9 +365,9 @@ describe("unified TUI: setWidget factory routing", () => {
     h.context.setWidget("k", f2);
 
     expect(f1.component.dispose).toHaveBeenCalled();
-    const below = h.tui.children[2];
-    expect(below.children).toContain(f2.component);
-    expect(below.children).not.toContain(f1.component);
+    const above = h.tui.children[0];
+    expect(renderedWidgetLines(above)).toContain("v2");
+    expect(renderedWidgetLines(above)).not.toContain("v1");
   });
 
   it("a throwing first factory closes the otherwise-empty unified panel", () => {
@@ -387,9 +398,392 @@ describe("unified TUI: setWidget factory routing", () => {
     ).toThrow("replacement exploded");
 
     expect(prior.component.dispose).not.toHaveBeenCalled();
-    expect(h.tui.children[2].children).toContain(prior.component);
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("prior");
     expect(h.tui.stopped).toBe(false);
     expect(h.panelBridge.closePanel).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid factory result before replacing the prior component", () => {
+    const h = makeHarness();
+    const prior = makeFactory("prior");
+    h.context.setWidget("k", prior);
+
+    expect(() => h.context.setWidget("k", () => ({ invalidate() {} }))).toThrow("without render()");
+
+    expect(prior.component.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("prior");
+  });
+
+  it("observes a rejected async factory before rejecting its malformed result", async () => {
+    const h = makeHarness();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const factoryFailure = Promise.reject(new Error("async factory exploded"));
+
+      expect(() => h.context.setWidget("async-factory", () => factoryFailure)).toThrow(
+        "without render()",
+      );
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(
+        h.bundle.state
+          .catalogSnapshot()
+          .capabilityDiagnostics.some((message) => message.includes("async factory exploded")),
+      ).toBe(true);
+      expect(h.tui.stopped).toBe(true);
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("best-effort disposes an invalid result and fences all descendant widget writes", async () => {
+    const h = makeHarness();
+    const prior = makeFactory("prior");
+    h.context.setWidget("k", prior);
+    const disposeFailure = Promise.reject(new Error("invalid result cleanup exploded"));
+    const invalid = {
+      dispose: vi.fn(() => {
+        h.context.setWidget("cross-key-sync", ["stale sync"]);
+        queueMicrotask(() => h.context.setWidget("cross-key-async", ["stale async"]));
+        return disposeFailure;
+      }),
+    };
+
+    expect(() => h.context.setWidget("k", () => invalid)).toThrow("without render()");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(invalid.dispose).toHaveBeenCalledTimes(1);
+    expect(prior.component.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("prior");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("cross-key-sync");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("cross-key-async");
+    expect(h.sendToMain).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "setWidget",
+        widgetKey: expect.stringMatching(/^cross-key-/),
+      }),
+    );
+    expect(
+      h.bundle.state
+        .catalogSnapshot()
+        .capabilityDiagnostics.some((message) =>
+          message.includes("invalid result cleanup exploded"),
+        ),
+    ).toBe(true);
+  });
+
+  it("reads placement before opening or mutating either widget representation", () => {
+    const hostileOptions = Object.defineProperty({}, "placement", {
+      get() {
+        throw new Error("placement exploded");
+      },
+    });
+
+    const initial = makeHarness();
+    const factory = makeFactory("never constructed");
+    expect(() => initial.context.setWidget("k", factory, hostileOptions)).toThrow(
+      "placement exploded",
+    );
+    expect(factory).not.toHaveBeenCalled();
+    expect(initial.panelBridge.openPanel).not.toHaveBeenCalled();
+
+    const replacement = makeHarness();
+    const prior = makeFactory("prior");
+    replacement.context.setWidget("k", prior);
+    replacement.sendToMain.mockClear();
+    expect(() => replacement.context.setWidget("k", ["static"], hostileOptions)).toThrow(
+      "placement exploded",
+    );
+    expect(prior.component.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(replacement.tui.children[0])).toContain("prior");
+    expect(replacement.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("k");
+    expect(replacement.sendToMain).not.toHaveBeenCalled();
+  });
+
+  it("contains render failures behind a visible fallback and reports only once", () => {
+    const h = makeHarness();
+    h.context.setWidget("broken", () => ({
+      render() {
+        throw new Error("paint exploded");
+      },
+    }));
+    const installed = h.tui.children[0].children[0];
+
+    expect(() => installed.render(80)).not.toThrow();
+    expect(installed.render(80)[0]).toContain('Extension widget "broken" render failed');
+    expect(
+      h.sendToMain.mock.calls.filter(
+        ([message]) => message.method === "notify" && message.message.includes("paint exploded"),
+      ),
+    ).toHaveLength(1);
+    expect(h.bundle.state.catalogSnapshot().capabilityDiagnostics[0]).toContain("paint exploded");
+  });
+
+  it("observes rejected promises returned by every synchronous component hook", async () => {
+    const h = makeHarness();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const renderFailure = Promise.reject(new Error("async paint exploded"));
+      const invalidateFailure = Promise.reject(new Error("async invalidate exploded"));
+      const disposeFailure = Promise.reject(new Error("async dispose exploded"));
+      h.context.setWidget("async", () => ({
+        render: () => renderFailure,
+        invalidate: () => invalidateFailure,
+        dispose: () => disposeFailure,
+      }));
+      const installed = h.tui.children[0].children[0];
+
+      expect(installed.render(80)[0]).toContain('Extension widget "async" render failed');
+      installed.invalidate();
+      h.context.setWidget("async", undefined);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).not.toHaveBeenCalled();
+      const diagnostics = h.bundle.state.catalogSnapshot().capabilityDiagnostics;
+      expect(diagnostics.some((message) => message.includes("render() must return"))).toBe(true);
+      expect(diagnostics.some((message) => message.includes("async invalidate exploded"))).toBe(
+        true,
+      );
+      expect(diagnostics.some((message) => message.includes("async dispose exploded"))).toBe(true);
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("contains malformed render output instead of passing it into pi-tui", () => {
+    const h = makeHarness();
+    h.context.setWidget("malformed", () => ({ render: () => ["valid", 42] }));
+    const installed = h.tui.children[0].children[0];
+
+    expect(installed.render(80)).toEqual([expect.stringContaining('Extension widget "malformed"')]);
+    expect(
+      h.sendToMain.mock.calls.some(
+        ([message]) =>
+          message.method === "notify" &&
+          message.message.includes("render() must return an array of strings"),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["carriage return", "first\rsecond"],
+    ["newline", "first\nsecond"],
+  ])("contains an embedded %s behind one safe fallback row", (_label, line) => {
+    const h = makeHarness();
+    h.context.setWidget("multiline", () => ({ render: () => [line] }));
+    const installed = h.tui.children[0].children[0];
+
+    const rendered = installed.render(80);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]).not.toMatch(/[\r\n]/);
+    expect(rendered[0]).toContain('Extension widget "multiline" render failed');
+    expect(
+      h.sendToMain.mock.calls.some(
+        ([message]) =>
+          message.method === "notify" &&
+          message.message.includes("contains an embedded line break"),
+      ),
+    ).toBe(true);
+  });
+
+  it("clips valid output at a transient tiny width without reporting an extension failure", () => {
+    const h = makeHarness();
+    const fullLine = "x".repeat(200);
+    h.context.setWidget("wide", () => ({ render: () => [fullLine] }));
+    const installed = h.tui.children[0].children[0];
+
+    const [clipped] = installed.render(2);
+    expect(clipped).toBe("x…");
+    expect(installed.render(240)).toEqual([fullLine]);
+    expect(
+      h.sendToMain.mock.calls.some(
+        ([message]) => message.method === "notify" && message.message.includes("render failed"),
+      ),
+    ).toBe(false);
+    expect(h.bundle.state.catalogSnapshot().capabilityDiagnostics).toEqual([]);
+  });
+
+  it("preserves ANSI through width normalization and enforces the helper postcondition", () => {
+    const red = "\u001b[31m";
+    const reset = "\u001b[0m";
+    const visibleWidth = (text) => [...stripVTControlCharacters(text)].length;
+    const ansiAwareTruncate = (text, width, ellipsis = "") => {
+      const plain = stripVTControlCharacters(text);
+      if (plain.length <= width) return text;
+      return `${red}${plain.slice(0, Math.max(0, width - ellipsis.length))}${ellipsis}${reset}`;
+    };
+    const h = makeHarness({ visibleWidth, truncateToWidth: ansiAwareTruncate });
+    const fullLine = `${red}factory widget content${reset}`;
+    h.context.setWidget("ansi", () => ({ render: () => [fullLine] }));
+    const installed = h.tui.children[0].children[0];
+
+    const [clipped] = installed.render(2);
+    expect(visibleWidth(clipped)).toBeLessThanOrEqual(2);
+    expect(clipped.startsWith(red)).toBe(true);
+    expect(clipped.endsWith(reset)).toBe(true);
+    expect(installed.render(80)).toEqual([fullLine]);
+    expect(h.sendToMain).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "notify", notifyType: "error" }),
+    );
+
+    const brokenHelper = makeHarness({
+      visibleWidth,
+      truncateToWidth: (text) => text,
+    });
+    brokenHelper.context.setWidget("bad-helper", () => ({ render: () => [fullLine] }));
+    const [safelyBounded] = brokenHelper.tui.children[0].children[0].render(2);
+    expect(visibleWidth(safelyBounded)).toBeLessThanOrEqual(2);
+    expect(brokenHelper.sendToMain).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "notify", notifyType: "error" }),
+    );
+  });
+
+  it("keeps exactly one presentation when a key switches static → factory", () => {
+    const h = makeHarness();
+    h.context.setWidget("k", ["static"]);
+    const factory = makeFactory("factory");
+
+    h.context.setWidget("k", factory);
+
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("k");
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("factory");
+    expect(h.sendToMain).toHaveBeenLastCalledWith(
+      expect.objectContaining({ method: "setWidget", widgetKey: "k", widgetLines: undefined }),
+    );
+  });
+
+  it("keeps exactly one presentation when a key switches factory → static", () => {
+    const h = makeHarness();
+    const factory = makeFactory("factory");
+    h.context.setWidget("k", factory);
+    const tui = h.tui;
+
+    h.context.setWidget("k", ["static"]);
+
+    expect(factory.component.dispose).toHaveBeenCalledTimes(1);
+    expect(tui.stopped).toBe(true);
+    expect(h.bundle.state.catalogSnapshot().widgets.k).toEqual(["static"]);
+    expect(h.sendToMain).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: "setWidget",
+        widgetKey: "k",
+        widgetLines: ["static"],
+        widgetPlacement: "aboveEditor",
+      }),
+    );
+  });
+
+  it("does not dispose a component factory that returns the same instance again", () => {
+    const h = makeHarness();
+    const component = { render: () => ["stable"], dispose: vi.fn() };
+    const factory = () => component;
+    h.context.setWidget("k", factory);
+
+    h.context.setWidget("k", factory, { placement: "belowEditor" });
+
+    expect(component.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(h.tui.children[2])).toContain("stable");
+    expect(renderedWidgetLines(h.tui.children[0])).not.toContain("stable");
+  });
+
+  it("disposes a source shared by different keys only after its final owner leaves", () => {
+    const h = makeHarness();
+    const source = { render: () => ["shared"], dispose: vi.fn() };
+    const factory = () => source;
+    h.context.setWidget("a", factory);
+    h.context.setWidget("b", factory);
+    const above = h.tui.children[0];
+
+    h.context.setWidget("a", undefined);
+    expect(source.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(above)).toEqual(["shared"]);
+
+    h.context.setWidget("b", undefined);
+    expect(source.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a shared source alive while temporary key leases churn", () => {
+    const h = makeHarness();
+    const source = { render: () => ["shared"], dispose: vi.fn() };
+    const factory = () => source;
+    h.context.setWidget("anchor", factory);
+
+    for (const key of ["temporary-a", "temporary-b", "temporary-c"]) {
+      h.context.setWidget(key, factory);
+      h.context.setWidget(key, undefined);
+      expect(source.dispose).not.toHaveBeenCalled();
+    }
+
+    h.context.setWidget("anchor", undefined);
+    expect(source.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences same- and cross-key writes scheduled by a retiring component", async () => {
+    const h = makeHarness();
+    const replacement = makeFactory("replacement");
+    const retired = {
+      render: () => ["retired"],
+      dispose: vi.fn(() => {
+        h.context.setWidget("k", ["stale synchronous write"]);
+        h.context.setWidget("other-sync", ["stale cross-key synchronous write"]);
+        setTimeout(() => {
+          h.context.setWidget("other-timer", ["stale cross-key timer write"]);
+        }, 0);
+        return Promise.resolve().then(() => {
+          h.context.setWidget("k", ["stale asynchronous write"]);
+          h.context.setWidget("other-async", ["stale cross-key asynchronous write"]);
+        });
+      }),
+    };
+    h.context.setWidget("k", () => retired);
+
+    h.context.setWidget("k", replacement);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(retired.dispose).toHaveBeenCalledTimes(1);
+    expect(replacement.component.dispose).not.toHaveBeenCalled();
+    expect(renderedWidgetLines(h.tui.children[0])).toContain("replacement");
+    expect(h.tui.stopped).toBe(false);
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("k");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("other-sync");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("other-async");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("other-timer");
+    expect(h.sendToMain).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "setWidget",
+        widgetKey: expect.stringMatching(/^(k|other-)/),
+        widgetLines: expect.any(Array),
+      }),
+    );
+  });
+
+  it("tombstones the Unified generation and fences whole-TUI teardown callbacks", async () => {
+    const h = makeHarness();
+    const source = {
+      render: () => ["widget"],
+      dispose: vi.fn(() => h.unified.dispose()),
+    };
+    h.editor.dispose.mockImplementation(() => {
+      h.context.setWidget("editor-dispose-sync", ["stale sync"]);
+      queueMicrotask(() => h.context.setWidget("editor-dispose-async", ["stale async"]));
+    });
+    h.context.setWidget("k", () => source);
+    const panelId = h.panelBridge.openPanel.mock.results[0].value;
+
+    h.unified.dispose();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(source.dispose).toHaveBeenCalledTimes(1);
+    expect(h.editor.dispose).toHaveBeenCalledTimes(1);
+    expect(h.panelBridge.closePanel).toHaveBeenCalledTimes(1);
+    expect(h.panelBridge.closePanel).toHaveBeenCalledWith(panelId);
+    expect(h.panelBridge.openPanel).toHaveBeenCalledTimes(1);
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("editor-dispose-sync");
+    expect(h.bundle.state.catalogSnapshot().widgets).not.toHaveProperty("editor-dispose-async");
   });
 
   it("a static string[] widget still uses the sendToMain path (no unified TUI)", () => {

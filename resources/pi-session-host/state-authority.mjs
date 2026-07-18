@@ -101,6 +101,12 @@ export function createStateAuthority({
   let queueIdentity = { steer: [], followUp: [] };
   let queueLengths = { steer: 0, followUp: 0 };
   let queueValues = { steer: [], followUp: [] };
+  // Idle prompts bypass Pi's public queues, but their preflight callback still
+  // gives us an exact child-owned delivery identity before message_start can
+  // fire re-entrantly. Persist that one identity until the direct user echo or
+  // prompt settlement so renderer remount/sleep cannot turn accepted text back
+  // into an apparently unsent draft.
+  let directDeliveryIntentId = null;
   // Pi may acknowledge preflight before its public queue getter exposes the
   // accepted slot. Retain only the exact one-slot baseline claim until a later
   // direct read can prove that append; ambiguity discards the claim.
@@ -590,9 +596,19 @@ export function createStateAuthority({
     }
   }
 
+  // Pi's public isCompacting getter deliberately covers both context
+  // compaction and branch summarization. runNavigation gives us the public,
+  // operation-specific evidence needed to disambiguate that getter. Treating
+  // it as compaction while navigationDepth > 0 creates a phantom compaction:
+  // there can be no matching compaction_end, so its barrier and cancelling
+  // state can never settle.
+  function compactionGetterActive() {
+    return session.isCompacting === true && navigationDepth === 0;
+  }
+
   function compactionBarrierOpen() {
     return (
-      session.isCompacting === true ||
+      compactionGetterActive() ||
       compactionGetterReconcilePending ||
       ["active", "active_unknown_origin", "cancelling", "retry_wait"].includes(compaction.phase) ||
       compaction.invocationPending === true
@@ -610,7 +626,7 @@ export function createStateAuthority({
   }
 
   function reconcileCompactionGetter() {
-    const getterActive = session.isCompacting === true;
+    const getterActive = compactionGetterActive();
     if (
       getterActive &&
       !compactionGetterReconcilePending &&
@@ -1490,6 +1506,8 @@ export function createStateAuthority({
                 // window where message_start has no queue intent.
                 if (wasStreaming) {
                   registerQueuedIntent(request, queueLengthBeforePrompt, queueValuesBeforePrompt);
+                } else {
+                  directDeliveryIntentId = request.intentId;
                 }
               }
               preflightResolve(success);
@@ -1499,6 +1517,13 @@ export function createStateAuthority({
       ),
     );
     if (!wasStreaming) promptFence = promptPromise;
+    if (!wasStreaming) {
+      void promptPromise
+        .finally(() => {
+          if (directDeliveryIntentId === request.intentId) directDeliveryIntentId = null;
+        })
+        .catch(() => {});
+    }
     if (wasStreaming) {
       // Register this before any admission continuation so all prompt() exit
       // paths (handled extension, rejection, throw, or normal queueing) take a
@@ -1977,8 +2002,12 @@ export function createStateAuthority({
       const { deliveredQueueIntentIds } = readQueues(true);
       // More than one removal for one event is ambiguous; retire all rather
       // than assigning an arbitrary GUI intent.
-      const queueIntentId =
+      const queuedIntentId =
         deliveredQueueIntentIds.length === 1 ? deliveredQueueIntentIds[0] : undefined;
+      const queueIntentId = queuedIntentId ?? directDeliveryIntentId ?? undefined;
+      if (!queuedIntentId && directDeliveryIntentId === queueIntentId) {
+        directDeliveryIntentId = null;
+      }
       if (queueIntentId) publishedEvent = { ...event, queueIntentId };
     }
     if (event?.type === "agent_start") {
@@ -2437,6 +2466,7 @@ export function createStateAuthority({
       anomaly: null,
     };
     navigationDepth = 0;
+    directDeliveryIntentId = null;
     activeObservedOperations.clear();
     resetQueueIdentity();
   }

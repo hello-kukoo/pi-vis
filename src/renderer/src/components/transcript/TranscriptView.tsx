@@ -31,6 +31,7 @@ import {
   transcriptBlockCount,
 } from "../../stores/transcript.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { Spinner } from "../common/Spinner.js";
 import { IconChevronRight } from "../common/icons.js";
 import { DiffBlock } from "./DiffBlock.js";
@@ -535,10 +536,6 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
   const end = Math.min(lines.length, start + visibleCount + OUTPUT_VIRTUAL_OVERSCAN * 2);
   const beforeHeight = start * rowHeight;
   const afterHeight = Math.max(0, (lines.length - end) * rowHeight);
-  const hasOverflow = lines.length * rowHeight > viewportHeight + 1;
-  const atTop = scrollTop <= 1;
-  const atBottom = !hasOverflow || scrollTop + viewportHeight >= lines.length * rowHeight - 1;
-
   return (
     <div className="tool-card__output-panel">
       <div className="tool-card__section-header">
@@ -548,41 +545,49 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
           {copied ? "Copied" : "Copy all"}
         </button>
       </div>
-      <div
-        className={[
-          "tool-card__output-frame",
-          !atTop ? "tool-card__output-frame--fade-top" : "",
-          !atBottom ? "tool-card__output-frame--fade-bottom" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
+      <ScrollFadeFrame
+        frameClassName="tool-card__output-frame"
+        scrollerRef={scrollRef}
+        className="tool-card__virtual-scroll"
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        aria-label={`${label} (${formatLineCount(lines.length)})`}
+        role="region"
+        tabIndex={0}
+        horizontalScrollbar
       >
-        <div
-          ref={scrollRef}
-          className="tool-card__virtual-scroll"
-          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-          aria-label={`${label} (${formatLineCount(lines.length)})`}
-          role="region"
-          // biome-ignore lint/a11y/noNoninteractiveTabindex: scrollable output regions must be keyboard-focusable so users can page through retained output.
-          tabIndex={0}
-        >
-          <div style={{ height: beforeHeight }} aria-hidden="true" />
-          {lines.slice(start, end).map((line, offset) => (
-            <div
-              // biome-ignore lint/suspicious/noArrayIndexKey: virtual rows are positional slices of immutable text
-              key={start + offset}
-              ref={offset === 0 ? measureRef : undefined}
-              className="tool-card__output-line"
-            >
-              {line || "\u00A0"}
-            </div>
-          ))}
-          <div style={{ height: afterHeight }} aria-hidden="true" />
-        </div>
-      </div>
+        <div style={{ height: beforeHeight }} aria-hidden="true" />
+        {lines.slice(start, end).map((line, offset) => (
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: virtual rows are positional slices of immutable text
+            key={start + offset}
+            ref={offset === 0 ? measureRef : undefined}
+            className="tool-card__output-line"
+          >
+            {line || "\u00A0"}
+          </div>
+        ))}
+        <div style={{ height: afterHeight }} aria-hidden="true" />
+      </ScrollFadeFrame>
     </div>
   );
 });
+
+function ToolScrollWell({
+  children,
+  diff = false,
+}: {
+  children: React.ReactNode;
+  diff?: boolean | undefined;
+}): React.ReactElement {
+  return (
+    <ScrollFadeFrame
+      frameClassName="tool-card__scroll-frame"
+      className={`tool-card__scroll${diff ? " tool-card__scroll--diff" : ""}`}
+    >
+      {children}
+    </ScrollFadeFrame>
+  );
+}
 
 const ToolCallBlock = memo(function ToolCallBlock({
   data,
@@ -637,9 +642,9 @@ const ToolCallBlock = memo(function ToolCallBlock({
           <span className="tool-card__section-title">diff</span>
           <span className="tool-card__section-meta">{formatLineCount(diffLines.length)}</span>
         </div>
-        <div className="tool-card__scroll tool-card__scroll--diff">
+        <ToolScrollWell diff>
           <DiffBlock diff={diff} />
-        </div>
+        </ToolScrollWell>
       </div>
     ) : null;
     const outputNode = outputLines.length > 0 ? <VirtualizedOutput text={data.outputText} /> : null;
@@ -657,11 +662,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
     // Diffs truncate from the bottom — the head is the interesting part
     body = (
       <div className="tool-card__body">
-        <div className="tool-card__scroll">
+        <ToolScrollWell>
           <DiffBlock
             diff={hiddenDiff > 0 ? diffLines.slice(0, DIFF_PREVIEW_LINES).join("\n") : diff}
           />
-        </div>
+        </ToolScrollWell>
         {hiddenDiff > 0 && (
           <div className="tool-card__more">
             … {hiddenDiff} more {pluralLines(hiddenDiff)}
@@ -678,11 +683,11 @@ const ToolCallBlock = memo(function ToolCallBlock({
             … {hiddenOutput} earlier {pluralLines(hiddenOutput)}
           </div>
         )}
-        <div className="tool-card__scroll">
+        <ToolScrollWell>
           <pre className="tool-card__output">
             {outputLines.slice(-OUTPUT_PREVIEW_LINES).join("\n")}
           </pre>
-        </div>
+        </ToolScrollWell>
       </div>
     );
   }
@@ -763,11 +768,11 @@ const BashBlock = memo(function BashBlock({
           {open ? (
             <VirtualizedOutput text={data.outputText} />
           ) : (
-            <div className="tool-card__scroll">
+            <ToolScrollWell>
               <pre className="tool-card__output">
                 {outputLines.slice(-OUTPUT_PREVIEW_LINES).join("\n")}
               </pre>
-            </div>
+            </ToolScrollWell>
           )}
         </div>
       )}
@@ -826,11 +831,11 @@ const ActivityCard = memo(function ActivityCard({
     >
       {showBody && (
         <div className="tool-card__body">
-          <div className="tool-card__scroll">
+          <ToolScrollWell>
             <div className="transcript-block__content activity-card__markdown markdown-body">
               <Markdown>{open ? text : preview}</Markdown>
             </div>
-          </div>
+          </ToolScrollWell>
           {!open && hasHiddenPreview && (
             <div className="tool-card__more">
               {hiddenLines > 0

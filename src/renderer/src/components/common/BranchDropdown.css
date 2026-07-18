@@ -64,11 +64,17 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 0.143rem;
-  padding: 0.143rem var(--space-2) var(--space-2);
+  padding: 0.143rem 0 var(--space-1);
+}
+
+.branch-dropdown__list-frame {
+  --scroll-fade-surface: var(--surface);
+  padding: 0 var(--space-2);
 }
 
 .branch-dropdown__list--virtual {

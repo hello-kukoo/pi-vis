@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { RENDERER_GENERATION } from "../../lib/renderer-generation.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import "./ExtensionDialogHost.css";
 
 interface ExtensionDialogHostProps {
@@ -88,7 +89,12 @@ function SelectDialog({ request, onRespond }: DialogProps): React.ReactElement {
           </span>
         )}
       </div>
-      <div className="ext-dialog__options" ref={listRef} role="listbox">
+      <ScrollFadeFrame
+        frameClassName="ext-dialog__options-frame"
+        scrollerRef={listRef}
+        className="ext-dialog__options"
+        role="listbox"
+      >
         {req.options.map((opt, idx) => (
           <button
             type="button"
@@ -106,7 +112,7 @@ function SelectDialog({ request, onRespond }: DialogProps): React.ReactElement {
             {opt}
           </button>
         ))}
-      </div>
+      </ScrollFadeFrame>
       <div className="ext-dialog__hint">↑↓ navigate · enter to select</div>
       <button
         type="button"

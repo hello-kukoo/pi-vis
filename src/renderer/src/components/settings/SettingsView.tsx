@@ -9,6 +9,7 @@ import { useAppUpdatesStore } from "../../stores/app-updates-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { listThemes } from "../../theme/registry.js";
 import { LoginTerminal } from "../auth/LoginTerminal.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconCheck, IconChevronDown, IconClose } from "../common/icons.js";
 import "./SettingsView.css";
 
@@ -89,26 +90,33 @@ function SettingsSelect({
         <IconChevronDown className="settings-select__caret" />
       </button>
       {open && (
-        <div className="settings-select__dropdown" role="listbox">
-          {options.map((option) => {
-            const active = option.value === value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                className={`settings-select__option${active ? " settings-select__option--active" : ""}`}
-                role="option"
-                aria-selected={active}
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                <span className="settings-select__check">{active && <IconCheck />}</span>
-                <span className="settings-select__option-label">{option.label}</span>
-              </button>
-            );
-          })}
+        <div className="settings-select__dropdown">
+          <ScrollFadeFrame
+            frameClassName="settings-select__list-frame"
+            className="settings-select__list"
+            role="listbox"
+            fill
+          >
+            {options.map((option) => {
+              const active = option.value === value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`settings-select__option${active ? " settings-select__option--active" : ""}`}
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => {
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="settings-select__check">{active && <IconCheck />}</span>
+                  <span className="settings-select__option-label">{option.label}</span>
+                </button>
+              );
+            })}
+          </ScrollFadeFrame>
         </div>
       )}
     </div>
@@ -537,10 +545,14 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
             </button>
           </div>
 
-          <div className="settings-panel__body">
+          <ScrollFadeFrame
+            frameClassName="settings-panel__body-frame"
+            className="settings-panel__body"
+            fill
+          >
             {/* Pi runtime */}
             <section className="settings-section">
-              <h3 className="settings-section__title">pi runtime</h3>
+              <h3 className="settings-section__title">Pi runtime</h3>
               <div className="settings-row">
                 <span className="settings-label">Version</span>
                 <span className="settings-value settings-value--mono">
@@ -907,7 +919,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
                 </button>
               </div>
             </section>
-          </div>
+          </ScrollFadeFrame>
         </div>
       </div>
 

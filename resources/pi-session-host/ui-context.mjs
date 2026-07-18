@@ -21,6 +21,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createKeyboardProtocolNegotiator, createKittyGlobalGate } from "./keyboard-protocol.mjs";
 
 // ─── Dialog resolver (promise-based, one-at-a-time) ───────────────────────────
@@ -134,7 +135,7 @@ export function createDialogResolver(sendToMain, onAcknowledged = () => {}) {
  * @param {function} deps.sendToMain - sends messages to the Electron main process
  * @param {function} [deps.trackBlockingUi] - correlates a blocking UI promise
  *   with the lifecycle async context that opened it.
- * @param {object} deps.tuiModules - { TUI, KeybindingsManager, TUI_KEYBINDINGS } from pi-tui
+ * @param {object} deps.tuiModules - public TUI/component/keybinding/width helpers from pi-tui
  */
 export function createUIContext({
   theme,
@@ -163,8 +164,14 @@ export function createUIContext({
     setKittyProtocolActive,
     StdinBuffer,
     isKeyRelease,
+    truncateToWidth,
+    visibleWidth,
   } = tuiModules;
   const invocationSurface = new AsyncLocalStorage();
+  // A teardown callback belongs exclusively to the widget generation being
+  // retired. Preserve that identity across promises/timers created by teardown
+  // so none of its descendants can publish widgets into a live generation.
+  const widgetDisposalContext = new AsyncLocalStorage();
   const catalog = {
     notifications: [],
     statuses: new Map(),
@@ -397,6 +404,11 @@ export function createUIContext({
   // ─── Unified TUI state (one per uiContext) ────────────────────────────────────────
 
   let unifiedTuiState = null;
+
+  // Component factories may return the same object for more than one key. One
+  // source object is one lifecycle identity: every installed adapter owns a
+  // lease, and source.dispose() runs only after the final lease is released.
+  const widgetSourceOwnership = new Map();
 
   // Pending unified submissions remain authoritative across renderer loss:
   // id → { text, revision }. The new renderer replays the same correlated
@@ -670,49 +682,346 @@ export function createUIContext({
 
   function disposeUnifiedTui(options = {}) {
     if (!unifiedTuiState) return;
-    const { tui, editor, panelId, components } = unifiedTuiState;
+    const state = unifiedTuiState;
+    const { tui, editor, panelId, components } = state;
 
-    // Detach onTerminalInput handlers from this TUI instance. They stay
-    // registered (terminalInputHandlers) and re-attach to a fresh TUI if a
-    // later setWidget factory recreates one; nilling the unsubscribe avoids a
-    // stale detach on a disposed TUI.
-    for (const entry of terminalInputHandlers) {
-      try {
-        entry.unsubscribe?.();
-      } catch {
-        /* unsubscribe already invalidated by tui.stop() */
+    // Tombstone the generation before invoking any extension- or TUI-owned
+    // cleanup. Re-entrant disposal is then a no-op, and no callback can observe
+    // this retiring state as the current Unified TUI.
+    unifiedTuiState = null;
+
+    runWidgetTeardown(() => {
+      // Detach onTerminalInput handlers from this TUI instance. They stay
+      // registered (terminalInputHandlers) and re-attach to a fresh TUI if a
+      // later, independent setWidget factory recreates one; nilling the
+      // unsubscribe avoids a stale detach on a disposed TUI.
+      for (const entry of terminalInputHandlers) {
+        try {
+          entry.unsubscribe?.();
+        } catch {
+          /* unsubscribe already invalidated by tui.stop() */
+        }
+        entry.unsubscribe = null;
       }
-      entry.unsubscribe = null;
-    }
 
-    try {
-      tui.stop();
-    } catch {
-      /* already stopped */
-    }
-
-    // Dispose widget components + the editor. The layout Containers
-    // (widgetAbove/editorContainer/widgetBelow) are structural — pi-tui's
-    // Container has no dispose(), so they need no explicit teardown.
-    for (const { component } of components.values()) {
       try {
-        component.dispose?.();
+        tui.stop();
+      } catch {
+        /* already stopped */
+      }
+
+      // Dispose widget components + the editor. The layout Containers
+      // (widgetAbove/editorContainer/widgetBelow) are structural — pi-tui's
+      // Container has no dispose(), so they need no explicit teardown.
+      for (const { component } of components.values()) {
+        try {
+          component.dispose?.();
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        editor.dispose?.();
       } catch {
         /* ignore */
       }
-    }
+
+      // Renderer reload preserves correlated unified submissions for replay.
+      // Session replacement uses the default and retires old-session requests.
+      if (options.preservePendingSubmits !== true) pendingSubmits.clear();
+
+      panelBridge.closePanel(panelId);
+    });
+  }
+
+  function normalizedWidgetPlacement(options) {
+    // Match pi's public ExtensionUIContext contract: omitted placement means
+    // above the editor. Treat unknown runtime values conservatively as the
+    // default instead of silently moving extension chrome below the editor.
+    return options?.placement === "belowEditor" ? "belowEditor" : "aboveEditor";
+  }
+
+  function widgetFailureMessage(key, phase, error) {
+    let safeKey = "unknown";
     try {
-      editor.dispose?.();
+      safeKey = String(key);
     } catch {
-      /* ignore */
+      // Preserve a useful diagnostic even for a hostile runtime key value.
+    }
+    let detail = "Unknown error";
+    try {
+      detail = error instanceof Error ? error.message : String(error);
+    } catch {
+      // Even a hostile thrown value with a throwing toString() cannot escape
+      // the render boundary.
+    }
+    const sanitize = (value) => stripVTControlCharacters(value).replace(/\s+/g, " ").trim();
+    safeKey = sanitize(safeKey).slice(0, 120) || "unknown";
+    detail = sanitize(detail).slice(0, 240);
+    return `Extension widget "${safeKey}" ${phase} failed${detail ? `: ${detail}` : ""}`;
+  }
+
+  function reportWidgetFailure(key, phase, error) {
+    const message = widgetFailureMessage(key, phase, error);
+    addCapabilityDiagnostic(message);
+    catalog.notifications.push({
+      id: `widget-failure-${++notificationSequence}`,
+      message,
+      type: "error",
+    });
+    try {
+      sendToMain({
+        type: "extension_ui_request",
+        method: "notify",
+        message,
+        notifyType: "error",
+      });
+    } catch {
+      // Render containment must remain containment even if the renderer IPC
+      // disappeared at the same moment as the extension failed.
+    }
+  }
+
+  function observeRejectedThenable(value, onRejected) {
+    if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+      return false;
+    }
+    let then;
+    try {
+      then = value.then;
+    } catch (error) {
+      try {
+        onRejected(error);
+      } catch {
+        // Failure reporting must not become a second component failure.
+      }
+      return true;
+    }
+    if (typeof then !== "function") return false;
+
+    // Pi's Component contract is synchronous, but a JavaScript extension can
+    // accidentally return a Promise. Observe its rejection immediately so the
+    // malformed hook cannot escape through the host's unhandled-rejection path.
+    try {
+      void Promise.resolve(value).then(undefined, (error) => {
+        try {
+          onRejected(error);
+        } catch {
+          // Failure reporting must not create an unhandled rejection either.
+        }
+      });
+    } catch (error) {
+      try {
+        onRejected(error);
+      } catch {
+        // Preserve containment even for a hostile thenable implementation.
+      }
+    }
+    return true;
+  }
+
+  function runWidgetTeardown(callback) {
+    // AsyncLocalStorage propagates this fence through Promise and timer work
+    // spawned by cleanup. The fence is intentionally key-agnostic: a disposer
+    // writing a different key is still stale work from a retired generation.
+    return widgetDisposalContext.run(true, callback);
+  }
+
+  function acquireWidgetSource(key, source) {
+    let ownership = widgetSourceOwnership.get(source);
+    if (!ownership) {
+      ownership = { source, leaseCount: 0, activeKeyRefCounts: new Map() };
+      widgetSourceOwnership.set(source, ownership);
+    }
+    ownership.leaseCount++;
+    ownership.activeKeyRefCounts.set(key, (ownership.activeKeyRefCounts.get(key) ?? 0) + 1);
+    return { ownership, key, released: false };
+  }
+
+  function releaseWidgetSource(lease, args, reportOnce) {
+    if (lease.released) return;
+    lease.released = true;
+
+    const { ownership, key } = lease;
+    const keyRefCount = ownership.activeKeyRefCounts.get(key) ?? 0;
+    if (keyRefCount <= 1) ownership.activeKeyRefCounts.delete(key);
+    else ownership.activeKeyRefCounts.set(key, keyRefCount - 1);
+    ownership.leaseCount--;
+    if (ownership.leaseCount > 0) return;
+
+    if (widgetSourceOwnership.get(ownership.source) === ownership) {
+      widgetSourceOwnership.delete(ownership.source);
     }
 
-    // Renderer reload preserves correlated unified submissions for replay.
-    // Session replacement uses the default and retires old-session requests.
-    if (options.preservePendingSubmits !== true) pendingSubmits.clear();
+    let result;
+    try {
+      result = runWidgetTeardown(() => ownership.source.dispose?.(...args));
+    } catch (error) {
+      reportOnce("dispose", error);
+      return;
+    }
+    observeRejectedThenable(result, (error) => reportOnce("dispose", error));
+  }
 
-    panelBridge.closePanel(panelId);
-    unifiedTuiState = null;
+  function disposeInvalidWidgetSource(key, source) {
+    if ((typeof source !== "object" && typeof source !== "function") || source === null) return;
+
+    // An invalid refresh may return an object that is still installed under a
+    // different lease. It is not ours to dispose until that final active lease
+    // retires through releaseWidgetSource().
+    if (widgetSourceOwnership.has(source)) return;
+
+    let result;
+    try {
+      result = runWidgetTeardown(() => source.dispose?.());
+    } catch (error) {
+      reportWidgetFailure(key, "dispose", error);
+      return;
+    }
+    observeRejectedThenable(result, (error) => reportWidgetFailure(key, "dispose", error));
+  }
+
+  function createGuardedWidgetComponent(key, source) {
+    if ((typeof source !== "object" && typeof source !== "function") || source === null) {
+      throw new TypeError(`Widget factory "${key}" must return a TUI component`);
+    }
+    if (typeof source.render !== "function") {
+      throw new TypeError(`Widget factory "${key}" returned a component without render()`);
+    }
+
+    const sourceLease = acquireWidgetSource(key, source);
+    const reportedPhases = new Set();
+    let disposed = false;
+    const reportOnce = (phase, error) => {
+      if (reportedPhases.has(phase)) return;
+      reportedPhases.add(phase);
+      reportWidgetFailure(key, phase, error);
+    };
+    const safeWidth = (width) => (Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 80);
+    const conservativelyTruncatePlainText = (value, width) => {
+      const maxWidth = safeWidth(width);
+      // Terminal code points occupy at most two cells. Keep only printable
+      // characters and at most floor(width / 2) of them, so this last-resort
+      // path is bounded even when the public width helpers are absent or throw.
+      // Losing styling here is preferable to leaking a partial control
+      // sequence into pi-tui.
+      const printable = Array.from(stripVTControlCharacters(value)).filter((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint >= 0x20 && !(codePoint >= 0x7f && codePoint <= 0x9f);
+      });
+      return printable.slice(0, Math.floor(maxWidth / 2)).join("");
+    };
+    const truncateSafely = (value, width) => {
+      const maxWidth = safeWidth(width);
+      if (typeof truncateToWidth === "function") {
+        try {
+          const truncated = truncateToWidth(value, maxWidth, maxWidth > 1 ? "…" : "");
+          if (typeof truncated === "string" && typeof visibleWidth === "function") {
+            const truncatedWidth = visibleWidth(truncated);
+            if (
+              Number.isFinite(truncatedWidth) &&
+              truncatedWidth >= 0 &&
+              truncatedWidth <= maxWidth
+            ) {
+              return truncated;
+            }
+          }
+        } catch {
+          // Fall through to a conservative plain-text bound. It sacrifices
+          // styling but cannot leave a partial terminal control sequence.
+        }
+      }
+      return conservativelyTruncatePlainText(value, maxWidth);
+    };
+    const fitRenderedLine = (value, width) => {
+      const maxWidth = safeWidth(width);
+      if (typeof visibleWidth === "function") {
+        try {
+          const measuredWidth = visibleWidth(value);
+          if (Number.isFinite(measuredWidth) && measuredWidth >= 0 && measuredWidth <= maxWidth) {
+            return value;
+          }
+        } catch {
+          // A width-helper failure is a host compatibility concern, not an
+          // extension render failure. The safe truncation path below contains
+          // the row without publishing a false error notification.
+        }
+      }
+      return truncateSafely(value, maxWidth);
+    };
+    const fallback = (error, width) => {
+      const message = widgetFailureMessage(key, "render", error);
+      try {
+        const styled = theme.fg("error", message);
+        return [
+          truncateSafely(typeof styled === "string" && styled.length > 0 ? styled : message, width),
+        ];
+      } catch {
+        return [truncateSafely(message, width)];
+      }
+    };
+
+    return {
+      render(...args) {
+        try {
+          const render = source.render;
+          if (typeof render !== "function") {
+            throw new TypeError("render is no longer a function");
+          }
+          const lines = render.apply(source, args);
+          if (!Array.isArray(lines)) {
+            observeRejectedThenable(lines, (error) => reportOnce("render", error));
+            throw new TypeError("render() must return an array of strings");
+          }
+          if (lines.some((line) => typeof line !== "string")) {
+            throw new TypeError("render() must return an array of strings");
+          }
+          for (let index = 0; index < lines.length; index++) {
+            if (lines[index].includes("\r") || lines[index].includes("\n")) {
+              throw new TypeError(`rendered line ${index + 1} contains an embedded line break`);
+            }
+          }
+          const width = safeWidth(args[0]);
+          if (typeof visibleWidth !== "function") {
+            return lines.map((line) => conservativelyTruncatePlainText(line, width));
+          }
+          // A component can legitimately see a transiently tiny width while
+          // the renderer mounts/fits xterm. Width overflow is therefore layout
+          // input, not an extension failure: normalize each row with pi-tui's
+          // ANSI-aware public helper and let the next wider render restore the
+          // complete source output. Malformed rows and thrown render calls
+          // remain on the diagnostic path above.
+          return lines.map((line) => fitRenderedLine(line, width));
+        } catch (error) {
+          reportOnce("render", error);
+          return fallback(error, args[0]);
+        }
+      },
+      invalidate(...args) {
+        try {
+          const result = source.invalidate?.(...args);
+          observeRejectedThenable(result, (error) => reportOnce("invalidate", error));
+        } catch (error) {
+          reportOnce("invalidate", error);
+        }
+      },
+      dispose(...args) {
+        if (disposed) return;
+        disposed = true;
+        releaseWidgetSource(sourceLease, args, reportOnce);
+      },
+    };
+  }
+
+  function removeFactoryWidget(state, key) {
+    state.widgetFactories.delete(key);
+    const existing = state.components.get(key);
+    if (!existing) return false;
+    const container = existing.placement === "aboveEditor" ? state.widgetAbove : state.widgetBelow;
+    container.removeChild(existing.component);
+    state.components.delete(key);
+    existing.component.dispose?.();
+    return true;
   }
 
   const context = {
@@ -795,32 +1104,105 @@ export function createUIContext({
 
     // ── Widgets ──
     setWidget: (key, content, options) => {
-      if (typeof content === "function") {
+      // A retiring source/TUI may schedule synchronous or asynchronous cleanup.
+      // Every descendant write is stale, including a write to a different key.
+      if (widgetDisposalContext.getStore() === true) return;
+
+      const isFactory = typeof content === "function";
+      const isStatic = Array.isArray(content);
+      // Resolve extension-controlled options before opening a panel or mutating
+      // either presentation plane. A throwing/revoked getter is therefore a
+      // clean failed call rather than a half-committed widget transition.
+      const placement = isFactory || isStatic ? normalizedWidgetPlacement(options) : undefined;
+
+      if (isFactory) {
         // Construct first, then replace atomically. A throwing factory must not
         // strand a blank unified panel or destroy the prior component for the
         // same key.
         ensureUnifiedTui();
-        const { widgetFactories, widgetAbove, widgetBelow, tui, components } = unifiedTuiState;
-        const placement = options?.placement || "belowEditor";
+        const state = unifiedTuiState;
+        const { widgetFactories, widgetAbove, widgetBelow, tui, components } = state;
+        let source;
         let component;
         try {
-          component = content(tui, theme);
+          source = content(tui, theme);
+          // Observe a mistakenly async factory before synchronous Component
+          // validation rejects its Promise/thenable, preventing a later
+          // rejection from escaping through the host process.
+          observeRejectedThenable(source, (error) => reportWidgetFailure(key, "factory", error));
+          component = createGuardedWidgetComponent(key, source);
         } catch (error) {
+          disposeInvalidWidgetSource(key, source);
           maybeDisposeUnifiedTui();
           throw error;
         }
 
+        // A factory is allowed to call UI methods synchronously. If that
+        // re-entrant work replaced this TUI, the component belongs to the old
+        // generation and must never be installed into the new one.
+        if (unifiedTuiState !== state) {
+          component.dispose?.();
+          throw new Error(`Widget factory "${key}" outlived its Unified TUI generation`);
+        }
+
         const existing = components.get(key);
+        if (existing?.source === source) {
+          // A factory may return the same component instance on refresh. Reuse
+          // its guarded adapter so replacing the registration cannot dispose
+          // the component that remains installed.
+          component.dispose?.();
+          if (existing.placement !== placement) {
+            const oldContainer = existing.placement === "aboveEditor" ? widgetAbove : widgetBelow;
+            const nextContainer = placement === "aboveEditor" ? widgetAbove : widgetBelow;
+            nextContainer.addChild(existing.component);
+            oldContainer.removeChild(existing.component);
+            existing.placement = placement;
+          }
+          widgetFactories.set(key, { factory: content, placement });
+          if (catalog.widgets.delete(key)) {
+            sendToMain({
+              type: "extension_ui_request",
+              method: "setWidget",
+              widgetKey: key,
+              widgetLines: undefined,
+              widgetPlacement: undefined,
+            });
+          }
+          tui.requestRender();
+          return;
+        }
+
+        const container = placement === "aboveEditor" ? widgetAbove : widgetBelow;
+        try {
+          // Install the validated replacement before retiring the previous
+          // component. A construction/add failure therefore leaves the prior
+          // registration intact and renderable.
+          container.addChild(component);
+        } catch (error) {
+          component.dispose?.();
+          maybeDisposeUnifiedTui();
+          throw error;
+        }
+        components.set(key, { component, source, placement });
+        widgetFactories.set(key, { factory: content, placement });
+
         if (existing) {
-          if (existing.placement === "aboveEditor") widgetAbove.removeChild(existing.component);
-          else widgetBelow.removeChild(existing.component);
+          const oldContainer = existing.placement === "aboveEditor" ? widgetAbove : widgetBelow;
+          oldContainer.removeChild(existing.component);
           existing.component.dispose?.();
         }
 
-        widgetFactories.set(key, { factory: content, placement });
-        const container = placement === "aboveEditor" ? widgetAbove : widgetBelow;
-        container.addChild(component);
-        components.set(key, { component, placement });
+        // A key has one presentation plane. Switching static → factory clears
+        // the Dock copy only after the factory component is known-good.
+        if (catalog.widgets.delete(key)) {
+          sendToMain({
+            type: "extension_ui_request",
+            method: "setWidget",
+            widgetKey: key,
+            widgetLines: undefined,
+            widgetPlacement: undefined,
+          });
+        }
         tui.requestRender();
       } else if (content === undefined) {
         catalog.widgets.delete(key);
@@ -837,16 +1219,8 @@ export function createUIContext({
         });
         // Additionally tear down any factory component in the unified TUI.
         if (unifiedTuiState) {
-          const { widgetFactories, widgetAbove, widgetBelow, tui, components } = unifiedTuiState;
-          widgetFactories.delete(key);
-          const existing = components.get(key);
-          if (existing) {
-            if (existing.placement === "aboveEditor") widgetAbove.removeChild(existing.component);
-            else widgetBelow.removeChild(existing.component);
-            existing.component.dispose?.();
-            components.delete(key);
-            tui.requestRender();
-          }
+          const state = unifiedTuiState;
+          if (removeFactoryWidget(state, key)) state.tui.requestRender();
 
           // Tear down only when ALL unified roots are gone. If the user has an
           // unsent editor draft, keep an editor-only unified panel alive instead
@@ -854,15 +1228,27 @@ export function createUIContext({
           // submit is in flight, keep the panel too so a guard bail can restore.
           maybeDisposeUnifiedTui();
         }
-      } else if (Array.isArray(content)) {
-        catalog.widgets.set(key, [...content]);
-        // Static string[] widget: existing behavior
+      } else if (isStatic) {
+        if (content.some((line) => typeof line !== "string")) {
+          throw new TypeError(`Static widget "${key}" must contain only strings`);
+        }
+        const lines = [...content];
+        catalog.widgets.set(key, lines);
+
+        // A key has one presentation plane. Switching factory → static removes
+        // and disposes the TUI component before publishing the Dock value.
+        if (unifiedTuiState) {
+          const state = unifiedTuiState;
+          if (removeFactoryWidget(state, key)) state.tui.requestRender();
+          maybeDisposeUnifiedTui();
+        }
+
         sendToMain({
           type: "extension_ui_request",
           method: "setWidget",
           widgetKey: key,
-          widgetLines: content,
-          widgetPlacement: options?.placement,
+          widgetLines: lines,
+          widgetPlacement: placement,
         });
       }
     },

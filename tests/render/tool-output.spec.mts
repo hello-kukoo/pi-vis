@@ -196,6 +196,6 @@ test.describe("tool output detail UI", () => {
       el.scrollTop = el.scrollHeight;
     });
     await expect(card.locator(".tool-card__output-line").last()).toContainText("preview-line-180");
-    await expect(card.locator(".tool-card__output-frame")).toHaveClass(/fade-top/);
+    await expect(card.locator(".scroll-fade-frame__edge--top")).toBeVisible();
   });
 });

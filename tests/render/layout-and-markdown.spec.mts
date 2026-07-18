@@ -68,6 +68,40 @@ async function seedHierarchicalMarkdownMessage(page: Page): Promise<void> {
 }
 
 test.describe("layout overflow and markdown separators", () => {
+  test("dropping an operating-system file stages it in the composer", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
+    // File staging is runtime-backed even though the textarea is intentionally
+    // usable before authority attaches. Wait for the same readiness gate as
+    // the attachment button before asserting the enabled drop treatment.
+    await expect(page.locator(".composer__attach-btn")).toBeEnabled({ timeout: 20_000 });
+
+    await page.locator(".composer").evaluate((composer) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["drop content"], "dropped-notes.txt", { type: "text/plain" }));
+      Reflect.set(window, "__pivisDropTransfer", transfer);
+      composer.dispatchEvent(
+        new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }),
+      );
+    });
+    await expect(page.locator(".composer__file-drop")).toContainText("Drop files to attach");
+    await page.locator(".composer").evaluate((composer) => {
+      const transfer = Reflect.get(window, "__pivisDropTransfer") as DataTransfer;
+      composer.dispatchEvent(
+        new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }),
+      );
+      Reflect.deleteProperty(window, "__pivisDropTransfer");
+    });
+
+    await expect(page.locator(".composer__file-drop")).toHaveCount(0);
+    await expect(page.locator(".composer__attachment-item--file")).toHaveCount(1);
+    await expect(page.locator(".composer__file-attachment")).toHaveAttribute(
+      "title",
+      "dropped-notes.txt",
+    );
+  });
+
   test("collapsing the sidebar with a fading long title does not widen or clip the main grid", async ({
     page,
   }) => {

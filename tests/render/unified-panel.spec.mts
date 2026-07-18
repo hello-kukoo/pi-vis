@@ -14,6 +14,8 @@ import { expect, test } from "@playwright/test";
 
 interface PreviewStoreState {
   activeSessionId: string;
+  addCustomMessage: (sessionId: string, content: string) => void;
+  requestComposerFocus: (sessionId: string) => void;
   applyWorktree: (
     sessionId: string,
     result: { worktreePath: string; branch: string; name: string; base: string },
@@ -27,6 +29,9 @@ interface PreviewHooks {
     cols: number | undefined;
     rows: number | undefined;
   }>;
+  emitUnifiedPanelBurst: () => void;
+  emitUnsafeUnifiedReplay: () => void;
+  emitSafeUnifiedReplay: () => void;
   emitUnifiedPanelUpdate: () => void;
   openUnifiedPanel: () => void;
 }
@@ -63,6 +68,162 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
     await expect(panel.locator(".xterm-rows")).toContainText("swift-otter");
   });
 
+  test("replays every authority delta when React coalesces multiple publications", async ({
+    page,
+  }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel.locator(".xterm-rows")).toContainText("swift-otter", { timeout: 20_000 });
+
+    await page.evaluate(() => {
+      const preview = (window as unknown as { __pivisPreview?: PreviewHooks }).__pivisPreview;
+      preview?.emitUnifiedPanelBurst();
+    });
+
+    // The second chunk is cursor-relative and only makes sense after the first.
+    // Reading just the latest publication loses the keyframe; replaying the
+    // authority buffer suffix preserves both in their original order.
+    await expect(panel.locator(".xterm-rows")).toContainText("COALESCED KEYFRAME");
+    await expect(panel.locator(".xterm-rows")).toContainText("COALESCED DEPENDENT DELTA");
+  });
+
+  test("fences input and explicit focus until an unsafe replay is reconstructed", async ({
+    page,
+  }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    const helper = panel.locator(".xterm-helper-textarea");
+    await expect(panel).toHaveAttribute("data-input-enabled", "true", { timeout: 20_000 });
+    await helper.focus();
+
+    await page.evaluate(() => {
+      const preview = (window as unknown as { __pivisPreview?: PreviewHooks }).__pivisPreview;
+      if (!preview) return;
+      preview.panelInputLog.length = 0;
+      preview.emitUnsafeUnifiedReplay();
+    });
+    await expect(panel).toHaveAttribute("data-input-enabled", "false");
+
+    // A key arriving in the commit→effect window or while the terminal is
+    // blank must remain host-local until a reconstructable frame is painted.
+    await page.keyboard.insertText("q");
+    await page.waitForTimeout(100);
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as unknown as { __pivisPreview?: PreviewHooks }
+          ).__pivisPreview?.panelInputLog.join("") ?? "",
+      ),
+    ).not.toContain("q");
+
+    const sidebarToggle = page.getByRole("button", { name: "Hide sidebar" });
+    await sidebarToggle.focus();
+    await page.evaluate(() => {
+      const store = (
+        window as unknown as { __pivisStore?: { getState: () => PreviewStoreState } }
+      ).__pivisStore?.getState();
+      if (store?.activeSessionId) store.requestComposerFocus(store.activeSessionId);
+    });
+    await expect(sidebarToggle).toBeFocused();
+    await expect(helper).not.toBeFocused();
+
+    await page.evaluate(() => {
+      (
+        window as unknown as { __pivisPreview?: PreviewHooks }
+      ).__pivisPreview?.emitSafeUnifiedReplay();
+    });
+    await expect(panel).toHaveAttribute("data-input-enabled", "true");
+    await expect(helper).toBeFocused();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as { __pivisPreview?: PreviewHooks }
+            ).__pivisPreview?.panelInputLog.join("") ?? "",
+        ),
+      )
+      .toContain("q");
+  });
+
+  test("requests reconstruction for each unsafe replay generation and after teardown", async ({
+    page,
+  }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel).toHaveAttribute("data-input-enabled", "true", { timeout: 20_000 });
+
+    // Keep xterm mounted but hidden so its resize observer cannot create a
+    // false-positive report while the replay-reconstruction effect stays live.
+    await page.locator(".unified-toggle").getByRole("tab", { name: "Input" }).click();
+    await expect(panel).toBeHidden();
+    await page.evaluate(() => {
+      const preview = (window as unknown as { __pivisPreview?: PreviewHooks }).__pivisPreview;
+      if (preview) preview.panelResizeLog.length = 0;
+    });
+
+    const resizeCount = () =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __pivisPreview?: PreviewHooks }).__pivisPreview?.panelResizeLog
+            .length ?? 0,
+      );
+    await page.evaluate(() => {
+      (
+        window as unknown as { __pivisPreview?: PreviewHooks }
+      ).__pivisPreview?.emitUnsafeUnifiedReplay();
+    });
+    await expect.poll(resizeCount).toBeGreaterThan(0);
+    const afterFirstReplay = await resizeCount();
+
+    await page.evaluate(() => {
+      (
+        window as unknown as { __pivisPreview?: PreviewHooks }
+      ).__pivisPreview?.emitUnsafeUnifiedReplay();
+    });
+    await expect.poll(resizeCount).toBeGreaterThan(afterFirstReplay);
+    const afterSecondReplay = await resizeCount();
+
+    await page.evaluate(() => {
+      type Session = { unifiedPanel?: unknown };
+      type Store = {
+        getState: () => { activeSessionId: string; sessions: Map<string, Session> };
+        setState: (partial: { sessions: Map<string, Session> }) => void;
+      };
+      const store = (window as unknown as { __pivisStore?: Store }).__pivisStore;
+      const state = store?.getState();
+      const session = state?.sessions.get(state.activeSessionId);
+      if (!store || !state || !session?.unifiedPanel) return;
+      (window as unknown as { __savedUnifiedPanel?: unknown }).__savedUnifiedPanel =
+        session.unifiedPanel;
+      const sessions = new Map(state.sessions);
+      sessions.set(state.activeSessionId, { ...session, unifiedPanel: undefined });
+      store.setState({ sessions });
+    });
+    await expect(panel).toHaveCount(0);
+
+    await page.evaluate(() => {
+      type Session = { unifiedPanel?: unknown };
+      type Store = {
+        getState: () => { activeSessionId: string; sessions: Map<string, Session> };
+        setState: (partial: { sessions: Map<string, Session> }) => void;
+      };
+      const store = (window as unknown as { __pivisStore?: Store }).__pivisStore;
+      const saved = (window as unknown as { __savedUnifiedPanel?: unknown }).__savedUnifiedPanel;
+      const state = store?.getState();
+      const session = state?.sessions.get(state.activeSessionId);
+      if (!store || !state || !session || !saved) return;
+      const sessions = new Map(state.sessions);
+      sessions.set(state.activeSessionId, { ...session, unifiedPanel: saved });
+      store.setState({ sessions });
+    });
+    await expect.poll(resizeCount).toBeGreaterThan(afterSecondReplay);
+  });
+
   test("does not steal focus from an in-progress session rename when it appears", async ({
     page,
   }) => {
@@ -85,6 +246,32 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
     await expect(nameInput).toBeFocused();
     await page.keyboard.type(" safely");
     await expect(nameInput).toHaveValue("Renaming safely");
+  });
+
+  test("focuses the active Unified TUI when its session row is selected", async ({ page }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel.locator(".xterm-rows")).toContainText("swift-otter", { timeout: 20_000 });
+
+    // A new session is intentionally hidden behind the New session row until
+    // it has content. Promote this preview session so its real keyed row is the
+    // navigation target, then preserve an unambiguous handle across switches.
+    await page.evaluate(() => {
+      const store = (window as unknown as { __pivisStore?: { getState: () => PreviewStoreState } })
+        .__pivisStore;
+      const state = store?.getState();
+      if (state?.activeSessionId) state.addCustomMessage(state.activeSessionId, "focus probe");
+    });
+    const firstRow = page.locator(".sidebar__session--active");
+    await firstRow.evaluate((element) => element.setAttribute("data-focus-return", "true"));
+    await page.locator('.sidebar__session:not([data-focus-return="true"])').first().click();
+    await expect(page.locator(".composer__textarea")).toBeFocused();
+
+    await page.locator('[data-focus-return="true"]').click();
+
+    await expect(panel).toBeVisible();
+    await expect(panel.locator(".xterm-helper-textarea")).toBeFocused();
   });
 
   test("a short roster: card hugs the content, no scroll (trailing blanks trimmed)", async ({

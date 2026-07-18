@@ -5,8 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   isNewSessionPending,
   isPendingNewSessionActiveFor,
-  isSessionWorking,
   sessionHasHistory,
+  shouldShowWorkingIndicator,
   useSessionsStore,
 } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
@@ -52,8 +52,8 @@ function StatusDot({
   }
 }
 
-interface StreamingDotProps {
-  isStreaming: boolean;
+interface WorkingDotProps {
+  working: boolean;
 }
 
 function ArchiveIcon(): React.ReactElement {
@@ -91,13 +91,13 @@ function PinIcon({ filled }: { filled: boolean }): React.ReactElement {
   );
 }
 
-function StreamingIndicator({ isStreaming }: StreamingDotProps): React.ReactElement | null {
+function WorkingIndicator({ working }: WorkingDotProps): React.ReactElement | null {
   const animationDelay = useSyncedAnimationDelay(STREAMING_DOT_ANIMATION_MS);
-  if (!isStreaming) return null;
+  if (!working) return null;
   return (
     <span
       className="status-dot status-dot--streaming"
-      title="Streaming"
+      title="Working"
       style={{ "--status-dot-animation-delay": animationDelay } as React.CSSProperties}
     />
   );
@@ -675,8 +675,8 @@ export function Sidebar({
                                   }
                                 }}
                               >
-                                {isSessionWorking(liveSession) ? (
-                                  <StreamingIndicator isStreaming />
+                                {shouldShowWorkingIndicator(liveSession) ? (
+                                  <WorkingIndicator working />
                                 ) : (
                                   <StatusDot
                                     status={liveSession?.status ?? "cold"}

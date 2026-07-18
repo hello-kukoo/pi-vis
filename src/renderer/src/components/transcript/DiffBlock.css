@@ -10,9 +10,15 @@
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  overflow: hidden;
+  padding: var(--space-1);
+  margin: 0.286rem 0;
+}
+
+.diff-block__scroll {
   overflow-x: auto;
   overflow-y: hidden;
-  margin: 0.286rem 0;
+  border-radius: calc(var(--radius-md) - var(--space-1));
 }
 
 .diff-block__inner {

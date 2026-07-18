@@ -159,4 +159,14 @@ describe("Markdown code highlighting", () => {
     expect(second.container.querySelector(".shiki")?.textContent).toBe("const cachedValue = 1;");
     second.unmount();
   });
+
+  it("nests markdown tables inside a dedicated horizontal scroll owner", () => {
+    const view = mount(<Markdown>{"| A | B |\n| - | - |\n| 1 | 2 |"}</Markdown>);
+
+    const shell = view.container.querySelector(".markdown-table-shell");
+    const scroller = shell?.querySelector(":scope > .markdown-table-scroll");
+    expect(scroller?.querySelector(":scope > table")?.textContent).toContain("A");
+
+    view.unmount();
+  });
 });

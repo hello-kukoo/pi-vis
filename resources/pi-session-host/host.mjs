@@ -455,6 +455,8 @@ async function handleInit(msg) {
       TUI_KEYBINDINGS: piTui.TUI_KEYBINDINGS,
       Container: piTui.Container,
       Editor: piTui.Editor,
+      truncateToWidth: piTui.truncateToWidth,
+      visibleWidth: piTui.visibleWidth,
       // Kitty keyboard protocol exports (pi-tui public index). Feature-detected
       // inside createUIContext: if absent (old pi-tui), the host performs no
       // negotiation and keeps legacy behavior. setKittyProtocolActive toggles

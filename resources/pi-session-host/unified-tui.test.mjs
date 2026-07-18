@@ -149,6 +149,8 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
       TUI_KEYBINDINGS: piTui.TUI_KEYBINDINGS,
       Container: piTui.Container,
       Editor: piTui.Editor,
+      truncateToWidth: piTui.truncateToWidth,
+      visibleWidth: piTui.visibleWidth,
       // Kitty keyboard protocol exports (pi-tui public index). Their presence is
       // what enables negotiation in createUIContext (feature-detected). The I9
       // case builds a modules object WITHOUT these to prove graceful fallback.
@@ -212,6 +214,51 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
     // a blank screen-clear.
     const painted = frames.map((f) => f.data).join("");
     expect(painted).toContain("Fleet");
+  });
+
+  it("contains a throwing extension render and remains able to paint a healthy replacement", async () => {
+    await setup();
+    const bridge = makeCapturingBridge();
+    const notifications = [];
+    const { context, unified } = createUIContext({
+      theme,
+      editorTheme: buildEditorTheme(pi, theme),
+      panelBridge: bridge,
+      createDialog: async () => ({}),
+      sendToMain: (message) => notifications.push(message),
+      tuiModules: tuiModules(),
+    });
+    controllers.push(unified);
+
+    context.setWidget("unstable", () => ({
+      render() {
+        throw new Error("extension paint exploded");
+      },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const failedPaint = bridge.messages
+      .filter((message) => message.type === "panel_data")
+      .map((message) => message.data)
+      .join("");
+    expect(failedPaint).toContain('Extension widget "unstable" render failed');
+    expect(
+      notifications.filter(
+        (message) =>
+          message.method === "notify" && message.message.includes("extension paint exploded"),
+      ),
+    ).toHaveLength(1);
+
+    const replacementStart = bridge.messages.length;
+    context.setWidget("unstable", () => ({ render: () => ["healthy replacement"] }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const replacementPaint = bridge.messages
+      .slice(replacementStart)
+      .filter((message) => message.type === "panel_data")
+      .map((message) => message.data)
+      .join("");
+    expect(replacementPaint).toContain("healthy replacement");
   });
 
   it("custom() overlay on the unified TUI emits panel_mode viewport→content (the wiggle fix)", async () => {

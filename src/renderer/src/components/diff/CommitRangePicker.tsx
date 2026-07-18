@@ -1,10 +1,11 @@
 import type { GitCommitMetadata, GitCommitRange, GitCommitsResult } from "@shared/git.js";
 import type React from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconChevronDown } from "../common/icons.js";
 import "./CommitRangePicker.css";
 
@@ -23,18 +24,18 @@ export function CommitRangePicker(): React.ReactElement | null {
   const root = useDiffStore((s) => s.root);
   const base = useDiffStore((s) => s.selectedBase);
   const range = useDiffStore((s) => s.commitRange);
+  const workingTreeScope = useDiffStore((s) => s.workingTreeScope);
   const editing = useDiffStore((s) => s.editSession !== null || s.commentEditorFiles.size > 0);
   const setCommitRange = useDiffStore((s) => s.setCommitRange);
+  const showUncommittedChanges = useDiffStore((s) => s.showUncommittedChanges);
   const [open, setOpen] = useState(false);
   const [commits, setCommits] = useState<GitCommitMetadata[]>([]); // oldest → newest
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [first, setFirst] = useState<string | null>(null);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
-  const [listScrollFades, setListScrollFades] = useState({ top: false, bottom: false });
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
   useEscapeClaim(open);
 
   const key = root && base ? `${root}\0${base}` : null;
@@ -111,7 +112,14 @@ export function CommitRangePicker(): React.ReactElement | null {
     minOverscan: 16,
   });
   const count = range === null ? 0 : rangeCount(commits, range);
-  const label = range === null ? "Working tree" : count === 1 ? "1 commit" : `${count} commits`;
+  const label =
+    range === null
+      ? workingTreeScope === "uncommitted"
+        ? "Uncommitted"
+        : "Working tree"
+      : count === 1
+        ? "1 commit"
+        : `${count} commits`;
   const selectedIndices = range
     ? [
         commits.findIndex((commit) => commit.sha === range.start),
@@ -124,37 +132,6 @@ export function CommitRangePicker(): React.ReactElement | null {
   useEffect(() => {
     if (open) virtual.ensureIndexVisible(highlightedIndex);
   }, [highlightedIndex, open, virtual.ensureIndexVisible]);
-
-  const updateListScrollFades = useCallback(() => {
-    const listElement = listRef.current;
-    if (!listElement) return;
-    const next = {
-      top: listElement.scrollTop > 1,
-      bottom: listElement.scrollHeight - listElement.scrollTop - listElement.clientHeight > 1,
-    };
-    setListScrollFades((current) =>
-      current.top === next.top && current.bottom === next.bottom ? current : next,
-    );
-  }, []);
-
-  useLayoutEffect(() => {
-    const listElement = listRef.current;
-    if (!listElement) return;
-    const observer = new ResizeObserver(updateListScrollFades);
-    observer.observe(listElement);
-    const content = listElement.querySelector(".commit-range-picker__spacer");
-    if (content) observer.observe(content);
-    updateListScrollFades();
-    return () => observer.disconnect();
-  });
-
-  const setListElement = useCallback(
-    (element: HTMLDivElement | null) => {
-      listRef.current = element;
-      virtual.containerRef(element);
-    },
-    [virtual.containerRef],
-  );
 
   const chooseCommit = (sha: string): void => {
     if (first === null) {
@@ -236,25 +213,36 @@ export function CommitRangePicker(): React.ReactElement | null {
           role="dialog"
           aria-label="Commit range"
         >
-          <button
-            data-autofocus
-            type="button"
-            className={`commit-range-picker__working${range === null ? " commit-range-picker__working--selected" : ""}`}
-            aria-pressed={range === null}
-            onClick={() => {
-              setCommitRange(null);
-              close();
-            }}
-          >
-            Working tree
-          </button>
-          <div
-            ref={setListElement}
-            onScroll={(event) => {
-              virtual.onScroll(event);
-              updateListScrollFades();
-            }}
-            className={`commit-range-picker__list${listScrollFades.top ? " commit-range-picker__list--fade-top" : ""}${listScrollFades.bottom ? " commit-range-picker__list--fade-bottom" : ""}`}
+          <div className="commit-range-picker__scopes">
+            <button
+              data-autofocus
+              type="button"
+              className={`commit-range-picker__working${range === null && workingTreeScope === "base" ? " commit-range-picker__working--selected" : ""}`}
+              aria-pressed={range === null && workingTreeScope === "base"}
+              onClick={() => {
+                setCommitRange(null);
+                close();
+              }}
+            >
+              Working tree
+            </button>
+            <button
+              type="button"
+              className={`commit-range-picker__working${range === null && workingTreeScope === "uncommitted" ? " commit-range-picker__working--selected" : ""}`}
+              aria-pressed={range === null && workingTreeScope === "uncommitted"}
+              onClick={() => {
+                showUncommittedChanges();
+                close();
+              }}
+            >
+              Uncommitted changes
+            </button>
+          </div>
+          <ScrollFadeFrame
+            frameClassName="commit-range-picker__list-shell"
+            scrollerRef={virtual.containerRef}
+            onScroll={virtual.onScroll}
+            className="commit-range-picker__list"
             role="listbox"
             aria-label="Commits, newest first"
             tabIndex={0}
@@ -314,7 +302,7 @@ export function CommitRangePicker(): React.ReactElement | null {
                 })}
               </div>
             </div>
-          </div>
+          </ScrollFadeFrame>
         </div>
       )}
     </div>

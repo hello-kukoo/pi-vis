@@ -1,6 +1,9 @@
 // Pure selection → edit-range mapping for the diff edit card.
 //
 // A selection covers a contiguous range of model line indices [startIdx..endIdx].
+// The interactive diff-selection entry point may ask us to widen the range to
+// the nearest non-whitespace editable line on each side. Any intervening blank
+// lines come with that context. Store-level callers keep exact range semantics.
 // We project it into a SEQUENCE of blocks preserving exact original row order:
 //
 //   - {kind:"edit", lineIdxs, newNos, initialText}  — a run of editable
@@ -72,6 +75,8 @@ export interface EditRange {
  * @param endIdx      selection end model line index (inclusive).
  * @param commentedNewNos  new-side line numbers that carry a comment thread
  *                    (so we can break segments / emit comment blocks).
+ * @param options      presentation-only range widening; omitted callers retain
+ *                    the exact selected line bounds.
  */
 export function resolveEditRange(
   model: DiffModel,
@@ -79,6 +84,7 @@ export function resolveEditRange(
   startIdx: number,
   endIdx: number,
   commentedNewNos: Set<number>,
+  options: { expandToAdjacentContent?: boolean } = {},
 ): EditRange | null {
   if (model.kind !== "ok") return null;
   const lines = model.lines;
@@ -97,6 +103,19 @@ export function resolveEditRange(
   while (lo <= hi && lines[lo]?.type === "del") lo++;
   while (hi >= lo && lines[hi]?.type === "del") hi--;
   if (lo > hi) return null;
+
+  // Include one useful new-side context line on either side. "Useful" means
+  // non-whitespace: blank lines between the selection and that line remain in
+  // the contiguous edit range, but a file tail made only of blanks does not
+  // enlarge the editor. Removed rows are skipped while looking because they
+  // have no working-tree line to edit; if they sit between the selection and
+  // the context line, the block projection below suppresses them as usual.
+  if (options.expandToAdjacentContent) {
+    const contextAbove = adjacentContentLine(lines, lo, -1);
+    const contextBelow = adjacentContentLine(lines, hi, 1);
+    if (contextAbove !== null) lo = contextAbove;
+    if (contextBelow !== null) hi = contextBelow;
+  }
 
   // Disqualify: any line in the trimmed range is hidden (collapsed-gap).
   for (let i = lo; i <= hi; i++) {
@@ -153,4 +172,17 @@ export function resolveEditRange(
     endNewNo: lastNewNo,
     blocks,
   };
+}
+
+function adjacentContentLine(
+  lines: Extract<DiffModel, { kind: "ok" }>["lines"],
+  edge: number,
+  direction: -1 | 1,
+): number | null {
+  for (let index = edge + direction; index >= 0 && index < lines.length; index += direction) {
+    const line = lines[index];
+    if (!line || line.type === "del" || line.newNo === null) continue;
+    if (line.text.trim().length > 0) return index;
+  }
+  return null;
 }

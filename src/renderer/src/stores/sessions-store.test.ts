@@ -222,6 +222,134 @@ describe("sessions store - diff comments", () => {
     ]);
   });
 
+  it("clears a submitted draft and comments after custody even when its Composer is gone", () => {
+    const store = useSessionsStore.getState();
+    store.setSessionDraft(SESSION_A, "review this");
+    store.setDiffComment(SESSION_A, {
+      filePath: "a.ts",
+      lineNumber: 10,
+      lineText: "target();",
+      text: "Please rename this.",
+    });
+    const submittedComments = store.getDiffCommentsForPrompt(SESSION_A);
+    store.registerPendingComposerSubmission(SESSION_A, {
+      intentId: "submit-1",
+      owner: { hostInstanceId: "host-1", sessionEpoch: 1 },
+      editorRevision: 4,
+      draftScope: "session",
+      composerText: "review this",
+      submittedText: "<comments>review this</comments>\nreview this",
+      submittedComments,
+    });
+
+    // No mounted component participates in this result. This is the switch-
+    // away/sleep-wake path that used to leave the sent payload as a draft.
+    store.applySubmissionDisposition(SESSION_A, {
+      intentId: "submit-1",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 4,
+      disposition: "in_custody",
+    });
+
+    const state = useSessionsStore.getState();
+    expect(state.sessionDrafts.has(SESSION_A)).toBe(false);
+    expect(state.getDiffCommentsForPrompt(SESSION_A)).toEqual([]);
+    expect(state.sessions.get(SESSION_A)?.pendingComposerSubmission).toBeUndefined();
+  });
+
+  it("preserves newer draft text and comment revisions after an older submission is accepted", () => {
+    const store = useSessionsStore.getState();
+    store.setSessionDraft(SESSION_A, "original");
+    store.setDiffComment(SESSION_A, {
+      filePath: "a.ts",
+      lineNumber: 10,
+      lineText: "target();",
+      text: "original comment",
+    });
+    const submittedComments = store.getDiffCommentsForPrompt(SESSION_A);
+    store.registerPendingComposerSubmission(SESSION_A, {
+      intentId: "submit-older",
+      owner: { hostInstanceId: "host-1", sessionEpoch: 1 },
+      editorRevision: 7,
+      draftScope: "session",
+      composerText: "original",
+      submittedText: "original with comments",
+      submittedComments,
+    });
+    store.setSessionDraft(SESSION_A, "newer draft");
+    store.setDiffComment(SESSION_A, {
+      filePath: "a.ts",
+      lineNumber: 10,
+      lineText: "target();",
+      text: "newer comment",
+    });
+
+    store.applySubmissionDisposition(SESSION_A, {
+      intentId: "submit-older",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 7,
+      disposition: "consumed",
+    });
+
+    const state = useSessionsStore.getState();
+    expect(state.sessionDrafts.get(SESSION_A)).toBe("newer draft");
+    expect(state.getDiffCommentsForPrompt(SESSION_A)).toMatchObject([{ text: "newer comment" }]);
+  });
+
+  it("uses an authoritative prompt echo to clear durable submission custody", () => {
+    const store = useSessionsStore.getState();
+    store.setSessionDraft(SESSION_A, "echoed prompt");
+    store.registerPendingComposerSubmission(SESSION_A, {
+      intentId: "submit-echo",
+      owner: { hostInstanceId: "host-1", sessionEpoch: 1 },
+      editorRevision: 2,
+      draftScope: "session",
+      composerText: "echoed prompt",
+      submittedText: "echoed prompt",
+      submittedComments: [],
+    });
+
+    store.applyEvent(SESSION_A, {
+      type: "message_start",
+      message: { role: "user", content: "echoed prompt" },
+      queueIntentId: "submit-echo",
+    });
+
+    const state = useSessionsStore.getState();
+    expect(state.sessionDrafts.has(SESSION_A)).toBe(false);
+    expect(state.sessions.get(SESSION_A)?.pendingComposerSubmission).toBeUndefined();
+  });
+
+  it("does not clear an unrelated same-text workspace draft for an established session", () => {
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_B, WORKSPACE, "/f/b.jsonl");
+    store.setSessionDraft(SESSION_B, "same text");
+    store.setNewSessionDraft(WORKSPACE, "same text");
+    store.registerPendingComposerSubmission(SESSION_B, {
+      intentId: "submit-established",
+      owner: { hostInstanceId: "host-1", sessionEpoch: 1 },
+      editorRevision: 3,
+      draftScope: "session",
+      composerText: "same text",
+      submittedText: "same text",
+      submittedComments: [],
+    });
+
+    store.applySubmissionDisposition(SESSION_B, {
+      intentId: "submit-established",
+      hostInstanceId: "host-1",
+      sessionEpoch: 1,
+      editorRevision: 3,
+      disposition: "consumed",
+    });
+
+    const state = useSessionsStore.getState();
+    expect(state.sessionDrafts.has(SESSION_B)).toBe(false);
+    expect(state.newSessionDrafts.get(WORKSPACE)).toBe("same text");
+  });
+
   it("relocates an anchor when its saved line text moves uniquely", () => {
     const store = useSessionsStore.getState();
     store.setDiffComment(SESSION_A, {
@@ -708,6 +836,8 @@ describe("createSession(name) and tab lifecycle", () => {
     useSessionsStore.getState().createSession(SESSION_A, WORKSPACE);
     useSessionsStore.getState().createSession(SESSION_B, WORKSPACE);
     useSessionsStore.getState().setActiveSession(SESSION_A);
+    expect(nextPanelSequence(99)).toBe(1);
+    expect(nextPanelSequence(99)).toBe(2);
 
     useSessionsStore.getState().removeSession(SESSION_A);
     expect(useSessionsStore.getState().sessions.get(SESSION_A)).toBeUndefined();
@@ -715,6 +845,7 @@ describe("createSession(name) and tab lifecycle", () => {
     // B is still there, and the workspace's activeSessions list no longer mentions A.
     const ws = useSessionsStore.getState().workspaces.get(WORKSPACE);
     expect(ws?.activeSessions).toEqual([SESSION_B]);
+    expect(nextPanelSequence(99)).toBe(1);
 
     useSessionsStore.getState().setActiveSession(SESSION_B);
     useSessionsStore.getState().removeSession(SESSION_B);
@@ -1112,6 +1243,30 @@ describe("sessions store - workspace expand / reorder model", () => {
     expect(useSessionsStore.getState().activeWorkspacePath).toBeNull();
   });
 
+  it("closes an unused pending-new predecessor instead of releasing its activation visit", async () => {
+    const invoke = vi.fn(() => Promise.resolve({ closed: true }));
+    vi.stubGlobal("window", { pivis: { invoke } });
+    const store = useSessionsStore.getState();
+    store.createSession(SESSION_A, WS_A, undefined, undefined, undefined, "ready");
+    store.createSession(SESSION_B, WS_B, "/f/b.jsonl", undefined, undefined, "ready");
+    useSessionsStore.setState((state) => {
+      const sessions = new Map(state.sessions);
+      const pending = sessions.get(SESSION_A);
+      if (pending) sessions.set(SESSION_A, { ...pending, activationVisitId: "pending-visit" });
+      return { sessions, activeSessionId: SESSION_A, activeWorkspacePath: WS_A };
+    });
+
+    await store.setActiveSession(SESSION_B);
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("session.close", { sessionId: SESSION_A }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith("session.releaseActivationVisit", expect.anything());
+    expect(useSessionsStore.getState().activeSessionId).toBe(SESSION_B);
+    await vi.waitFor(() => expect(useSessionsStore.getState().sessions.has(SESSION_A)).toBe(false));
+    vi.unstubAllGlobals();
+  });
+
   it("does not release the previous host when a slow target activation finishes after return", async () => {
     let resolveActivation!: () => void;
     const activation = new Promise<void>((resolve) => {
@@ -1464,7 +1619,7 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
     expect(shouldShowWorkingIndicator(session())).toBe(false);
   });
 
-  it("uses every authoritative compaction activity state, the sdk fallback, and no fenced state", () => {
+  it("uses canonical compaction activity and never Pi's branch-summary SDK bit", () => {
     installAuthority();
     const states = ["active", "active_unknown_origin", "cancelling", "retry_wait"] as const;
     for (const [index, state] of states.entries()) {
@@ -1490,13 +1645,13 @@ describe("sessions store - shouldShowWorkingIndicator", () => {
           retryAttempt: 0,
           isBashRunning: false,
         },
+        activity: {
+          navigation: { kind: "navigation", state: "active" },
+        },
       }),
     );
-    expect(sessionCompactionActivity(session())).toEqual({
-      kind: "compaction",
-      state: "active",
-      attempt: 0,
-    });
+    expect(sessionCompactionActivity(session())).toBeUndefined();
+    expect(shouldShowWorkingIndicator(session())).toBe(false);
 
     // A sequence gap fences the authority snapshot; neither its former
     // compaction activity nor a direct runtime diagnostic may keep the UI busy.
@@ -2426,7 +2581,7 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     ]);
   });
 
-  it("activates before pending history hydration resolves, but resolves after seeding", async () => {
+  it("selects immediately and hydrates persisted history before subprocess activation", async () => {
     let resolveHistory!: (value: ReturnType<typeof loadedHistory>) => void;
     const invoke = vi.fn((channel: string, payload?: unknown) => {
       if (channel === "session.open") {
@@ -2450,13 +2605,13 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
     vi.stubGlobal("window", { pivis: { invoke } });
 
     const opening = useSessionsStore.getState().openSessionTab(WORKSPACE, "/f/a.jsonl");
-    await vi.waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith(
-        "session.activate",
-        expect.objectContaining({ sessionId: SESSION_A }),
-      ),
-    );
+    await vi.waitFor(() => expect(resolveHistory).toBeTypeOf("function"));
+    expect(useSessionsStore.getState().activeSessionId).toBe(SESSION_A);
     expect(useSessionsStore.getState().sessions.get(SESSION_A)?.historyHydrating).toBe(true);
+    expect(invoke).not.toHaveBeenCalledWith(
+      "session.activate",
+      expect.objectContaining({ sessionId: SESSION_A }),
+    );
     let settled = false;
     void opening.then(() => {
       settled = true;
@@ -2469,8 +2624,18 @@ describe("sessions store - pending new session + per-workspace drafts", () => {
         { id: "h1", type: "user", data: { content: "first" } },
       ]),
     );
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "session.activate",
+        expect.objectContaining({ sessionId: SESSION_A }),
+      ),
+    );
     await expect(opening).resolves.toBe(SESSION_A);
-    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.historyHydrating).toBe(false);
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.historyHydrating).toBe(false);
+    expect(session ? allTranscriptBlocks(session.transcript).map((block) => block.id) : []).toEqual(
+      ["h1"],
+    );
   });
 
   it("settles obsolete hydration promptly when a replacement removes the session file", async () => {
@@ -4291,6 +4456,93 @@ describe("sessions store - authority intent projection", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
+  it("projects input acknowledgement high-watermarks for custom and unified panels", () => {
+    const attach = authorityAttach();
+    const cursor = {
+      ...attach.baseline.owner,
+      transportSequence: 1,
+      snapshotSequence: 1,
+    };
+    attach.baseline.panels = [
+      {
+        panelKey: "panel:4",
+        panelId: 4,
+        owner: attach.baseline.owner,
+        sync: { state: "following", cursor },
+        overlay: true,
+        unified: false,
+        mode: "viewport",
+        inputAcknowledgedThrough: 6,
+        keyframe: { kind: "keyframe", ansi: "custom", renderRevision: 2 },
+      },
+      {
+        panelKey: "panel:5",
+        panelId: 5,
+        owner: attach.baseline.owner,
+        sync: { state: "following", cursor },
+        overlay: false,
+        unified: true,
+        mode: "content",
+        inputAcknowledgedThrough: 9,
+        keyframe: { kind: "keyframe", ansi: "unified", renderRevision: 3 },
+      },
+    ];
+
+    useSessionsStore.getState().applyAuthorityAttach(SESSION_A, attach);
+
+    const session = useSessionsStore.getState().sessions.get(SESSION_A);
+    expect(session?.panel?.inputAcknowledgedThrough).toBe(6);
+    expect(session?.unifiedPanel?.inputAcknowledgedThrough).toBe(9);
+  });
+
+  it("retires an authority panel input stream when the panel closes", () => {
+    const attach = authorityAttach();
+    const cursor = {
+      ...attach.baseline.owner,
+      transportSequence: 1,
+      snapshotSequence: 1,
+    };
+    attach.baseline.panels = [
+      {
+        panelKey: "panel:5",
+        panelId: 5,
+        owner: attach.baseline.owner,
+        sync: { state: "following", cursor },
+        overlay: false,
+        unified: true,
+        mode: "content",
+        inputAcknowledgedThrough: 0,
+        keyframe: { kind: "keyframe", ansi: "frame", renderRevision: 1 },
+      },
+    ];
+    useSessionsStore.getState().applyAuthorityAttach(SESSION_A, attach);
+    const nextAuthorityPanelSequence = () =>
+      nextPanelInputSequence(
+        SESSION_A,
+        attach.baseline.owner.hostInstanceId,
+        attach.baseline.owner.sessionEpoch,
+        5,
+      );
+    expect(nextAuthorityPanelSequence()).toBe(1);
+    expect(nextAuthorityPanelSequence()).toBe(2);
+
+    useSessionsStore.getState().applyAuthorityPublication({
+      sessionId: SESSION_A,
+      rendererGeneration: 0,
+      publicationSequence: 1,
+      plane: "panel",
+      owner: attach.baseline.owner,
+      payload: {
+        kind: "close",
+        cursor: { ...cursor, transportSequence: 2 },
+        panelKey: "panel:5",
+      },
+    });
+
+    expect(useSessionsStore.getState().sessions.get(SESSION_A)?.unifiedPanel).toBeUndefined();
+    expect(nextAuthorityPanelSequence()).toBe(1);
+  });
+
   it("materializes transcript events replayed with an attach baseline", () => {
     const attach = authorityAttach();
     attach.replay = [
@@ -5236,7 +5488,7 @@ describe("sessions store - explicit search result open", () => {
     });
   });
 
-  it("restores the previous active session without releasing its visit when activation fails", async () => {
+  it("keeps a validated saved session visible when runtime activation fails", async () => {
     const previousFile = "/tmp/previous.jsonl";
     const targetFile = "/tmp/search-fails.jsonl";
     useSessionsStore
@@ -5252,7 +5504,10 @@ describe("sessions store - explicit search result open", () => {
       if (channel === "session.loadHistory") {
         return loadedHistory(payload, []);
       }
-      if (channel === "session.activate") throw new Error("host startup failed");
+      if (channel === "session.activate") {
+        throw new Error("Could not restore model retired-provider/retired-model");
+      }
+      if (channel === "session.releaseActivationVisit") return { released: false };
       throw new Error(`unexpected channel ${channel}`);
     });
     const preopened: SessionSearchOpenResult = {
@@ -5270,16 +5525,16 @@ describe("sessions store - explicit search result open", () => {
         focus: true,
         preopened,
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe(SESSION_B);
 
     const state = useSessionsStore.getState();
-    expect(state.activeSessionId).toBe(SESSION_A);
+    expect(state.activeSessionId).toBe(SESSION_B);
     expect(state.activeWorkspacePath).toBe(WORKSPACE);
-    expect(state.sessions.get(SESSION_A)?.activationVisitId).toBe("previous-visit");
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "session.releaseActivationVisit",
-      expect.anything(),
-    );
+    expect(state.sessions.get(SESSION_B)?.status).toBe("failed");
+    expect(invokeMock).toHaveBeenCalledWith("session.releaseActivationVisit", {
+      sessionId: SESSION_A,
+      activationVisitId: "previous-visit",
+    });
   });
 
   it("reconciles a stale failed renderer record before adopting a replacement", async () => {

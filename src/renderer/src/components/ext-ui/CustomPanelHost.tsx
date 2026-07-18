@@ -41,6 +41,8 @@ import {
 } from "../../lib/panel-input-buffer.js";
 import {
   acknowledgePanelInput,
+  capturePanelInputGeneration,
+  isPanelInputGenerationCurrent,
   nextPanelInputSequence,
   panelInputGapMessage,
   resetPanelInputSequenceToAcknowledged,
@@ -93,6 +95,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     outputSequence?: number;
     outputKind?: "keyframe" | "delta" | "reset";
     outputAnsi?: string;
+    inputAcknowledgedThrough?: number;
     syncState?: "following" | "synchronizing" | "unavailable";
   } | null>(null);
   const renderedOutputSequenceRef = useRef<number | null>(null);
@@ -131,6 +134,15 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   // Authority deltas are incrementally rendered from the projection. Legacy
   // panel_data remains a fallback only until this projection exists.
   useEffect(() => {
+    if (panel?.inputAcknowledgedThrough !== undefined) {
+      acknowledgePanelInput(
+        sessionId,
+        panel.hostInstanceId,
+        panel.sessionEpoch,
+        panel.id,
+        panel.inputAcknowledgedThrough,
+      );
+    }
     const term = termRef.current;
     if (!term || !panel) return;
     const repaintKey = `${panel.hostInstanceId}:${panel.sessionEpoch}:${panel.id}`;
@@ -571,8 +583,11 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
         ...identity,
         revision: activePanel.authority ? activePanel.renderRevision! : repaintRevision,
       };
+      const inputGeneration = capturePanelInputGeneration(sessionId, identity);
+      if (!inputGeneration) return;
       panelInputTailRef.current = panelInputTailRef.current
         .then(async () => {
+          if (!isPanelInputGenerationCurrent(inputGeneration)) return;
           const latest = panelRef.current;
           if (
             !latest ||
@@ -595,6 +610,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
             target.hostInstanceId,
             target.sessionEpoch,
             target.panelId,
+            inputGeneration,
           );
           const result = await window.pivis.invoke("session.panelInput", {
             sessionId,
@@ -605,12 +621,14 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
             sequence,
             data,
           });
+          if (!isPanelInputGenerationCurrent(inputGeneration)) return;
           acknowledgePanelInput(
             sessionId,
             target.hostInstanceId,
             target.sessionEpoch,
             target.panelId,
             result.acknowledgedThrough,
+            inputGeneration,
           );
           const afterInput = panelRef.current;
           if (
@@ -628,6 +646,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
               target.sessionEpoch,
               target.panelId,
               result.acknowledgedThrough,
+              inputGeneration,
             );
             bufferInput();
             const terminal = termRef.current;
@@ -650,7 +669,9 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
           }
         })
         .catch((error) => {
-          useSessionsStore.getState().addToast(sessionId, String(error), "error");
+          if (isPanelInputGenerationCurrent(inputGeneration)) {
+            useSessionsStore.getState().addToast(sessionId, String(error), "error");
+          }
         });
     };
     dispatchPanelInputRef.current = dispatchPanelInput;

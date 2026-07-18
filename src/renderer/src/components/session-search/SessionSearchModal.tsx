@@ -5,11 +5,12 @@ import type {
   SessionSearchResult,
 } from "@shared/session-search.js";
 import type React from "react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useSessionSearchStore } from "../../stores/session-search-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconChevronLeft, IconClose, IconSearch } from "../common/icons.js";
 import "./SessionSearchModal.css";
 
@@ -120,8 +121,6 @@ export function SessionSearchModal({
   const inputRef = useRef<HTMLInputElement>(null);
   const previewBackRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const resultsPaneRef = useRef<HTMLElement>(null);
-  const [resultScrollFades, setResultScrollFades] = useState({ top: false, bottom: false });
   const listboxId = useId();
   const selectedOptionId = state.selectedTargetId
     ? `session-search-result-${state.selectedTargetId}`
@@ -181,29 +180,6 @@ export function SessionSearchModal({
       .getElementById(`session-search-result-${state.selectedTargetId}`)
       ?.scrollIntoView({ block: "nearest" });
   }, [state.open, state.narrowPane, state.selectedTargetId]);
-
-  const updateResultScrollFades = useCallback(() => {
-    const pane = resultsPaneRef.current;
-    if (!pane) return;
-    const next = {
-      top: pane.scrollTop > 1,
-      bottom: pane.scrollHeight - pane.scrollTop - pane.clientHeight > 1,
-    };
-    setResultScrollFades((current) =>
-      current.top === next.top && current.bottom === next.bottom ? current : next,
-    );
-  }, []);
-
-  useLayoutEffect(() => {
-    const pane = resultsPaneRef.current;
-    if (!pane) return;
-    const observer = new ResizeObserver(updateResultScrollFades);
-    observer.observe(pane);
-    const content = pane.querySelector(".session-search__results");
-    if (content) observer.observe(content);
-    updateResultScrollFades();
-    return () => observer.disconnect();
-  });
 
   useEffect(() => {
     if (!state.open) return;
@@ -331,11 +307,12 @@ export function SessionSearchModal({
           </div>
         )}
         {hasQuery && !inPreview && (
-          <section
-            ref={resultsPaneRef}
-            className={`session-search__results-pane${resultScrollFades.top ? " session-search__results-pane--fade-top" : ""}${resultScrollFades.bottom ? " session-search__results-pane--fade-bottom" : ""}`}
+          <ScrollFadeFrame
+            frameClassName="session-search__results-shell"
+            className="session-search__results-pane"
+            role="region"
             aria-label="Search results"
-            onScroll={updateResultScrollFades}
+            fill
           >
             {state.error && (
               <div className="session-search__notice session-search__notice--error">
@@ -375,10 +352,16 @@ export function SessionSearchModal({
                 {state.loading ? "Searching…" : "Load more sessions"}
               </button>
             )}
-          </section>
+          </ScrollFadeFrame>
         )}
         {inPreview && (
-          <section className="session-search__context-pane" aria-label="Saved history context">
+          <ScrollFadeFrame
+            frameClassName="session-search__context-shell"
+            className="session-search__context-pane"
+            role="region"
+            aria-label="Saved history context"
+            fill
+          >
             <div className="session-search__context-header">
               <button
                 ref={previewBackRef}
@@ -475,7 +458,7 @@ export function SessionSearchModal({
                 )}
               </div>
             )}
-          </section>
+          </ScrollFadeFrame>
         )}
       </div>
     </div>

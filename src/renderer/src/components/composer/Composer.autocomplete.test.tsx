@@ -74,6 +74,19 @@ function selectFiles(input: HTMLInputElement, files: File[]): void {
   });
 }
 
+function dispatchFileDrag(
+  target: HTMLElement,
+  type: "dragenter" | "dragover" | "dragleave" | "drop",
+  files: File[],
+): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: { files, types: ["Files"], dropEffect: "none" },
+  });
+  act(() => target.dispatchEvent(event));
+  return event;
+}
+
 function outcomeFor(envelope: Envelope, patch: Partial<IntentOutcome> = {}): IntentOutcome {
   const base = {
     intentId: envelope.intentId,
@@ -896,6 +909,35 @@ describe("Composer autocomplete and authority intents", () => {
     composer.unmount();
   });
 
+  it("does not re-seed an accepted prompt after its Composer unmounts", async () => {
+    installInvoke(invoke, false);
+    const composer = mount();
+    type(composer.textarea(), "sent before switching away");
+    key(composer.textarea(), "Enter");
+    await vi.waitFor(() => expect(intentCalls(invoke)).toHaveLength(1));
+    const envelope = intentCalls(invoke)[0]!;
+    expect(useSessionsStore.getState().newSessionDrafts.get(WORKSPACE)).toBe(
+      "sent before switching away",
+    );
+
+    composer.unmount();
+    act(() =>
+      useSessionsStore.getState().applySubmissionDisposition(SID, {
+        intentId: envelope.intentId,
+        hostInstanceId: OWNER.hostInstanceId,
+        sessionEpoch: OWNER.sessionEpoch,
+        editorRevision: (envelope.intent as Extract<SessionIntent, { kind: "submit" }>)
+          .editorRevision,
+        disposition: "consumed",
+      }),
+    );
+    expect(useSessionsStore.getState().newSessionDrafts.has(WORKSPACE)).toBe(false);
+
+    const remounted = mount();
+    expect(remounted.textarea().value).toBe("");
+    remounted.unmount();
+  });
+
   it("retains a newer local prompt edit when its dispatched prompt is consumed", async () => {
     installInvoke(invoke, false);
     const composer = mount();
@@ -1365,6 +1407,188 @@ describe("Composer attachments under authority outcomes", () => {
       "doesn't support image input",
     );
     composer.unmount();
+  });
+
+  it("stages operating-system file drops through the picker attachment pipeline", () => {
+    const composer = mount();
+    const dropTarget = composer.container.querySelector<HTMLElement>(".composer")!;
+    const file = pickedFile("notes.txt", "text/plain", "/tmp/notes.txt");
+
+    const dragEnter = dispatchFileDrag(dropTarget, "dragenter", [file]);
+    expect(dragEnter.defaultPrevented).toBe(true);
+    expect(composer.container.querySelector(".composer__file-drop")?.textContent).toContain(
+      "Drop files to attach",
+    );
+
+    const drop = dispatchFileDrag(dropTarget, "drop", [file]);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composer.container.querySelector(".composer__file-drop")).toBeNull();
+    expect(composer.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(1);
+    expect(
+      composer.container.querySelector(".composer__file-attachment")?.getAttribute("title"),
+    ).toBe("/tmp/notes.txt");
+    composer.unmount();
+  });
+
+  it("keeps the file-drop overlay stable across nested drag enter/leave events", () => {
+    const composer = mount();
+    const dropTarget = composer.container.querySelector<HTMLElement>(".composer")!;
+    const nestedTarget = composer.container.querySelector<HTMLElement>(".composer__input-box")!;
+    const file = pickedFile("notes.txt", "text/plain", "/tmp/notes.txt");
+
+    dispatchFileDrag(dropTarget, "dragenter", [file]);
+    dispatchFileDrag(nestedTarget, "dragenter", [file]);
+    expect(composer.container.querySelector(".composer__file-drop")).not.toBeNull();
+
+    dispatchFileDrag(nestedTarget, "dragleave", [file]);
+    expect(composer.container.querySelector(".composer__file-drop")).not.toBeNull();
+
+    dispatchFileDrag(dropTarget, "dragleave", [file]);
+    expect(composer.container.querySelector(".composer__file-drop")).toBeNull();
+    composer.unmount();
+  });
+
+  it("consumes unavailable and submitting drops without staging or browser navigation", async () => {
+    setSessionField({ status: "cold" });
+    const unavailable = mount();
+    const unavailableTarget = unavailable.container.querySelector<HTMLElement>(".composer")!;
+    const file = pickedFile("notes.txt", "text/plain", "/tmp/notes.txt");
+
+    expect(dispatchFileDrag(unavailableTarget, "dragover", [file]).defaultPrevented).toBe(true);
+    expect(dispatchFileDrag(unavailableTarget, "drop", [file]).defaultPrevented).toBe(true);
+    expect(unavailable.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(
+      0,
+    );
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+      "Wait for the session runtime",
+    );
+    unavailable.unmount();
+
+    setSessionField({ status: "ready" });
+    installInvoke(invoke, false);
+    const submitting = mount();
+    type(submitting.textarea(), "prompt in flight");
+    key(submitting.textarea(), "Enter");
+    await vi.waitFor(() => expect(submitting.textarea().disabled).toBe(true));
+    const submittingTarget = submitting.container.querySelector<HTMLElement>(".composer")!;
+    expect(dispatchFileDrag(submittingTarget, "dragover", [file]).defaultPrevented).toBe(true);
+    expect(dispatchFileDrag(submittingTarget, "drop", [file]).defaultPrevented).toBe(true);
+    expect(submitting.container.querySelectorAll(".composer__attachment-item--file")).toHaveLength(
+      0,
+    );
+    expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+      "Wait for the current prompt",
+    );
+    submitting.unmount();
+  });
+
+  it("reserves the eight image slots across delayed concurrent drop batches", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+    });
+    const readers: Array<{
+      result: string | null;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      onabort: (() => void) | null;
+    }> = [];
+    class DeferredReader {
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      readAsDataURL(): void {
+        readers.push(this);
+      }
+    }
+    const original = globalThis.FileReader;
+    vi.stubGlobal("FileReader", DeferredReader);
+    try {
+      const composer = mount();
+      const dropTarget = composer.container.querySelector<HTMLElement>(".composer")!;
+      const images = Array.from({ length: 12 }, (_, index) =>
+        pickedFile(`image-${index}.png`, "image/png", `/tmp/image-${index}.png`),
+      );
+
+      dispatchFileDrag(dropTarget, "drop", images.slice(0, 6));
+      dispatchFileDrag(dropTarget, "drop", images.slice(6));
+
+      expect(readers).toHaveLength(8);
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachmentReads).toBe(8);
+      expect(useSessionsStore.getState().sessions.get(SID)?.toasts.at(-1)?.message).toContain(
+        "max 8",
+      );
+
+      act(() => {
+        for (const reader of readers) {
+          reader.result = "data:image/png;base64,eA==";
+          reader.onload?.();
+        }
+      });
+      await vi.waitFor(() =>
+        expect(composer.container.querySelectorAll(".composer__attachment-thumb")).toHaveLength(8),
+      );
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachments).toHaveLength(8);
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachmentReads).toBe(0);
+      composer.unmount();
+    } finally {
+      vi.stubGlobal("FileReader", original);
+    }
+  });
+
+  it("releases reserved image slots after read errors and aborts", async () => {
+    setSessionField({
+      availableModels: [{ id: "text-model", name: "Image", input: ["text", "image"] }],
+    });
+    const readers: Array<{
+      result: string | null;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+      onabort: (() => void) | null;
+    }> = [];
+    class DeferredReader {
+      result: string | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      readAsDataURL(): void {
+        readers.push(this);
+      }
+    }
+    const original = globalThis.FileReader;
+    vi.stubGlobal("FileReader", DeferredReader);
+    try {
+      const composer = mount();
+      const dropTarget = composer.container.querySelector<HTMLElement>(".composer")!;
+      const images = Array.from({ length: 10 }, (_, index) =>
+        pickedFile(`retry-${index}.png`, "image/png", `/tmp/retry-${index}.png`),
+      );
+      dispatchFileDrag(dropTarget, "drop", images.slice(0, 8));
+      expect(readers).toHaveLength(8);
+
+      act(() => {
+        readers[0]!.onerror?.();
+        readers[1]!.onabort?.();
+      });
+      dispatchFileDrag(dropTarget, "drop", images.slice(8));
+      expect(readers).toHaveLength(10);
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachmentReads).toBe(8);
+
+      act(() => {
+        for (const reader of readers.slice(2)) {
+          reader.result = "data:image/png;base64,eA==";
+          reader.onload?.();
+        }
+      });
+      await vi.waitFor(() =>
+        expect(composer.container.querySelectorAll(".composer__attachment-thumb")).toHaveLength(8),
+      );
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachments).toHaveLength(8);
+      expect(useSessionsStore.getState().sessions.get(SID)?.editorAttachmentReads).toBe(0);
+      composer.unmount();
+    } finally {
+      vi.stubGlobal("FileReader", original);
+    }
   });
 
   it("keeps file/image attachments staged across extension commands and clears each authority-confirmed context exactly once", async () => {

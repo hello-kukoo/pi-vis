@@ -849,6 +849,22 @@ describe("getChangesCount", () => {
 });
 
 describe("createWorktree", () => {
+  it("pins checkout identity without inspecting uncommitted payload", async () => {
+    makeRepo();
+    const { checkoutStillMatchesIdentity, readCheckoutIdentity } = await import("./git.js");
+    const captured = await readCheckoutIdentity(workDir);
+    expect(captured.kind).toBe("ok");
+    if (captured.kind !== "ok") return;
+
+    write(path.join(workDir, "local-only.txt"), "not copied\n");
+    expect(await checkoutStillMatchesIdentity(workDir, captured.identity)).toEqual({ kind: "ok" });
+
+    git(workDir, ["checkout", "-b", "identity-moved"]);
+    expect(await checkoutStillMatchesIdentity(workDir, captured.identity)).toMatchObject({
+      kind: "error",
+    });
+  });
+
   it("creates a worktree on a new branch from the current HEAD", async () => {
     makeRepo();
     // Create a branch to use as base

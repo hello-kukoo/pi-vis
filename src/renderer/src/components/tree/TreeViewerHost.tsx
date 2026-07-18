@@ -16,6 +16,7 @@ import { cssEscape } from "../../lib/format.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { type TreeFilterMode, isTreeUnsupported, useTreeStore } from "../../stores/tree-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconChevronRight, IconClose } from "../common/icons.js";
 import { type VisibleRow, flattenVisible } from "./tree-flatten.js";
 import "../common/viewer-header.css";
@@ -421,7 +422,14 @@ function TreeList({
   }, [rows, selectedId]);
 
   return (
-    <div ref={treeRef} className="tree-viewer__tree" role="listbox" aria-label="Conversation tree">
+    <ScrollFadeFrame
+      frameClassName="tree-viewer__tree-frame"
+      scrollerRef={treeRef}
+      className="tree-viewer__tree"
+      role="listbox"
+      aria-label="Conversation tree"
+      fill
+    >
       {rows.map((row) => (
         <TreeRow
           key={row.entry.id}
@@ -434,7 +442,7 @@ function TreeList({
           onEditLabel={() => onEditLabel(row.entry.id, row.label)}
         />
       ))}
-    </div>
+    </ScrollFadeFrame>
   );
 }
 

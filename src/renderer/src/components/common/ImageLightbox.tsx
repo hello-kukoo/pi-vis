@@ -84,28 +84,30 @@ export function ImageLightbox(): React.ReactElement | null {
             <IconClose />
           </button>
         </div>
-        <div className="image-lightbox__body">
-          {canNavigate && (
-            <button
-              type="button"
-              className="image-lightbox__nav image-lightbox__nav--previous icon-btn"
-              onClick={previous}
-              aria-label="Previous image"
-            >
-              <IconChevronLeft />
-            </button>
-          )}
-          <img className="image-lightbox__image" src={current.src} alt={current.alt ?? ""} />
-          {canNavigate && (
-            <button
-              type="button"
-              className="image-lightbox__nav image-lightbox__nav--next icon-btn"
-              onClick={next}
-              aria-label="Next image"
-            >
-              <IconChevronRight />
-            </button>
-          )}
+        <div className="image-lightbox__body-shell">
+          <div className="image-lightbox__body">
+            {canNavigate && (
+              <button
+                type="button"
+                className="image-lightbox__nav image-lightbox__nav--previous icon-btn"
+                onClick={previous}
+                aria-label="Previous image"
+              >
+                <IconChevronLeft />
+              </button>
+            )}
+            <img className="image-lightbox__image" src={current.src} alt={current.alt ?? ""} />
+            {canNavigate && (
+              <button
+                type="button"
+                className="image-lightbox__nav image-lightbox__nav--next icon-btn"
+                onClick={next}
+                aria-label="Next image"
+              >
+                <IconChevronRight />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

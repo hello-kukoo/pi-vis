@@ -3,6 +3,7 @@ import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { IconBell, IconClose } from "../common/icons.js";
 import "./NotificationStack.css";
 
@@ -220,31 +221,33 @@ export function NotificationStack({
                 Clear all
               </button>
             </div>
-            <div className="notification-stack__list-wrap">
-              <div className="notification-stack__list">
-                {notifications.map((toast) => {
-                  const type = notificationType(toast.type);
-                  return (
-                    <article
-                      key={toast.id}
-                      className={`notification-card notification-card--${type}`}
-                      aria-label={`${notificationTypeLabel(type)} notification`}
+            <ScrollFadeFrame
+              frameClassName="notification-stack__list-wrap"
+              className="notification-stack__list"
+              fill
+            >
+              {notifications.map((toast) => {
+                const type = notificationType(toast.type);
+                return (
+                  <article
+                    key={toast.id}
+                    className={`notification-card notification-card--${type}`}
+                    aria-label={`${notificationTypeLabel(type)} notification`}
+                  >
+                    <span className="notification-card__marker" aria-hidden="true" />
+                    <div className="notification-card__message">{toast.message}</div>
+                    <button
+                      type="button"
+                      className="notification-card__dismiss icon-btn"
+                      onClick={() => dismissToast(sessionId, toast.id)}
+                      aria-label="Dismiss notification"
                     >
-                      <span className="notification-card__marker" aria-hidden="true" />
-                      <div className="notification-card__message">{toast.message}</div>
-                      <button
-                        type="button"
-                        className="notification-card__dismiss icon-btn"
-                        onClick={() => dismissToast(sessionId, toast.id)}
-                        aria-label="Dismiss notification"
-                      >
-                        <IconClose size="0.857em" />
-                      </button>
-                    </article>
-                  );
-                })}
-              </div>
-            </div>
+                      <IconClose size="0.857em" />
+                    </button>
+                  </article>
+                );
+              })}
+            </ScrollFadeFrame>
           </>
         ) : previewNotification ? (
           <div

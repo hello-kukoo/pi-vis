@@ -184,8 +184,13 @@
   flex-direction: column;
   gap: 0.143rem;
   overflow-y: auto;
+  overflow-x: hidden;
   max-height: 13.571em; /* ≈190px @ 14px root, leaves room for card padding */
   padding: 0.143rem var(--space-2);
+}
+
+.composer__suggestion-list-frame {
+  --scroll-fade-surface: var(--surface);
 }
 
 .composer__suggestion {
@@ -291,6 +296,7 @@
 }
 
 .composer__input-box {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -305,6 +311,29 @@
   font-size: var(--font-size-base);
   line-height: 1.5;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.composer__input-box--file-drag,
+.composer__input-box--file-drag:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.composer__file-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--input-bg) 88%, transparent);
+  color: var(--accent);
+  font-size: 0.929em;
+  font-weight: 600;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
 }
 
 /* Connected stack: when the Dock tray sits above the composer, the input box
@@ -433,4 +462,5 @@
   min-height: 2.1em;
   max-height: calc(1.5em * 10 + 0.6em);
   overflow-y: auto;
+  overflow-x: hidden;
 }

@@ -47,6 +47,7 @@ import {
 } from "../../stores/sessions-store.js";
 import { useTreeStore } from "../../stores/tree-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { Spinner } from "../common/Spinner.js";
 import { IconClose, IconComment, IconFile } from "../common/icons.js";
 import "./Composer.css";
@@ -58,9 +59,14 @@ interface ComposerProps {
 type FileWithLegacyPath = File & { path?: string };
 
 const IMAGE_FILE_EXTENSION = /\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i;
+const MAX_IMAGE_ATTACHMENTS = 8;
 
 function isImageFile(file: File): boolean {
   return file.type.startsWith("image/") || IMAGE_FILE_EXTENSION.test(file.name);
+}
+
+function carriesFiles(dataTransfer: DataTransfer): boolean {
+  return dataTransfer.files.length > 0 || Array.from(dataTransfer.types).includes("Files");
 }
 
 function pathForPickedFile(file: File): string {
@@ -172,6 +178,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const suggestionListRef = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
+  const [fileDragActive, setFileDragActive] = useState(false);
+  const fileDragDepthRef = useRef(0);
+  // FileReader completion is asynchronous, so rendered attachment state is
+  // not a capacity ledger. Reserve against the exact session/editor epoch
+  // synchronously before each read; concurrent picker/drop batches then share
+  // one eight-image limit without making stale reads block a successor epoch.
+  const imageSlotReservationsRef = useRef(new Map<string, number>());
   // Re-entrancy guard for `handleSubmit`. De-duplicate only the same content:
   // a distinct command/prompt typed while an earlier operation is finishing is
   // a legitimate rapid submission and must still reach host custody.
@@ -534,11 +547,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       const store = useSessionsStore.getState();
       const current = store.sessions.get(sessionId);
       const submitted = pendingOrdinaryPromptRef.current;
-      // Idle prompts are delivered directly rather than through Pi's queue,
-      // so their first user echo has no queue intent ID. In a brand-new
-      // session an exact untagged echo is sufficient delivery evidence for
-      // the still-visible payload; the generation/attachment fences below
-      // still preserve any newer local draft.
+      // Current hosts tag queued and idle-direct echoes with the stable intent.
+      // For legacy hosts, an exact untagged echo is still sufficient delivery
+      // evidence for the one visible payload; generation/attachment fences
+      // below preserve any newer local draft.
       const matchingFirstEcho =
         submitted &&
         current?.transcript.authoritativeUserEchoes.some(
@@ -584,6 +596,9 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const closeSessionTab = useSessionsStore((s) => s.closeSessionTab);
   const setNewSessionDraft = useSessionsStore((s) => s.setNewSessionDraft);
   const setSessionDraft = useSessionsStore((s) => s.setSessionDraft);
+  const registerPendingComposerSubmission = useSessionsStore(
+    (s) => s.registerPendingComposerSubmission,
+  );
   const clearEditorInjection = useSessionsStore((s) => s.clearEditorInjection);
   const diffCommentCount = useSessionsStore((s) => s.diffComments.get(sessionId)?.size ?? 0);
   const clearDiffComments = useSessionsStore((s) => s.clearDiffComments);
@@ -819,11 +834,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     fileInputRef.current?.click();
   }, []);
 
-  const handleFilesSelected = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = e.target.files;
-      if (!files || files.length === 0) return;
-      const selected = Array.from(files).map((file) => ({
+  const stageFiles = useCallback(
+    (files: readonly File[]) => {
+      if (files.length === 0) return;
+      const selected = files.map((file) => ({
         file,
         path: pathForPickedFile(file),
         image: isImageFile(file),
@@ -853,32 +867,59 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       }
 
       const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
-      const MAX_ATTACHMENTS = 8;
-      let slots = MAX_ATTACHMENTS - attachments.length;
       for (const { file, path, image } of selected) {
         if (!image || !modelSupportsImages) continue;
-        if (slots <= 0) {
-          addToast(sessionId, "Too many image attachments (max 8)", "error");
+        const readSessionId = sessionId;
+        const readEditorEpoch = editorPatchEpochRef.current;
+        const reservationKey = `${readSessionId}\u0000${readEditorEpoch}`;
+        const reservedSlots = imageSlotReservationsRef.current.get(reservationKey) ?? 0;
+        const committedSlots = replicatedAttachmentsRef.current.reduce(
+          (count, attachment) => count + (attachment.kind === "image" ? 1 : 0),
+          0,
+        );
+        if (committedSlots + reservedSlots >= MAX_IMAGE_ATTACHMENTS) {
+          addToast(sessionId, `Too many image attachments (max ${MAX_IMAGE_ATTACHMENTS})`, "error");
           break;
         }
         if (file.size > MAX_IMAGE_BYTES) {
           addToast(sessionId, `${file.name} is too large (max 10 MB)`, "error");
           continue;
         }
-        slots--;
-        const reader = new FileReader();
-        const readSessionId = sessionId;
-        const readEditorEpoch = editorPatchEpochRef.current;
-        useSessionsStore.getState().beginEditorAttachmentRead(readSessionId);
+        imageSlotReservationsRef.current.set(reservationKey, reservedSlots + 1);
+
+        let reservationReleased = false;
+        const releaseReservation = (): void => {
+          if (reservationReleased) return;
+          reservationReleased = true;
+          const current = imageSlotReservationsRef.current.get(reservationKey) ?? 0;
+          if (current <= 1) imageSlotReservationsRef.current.delete(reservationKey);
+          else imageSlotReservationsRef.current.set(reservationKey, current - 1);
+        };
         let readFinished = false;
+        let readCustodyStarted = false;
         const finishRead = (): void => {
           if (readFinished) return;
           readFinished = true;
-          useSessionsStore.getState().endEditorAttachmentRead(readSessionId);
+          releaseReservation();
+          if (readCustodyStarted) {
+            useSessionsStore.getState().endEditorAttachmentRead(readSessionId);
+          }
         };
+        let reader: FileReader;
+        try {
+          reader = new FileReader();
+          useSessionsStore.getState().beginEditorAttachmentRead(readSessionId);
+          readCustodyStarted = true;
+        } catch (error) {
+          finishRead();
+          addToast(sessionId, error instanceof Error ? error.message : String(error), "error");
+          continue;
+        }
         reader.onload = () => {
+          if (readFinished) return;
           try {
             if (
+              !mountedRef.current ||
               renderedSessionIdRef.current !== readSessionId ||
               editorPatchEpochRef.current !== readEditorEpoch
             ) {
@@ -904,6 +945,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           }
         };
         reader.onerror = () => {
+          if (readFinished) return;
           addToast(sessionId, `Could not read ${file.name}`, "error");
           finishRead();
         };
@@ -915,17 +957,70 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
           addToast(sessionId, error instanceof Error ? error.message : String(error), "error");
         }
       }
-      e.target.value = "";
     },
-    [
-      addToast,
-      attachments,
-      sessionId,
-      modelSupportsImages,
-      modelLabel,
-      synchronizeEditorText,
-      text,
-    ],
+    [addToast, sessionId, modelSupportsImages, modelLabel, synchronizeEditorText, text],
+  );
+
+  const handleFilesSelected = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? []);
+      e.target.value = "";
+      stageFiles(files);
+    },
+    [stageFiles],
+  );
+
+  const handleFileDragEnter = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      fileDragDepthRef.current += 1;
+      if (live && !submitPending) setFileDragActive(true);
+    },
+    [live, submitPending],
+  );
+
+  const handleFileDragOver = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = live && !submitPending ? "copy" : "none";
+    },
+    [live, submitPending],
+  );
+
+  const handleFileDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    if (fileDragDepthRef.current === 0) setFileDragActive(false);
+  }, []);
+
+  const handleFileDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!carriesFiles(e.dataTransfer)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      fileDragDepthRef.current = 0;
+      setFileDragActive(false);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
+      if (!live || submitPending) {
+        addToast(
+          sessionId,
+          submitPending
+            ? "Wait for the current prompt to be accepted before attaching files"
+            : "Wait for the session runtime before attaching files",
+          "warning",
+        );
+        return;
+      }
+      stageFiles(files);
+    },
+    [addToast, live, sessionId, stageFiles, submitPending],
   );
 
   const removeAttachment = useCallback(
@@ -1428,6 +1523,20 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                       ? { editorInjectionNonce: submittedEditorInjectionNonce }
                       : {}),
                   };
+                  // Keep the submission correlation in the session store as
+                  // well as this mounted component. Session switches and
+                  // sleep/wake can unmount the Composer before the host echo
+                  // or admission result arrives; the store can then retire
+                  // only the exact dispatched draft/comment revisions.
+                  registerPendingComposerSubmission(sessionId, {
+                    intentId,
+                    owner: dispatchSnapshot.owner,
+                    editorRevision: submittedEditorRevision,
+                    draftScope: pending ? "workspace" : "session",
+                    composerText: submittedLocalText,
+                    submittedText: finalAction.text,
+                    submittedComments: isRealPrompt ? pendingDiffComments : [],
+                  });
                   return intentId;
                 }
               : undefined,
@@ -1577,6 +1686,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       text,
       discovered,
       session,
+      pending,
       sessionId,
       addToast,
       addUserMessage,
@@ -1589,6 +1699,7 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
       modelLabel,
       worktreeCreating,
       semanticSnapshot?.model,
+      registerPendingComposerSubmission,
       clearSubmittedDiffComments,
       synchronizeEditorText,
       markSubmitPending,
@@ -1770,7 +1881,13 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const isSlashMode = text.startsWith("/");
 
   return (
-    <div className="composer">
+    <div
+      className="composer"
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
+    >
       <input
         ref={fileInputRef}
         type="file"
@@ -1788,7 +1905,12 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
             .composer__suggestions in Composer.css. */}
         {showSuggestions && (
           <div className="composer__suggestions">
-            <div className="composer__suggestion-list" role="listbox" ref={suggestionListRef}>
+            <ScrollFadeFrame
+              frameClassName="composer__suggestion-list-frame"
+              scrollerRef={suggestionListRef}
+              className="composer__suggestion-list"
+              role="listbox"
+            >
               {suggestions.map((s, i) => (
                 <button
                   type="button"
@@ -1811,12 +1933,18 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
                   </span>
                 </button>
               ))}
-            </div>
+            </ScrollFadeFrame>
           </div>
         )}
         <div
-          className={`composer__input-box${submitPending ? " composer__input-box--pending" : ""}${submitDenied ? " composer__input-box--denied" : ""}`}
+          className={`composer__input-box${submitPending ? " composer__input-box--pending" : ""}${submitDenied ? " composer__input-box--denied" : ""}${fileDragActive ? " composer__input-box--file-drag" : ""}`}
         >
+          {fileDragActive && (
+            <div className="composer__file-drop" role="status">
+              <IconFile size="1.25em" />
+              <span>Drop files to attach</span>
+            </div>
+          )}
           {/* Image previews live inside the input card, above the typed text,
               so attachments read as part of the pending message rather than a
               separate horizontal tray. */}

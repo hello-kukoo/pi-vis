@@ -50,7 +50,12 @@ import type { DiffModel } from "../lib/diff/diff-model.js";
 import { reanchorCommentsForEdit } from "../lib/diff/edit-anchor.js";
 import { describeIpcError } from "../lib/ipc-errors.js";
 import { findCurrentModel } from "../lib/model-utils.js";
-import { forgetPanelInputSequence } from "../lib/panel-input-sequence.js";
+import {
+  activatePanelInputIdentity,
+  forgetPanelInputSequence,
+  forgetPanelInputSession,
+  retirePanelInputIdentity,
+} from "../lib/panel-input-sequence.js";
 import { RENDERER_GENERATION } from "../lib/renderer-generation.js";
 import { dispatchSessionIntent, querySession } from "../lib/session-intent.js";
 import {
@@ -86,6 +91,19 @@ export interface QueuedMessage {
   source: "optimistic" | "authoritative";
 }
 
+interface PendingComposerSubmission {
+  intentId: string;
+  owner: RuntimeIdentity;
+  editorRevision: number;
+  /** Which renderer draft map owned composerText when dispatch began. */
+  draftScope: "workspace" | "session";
+  /** Renderer text that may be cleared only while it is still the saved draft. */
+  composerText: string;
+  /** Actual prompt after staged files/comments; used for untagged legacy echoes. */
+  submittedText: string;
+  submittedComments: CodeComment[];
+}
+
 export interface SessionViewState {
   sessionId: SessionId;
   workspacePath: string;
@@ -105,6 +123,12 @@ export interface SessionViewState {
   editorAttachments: unknown[];
   editorAttachmentReads: number;
   editorPatchPending: number;
+  /**
+   * Component-independent custody for one ordinary Composer submission.
+   * Survives switching away from the session so correlated acceptance can
+   * retire the exact draft/comment revisions while its Composer is unmounted.
+   */
+  pendingComposerSubmission?: PendingComposerSubmission | undefined;
   /** Cold→live activation owned by the current view-only visit, if any. */
   activationVisitId?: string | undefined;
   activationVisitReleasePending?: boolean | undefined;
@@ -240,6 +264,7 @@ export interface SessionViewState {
         outputSequence?: number;
         outputKind?: "keyframe" | "delta" | "reset";
         outputAnsi?: string;
+        inputAcknowledgedThrough?: number;
         syncState?: "following" | "synchronizing" | "unavailable";
       }
     | undefined;
@@ -269,6 +294,7 @@ export interface SessionViewState {
         outputSequence?: number;
         outputKind?: "keyframe" | "delta" | "reset";
         outputAnsi?: string;
+        inputAcknowledgedThrough?: number;
         syncState?: "following" | "synchronizing" | "unavailable";
       }
     | undefined;
@@ -343,6 +369,50 @@ export interface SessionViewState {
    * session last picked.
    */
   modelInitialized: boolean;
+}
+
+function panelInputIdentities(
+  session: SessionViewState | undefined,
+): Array<{ hostInstanceId: string; sessionEpoch: number; panelId: number }> {
+  if (!session) return [];
+  return [session.panel, session.unifiedPanel].flatMap((panel) =>
+    panel
+      ? [
+          {
+            hostInstanceId: panel.hostInstanceId,
+            sessionEpoch: panel.sessionEpoch,
+            panelId: panel.id,
+          },
+        ]
+      : [],
+  );
+}
+
+function retireSupersededPanelInputIdentities(
+  sessionId: SessionId,
+  previous: SessionViewState | undefined,
+  current: SessionViewState | undefined,
+): void {
+  const currentIdentities = panelInputIdentities(current);
+  const previousIdentities = panelInputIdentities(previous);
+  for (const previousIdentity of previousIdentities) {
+    const retained = currentIdentities.some(
+      (identity) =>
+        identity.hostInstanceId === previousIdentity.hostInstanceId &&
+        identity.sessionEpoch === previousIdentity.sessionEpoch &&
+        identity.panelId === previousIdentity.panelId,
+    );
+    if (!retained) retirePanelInputIdentity(sessionId, previousIdentity);
+  }
+  for (const currentIdentity of currentIdentities) {
+    const retained = previousIdentities.some(
+      (identity) =>
+        identity.hostInstanceId === currentIdentity.hostInstanceId &&
+        identity.sessionEpoch === currentIdentity.sessionEpoch &&
+        identity.panelId === currentIdentity.panelId,
+    );
+    if (!retained) activatePanelInputIdentity(sessionId, currentIdentity);
+  }
 }
 
 interface WorkspaceState {
@@ -489,6 +559,35 @@ function sameCommentRevision(a: CodeComment, b: CodeComment): boolean {
   return a.id === b.id && a.revision === b.revision;
 }
 
+function withoutSubmittedCommentRevisions(
+  existing: Map<string, CodeComment> | undefined,
+  submitted: readonly CodeComment[],
+): Map<string, CodeComment> | undefined {
+  if (!existing || submitted.length === 0) return existing;
+  const comments = new Map(existing);
+  let changed = false;
+  for (const submittedComment of submitted) {
+    for (const [key, current] of comments) {
+      if (!sameCommentRevision(current, submittedComment)) continue;
+      comments.delete(key);
+      changed = true;
+      break;
+    }
+  }
+  return changed ? comments : existing;
+}
+
+function clearMatchingDraft<K>(drafts: Map<K, string>, key: K, text: string): Map<K, string> {
+  if (drafts.get(key) !== text) return drafts;
+  const next = new Map(drafts);
+  next.delete(key);
+  return next;
+}
+
+function submissionDispositionProvesCustody(disposition: SubmissionResult["disposition"]): boolean {
+  return ["in_custody", "consumed", "completed", "extension_error"].includes(disposition);
+}
+
 function diffCommentsStorageSessionKey(sessionFile: string): SessionId {
   return `file:${sessionFile}` as SessionId;
 }
@@ -546,10 +645,10 @@ export function sessionCompactionActivity(
 ): CompactionActivity | undefined {
   const snapshot = authoritySnapshotFor(session);
   if (!snapshot) return undefined;
-  return (
-    snapshot.activity.compaction ??
-    (snapshot.sdk.isCompacting ? { kind: "compaction", state: "active", attempt: 0 } : undefined)
-  );
+  // Pi's generic SDK getter also covers branch summarization. The child-owned
+  // operation journal/activity projection is the only source that can
+  // distinguish real context compaction from tree navigation.
+  return snapshot.activity.compaction;
 }
 
 function isSessionHistoryBusy(session: SessionViewState | undefined): boolean {
@@ -1044,6 +1143,10 @@ interface SessionsStore {
   sessionDrafts: Map<SessionId, string>;
   /** Update (replace) the per-session draft. Empty text deletes the entry. */
   setSessionDraft: (sessionId: SessionId, text: string) => void;
+  registerPendingComposerSubmission: (
+    sessionId: SessionId,
+    submission: PendingComposerSubmission,
+  ) => void;
 
   /** Diff-viewer comments keyed per session, then by file+new-side line. */
   diffComments: Map<SessionId, Map<string, CodeComment>>;
@@ -1339,8 +1442,13 @@ interface SessionsStore {
 
   refreshWorkspaceSessions: (path: string) => Promise<void>;
 
-  /** Resolves false only when a visit-triggered activation fails. State selection is synchronous. */
-  setActiveSession: (sessionId: SessionId | null) => Promise<boolean>;
+  /** Selects synchronously. A cold-open caller may fence subprocess activation
+   *  behind persisted-history hydration so the selected transcript/editor are
+   *  useful before runtime attach begins. */
+  setActiveSession: (
+    sessionId: SessionId | null,
+    opts?: { beforeActivation?: Promise<unknown> },
+  ) => Promise<boolean>;
   /** Retry activation for an already-active failed/exited session. Switching
    *  to a session is what normally reactivates it, so a session that dies
    *  while active (host crash, sleep/wake) needs this explicit recovery. */
@@ -1518,6 +1626,9 @@ const buildSessionsStore = (
   },
 
   createSession: (sessionId, workspacePath, sessionFile, name, title, status) => {
+    // A reused renderer session id is a new input generation. In-flight work
+    // from the removed record may settle, but can never mutate this successor.
+    forgetPanelInputSession(sessionId);
     set((state) => {
       const sessions = new Map(state.sessions);
       const pendingSetup = sessionFile ? undefined : state.newSessionSetupDrafts.get(workspacePath);
@@ -1599,6 +1710,7 @@ const buildSessionsStore = (
   },
 
   removeSession: (sessionId, opts) => {
+    forgetPanelInputSession(sessionId);
     set((state) => {
       const sessions = new Map(state.sessions);
       const s = sessions.get(sessionId);
@@ -1750,7 +1862,9 @@ const buildSessionsStore = (
       let newSessionDrafts = state.newSessionDrafts;
       let newSessionSetupDrafts = state.newSessionSetupDrafts;
       let sessionDrafts = state.sessionDrafts;
+      let diffComments = state.diffComments;
       let anyPromoted = false;
+      let acceptedPendingSubmission = false;
 
       for (const event of events) {
         let unreadStatus = current.unreadStatus;
@@ -1811,6 +1925,54 @@ const buildSessionsStore = (
           );
           anyPromoted = true;
         }
+        const pendingSubmission = current.pendingComposerSubmission;
+        const submissionEchoed =
+          !!pendingSubmission &&
+          !!authoritativeUserEcho &&
+          (authoritativeUserEcho.intentId === pendingSubmission.intentId ||
+            (authoritativeUserEcho.intentId === undefined &&
+              authoritativeUserEcho.content === pendingSubmission.submittedText));
+        if (submissionEchoed && pendingSubmission) {
+          // A tagged host echo is exact delivery evidence. The content fallback
+          // is retained for older hosts and remains scoped to the single
+          // registered submission. Clear only the draft text and comment
+          // revisions that were actually dispatched so later edits survive.
+          if (pendingSubmission.draftScope === "workspace") {
+            newSessionDrafts = clearMatchingDraft(
+              newSessionDrafts,
+              current.workspacePath,
+              pendingSubmission.composerText,
+            );
+            // A first user echo promotes a pending workspace draft into its
+            // real session earlier in this reducer turn. Retire that migrated
+            // copy too, but never touch a session draft for an unrelated
+            // established-session disposition.
+            if (promoted) {
+              sessionDrafts = clearMatchingDraft(
+                sessionDrafts,
+                sessionId,
+                pendingSubmission.composerText,
+              );
+            }
+          } else {
+            sessionDrafts = clearMatchingDraft(
+              sessionDrafts,
+              sessionId,
+              pendingSubmission.composerText,
+            );
+          }
+          const existingComments = diffComments.get(sessionId);
+          const remainingComments = withoutSubmittedCommentRevisions(
+            existingComments,
+            pendingSubmission.submittedComments,
+          );
+          if (remainingComments !== existingComments) {
+            diffComments = new Map(diffComments);
+            if (!remainingComments || remainingComments.size === 0) diffComments.delete(sessionId);
+            else diffComments.set(sessionId, remainingComments);
+          }
+          acceptedPendingSubmission = true;
+        }
         const toasts =
           event.type === "extension_error"
             ? [
@@ -1833,12 +1995,16 @@ const buildSessionsStore = (
 
           isNewPending: promoted ? false : current.isNewPending,
           editorInjection: promoted ? undefined : current.editorInjection,
+          pendingComposerSubmission: submissionEchoed
+            ? undefined
+            : current.pendingComposerSubmission,
         };
       }
 
+      if (diffComments !== state.diffComments) persistCodeComments(diffComments);
       sessions.set(sessionId, current);
-      return anyPromoted
-        ? { sessions, newSessionDrafts, newSessionSetupDrafts, sessionDrafts }
+      return anyPromoted || acceptedPendingSubmission
+        ? { sessions, newSessionDrafts, newSessionSetupDrafts, sessionDrafts, diffComments }
         : { sessions };
     });
     schedulePresentationRehydrateIfIdle(sessionId);
@@ -2207,6 +2373,7 @@ const buildSessionsStore = (
 
   applyAuthorityAttach: (sessionId, response) => {
     if (response.status !== "ready") return;
+    const previousSession = get().sessions.get(sessionId);
     // Main buffers publications while the child serializes its baseline. The
     // authority reducer advances every plane through that replay, but transcript
     // payloads must also reach the presentation reducer; otherwise a user
@@ -2273,6 +2440,7 @@ const buildSessionsStore = (
                 mode: customPanel.baseline.mode,
                 authority: true,
                 inputEnabled: customPanel.inputEnabled,
+                inputAcknowledgedThrough: customPanel.baseline.inputAcknowledgedThrough,
                 renderRevision: customPanel.baseline.keyframe.renderRevision,
                 keyframeReady: customPanel.baseline.keyframe.kind === "keyframe",
                 ...(customPanel.output
@@ -2294,6 +2462,7 @@ const buildSessionsStore = (
                 mode: unifiedPanel.baseline.mode,
                 authority: true,
                 inputEnabled: unifiedPanel.inputEnabled,
+                inputAcknowledgedThrough: unifiedPanel.baseline.inputAcknowledgedThrough,
                 renderRevision: unifiedPanel.baseline.keyframe.renderRevision,
                 keyframeReady: unifiedPanel.baseline.keyframe.kind === "keyframe",
                 ...(unifiedPanel.output
@@ -2333,6 +2502,7 @@ const buildSessionsStore = (
         get().applyEvents(sessionId, replayEvents);
       }
     });
+    retireSupersededPanelInputIdentities(sessionId, previousSession, get().sessions.get(sessionId));
     const droppedReplayEntries = transcriptFollowing
       ? invalidReplayEntries
       : replayTranscriptEntries;
@@ -2355,6 +2525,7 @@ const buildSessionsStore = (
 
   applyAuthorityPublication: (publication) => {
     const sessionId = publication.sessionId as SessionId;
+    const previousSession = get().sessions.get(sessionId);
     // Transcript is a separate presentation plane. Semantic frames intentionally
     // carry no Pi event records, so no event can become a liveness authority.
     const transcriptEntries =
@@ -2515,6 +2686,7 @@ const buildSessionsStore = (
                 mode: customPanel.baseline.mode,
                 authority: true,
                 inputEnabled: customPanel.inputEnabled,
+                inputAcknowledgedThrough: customPanel.baseline.inputAcknowledgedThrough,
                 renderRevision: customPanel.baseline.keyframe.renderRevision,
                 keyframeReady: customPanel.baseline.keyframe.kind === "keyframe",
                 ...(customPanel.output
@@ -2536,6 +2708,7 @@ const buildSessionsStore = (
                 mode: unifiedPanel.baseline.mode,
                 authority: true,
                 inputEnabled: unifiedPanel.inputEnabled,
+                inputAcknowledgedThrough: unifiedPanel.baseline.inputAcknowledgedThrough,
                 renderRevision: unifiedPanel.baseline.keyframe.renderRevision,
                 keyframeReady: unifiedPanel.baseline.keyframe.kind === "keyframe",
                 ...(unifiedPanel.output
@@ -2563,6 +2736,7 @@ const buildSessionsStore = (
       if (accepted && events.length > 0) get().applyEvents(sessionId, events);
       if (accepted && uiRequest) get().addUiRequest(sessionId, uiRequest);
     });
+    retireSupersededPanelInputIdentities(sessionId, previousSession, get().sessions.get(sessionId));
     const droppedEntries = authorityRejectedTranscript
       ? transcriptEntries
       : accepted
@@ -2696,9 +2870,13 @@ const buildSessionsStore = (
   applySubmissionDisposition: (sessionId, result) => {
     // Compatibility admission feedback is renderer presentation only. It is
     // intentionally bounded and never changes authority, transcript, queues,
-    // editor custody, or liveness.
+    // host editor custody, or liveness. A correlated custody disposition may
+    // retire the exact renderer draft/comment revisions registered before
+    // dispatch; this is the same presentation-only clearing a mounted Composer
+    // performs, but it survives session switches and system sleep.
     set((state) => {
-      if (!state.sessions.has(sessionId)) return {};
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
       const key = submissionDispositionKey(result.intentId, result);
       const submissionDispositions = new Map(state.submissionDispositions);
       submissionDispositions.delete(key);
@@ -2708,7 +2886,55 @@ const buildSessionsStore = (
         if (oldest === undefined) break;
         submissionDispositions.delete(oldest);
       }
-      return { submissionDispositions };
+      const pending = current.pendingComposerSubmission;
+      const matchesPending =
+        pending?.intentId === result.intentId &&
+        pending.owner.hostInstanceId === result.hostInstanceId &&
+        pending.owner.sessionEpoch === result.sessionEpoch &&
+        pending.editorRevision === result.editorRevision;
+      if (!matchesPending || !pending) return { submissionDispositions };
+
+      if (!submissionDispositionProvesCustody(result.disposition)) {
+        // A definitive pre-dispatch rejection preserves the draft/comments but
+        // retires this correlation. `admitting` and `outcome_unknown` remain
+        // eligible for later exact user-echo evidence.
+        if (!["not_submitted", "rejected"].includes(result.disposition)) {
+          return { submissionDispositions };
+        }
+        const sessions = new Map(state.sessions);
+        sessions.set(sessionId, { ...current, pendingComposerSubmission: undefined });
+        return { submissionDispositions, sessions };
+      }
+
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, { ...current, pendingComposerSubmission: undefined });
+      const newSessionDrafts =
+        pending.draftScope === "workspace"
+          ? clearMatchingDraft(state.newSessionDrafts, current.workspacePath, pending.composerText)
+          : state.newSessionDrafts;
+      const sessionDrafts =
+        pending.draftScope === "session"
+          ? clearMatchingDraft(state.sessionDrafts, sessionId, pending.composerText)
+          : state.sessionDrafts;
+      const existingComments = state.diffComments.get(sessionId);
+      const remainingComments = withoutSubmittedCommentRevisions(
+        existingComments,
+        pending.submittedComments,
+      );
+      let diffComments = state.diffComments;
+      if (remainingComments !== existingComments) {
+        diffComments = new Map(state.diffComments);
+        if (!remainingComments || remainingComments.size === 0) diffComments.delete(sessionId);
+        else diffComments.set(sessionId, remainingComments);
+        persistCodeComments(diffComments);
+      }
+      return {
+        submissionDispositions,
+        sessions,
+        newSessionDrafts,
+        sessionDrafts,
+        diffComments,
+      };
     });
   },
 
@@ -2809,15 +3035,41 @@ const buildSessionsStore = (
             );
       if (authorityOwnsEvent) return;
     }
-    if (event.type === "panel_open" || event.type === "panel_close") {
+    if (event.type === "panel_open") {
       // A host may reuse a numeric panel id after restart and React may
       // coalesce clear/open renders. Every open is nevertheless a new
       // host-bound input stream whose sequence starts at zero.
       forgetPanelInputSequence(sessionId, event.panelId);
+      activatePanelInputIdentity(sessionId, {
+        hostInstanceId: event.hostInstanceId ?? current?.hostInstanceId ?? "",
+        sessionEpoch: event.sessionEpoch ?? current?.sessionEpoch ?? 0,
+        panelId: event.panelId,
+      });
+    } else if (event.type === "panel_close") {
+      const displayed = [current?.panel, current?.unifiedPanel].find(
+        (panel) => panel?.id === event.panelId,
+      );
+      if (displayed) {
+        retirePanelInputIdentity(sessionId, {
+          hostInstanceId: displayed.hostInstanceId,
+          sessionEpoch: displayed.sessionEpoch,
+          panelId: displayed.id,
+        });
+      } else {
+        forgetPanelInputSequence(sessionId, event.panelId);
+      }
     } else if (event.type === "panel_clear_all" && current?.panel) {
-      forgetPanelInputSequence(sessionId, current.panel.id);
+      retirePanelInputIdentity(sessionId, {
+        hostInstanceId: current.panel.hostInstanceId,
+        sessionEpoch: current.panel.sessionEpoch,
+        panelId: current.panel.id,
+      });
     } else if (event.type === "unified_panel_reset" && current?.unifiedPanel) {
-      forgetPanelInputSequence(sessionId, current.unifiedPanel.id);
+      retirePanelInputIdentity(sessionId, {
+        hostInstanceId: current.unifiedPanel.hostInstanceId,
+        sessionEpoch: current.unifiedPanel.sessionEpoch,
+        panelId: current.unifiedPanel.id,
+      });
     }
     set((state) => {
       const s = state.sessions.get(sessionId);
@@ -4072,6 +4324,16 @@ const buildSessionsStore = (
           });
         }
       }
+      // Select the reconstructed session immediately, then hydrate its saved
+      // transcript before asking main to attach the subprocess. The textarea
+      // is intentionally usable without semantic authority, so the user can
+      // read and compose while this cold-open fence settles.
+      const hydration = sessionFile ? get().rehydrateHistory(sessionId) : Promise.resolve();
+      let activation: Promise<boolean> | undefined;
+      if (focus) {
+        if (opts?.requestComposerFocus) get().requestComposerFocus(sessionId);
+        activation = get().setActiveSession(sessionId, { beforeActivation: hydration });
+      }
       // Re-attach worktree identity for a resumed worktree session so the
       // chip renders and git operations target the worktree (not the parent
       // workspace). New sessions have no worktree and skip this.
@@ -4122,13 +4384,8 @@ const buildSessionsStore = (
         // The initial revisioned snapshot remains valid if the session closed
         // before the follow-up query completed.
       }
-      // Persisted hydration is deliberately concurrent with activation: large
-      // JSONL conversion yields in main, and the tab must become interactive
-      // before the complete scrollback has arrived.
-      const hydration = sessionFile ? get().rehydrateHistory(sessionId) : Promise.resolve();
-      if (focus) {
-        if (opts?.requestComposerFocus) get().requestComposerFocus(sessionId);
-        if (!(await get().setActiveSession(sessionId))) {
+      if (activation) {
+        if (!(await activation)) {
           await hydration.catch(() => {});
           return null;
         }
@@ -4177,11 +4434,8 @@ const buildSessionsStore = (
     await get().refreshWorkspaceSessions(workspacePath);
   },
 
-  setActiveSession: async (sessionId) => {
+  setActiveSession: async (sessionId, opts) => {
     const previousActiveId = get().activeSessionId;
-    const previousUnreadStatus = previousActiveId
-      ? get().sessions.get(previousActiveId)?.unreadStatus
-      : undefined;
     const returningSession = sessionId ? get().sessions.get(sessionId) : undefined;
     const returningVisitId = returningSession?.activationVisitReleasePending
       ? returningSession.activationVisitId
@@ -4247,8 +4501,11 @@ const buildSessionsStore = (
       }
     };
 
+    let previousReleaseStarted = false;
     const releasePrevious = (): void => {
+      if (previousReleaseStarted) return;
       if (!previousActiveId || previousActiveId === sessionId) return;
+      previousReleaseStarted = true;
       const previous = get().sessions.get(previousActiveId);
       if (shouldReapPendingNewSession(previous)) {
         void get().closeSessionTab(previousActiveId, { preservePendingDraft: true });
@@ -4283,6 +4540,15 @@ const buildSessionsStore = (
       }
     };
 
+    if (sessionId && sessionId !== previousActiveId && opts?.beforeActivation) {
+      // Selection is already visible. Release the old view now so a second
+      // switch during a slow history read cannot strand its activation visit,
+      // then suppress attach if this session is no longer selected.
+      releasePrevious();
+      await opts.beforeActivation.catch(() => {});
+      if (get().activeSessionId !== sessionId) return true;
+    }
+
     if (!sessionId || sessionId === previousActiveId) {
       releasePrevious();
       return true;
@@ -4298,17 +4564,21 @@ const buildSessionsStore = (
           activationVisitId: returningVisitId,
         });
         if (!cancelled && get().activeSessionId === sessionId) {
-          const activated = await activateForVisit(sessionId);
-          if (activated && get().activeSessionId === sessionId) releasePrevious();
-          return activated;
+          await activateForVisit(sessionId);
+          if (get().activeSessionId === sessionId) releasePrevious();
+          // Visible session selection is independent of SDK-host startup. A
+          // failed activation leaves the persisted transcript selected and a
+          // retryable failed runtime instead of making a valid saved session
+          // look unopenable.
+          return true;
         }
         releasePrevious();
         return true;
       } catch {
         if (get().activeSessionId !== sessionId) return true;
-        const activated = await activateForVisit(sessionId);
-        if (activated && get().activeSessionId === sessionId) releasePrevious();
-        return activated;
+        await activateForVisit(sessionId);
+        if (get().activeSessionId === sessionId) releasePrevious();
+        return true;
       }
     }
     const target = get().sessions.get(sessionId);
@@ -4319,32 +4589,9 @@ const buildSessionsStore = (
       // Main binds the token only when this visit actually causes activation;
       // an already-live process can therefore never be reaped by a stale UI
       // status or duplicate invoke.
-      const activated = await activateForVisit(sessionId);
-      if (!activated && get().activeSessionId === sessionId) {
-        if (previousActiveId && get().sessions.has(previousActiveId)) {
-          if (previousUnreadStatus) {
-            set((state) => {
-              const previous = state.sessions.get(previousActiveId);
-              if (!previous) return {};
-              const sessions = new Map(state.sessions);
-              sessions.set(previousActiveId, { ...previous, unreadStatus: previousUnreadStatus });
-              return { sessions };
-            });
-          }
-          // Previous release is intentionally deferred until activation
-          // succeeds, so rollback is a local selection restore and must not
-          // start or cancel another activation visit.
-          const previous = get().sessions.get(previousActiveId);
-          set({
-            activeSessionId: previousActiveId,
-            activeWorkspacePath: previous?.workspacePath ?? null,
-          });
-        } else {
-          set({ activeSessionId: null, activeWorkspacePath: null });
-        }
-      }
-      if (activated && get().activeSessionId === sessionId) releasePrevious();
-      return activated;
+      await activateForVisit(sessionId);
+      if (get().activeSessionId === sessionId) releasePrevious();
+      return true;
     }
     releasePrevious();
     return true;
@@ -4428,6 +4675,23 @@ const buildSessionsStore = (
     });
   },
 
+  registerPendingComposerSubmission: (sessionId, submission) => {
+    set((state) => {
+      const current = state.sessions.get(sessionId);
+      if (!current) return {};
+      const sessions = new Map(state.sessions);
+      sessions.set(sessionId, {
+        ...current,
+        pendingComposerSubmission: {
+          ...submission,
+          owner: { ...submission.owner },
+          submittedComments: submission.submittedComments.map((comment) => ({ ...comment })),
+        },
+      });
+      return { sessions };
+    });
+  },
+
   setDiffComment: (sessionId, comment) => {
     const text = comment.text.trim();
     if (text.length === 0) {
@@ -4490,20 +4754,10 @@ const buildSessionsStore = (
     set((state) => {
       const existingForSession = state.diffComments.get(sessionId);
       if (!existingForSession) return {};
-      const comments = new Map(existingForSession);
-      let changed = false;
-      for (const submittedComment of submitted) {
-        for (const [key, current] of comments) {
-          if (sameCommentRevision(current, submittedComment)) {
-            comments.delete(key);
-            changed = true;
-            break;
-          }
-        }
-      }
-      if (!changed) return {};
+      const comments = withoutSubmittedCommentRevisions(existingForSession, submitted);
+      if (comments === existingForSession) return {};
       const diffComments = new Map(state.diffComments);
-      if (comments.size === 0) diffComments.delete(sessionId);
+      if (!comments || comments.size === 0) diffComments.delete(sessionId);
       else diffComments.set(sessionId, comments);
       persistCodeComments(diffComments);
       return { diffComments };

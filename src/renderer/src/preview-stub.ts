@@ -64,6 +64,7 @@ const listeners = new Map<string, Set<Listener>>();
 // these to drive deterministic streaming + observe panel input without a
 // real pi. They are attached to window.__pivisPreview and are a no-op for
 // real Electron builds (preview-stub only loads in dev:renderer).
+let suppressUnifiedPanelResize = false;
 const previewHooks = {
   /** Count of session interrupt requests dispatched to the stub. */
   abortCalls: 0,
@@ -105,6 +106,66 @@ const previewHooks = {
       panelId: 2,
       data: "\x1b[?2026h\x1b[s\x1b[H\x1b[2K▸ panel update\x1b[u\x1b[?2026l",
     });
+  },
+  /** Emit two authority publications in one browser turn. */
+  emitUnifiedPanelBurst(): void {
+    const rec = panelFrames.get(2);
+    if (!rec) return;
+    const keyframe = "\x1b[2J\x1b[H\x1b[3J▸ COALESCED KEYFRAME";
+    const dependentDelta = "\r\n  COALESCED DEPENDENT DELTA";
+    emitPreviewPanelEvent(rec.sessionId, {
+      type: "panel_data",
+      panelId: 2,
+      data: keyframe,
+    });
+    emitPreviewPanelEvent(rec.sessionId, {
+      type: "panel_data",
+      panelId: 2,
+      data: dependentDelta,
+    });
+    registerPanelFrame(rec.sessionId, 2, `${keyframe}${dependentDelta}`);
+  },
+  /** Replace the replay segment with an unsafe cursor-relative tail. */
+  emitUnsafeUnifiedReplay(): void {
+    const state = useSessionsStore.getState();
+    const sessionId = state.activeSessionId;
+    const session = sessionId ? state.sessions.get(sessionId) : undefined;
+    if (!sessionId || !session?.unifiedPanel) return;
+    suppressUnifiedPanelResize = true;
+    const sessions = new Map(state.sessions);
+    sessions.set(sessionId, {
+      ...session,
+      unifiedPanel: {
+        ...session.unifiedPanel,
+        buffer: ["\x1b[Hcursor-relative tail without a reconstruction anchor"],
+        outputSequence: (session.unifiedPanel.outputSequence ?? 0) + 1,
+        outputKind: "delta",
+        outputAnsi: "\x1b[Hcursor-relative tail without a reconstruction anchor",
+      },
+    });
+    useSessionsStore.setState({ sessions });
+  },
+  /** Supply a complete anchor after emitUnsafeUnifiedReplay(). */
+  emitSafeUnifiedReplay(): void {
+    const state = useSessionsStore.getState();
+    const sessionId = state.activeSessionId;
+    const session = sessionId ? state.sessions.get(sessionId) : undefined;
+    if (!sessionId || !session?.unifiedPanel) return;
+    const ansi = "\x1b[2J\x1b[H\x1b[3J▸ SAFE RECONSTRUCTED FRAME";
+    suppressUnifiedPanelResize = false;
+    registerPanelFrame(sessionId, session.unifiedPanel.id, ansi);
+    const sessions = new Map(state.sessions);
+    sessions.set(sessionId, {
+      ...session,
+      unifiedPanel: {
+        ...session.unifiedPanel,
+        buffer: [ansi],
+        outputSequence: (session.unifiedPanel.outputSequence ?? 0) + 1,
+        outputKind: "delta",
+        outputAnsi: ansi,
+      },
+    });
+    useSessionsStore.setState({ sessions });
   },
   /** Begin a fake turn on the active session. */
   startStreaming(): void {
@@ -1602,6 +1663,7 @@ const stub = {
         };
         previewHooks.panelResizeLog.push({ panelId, cols: (req as { cols?: number }).cols, rows });
         const rec = panelId !== undefined ? panelFrames.get(panelId) : undefined;
+        if (panelId === 2 && suppressUnifiedPanelResize) return undefined;
         if (rec && panelId !== undefined) {
           const activePanelId = panelId;
           if (force === true && typeof rec.sessionId === "string")

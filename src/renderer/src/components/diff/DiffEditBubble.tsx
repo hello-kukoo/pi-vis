@@ -119,7 +119,9 @@ function resolveSelection(): Resolved | null {
   // is eligible — the card reveals the hidden context lines, and RowsView
   // suppresses the overlapped gap row while the card is open.
   const allLineIdxs = new Set(model.lines.map((_, idx) => idx));
-  const editRange = resolveEditRange(model, allLineIdxs, lo, hi, commentedNewNos);
+  const editRange = resolveEditRange(model, allLineIdxs, lo, hi, commentedNewNos, {
+    expandToAdjacentContent: true,
+  });
   if (!editRange) return rejected("no editable (context/add) line in range", { path, lo, hi });
 
   const cursor = resolveCursorPosition(domRange, file, model, editRange);

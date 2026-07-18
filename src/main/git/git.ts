@@ -1864,6 +1864,78 @@ export type CopyCheckoutChangesResult =
   | { kind: "ok"; changed: boolean }
   | { kind: "error"; message: string };
 
+export interface CheckoutIdentity {
+  head: string;
+  baseLabel: string;
+}
+
+export type ReadCheckoutIdentityResult =
+  | { kind: "ok"; identity: CheckoutIdentity }
+  | { kind: "error"; message: string };
+
+/** Read only the immutable commit + presentation label of a checkout.
+ *
+ * This is the clean-worktree counterpart to `captureCheckoutChanges`: when a
+ * user explicitly declines to copy local contents, we still pin the exact
+ * source commit and reject a branch/HEAD change at the detach boundary without
+ * reading or staging any uncommitted payload. */
+export async function readCheckoutIdentity(
+  requestedRoot: string,
+): Promise<ReadCheckoutIdentityResult> {
+  const env = await getSubprocessEnv();
+  try {
+    const rootResult = await execGitCapture(["rev-parse", "--show-toplevel"], requestedRoot, env);
+    const sourceRoot = rootResult.stdout.trim();
+    if (rootResult.code !== 0 || !sourceRoot) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading repository root", rootResult),
+      };
+    }
+    const [headResult, branchResult] = await Promise.all([
+      execGitCapture(["rev-parse", "--verify", "HEAD^{commit}"], sourceRoot, env),
+      execGitCapture(["rev-parse", "--abbrev-ref", "HEAD"], sourceRoot, env),
+    ]);
+    const failed =
+      headResult.code !== 0 ? headResult : branchResult.code !== 0 ? branchResult : null;
+    const head = headResult.stdout.trim();
+    if (failed || !head) {
+      return {
+        kind: "error",
+        message: describeCheckoutCopyFailure("Reading checkout identity", failed ?? headResult),
+      };
+    }
+    const branch = branchResult.stdout.trim();
+    return {
+      kind: "ok",
+      identity: {
+        head,
+        baseLabel: branch && branch !== "HEAD" ? branch : head.slice(0, 8),
+      },
+    };
+  } catch (error) {
+    return { kind: "error", message: `Could not read checkout identity: ${errorMessage(error)}` };
+  }
+}
+
+export async function checkoutStillMatchesIdentity(
+  sourceRoot: string,
+  identity: CheckoutIdentity,
+): Promise<{ kind: "ok" } | { kind: "error"; message: string }> {
+  const current = await readCheckoutIdentity(sourceRoot);
+  if (current.kind === "error") return current;
+  if (
+    current.identity.head !== identity.head ||
+    current.identity.baseLabel !== identity.baseLabel
+  ) {
+    return {
+      kind: "error",
+      message: "The current checkout changed while the worktree was being created. Try again.",
+    };
+  }
+  return { kind: "ok" };
+}
+
 export interface CheckoutChangesSnapshot {
   head: string;
   baseLabel: string;

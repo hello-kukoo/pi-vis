@@ -47,6 +47,27 @@ test.describe("Pi-Vis e2e", () => {
     // Check the app loaded
     await expect(window.locator(".app, .pi-not-found")).toBeVisible({ timeout: 10000 });
 
+    // Renderer reload is not a supported lifecycle: both normal and hard
+    // refresh must leave the current document (and its generation custody)
+    // intact.
+    const reloadSentinel = await window.evaluate(() => {
+      const value = crypto.randomUUID();
+      Object.assign(window, { __pivisReloadSentinel: value });
+      return value;
+    });
+    const platformModifier = process.platform === "darwin" ? "Meta" : "Control";
+    await window.keyboard.press(`${platformModifier}+R`);
+    await expect
+      .poll(() => window.evaluate(() => Reflect.get(window, "__pivisReloadSentinel")))
+      .toBe(reloadSentinel);
+    await window.keyboard.press(`${platformModifier}+Shift+R`);
+    await expect
+      .poll(() => window.evaluate(() => Reflect.get(window, "__pivisReloadSentinel")))
+      .toBe(reloadSentinel);
+
+    await window.getByTitle("Settings").click();
+    await expect(window.getByRole("heading", { name: "Pi runtime", exact: true })).toBeVisible();
+
     await app.close();
     fs.rmSync(settingsDir, { recursive: true, force: true });
     fs.rmSync(workspaceDir, { recursive: true, force: true });

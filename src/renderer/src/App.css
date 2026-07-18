@@ -175,8 +175,12 @@
    and a real top-fade size for the scroll-state class to use. The fade is not
    always painted; TranscriptView only enables it after there is clipped
    content above the viewport. */
+.app--sidebar-collapsed .transcript-region,
 .app--sidebar-collapsed .transcript-view {
   --transcript-fade-top: 2rem;
+}
+
+.app--sidebar-collapsed .transcript-view {
   --transcript-pad-top: 2rem;
 }
 
@@ -263,6 +267,8 @@
    so they float over transcript content without taking layout space and stop
    before the composer/dock/status area. */
 .transcript-region {
+  --transcript-fade-top: 0;
+  --transcript-fade-bottom: 3rem;
   position: relative;
   display: flex;
   flex-direction: column;

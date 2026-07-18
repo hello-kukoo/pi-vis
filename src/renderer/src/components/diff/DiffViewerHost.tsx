@@ -15,6 +15,7 @@ import { useDiffStore } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
 import { FadeText } from "../common/FadeText.js";
+import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { useSyncedSpinnerStyle } from "../common/Spinner.js";
 import {
   IconCheck,
@@ -79,6 +80,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   const viewMode = useDiffStore((s) => s.viewMode);
   const setViewMode = useDiffStore((s) => s.setViewMode);
   const selectedBase = useDiffStore((s) => s.selectedBase);
+  const workingTreeScope = useDiffStore((s) => s.workingTreeScope);
   const commitRange = useDiffStore((s) => s.commitRange);
   const historicalContext = useDiffStore((s) => s.historicalContext);
   const historical = commitRange !== null;
@@ -124,7 +126,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     caseSensitive: searchCaseSensitive,
     viewMode: effectiveSearchViewMode,
     root,
-    base: selectedBase,
+    base: commitRange !== null || workingTreeScope === "base" ? selectedBase : null,
     range: commitRange,
     historicalContext,
     files: searchFiles,
@@ -648,36 +650,40 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
               setRailWidth={setRailWidth}
             />
           )}
-          <div
-            ref={contentRef}
-            className={`diff-content${phase !== "ready" ? " diff-content--empty" : ""}`}
-          >
-            {phase === "loading" && (
-              <div className="diff-empty">
-                <span>Loading changes…</span>
-              </div>
-            )}
-            {phase === "not-a-repo" && <NotARepoState root={root} />}
-            {phase === "git-missing" && (
-              <div className="diff-empty">git executable not found on PATH</div>
-            )}
-            {phase === "error" && (
-              <ErrorState message={errorMessage} onRetry={() => void refresh()} />
-            )}
-            {phase === "ready" && files.length === 0 && <CleanState historical={historical} />}
-            {phase === "ready" && files.length > 0 && (
-              <FileSections
-                sessionId={sessionId}
-                files={files}
-                searchFiles={searchFiles}
-                activeSearchPath={activeMatch?.path ?? null}
-                fileState={fileState}
-                viewMode={viewMode}
-                narrow={narrow}
-                registerSection={registerSection}
-              />
-            )}
-            {!historical && <DiffEditBubble />}
+          <div className="diff-content-shell">
+            <div
+              ref={contentRef}
+              className={`diff-content${phase !== "ready" ? " diff-content--empty" : ""}`}
+            >
+              {phase === "loading" && (
+                <div className="diff-empty">
+                  <span>Loading changes…</span>
+                </div>
+              )}
+              {phase === "not-a-repo" && <NotARepoState root={root} />}
+              {phase === "git-missing" && (
+                <div className="diff-empty">git executable not found on PATH</div>
+              )}
+              {phase === "error" && (
+                <ErrorState message={errorMessage} onRetry={() => void refresh()} />
+              )}
+              {phase === "ready" && files.length === 0 && (
+                <CleanState historical={historical} workingTreeScope={workingTreeScope} />
+              )}
+              {phase === "ready" && files.length > 0 && (
+                <FileSections
+                  sessionId={sessionId}
+                  files={files}
+                  searchFiles={searchFiles}
+                  activeSearchPath={activeMatch?.path ?? null}
+                  fileState={fileState}
+                  viewMode={viewMode}
+                  narrow={narrow}
+                  registerSection={registerSection}
+                />
+              )}
+              {!historical && <DiffEditBubble />}
+            </div>
           </div>
         </div>
       </div>
@@ -1275,7 +1281,13 @@ function Rail({
           aria-label="Filter files"
         />
       </div>
-      <div className="diff-rail__list" ref={listRef} role="listbox">
+      <ScrollFadeFrame
+        frameClassName="diff-rail__list-frame"
+        scrollerRef={listRef}
+        className="diff-rail__list"
+        role="listbox"
+        fill
+      >
         {rows.length === 0 ? (
           <div className="diff-rail__empty">
             {filterActive ? "No matching files" : "No changed files"}
@@ -1378,7 +1390,7 @@ function Rail({
             );
           })
         )}
-      </div>
+      </ScrollFadeFrame>
       <div className="diff-rail__draghandle" onMouseDown={handleResizeStart} />
     </aside>
   );
@@ -1441,13 +1453,25 @@ function FileSections({
 
 // ── Empty / error states ─────────────────────────────────────────────
 
-function CleanState({ historical = false }: { historical?: boolean }): React.ReactElement {
+function CleanState({
+  historical = false,
+  workingTreeScope = "base",
+}: {
+  historical?: boolean;
+  workingTreeScope?: "base" | "uncommitted";
+}): React.ReactElement {
   return (
     <div className="diff-empty">
       <span className="diff-empty__check" aria-hidden>
         <IconCheck />
       </span>
-      <span>{historical ? "No changes in selected range" : "Working tree clean"}</span>
+      <span>
+        {historical
+          ? "No changes in selected range"
+          : workingTreeScope === "uncommitted"
+            ? "No uncommitted changes"
+            : "Working tree clean"}
+      </span>
       {!historical && <span className="diff-empty__sub">No changes since HEAD</span>}
     </div>
   );

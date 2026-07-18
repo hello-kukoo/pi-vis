@@ -33,8 +33,10 @@ import {
 } from "./auth.js";
 import {
   type CheckoutChangesSnapshot,
+  type CheckoutIdentity,
   applyCheckoutChanges,
   captureCheckoutChanges,
+  checkoutStillMatchesIdentity,
   checkoutStillMatchesSnapshot,
   cleanupCreatedWorktree,
   createWorktree,
@@ -45,6 +47,7 @@ import {
   getCommits,
   getFileDiff,
   inspectWorktree,
+  readCheckoutIdentity,
   writeWorkingFile,
 } from "./git/git.js";
 import { readPiChangelog } from "./pi-changelog.js";
@@ -608,7 +611,12 @@ export function initIpc(win: BrowserWindow): void {
       _evt,
       args:
         | { sessionId: SessionId; base: string; fromCurrentCheckout?: false }
-        | { sessionId: SessionId; fromCurrentCheckout: true; base?: never },
+        | {
+            sessionId: SessionId;
+            fromCurrentCheckout: true;
+            copyUncommitted: boolean;
+            base?: never;
+          },
     ) => {
       const activeRegistry = registry;
       if (!activeRegistry) return { ok: false, error: "Session not found" };
@@ -616,6 +624,9 @@ export function initIpc(win: BrowserWindow): void {
       if (!rec) return { ok: false, error: "Session not found" };
       if (args.fromCurrentCheckout && !rec.sessionFile) {
         return { ok: false, error: "The session has not started yet" };
+      }
+      if (args.fromCurrentCheckout && typeof args.copyUncommitted !== "boolean") {
+        return { ok: false, error: "Choose whether to copy uncommitted changes" };
       }
       if (!args.fromCurrentCheckout && rec.sessionFile) {
         return { ok: false, error: "Established sessions must branch from their current checkout" };
@@ -637,20 +648,29 @@ export function initIpc(win: BrowserWindow): void {
       safeSend("session.worktreeOperationChanged", { sessionId: args.sessionId, active: true });
       let operationError: string | undefined;
       let checkoutSnapshot: CheckoutChangesSnapshot | undefined;
+      let checkoutIdentity: CheckoutIdentity | undefined;
       let reservedWorktreePath: string | undefined;
       try {
         let base = args.fromCurrentCheckout ? "HEAD" : args.base;
+        const sourceCheckout = rec.worktreePath ?? rec.workspacePath;
         if (args.fromCurrentCheckout) {
-          const captured = await captureCheckoutChanges(rec.worktreePath ?? rec.workspacePath);
-          if (captured.kind === "error") throw new Error(captured.message);
-          checkoutSnapshot = captured.snapshot;
-          base = checkoutSnapshot.head;
+          if (args.copyUncommitted) {
+            const captured = await captureCheckoutChanges(sourceCheckout);
+            if (captured.kind === "error") throw new Error(captured.message);
+            checkoutSnapshot = captured.snapshot;
+            base = checkoutSnapshot.head;
+          } else {
+            const captured = await readCheckoutIdentity(sourceCheckout);
+            if (captured.kind === "error") throw new Error(captured.message);
+            checkoutIdentity = captured.identity;
+            base = checkoutIdentity.head;
+          }
         }
         if (!base) throw new Error("A base branch is required");
         const result = await createWorktree(
           rec.workspacePath,
           base,
-          rec.workspacePath,
+          sourceCheckout,
           (worktreePath) => {
             if (reservedCreatedWorktrees.has(worktreePath)) {
               throw new Error("The generated worktree path is already reserved.");
@@ -661,6 +681,7 @@ export function initIpc(win: BrowserWindow): void {
         );
         if (result.kind === "error") throw new Error(result.message);
         if (checkoutSnapshot) result.base = checkoutSnapshot.baseLabel;
+        if (checkoutIdentity) result.base = checkoutIdentity.baseLabel;
         // Persist only after the respawn succeeds, merging at the commit
         // point so overlapping worktree operations cannot drop each other.
         // If eligibility changes during the potentially-long checkout, remove
@@ -693,8 +714,15 @@ export function initIpc(win: BrowserWindow): void {
                   onImmediatelyBeforeDetach: async () => {
                     if (checkoutSnapshot) {
                       const current = await checkoutStillMatchesSnapshot(
-                        rec.worktreePath ?? rec.workspacePath,
+                        sourceCheckout,
                         checkoutSnapshot,
+                      );
+                      if (current.kind === "error") throw new Error(current.message);
+                    }
+                    if (checkoutIdentity) {
+                      const current = await checkoutStillMatchesIdentity(
+                        sourceCheckout,
+                        checkoutIdentity,
                       );
                       if (current.kind === "error") throw new Error(current.message);
                     }
@@ -1001,6 +1029,7 @@ export function initIpc(win: BrowserWindow): void {
   });
 
   ipcMain.handle("session.close", async (_evt, args: { sessionId: SessionId }) => {
+    logTestIpcInvocation("session.close", args);
     // Closing a renderer tab is deliberately unconditional. The registry
     // fences ingress, makes a best-effort host shutdown, and always releases
     // its in-memory runtime; persisted session files are never removed.

@@ -127,6 +127,36 @@ test.describe("Transcript bottom pinning across Composer replacements", () => {
     await page.mouse.wheel(0, -500);
     await expect.poll(() => bottomDistance(page), { timeout: 5_000 }).toBeGreaterThan(RESTICK_PX);
     await expectPinnedScrollbar(page, false);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            () =>
+              getComputedStyle(
+                document.querySelector(".transcript-region") as HTMLElement,
+                "::after",
+              ).opacity,
+          ),
+        { timeout: 2_000 },
+      )
+      .toBe("1");
+    const fadeGeometry = await page.evaluate(() => {
+      const transcript = document.querySelector(".transcript-view") as HTMLElement;
+      const region = document.querySelector(".transcript-region") as HTMLElement;
+      const fade = getComputedStyle(region, "::after");
+      return {
+        transcriptMask: getComputedStyle(transcript).maskImage,
+        transcriptWebkitMask: getComputedStyle(transcript).getPropertyValue("-webkit-mask-image"),
+        fadeOpacity: fade.opacity,
+        fadeRight: fade.right,
+      };
+    });
+    expect(fadeGeometry).toEqual({
+      transcriptMask: "none",
+      transcriptWebkitMask: "none",
+      fadeOpacity: "1",
+      fadeRight: "10px",
+    });
     const scrollbackGeometry = await readingColumnGeometry(page);
     expect(scrollbackGeometry.left).toBeCloseTo(pinnedGeometry.left, 5);
     expect(scrollbackGeometry.width).toBeCloseTo(pinnedGeometry.width, 5);

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useVirtualList } from "../../hooks/useVirtualList.js";
 import { FadeText } from "./FadeText.js";
+import { ScrollFadeFrame } from "./ScrollFadeFrame.js";
 import { IconCheck, IconChevronDown } from "./icons.js";
 import "./BranchDropdown.css";
 
@@ -264,12 +265,14 @@ export function BranchDropdown({
           {listItems.length === 0 ? (
             <div className="branch-dropdown__empty">No branches found</div>
           ) : (
-            <div
-              ref={virtualList.containerRef}
+            <ScrollFadeFrame
+              frameClassName="branch-dropdown__list-frame"
+              scrollerRef={virtualList.containerRef}
               onScroll={virtualList.onScroll}
               className="branch-dropdown__list branch-dropdown__list--virtual"
               role="listbox"
               id={listboxId}
+              fill
             >
               <div
                 className="branch-dropdown__virtual-spacer"
@@ -338,7 +341,7 @@ export function BranchDropdown({
                   })}
                 </div>
               </div>
-            </div>
+            </ScrollFadeFrame>
           )}
           {/* Pinned footer — always visible regardless of list scroll. */}
           <div

@@ -67,6 +67,29 @@ describe("resolveEditRange", () => {
     expect(r!.endLineIdx).toBe(4);
   });
 
+  it("walks across whitespace but includes only one non-whitespace context line per side", () => {
+    const spaced = model(
+      "before\n\n\nselected\n\n\nafter\ntail\n",
+      "before\n\n\nselected changed\n\n\nafter\ntail\n",
+    );
+    const selected = spaced.lines.findIndex((line) => line.text === "selected changed");
+    const r = resolveEditRange(spaced, allVisible(spaced), selected, selected, new Set(), {
+      expandToAdjacentContent: true,
+    });
+
+    expect(r).not.toBeNull();
+    expect(r!.startNewNo).toBe(1);
+    expect(r!.endNewNo).toBe(7);
+    expect(r!.blocks).toEqual([
+      {
+        kind: "edit",
+        lineIdxs: expect.any(Array),
+        newNos: [1, 2, 3, 4, 5, 6, 7],
+        initialText: "before\n\n\nselected changed\n\n\nafter",
+      },
+    ]);
+  });
+
   it("ends an edit segment at a commented line and emits a comment block", () => {
     // Select the whole model; line d (newNo 4) is commented.
     const r = resolveEditRange(m, allVisible(m), 0, 6, new Set([4]));
