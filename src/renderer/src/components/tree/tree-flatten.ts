@@ -396,12 +396,48 @@ function extractContent(content: unknown): string {
         c !== null &&
         (c as Record<string, unknown>)["type"] === "text"
       ) {
-        out += String((c as Record<string, unknown>)["text"] ?? "");
+        const text = (c as Record<string, unknown>)["text"];
+        if (typeof text === "string") out += text;
       }
     }
     return out;
   }
   return "";
+}
+
+/**
+ * Full clipboard text for one flat tree entry. This deliberately does not use
+ * `entryDisplayText`: that function is a compact, single-line UI summary.
+ * Tree entries already carry their complete message/summary payload across the
+ * flat IPC boundary, so copying must preserve it verbatim.
+ */
+export function entryCopyText(entry: SessionTreeEntry): string {
+  switch (entry.type) {
+    case "message": {
+      const message = entry.message as { content?: unknown; command?: unknown } | undefined;
+      const content = extractContent(message?.content);
+      return content || (typeof message?.command === "string" ? message.command : "");
+    }
+    case "branch_summary":
+      return stringEntryField(entry, "summary");
+    case "custom_message":
+      return extractContent((entry as { content?: unknown }).content);
+    case "label":
+      return stringEntryField(entry, "label");
+    case "session_info":
+      return stringEntryField(entry, "name");
+    case "model_change":
+      return stringEntryField(entry, "modelId");
+    case "thinking_level_change":
+      return stringEntryField(entry, "thinkingLevel");
+    default:
+      return "";
+  }
+}
+
+function stringEntryField(entry: SessionTreeEntry, key: string): string {
+  const value = (entry as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : "";
 }
 
 /**
