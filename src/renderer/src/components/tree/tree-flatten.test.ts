@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type FlattenOpts,
   buildNestedTree,
+  entryCopyText,
   entryDisplayText,
   flattenVisible,
 } from "./tree-flatten.js";
@@ -232,6 +233,44 @@ describe("flattenVisible — fold + search", () => {
     expect(seen).toEqual(expect.arrayContaining(["a2", "a2d"]));
     expect(seen).not.toContain("a1d");
     expect(flattenVisible(tree(), opts({ search: "relative zzznope" }))).toHaveLength(0);
+  });
+});
+
+describe("entryCopyText", () => {
+  it("preserves complete message text rather than the row's truncated one-line summary", () => {
+    const text = `first line\n${"x".repeat(300)}\nlast line`;
+    const entry = {
+      id: "long",
+      type: "message",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    } as never;
+    expect(entryCopyText(entry)).toBe(text);
+    expect(entryDisplayText(entry)).toContain("…");
+  });
+
+  it("extracts all supported flat-entry text without stringifying non-text blocks", () => {
+    expect(
+      entryCopyText({
+        id: "multi",
+        type: "message",
+        message: {
+          content: [
+            { type: "text", text: "before" },
+            { type: "toolCall", name: "read", arguments: { path: "/secret" } },
+            { type: "text", text: " after" },
+          ],
+        },
+      } as never),
+    ).toBe("before after");
+    expect(
+      entryCopyText({ id: "summary", type: "branch_summary", summary: "full\nsummary" } as never),
+    ).toBe("full\nsummary");
+    expect(
+      entryCopyText({ id: "custom", type: "custom_message", content: "custom body" } as never),
+    ).toBe("custom body");
+    expect(
+      entryCopyText({ id: "bash", type: "message", message: { command: "git status" } } as never),
+    ).toBe("git status");
   });
 });
 
