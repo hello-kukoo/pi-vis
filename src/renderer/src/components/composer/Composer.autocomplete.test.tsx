@@ -140,7 +140,11 @@ function outcomeFor(envelope: Envelope, patch: Partial<IntentOutcome> = {}): Int
     case "refreshModels":
       return { ...base, kind: "refreshModels", result: { refreshed: true } };
     case "loginProvider":
-      return { ...base, kind: "loginProvider", result: { authenticated: true } };
+      return {
+        ...base,
+        kind: "loginProvider",
+        result: { providerId: envelope.intent.providerId, authType: envelope.intent.authType },
+      };
   }
 }
 

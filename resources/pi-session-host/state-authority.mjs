@@ -384,7 +384,7 @@ export function createStateAuthority({
         return (
           isStrictObject(intent, ["kind", "providerId", "authType"]) &&
           nonEmpty(intent.providerId) &&
-          nonEmpty(intent.authType)
+          ["oauth", "api_key"].includes(intent.authType)
         );
       case "reload":
         return (
@@ -1259,7 +1259,11 @@ export function createStateAuthority({
       case "refreshModels":
         return value.refreshed === true ? { refreshed: true } : undefined;
       case "loginProvider":
-        return value.authenticated === true ? { authenticated: true } : undefined;
+        return typeof value.providerId === "string" &&
+          value.providerId.length > 0 &&
+          ["oauth", "api_key"].includes(value.authType)
+          ? { providerId: value.providerId, authType: value.authType }
+          : undefined;
       default:
         return undefined;
     }

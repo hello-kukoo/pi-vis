@@ -294,7 +294,13 @@ export function ExtensionDialogHost({
   // stays visible until the correlated host acknowledgement arrives.
   if (!current) return null;
   if (current.method === "providerAuth") {
-    return <ProviderLoginDialog sessionId={sessionId} request={current} />;
+    return (
+      <ProviderLoginDialog
+        key={current.operationId ?? current.id}
+        sessionId={sessionId}
+        request={current}
+      />
+    );
   }
 
   // No modal overlay: the dialog lives in the Composer slot so the

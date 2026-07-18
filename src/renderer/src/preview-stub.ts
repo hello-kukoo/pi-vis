@@ -1,4 +1,5 @@
 import type { SessionId } from "@shared/ids.js";
+import type { ExtensionUiRequest } from "@shared/pi-protocol/extension-ui.js";
 import type {
   AgentSessionSnapshot,
   AuthorityAttachResponse,
@@ -43,6 +44,7 @@ type PreviewRuntime = {
   snapshotSequence: number;
   transportSequence: number;
   panelTransportSequence: number;
+  extensionUiTransportSequence: number;
   publicationSequence: number;
   journalSequence: number;
   rendererGeneration?: number;
@@ -59,6 +61,11 @@ const previewRuntime = new Map<SessionId, PreviewRuntime>();
 
 type Listener = (payload: unknown) => void;
 const listeners = new Map<string, Set<Listener>>();
+const previewAuthPrompts = new Map<
+  string,
+  { sessionId: SessionId; resolve: () => void; reject: (error: Error) => void }
+>();
+let previewLoginComplete = false;
 
 // Test/preview hooks (NOT part of the real IPC contract). Render tests use
 // these to drive deterministic streaming + observe panel input without a
@@ -205,6 +212,7 @@ const previewHooks = {
     runtime.snapshotSequence = 0;
     runtime.transportSequence = 1;
     runtime.panelTransportSequence = 0;
+    runtime.extensionUiTransportSequence = 1;
     runtime.publicationSequence = 0;
     runtime.journalSequence = 0;
     runtime.recentOutcomes = [];
@@ -239,6 +247,7 @@ function runtimeFor(sessionId: SessionId): PreviewRuntime {
       snapshotSequence: 0,
       transportSequence: 1,
       panelTransportSequence: 0,
+      extensionUiTransportSequence: 1,
       publicationSequence: 0,
       journalSequence: 0,
       steering: [],
@@ -316,6 +325,23 @@ function publishSemanticState(sessionId: SessionId): void {
       terminalSnapshot: snapshot,
     },
   } satisfies RendererPublication);
+}
+
+function publishProviderAuthRequest(sessionId: SessionId, request: ExtensionUiRequest): void {
+  const runtime = runtimeFor(sessionId);
+  const cursor = {
+    ...currentOwner(sessionId),
+    transportSequence: ++runtime.extensionUiTransportSequence,
+    snapshotSequence: Math.max(1, runtime.snapshotSequence),
+  };
+  emit("session.publication", {
+    sessionId,
+    rendererGeneration: runtime.rendererGeneration ?? 0,
+    publicationSequence: ++runtime.publicationSequence,
+    plane: "extensionUi",
+    owner: currentOwner(sessionId),
+    payload: { kind: "request", cursor, request },
+  } as RendererPublication);
 }
 
 function publishIntentOutcome(sessionId: SessionId, outcome: IntentOutcome): void {
@@ -875,10 +901,9 @@ async function handlePreviewRequest(command: Record<string, unknown>): Promise<u
           {
             id: "preview",
             name: "Preview",
-            checkAuth: true,
-            configured: false,
+            configured: previewLoginComplete,
             source: "preview",
-            methods: ["oauth", "apiKey"],
+            methods: ["oauth", "api_key"],
           },
         ],
       });
@@ -899,6 +924,16 @@ async function handlePreviewRequest(command: Record<string, unknown>): Promise<u
             provider: "anthropic",
             input: ["text", "image"],
           },
+          ...(previewLoginComplete
+            ? [
+                {
+                  id: "preview/newly-available",
+                  name: "Newly Available",
+                  provider: "preview",
+                  input: ["text"],
+                },
+              ]
+            : []),
         ],
         currentModelId,
       });
@@ -1182,7 +1217,11 @@ function outcomeFor(
     case "refreshModels":
       return { ...base, kind: "refreshModels", result: { refreshed: true } };
     case "loginProvider":
-      return { ...base, kind: "loginProvider", result: { authenticated: true } };
+      return {
+        ...base,
+        kind: "loginProvider",
+        result: { providerId: intent.providerId, authType: intent.authType },
+      };
   }
 }
 
@@ -1194,8 +1233,60 @@ async function settleIntent(envelope: PreviewIntentEnvelope): Promise<void> {
     const intent: SessionIntent = envelope.intent;
     switch (intent.kind) {
       case "refreshModels":
-      case "loginProvider":
         break;
+      case "loginProvider": {
+        const requestId = `preview-auth-${envelope.intentId}`;
+        await new Promise<void>((resolve, reject) => {
+          let timer: number | undefined;
+          const finish = (): void => {
+            if (timer !== undefined) window.clearTimeout(timer);
+            previewAuthPrompts.delete(requestId);
+            resolve();
+          };
+          previewAuthPrompts.set(requestId, {
+            sessionId: envelope.sessionId,
+            resolve: finish,
+            reject: (error) => {
+              if (timer !== undefined) window.clearTimeout(timer);
+              previewAuthPrompts.delete(requestId);
+              reject(error);
+            },
+          });
+          publishProviderAuthRequest(envelope.sessionId, {
+            type: "extension_ui_request",
+            id: requestId,
+            operationId: `${requestId}:1`,
+            hostInstanceId: currentOwner(envelope.sessionId).hostInstanceId,
+            sessionEpoch: currentOwner(envelope.sessionId).sessionEpoch,
+            method: "providerAuth",
+            providerName: "Preview",
+            authType: intent.authType,
+            ...(intent.authType === "api_key"
+              ? {
+                  phase: "prompt",
+                  promptType: "secret",
+                  prompt: "API key",
+                  placeholder: "Paste your API key",
+                }
+              : {
+                  phase: "device",
+                  authUrl: "https://example.com/device",
+                  deviceCode: "PI-VIS-80",
+                  message: "Enter this code in your browser, then return here.",
+                }),
+          });
+          if (intent.authType === "oauth") {
+            timer = window.setTimeout(finish, 2_500);
+          }
+        });
+        previewLoginComplete = true;
+        emit("auth.changed", undefined);
+        emit("session.uiAcknowledged", {
+          sessionId: envelope.sessionId,
+          operationId: requestId,
+        });
+        break;
+      }
       case "interrupt":
         previewHooks.abortCalls++;
         cancelPreviewStream();
@@ -1424,6 +1515,42 @@ const stub = {
         return []; // preview has no user-droppable themes; bundled themes apply
       case "themes.userDir":
         return "~/Library/Application Support/pi-vis/themes";
+      case "clipboard.writeText":
+        (globalThis as { __previewClipboardWrites?: unknown[] }).__previewClipboardWrites ??= [];
+        (
+          globalThis as unknown as { __previewClipboardWrites: unknown[] }
+        ).__previewClipboardWrites.push(req);
+        return { ok: true };
+      case "app.openExternal":
+        (globalThis as { __previewExternalLinks?: unknown[] }).__previewExternalLinks ??= [];
+        (
+          globalThis as unknown as { __previewExternalLinks: unknown[] }
+        ).__previewExternalLinks.push(req);
+        return { ok: true };
+      case "session.respondToUiRequest": {
+        const response = req as {
+          sessionId: SessionId;
+          operationId: string;
+          response: { id: string; cancelled?: boolean };
+        };
+        emit("session.uiAcknowledged", {
+          sessionId: response.sessionId,
+          operationId: response.operationId,
+        });
+        const pending = previewAuthPrompts.get(response.response.id);
+        if (pending) {
+          if (response.response.cancelled === true) {
+            pending.reject(new Error("Sign in cancelled"));
+            emit("session.uiAcknowledged", {
+              sessionId: response.sessionId,
+              operationId: response.response.id,
+            });
+          } else {
+            pending.resolve();
+          }
+        }
+        return { acknowledged: true };
+      }
 
       case "workspace.list":
         return [DEMO_WORKSPACE];

@@ -765,7 +765,7 @@ export const SessionIntentSchema = z.union([
     .object({
       kind: z.literal("loginProvider"),
       providerId: NonEmptyIdSchema,
-      authType: NonEmptyIdSchema,
+      authType: z.enum(["oauth", "api_key"]),
     })
     .strict(),
 ]);
@@ -974,7 +974,7 @@ export const ExportIntentResultSchema = z.object({ path: z.string().min(1) }).st
 export const RefreshModelsIntentResultSchema = z.object({ refreshed: z.literal(true) }).strict();
 /** Credentials and provider errors never cross the authority boundary. */
 export const LoginProviderIntentResultSchema = z
-  .object({ authenticated: z.literal(true) })
+  .object({ providerId: NonEmptyIdSchema, authType: z.enum(["oauth", "api_key"]) })
   .strict();
 
 export const IntentOutcomeSchema = z.discriminatedUnion("kind", [

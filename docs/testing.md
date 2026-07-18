@@ -35,7 +35,7 @@ Before release, run `PIVIS_SEARCH_BENCH_MIB=500 npm run bench:session-search`, b
 
 Conversation-tree copy changes also run `npx vitest run src/renderer/src/components/tree/tree-flatten.test.ts src/renderer/src/components/tree/tree-copy.test.ts` and `npm run test:render -- tree-copy.spec.mts`; the render flow pins the exact clipboard payload plus input/native-selection non-interference.
 
-Model-catalog SWR coverage must prove that `refreshModels` emits no catalog payload, only a same-owner terminal outcome permits the follow-up `get_available_models` read, failures preserve the cache and expose retry only for that owner, and auth/picker triggers never activate a cold session.
+Model-catalog SWR coverage must prove that `refreshModels` emits no catalog payload, only a same-owner terminal outcome permits the follow-up `get_available_models` read, failures preserve the cache and expose retry only for that owner, and auth/picker triggers never activate a cold session. Runtime-login coverage additionally validates dynamic provider/method discovery, trust and method revalidation, cancellation, secret-free outcomes/replay snapshots, and persistent auth-surface revision replacement. `tests/render/provider-login.spec.mts` captures the provider chooser, an empty password-style API-key prompt, and OAuth device-code card; it submits a test secret, proves the DOM/Zustand projection does not retain it, exercises code copy/system-browser routing, and observes the post-login model catalog.
 
 Run the focused tests while changing these surfaces:
 

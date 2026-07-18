@@ -75,14 +75,28 @@ export const SetEditorTextUiRequestSchema = BaseUiRequest.extend({
 export const ProviderAuthUiRequestSchema = BaseUiRequest.extend({
   method: z.literal("providerAuth"),
   providerName: z.string().max(160),
-  authType: z.string().max(80),
-  phase: z.enum(["oauth", "device", "prompt", "error"]),
+  authType: z.enum(["oauth", "api_key"]),
+  phase: z.enum(["waiting", "oauth", "device", "info", "prompt", "error"]),
   authUrl: z.string().max(4096).optional(),
   deviceCode: z.string().max(512).optional(),
   message: z.string().max(1000).optional(),
   prompt: z.string().max(1000).optional(),
-  secret: z.boolean().optional(),
-  options: z.array(z.string().max(240)).max(100).optional(),
+  promptType: z.enum(["text", "secret", "manual_code", "select"]).optional(),
+  placeholder: z.string().max(240).optional(),
+  options: z
+    .array(
+      z.object({
+        id: z.string().max(240),
+        label: z.string().max(240),
+        description: z.string().max(500).optional(),
+      }),
+    )
+    .max(100)
+    .optional(),
+  links: z
+    .array(z.object({ url: z.string().max(4096), label: z.string().max(240).optional() }))
+    .max(20)
+    .optional(),
 });
 
 export const ExtensionUiRequestSchema = z.discriminatedUnion("method", [
@@ -118,16 +132,19 @@ export const ExtensionUiResponseSchema = z.union([
   z.object({
     type: z.literal("extension_ui_response"),
     id: z.string(),
+    operationId: z.string().optional(),
     value: z.string(),
   }),
   z.object({
     type: z.literal("extension_ui_response"),
     id: z.string(),
+    operationId: z.string().optional(),
     confirmed: z.boolean(),
   }),
   z.object({
     type: z.literal("extension_ui_response"),
     id: z.string(),
+    operationId: z.string().optional(),
     cancelled: z.literal(true),
   }),
 ]);
