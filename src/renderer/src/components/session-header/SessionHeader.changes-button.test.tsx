@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { SessionId } from "@shared/ids.js";
+import type { RendererPublication } from "@shared/pi-protocol/runtime-state.js";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { act } from "react-dom/test-utils";
@@ -35,12 +36,19 @@ function mount(): { container: HTMLDivElement; unmount: () => void } {
 
 describe("ChangesButton badge failure presentation", () => {
   let invoke: ReturnType<typeof vi.fn>;
+  let publicationListener: ((publication: RendererPublication) => void) | undefined;
 
   beforeEach(() => {
     invoke = vi.fn(() => Promise.resolve({ kind: "error", message: "git blew up" }));
+    publicationListener = undefined;
     (window as unknown as { pivis: unknown }).pivis = {
       invoke,
-      on: vi.fn(() => () => {}),
+      on: vi.fn((channel: string, listener: unknown) => {
+        if (channel === "session.publication") {
+          publicationListener = listener as (publication: RendererPublication) => void;
+        }
+        return () => {};
+      }),
     };
     useSessionsStore.setState({ sessions: new Map(), activeSessionId: SID });
     useSessionsStore.getState().createSession(SID, WORKSPACE, "/tmp/a.jsonl");
@@ -69,6 +77,47 @@ describe("ChangesButton badge failure presentation", () => {
     expect(useDiffStore.getState().open).toBe(true);
     expect(useDiffStore.getState().sessionId).toBe(SID);
     view.unmount();
+  });
+
+  it("refreshes after a tool completion on the authority transcript plane", async () => {
+    vi.useFakeTimers();
+    const view = mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    invoke.mockClear();
+
+    const owner = { hostInstanceId: "host", sessionEpoch: 1 };
+    act(() => {
+      publicationListener?.({
+        sessionId: SID,
+        rendererGeneration: 1,
+        publicationSequence: 1,
+        plane: "transcript",
+        owner,
+        payload: {
+          kind: "delta",
+          cursor: { ...owner, transportSequence: 1, snapshotSequence: 1 },
+          liveTailCursor: "1",
+          entries: [
+            {
+              type: "tool_execution_end",
+              toolCallId: "tool",
+              toolName: "write",
+              result: {},
+              isError: false,
+            },
+          ],
+        },
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(invoke).toHaveBeenCalledWith("git.changesCount", { root: WORKSPACE });
+    view.unmount();
+    vi.useRealTimers();
   });
 
   it("still hides for a non-repo workspace and while the badge is loading", () => {

@@ -11,6 +11,7 @@ import type React from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDiffSearch } from "../../hooks/useDiffSearch.js";
 import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
+import { transcriptPublicationIncludes } from "../../lib/transcript-publication.js";
 import { useDiffStore } from "../../stores/diff-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useSettingsStore } from "../../stores/settings-store.js";
@@ -198,16 +199,24 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
   // ── Auto-refresh on agent_end + window focus ──────────────────────
   // A full refresh runs on agent_end (turn boundary) and window focus; each
   // re-baselines the working-tree fingerprint and clears staleness. Mid-turn
-  // tool calls don't force a disruptive refresh — instead the header's
-  // per-tool-call badge refresh recomputes the fingerprint and lights the
-  // stale dot (see diff-store doBadgeRefresh).
+  // tool calls don't force a disruptive refresh — the header's badge scan
+  // recomputes the fingerprint and lights the stale dot instead. Runtime
+  // hosts publish those events on the sequenced transcript plane; the legacy
+  // event listener is retained only for compatibility.
   const stale = useDiffStore((s) => s.stale);
   const refreshing = useDiffStore((s) => s.refreshing);
   useEffect(() => {
     if (!visible || historical) return;
     const unsubEvent = window.pivis.on("session.events", ({ sessionId: sid, events }) => {
-      if (sid !== sessionId) return;
-      if (events.some((event) => event.type === "agent_end")) {
+      if (sid === sessionId && events.some((event) => event.type === "agent_end")) {
+        void refresh();
+      }
+    });
+    const unsubPublication = window.pivis.on("session.publication", (publication) => {
+      if (
+        publication.sessionId === sessionId &&
+        transcriptPublicationIncludes(publication, ["agent_end"])
+      ) {
         void refresh();
       }
     });
@@ -217,6 +226,7 @@ export function DiffViewerHost({ sessionId }: DiffViewerHostProps): React.ReactE
     window.addEventListener("focus", onFocus);
     return () => {
       unsubEvent();
+      unsubPublication();
       window.removeEventListener("focus", onFocus);
     };
   }, [visible, historical, sessionId, refresh]);
