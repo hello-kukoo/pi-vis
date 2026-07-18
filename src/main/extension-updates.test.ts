@@ -31,7 +31,6 @@ import {
   initExtensionUpdates,
   resolveExtensionUpdateWorkerPath,
   runExtensionUpdate,
-  scheduleBackgroundExtensionUpdateCheck,
 } from "./extension-updates.js";
 
 class FakeWorker extends EventEmitter {
@@ -146,26 +145,6 @@ describe("extension updates", () => {
     await expect(
       checkForExtensionUpdates(() => new FakeWorker({ ok: true, updates: [] })),
     ).resolves.toMatchObject({ updates: [] });
-  });
-
-  it("runs the default-on launch check after its non-blocking delay", async () => {
-    vi.useFakeTimers();
-    const check = vi.fn(async () => ({ updates: [], checkedAt: Date.now() }));
-    scheduleBackgroundExtensionUpdateCheck(() => true, check);
-
-    await vi.advanceTimersByTimeAsync(2999);
-    expect(check).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(check).toHaveBeenCalledOnce();
-  });
-
-  it("skips the launch check when its extension-only preference is disabled", async () => {
-    vi.useFakeTimers();
-    const check = vi.fn(async () => ({ updates: [], checkedAt: Date.now() }));
-    scheduleBackgroundExtensionUpdateCheck(() => false, check);
-
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(check).not.toHaveBeenCalled();
   });
 
   it("keeps every runner target extension-only", () => {

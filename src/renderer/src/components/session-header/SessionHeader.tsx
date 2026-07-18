@@ -33,6 +33,8 @@ interface SessionHeaderProps {
   sessionId: SessionId;
 }
 
+const MIN_NAME_INPUT_WIDTH_PX = 180;
+
 type GroupedModelHighlight =
   | { type: "provider"; providerKey: string }
   | { type: "model"; providerKey: string; modelKey: string };
@@ -206,7 +208,11 @@ export function SessionHeader({ sessionId }: SessionHeaderProps): React.ReactEle
   const handleRenameStart = useCallback(() => {
     if (!observation) return;
     const clickedWidth = nameButtonRef.current?.getBoundingClientRect().width ?? 0;
-    setNameInputWidth(clickedWidth > 0 ? Math.ceil(clickedWidth) : null);
+    // Preserve a useful editing target for short titles while the CSS max
+    // keeps the field within the actual space left by title-bar controls.
+    setNameInputWidth(
+      clickedWidth > 0 ? Math.max(MIN_NAME_INPUT_WIDTH_PX, Math.ceil(clickedWidth)) : null,
+    );
     setNameInput(session?.sessionName ?? session?.sessionTitle ?? "");
     setEditingName(true);
     setTimeout(() => nameInputRef.current?.focus(), 10);

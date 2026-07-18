@@ -88,14 +88,16 @@ export function checkForAppUpdate(): AppUpdateStatus {
   // Squirrel.Mac already has the update staged. Do not overwrite this state
   // with a new check; the renderer may have dismissed only the prompt while
   // Settings still needs to offer "Restart to install".
-  if (status.state === "downloaded") {
+  if (status.state === "downloaded" || status.state === "checking") {
     emitStatus();
     return status;
   }
 
   try {
-    autoUpdater.checkForUpdates();
+    // Claim the check before calling Electron so manual and scheduled callers
+    // cannot start overlapping autoUpdater requests in the same event turn.
     updateStatus({ state: "checking", checkedAt: Date.now(), error: undefined });
+    autoUpdater.checkForUpdates();
   } catch (error) {
     updateStatus({
       state: "error",

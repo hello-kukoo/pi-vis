@@ -69,6 +69,12 @@
   gap: 0.571rem; /* tight grouping within a section */
 }
 
+/* Updates are the primary recurring settings task, so surface them first
+   without changing the component's state/effect ordering. */
+.settings-section--updates {
+  order: -1;
+}
+
 .settings-section__title {
   font-family: var(--font-display);
   font-size: 0.857em;
