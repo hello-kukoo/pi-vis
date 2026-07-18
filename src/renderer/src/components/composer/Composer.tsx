@@ -253,7 +253,6 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
   const submissionDispositions = useSessionsStore((s) => s.submissionDispositions);
   const composerFocusRequest = useSessionsStore((s) => s.composerFocusRequest);
   const consumeComposerFocus = useSessionsStore((s) => s.consumeComposerFocus);
-  const escapeClaimCount = useOverlayStore((s) => s.count);
   const semanticSnapshot = authoritySnapshotFor(session);
   const commands = session?.commands ?? [];
   const discovered = useMemo(() => new Map(commands.map((c) => [c.name, c])), [commands]);
@@ -755,11 +754,14 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     // Mount is a one-shot autofocus opportunity. Consume it before inspecting
     // overlays or focus so closing an overlay later can never steal focus.
     didAutofocusRef.current = true;
-    if (escapeClaimCount > 0) return;
+    // Read the registry after the DOM mutation and departing layout-effect
+    // cleanups. The render snapshot can still include the Escape claim owned
+    // by the Composer replacement that was removed in this same commit.
+    if (useOverlayStore.getState().count > 0) return;
     const el = textareaRef.current;
     if (!el || el.disabled || !mayFocusComposer(el)) return;
     el.focus();
-  }, [escapeClaimCount]);
+  }, []);
 
   // Explicit entry focus is deliberately separate from ordinary selection.
   // Consume the matching request at its first native-Composer chance,
@@ -768,10 +770,10 @@ export function Composer({ sessionId }: ComposerProps): React.ReactElement {
     const request = composerFocusRequest;
     if (!request || request.sessionId !== sessionId) return;
     consumeComposerFocus(sessionId, request.nonce);
-    if (escapeClaimCount > 0) return;
+    if (useOverlayStore.getState().count > 0) return;
     const el = textareaRef.current;
     if (el && !el.disabled && mayExplicitlyFocusComposer(el)) el.focus();
-  }, [composerFocusRequest, consumeComposerFocus, escapeClaimCount, sessionId]);
+  }, [composerFocusRequest, consumeComposerFocus, sessionId]);
 
   // Accepted custody/consumption feedback is presentation-only, but it lets
   // the originating prompt transport clear its command text before the terminal

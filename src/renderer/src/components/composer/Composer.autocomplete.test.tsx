@@ -10,6 +10,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useEscapeClaim } from "../../hooks/useEscapeClaim.js";
 import { useOverlayStore } from "../../stores/overlay-store.js";
 import { useSessionsStore } from "../../stores/sessions-store.js";
 import { useTreeStore } from "../../stores/tree-store.js";
@@ -41,6 +42,11 @@ function mount(sessionId = SID): {
       container.remove();
     },
   };
+}
+
+function ComposerReplacement(): React.ReactElement {
+  useEscapeClaim(true);
+  return <textarea aria-label="Composer replacement" />;
 }
 
 function type(textarea: HTMLTextAreaElement, value: string): void {
@@ -1432,6 +1438,24 @@ describe("Composer autocomplete and authority intents", () => {
     const composer = mount();
     expect(document.activeElement).toBe(composer.textarea());
     composer.unmount();
+  });
+
+  it("restores focus when an Escape-claiming Composer replacement unmounts", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => flushSync(() => root.render(<ComposerReplacement />)));
+    container.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+
+    act(() => flushSync(() => root.render(<Composer sessionId={SID} />)));
+    expect(useOverlayStore.getState().count).toBe(0);
+    expect(document.activeElement).toBe(
+      container.querySelector<HTMLTextAreaElement>(".composer textarea"),
+    );
+
+    act(() => flushSync(() => root.unmount()));
+    container.remove();
   });
 });
 
