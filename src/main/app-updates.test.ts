@@ -1,3 +1,4 @@
+import { autoUpdater } from "electron";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({
@@ -13,7 +14,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { buildAppUpdateFeedUrl } from "./app-updates.js";
+import { buildAppUpdateFeedUrl, checkForAppUpdate, initAppUpdates } from "./app-updates.js";
 
 describe("buildAppUpdateFeedUrl", () => {
   it("builds the update.electronjs.org feed with platform and arch", () => {
@@ -26,5 +27,13 @@ describe("buildAppUpdateFeedUrl", () => {
         version: "0.3.3",
       }),
     ).toBe("https://update.electronjs.org/rsingapuri/pi-vis/darwin-arm64/0.3.3");
+  });
+
+  it("does not overlap app-updater checks while one is in progress", () => {
+    initAppUpdates(() => {});
+    checkForAppUpdate();
+    checkForAppUpdate();
+
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledOnce();
   });
 });

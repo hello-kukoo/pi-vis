@@ -945,7 +945,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
             </section>
 
             {/* ── Updates ──────────────────────────────────────────────── */}
-            <section className="settings-section">
+            <section className="settings-section settings-section--updates">
               <h3 className="settings-section__title">Updates</h3>
 
               <div className="settings-row">
@@ -975,7 +975,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
               </div>
 
               <div className="settings-row">
-                <span className="settings-label">Check Pi-Vis on launch</span>
+                <span className="settings-label">Check Pi-Vis automatically</span>
                 <button
                   type="button"
                   className={`settings-toggle ${settings.appUpdateCheckEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}
@@ -999,7 +999,7 @@ export function SettingsView({ onClose, initialSection }: SettingsViewProps): Re
               </div>
 
               <div className="settings-row">
-                <span className="settings-label">Check extensions on launch</span>
+                <span className="settings-label">Check extensions automatically</span>
                 <button
                   type="button"
                   className={`settings-toggle ${settings.extensionUpdateCheckEnabled ? "settings-toggle--on" : "settings-toggle--off"}`}

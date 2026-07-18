@@ -1,10 +1,11 @@
 import path from "node:path";
-import { BrowserWindow, app, screen, session, shell } from "electron";
+import { BrowserWindow, app, powerMonitor, screen, session, shell } from "electron";
 import {
   initIpc,
+  refreshBackgroundUpdateChecks,
+  startBackgroundUpdateChecks,
   stopAllSessions,
-  triggerBackgroundAppUpdateCheck,
-  triggerBackgroundExtensionUpdateCheck,
+  stopBackgroundUpdateChecks,
 } from "./ipc.js";
 import { isRendererReloadShortcut } from "./renderer-navigation.js";
 import { loadSettings, saveSettings } from "./settings-store.js";
@@ -220,10 +221,11 @@ if (!hasSingleInstanceLock) {
 
     createWindow();
 
-    // Background update checks (delayed, non-blocking). Extension checks are
-    // package-only and can never update the pinned Pi runtime.
-    triggerBackgroundAppUpdateCheck();
-    triggerBackgroundExtensionUpdateCheck();
+    // Background update checks are delayed, non-blocking, and remain active
+    // for long-running app instances. Extension checks are package-only and
+    // can never update the pinned Pi runtime.
+    startBackgroundUpdateChecks();
+    powerMonitor.on("resume", refreshBackgroundUpdateChecks);
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -239,6 +241,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on("before-quit", () => {
+    stopBackgroundUpdateChecks();
     stopAllSessions();
   });
 }

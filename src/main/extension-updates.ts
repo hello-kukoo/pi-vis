@@ -147,23 +147,6 @@ export function checkForExtensionUpdates(
   return operation;
 }
 
-export function scheduleBackgroundExtensionUpdateCheck(
-  isEnabled: () => boolean,
-  check: () => Promise<ExtensionUpdateStatus> = checkForExtensionUpdates,
-  delayMs = 3000,
-): ReturnType<typeof setTimeout> {
-  return setTimeout(() => {
-    try {
-      if (!isEnabled()) return;
-      void check().catch(() => {
-        // Silent at launch; Settings-open or a manual check can retry.
-      });
-    } catch {
-      // Extension update awareness is best-effort and never blocks startup.
-    }
-  }, delayMs);
-}
-
 export function buildExtensionUpdateArgs(target: ExtensionUpdateTarget): string[] {
   if (target === "all") return ["update", "--extensions", "--no-approve"];
   const source = target.extension.trim();

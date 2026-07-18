@@ -14,6 +14,17 @@ test("Settings auto-checks cached Pi extension status and keeps updates extensio
 
   const check = page.getByRole("button", { name: "Check extensions" });
   await expect(check).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator(".settings-section--updates").evaluate((updates) => {
+        const top = updates.getBoundingClientRect().top;
+        const sectionTops = [...document.querySelectorAll(".settings-section")].map(
+          (section) => section.getBoundingClientRect().top,
+        );
+        return top === Math.min(...sectionTops);
+      }),
+    )
+    .toBe(true);
 
   await expect(page.getByText("@pi/mcp", { exact: true })).toBeVisible();
   await expect(page.getByText("github.com/example/pi-tools", { exact: true })).toBeVisible();

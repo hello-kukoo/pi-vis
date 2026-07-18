@@ -107,8 +107,9 @@
   letter-spacing: var(--font-accent-tracking);
   padding: 0.286rem 0.429rem;
   outline: none;
-  /* JS snapshots the clicked label's rendered width. This fallback is used
-     only when layout measurement is unavailable (for example jsdom). */
+  /* JS snapshots the clicked label's rendered width but enforces this same
+     usable minimum for very short titles. This fallback is used only when
+     layout measurement is unavailable (for example jsdom). */
   width: 12.857rem;
   max-width: 100%;
   min-width: 0;

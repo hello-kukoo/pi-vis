@@ -36,7 +36,6 @@ import {
   getExtensionUpdateStatus,
   initExtensionUpdates,
   runExtensionUpdate,
-  scheduleBackgroundExtensionUpdateCheck,
 } from "./extension-updates.js";
 import {
   type CheckoutChangesSnapshot,
@@ -79,6 +78,7 @@ import {
   piThemeColorIndices,
   piThemeForSchemeId,
 } from "./theme-loader.js";
+import { UpdateCheckScheduler } from "./update-check-scheduler.js";
 import {
   getOrderedWorkspaces,
   pickWorkspace,
@@ -1443,6 +1443,7 @@ export function initIpc(win: BrowserWindow): void {
 
   ipcMain.handle("settings.set", async (_evt, updates: Partial<ReturnType<typeof getSettings>>) => {
     const next = saveSettings(updates);
+    refreshBackgroundUpdateChecks();
     // Color-scheme changes are handled entirely renderer-side: the host emits
     // stable per-role ANSI INDICES (color-agnostic), and the renderer resolves
     // them against the active palette at paint time. So a scheme swap recolors
@@ -1718,18 +1719,23 @@ export function stopAllSessions(): void {
   registry?.stopAll();
 }
 
-export function triggerBackgroundAppUpdateCheck(): void {
-  setTimeout(() => {
-    try {
-      const settings = getSettings();
-      if (!settings.appUpdateCheckEnabled) return;
-      checkForAppUpdate();
-    } catch {
-      // silent — app updates are best-effort
-    }
-  }, 5000);
+const backgroundUpdateScheduler = new UpdateCheckScheduler({
+  isAppUpdateEnabled: () => getSettings().appUpdateCheckEnabled,
+  isExtensionUpdateEnabled: () => getSettings().extensionUpdateCheckEnabled,
+  checkAppUpdate: checkForAppUpdate,
+  checkExtensionUpdates: checkForExtensionUpdates,
+});
+
+/** Start the shared, main-owned periodic update-awareness scheduler. */
+export function startBackgroundUpdateChecks(): void {
+  backgroundUpdateScheduler.start();
 }
 
-export function triggerBackgroundExtensionUpdateCheck(): void {
-  scheduleBackgroundExtensionUpdateCheck(() => getSettings().extensionUpdateCheckEnabled);
+/** Re-evaluate due checks after sleep/resume or an update-preference change. */
+export function refreshBackgroundUpdateChecks(): void {
+  backgroundUpdateScheduler.refresh();
+}
+
+export function stopBackgroundUpdateChecks(): void {
+  backgroundUpdateScheduler.stop();
 }
