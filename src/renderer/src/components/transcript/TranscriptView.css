@@ -380,14 +380,16 @@
 }
 
 .tool-card__header {
-  display: flex;
-  /* Keep the call type and its monospace input on one text baseline. */
-  align-items: baseline;
-  gap: 0.571rem;
+  display: grid;
+  /* Chrome, authored identity, and state are distinct alignment domains.
+     Identity text owns baseline alignment internally; the three regions share
+     only a geometric row center. */
+  grid-template-columns: 0.857rem minmax(0, 1fr) max-content;
+  align-items: center;
+  column-gap: 0.571rem;
   width: 100%;
   min-height: 2.714rem;
-  /* Baseline-aligned text sits slightly high in its line box; balance the row. */
-  padding: 0.691rem 0.857rem 0.451rem;
+  padding: 0.571rem 0.857rem;
   background: none;
   border: none;
   text-align: left;
@@ -407,13 +409,9 @@
 }
 
 .tool-card__chevron {
-  /* The disclosure mark remains optically centered while text uses a baseline. */
-  align-self: center;
-  position: relative;
-  top: -0.12rem;
+  grid-column: 1;
   width: 0.857rem;
   height: 0.857rem;
-  flex: none;
   color: var(--text-ghost);
   transition: transform 0.15s ease, color 0.15s ease;
 }
@@ -422,14 +420,23 @@
   transform: rotate(90deg);
 }
 
+.tool-card__identity {
+  grid-column: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 0.571rem;
+  min-width: 0;
+}
+
 .tool-card__name {
   /* Tool name: UI font, small, semibold. */
+  flex: none;
   font-family: var(--font-display);
   font-size: var(--font-size-small);
   font-weight: 600;
   line-height: var(--leading-label);
   color: var(--text);
-  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .tool-card__name--bash {
@@ -438,6 +445,7 @@
 
 .tool-card__subject {
   /* Subject is a literal value (file path / command) — monospace. */
+  flex: 0 1 auto;
   font-family: var(--font-code);
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
@@ -454,11 +462,11 @@
 }
 
 .tool-card__header-trailing {
+  grid-column: 3;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.429rem;
-  margin-left: auto;
-  flex: none;
 }
 
 .tool-card__summary-meta {
@@ -470,10 +478,10 @@
 }
 
 .tool-card__badge {
-  margin-left: auto;
-  flex-shrink: 0;
+  flex: none;
   font-family: var(--font-code);
   font-size: var(--font-size-small);
+  line-height: var(--leading-code);
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 18%, var(--bg-sunken));
   border-radius: 0.214em;
@@ -488,10 +496,6 @@
 .tool-card__badge--neutral {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 14%, var(--bg-sunken));
-}
-
-.tool-card__header-trailing .tool-card__badge {
-  margin-left: 0;
 }
 
 .tool-card__body {

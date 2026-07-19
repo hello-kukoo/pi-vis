@@ -217,7 +217,9 @@ interface ToolCardShellProps {
   onToggle: () => void;
   accessibleLabel: string;
   accessibleSummary?: string | undefined;
-  header: React.ReactNode;
+  kind: React.ReactNode;
+  subject?: React.ReactNode;
+  trailing?: React.ReactNode;
   children?: React.ReactNode;
 }
 
@@ -229,7 +231,9 @@ function ToolCardShell({
   onToggle,
   accessibleLabel,
   accessibleSummary,
-  header,
+  kind,
+  subject,
+  trailing,
   children,
 }: ToolCardShellProps): React.ReactElement {
   const bodyId = useId();
@@ -248,7 +252,11 @@ function ToolCardShell({
         aria-label={`${accessibleLabel} details${accessibleSummary ? ` — ${accessibleSummary}` : ""}`}
       >
         <IconChevronRight className="tool-card__chevron" />
-        {header}
+        <span className="tool-card__identity">
+          {kind}
+          {subject}
+        </span>
+        {trailing !== undefined && <span className="tool-card__header-trailing">{trailing}</span>}
       </button>
       {open && (
         <div id={bodyId} className="tool-card__body">
@@ -719,28 +727,17 @@ const ToolCallBlock = memo(function ToolCallBlock({
         ? "interrupted"
         : "complete";
 
-  const header = (
-    <>
-      <span className={`tool-card__name ${isBash ? "tool-card__name--bash" : ""}`}>
-        {isBash ? "$" : data.toolName}
-      </span>
-      {subject && (
-        <FadeText className="tool-card__subject" title={subject}>
-          {subject}
-        </FadeText>
-      )}
-      {(resultSummary || data.isStreaming || data.isError || data.interrupted) && (
-        <span className="tool-card__header-trailing">
-          {resultSummary && <span className="tool-card__summary-meta">{resultSummary}</span>}
-          {data.isStreaming && <Spinner className="tool-card__spinner" />}
-          {data.isError && <span className="tool-card__badge">error</span>}
-          {data.interrupted && !data.isError && (
-            <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
-          )}
-        </span>
-      )}
-    </>
-  );
+  const trailing =
+    resultSummary || data.isStreaming || data.isError || data.interrupted ? (
+      <>
+        {resultSummary && <span className="tool-card__summary-meta">{resultSummary}</span>}
+        {data.isStreaming && <Spinner className="tool-card__spinner" />}
+        {data.isError && <span className="tool-card__badge">error</span>}
+        {data.interrupted && !data.isError && (
+          <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+        )}
+      </>
+    ) : undefined;
 
   return (
     <ToolCardShell
@@ -759,7 +756,19 @@ const ToolCallBlock = memo(function ToolCallBlock({
           .filter(Boolean)
           .join(" · ") || undefined
       }
-      header={header}
+      kind={
+        <span className={`tool-card__name ${isBash ? "tool-card__name--bash" : ""}`}>
+          {isBash ? "$" : data.toolName}
+        </span>
+      }
+      subject={
+        subject ? (
+          <FadeText className="tool-card__subject" title={subject}>
+            {subject}
+          </FadeText>
+        ) : undefined
+      }
+      trailing={trailing}
     >
       <ProvenanceGrid
         values={[
@@ -847,33 +856,22 @@ const BashBlock = memo(function BashBlock({
         ? "interrupted"
         : "complete";
 
-  const header = (
-    <>
-      <span className="tool-card__name tool-card__name--bash">$</span>
-      <FadeText className="tool-card__subject tool-card__subject--command" title={data.command}>
-        {data.command}
-      </FadeText>
-      {(outputLines.length > 0 ||
-        data.isStreaming ||
-        isError ||
-        wasInterrupted ||
-        data.truncated) && (
-        <span className="tool-card__header-trailing">
-          {outputLines.length > 0 && (
-            <span className="tool-card__summary-meta">{formatLineCount(outputLines.length)}</span>
-          )}
-          {data.isStreaming && <Spinner className="tool-card__spinner" />}
-          {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
-          {wasInterrupted && !isError && (
-            <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
-          )}
-          {data.truncated && !isError && !wasInterrupted && (
-            <span className="tool-card__badge tool-card__badge--neutral">truncated</span>
-          )}
-        </span>
-      )}
-    </>
-  );
+  const trailing =
+    outputLines.length > 0 || data.isStreaming || isError || wasInterrupted || data.truncated ? (
+      <>
+        {outputLines.length > 0 && (
+          <span className="tool-card__summary-meta">{formatLineCount(outputLines.length)}</span>
+        )}
+        {data.isStreaming && <Spinner className="tool-card__spinner" />}
+        {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
+        {wasInterrupted && !isError && (
+          <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+        )}
+        {data.truncated && !isError && !wasInterrupted && (
+          <span className="tool-card__badge tool-card__badge--neutral">truncated</span>
+        )}
+      </>
+    ) : undefined;
 
   return (
     <ToolCardShell
@@ -893,7 +891,13 @@ const BashBlock = memo(function BashBlock({
           .filter(Boolean)
           .join(" · ") || undefined
       }
-      header={header}
+      kind={<span className="tool-card__name tool-card__name--bash">$</span>}
+      subject={
+        <FadeText className="tool-card__subject tool-card__subject--command" title={data.command}>
+          {data.command}
+        </FadeText>
+      }
+      trailing={trailing}
     >
       <ProvenanceGrid
         values={[
@@ -959,14 +963,6 @@ const ActivityCard = memo(function ActivityCard({
   const largeContent =
     text.length >= LARGE_STRUCTURED_TEXT_CHARS || splitOutputLines(text).length >= LARGE_DIFF_LINES;
 
-  const header = (
-    <>
-      <span className="tool-card__name">{label}</span>
-      {subject && <FadeText className="tool-card__subject">{subject}</FadeText>}
-      {badge && <span className="tool-card__badge">{badge}</span>}
-    </>
-  );
-
   return (
     <ToolCardShell
       isError={isError}
@@ -974,7 +970,9 @@ const ActivityCard = memo(function ActivityCard({
       onToggle={toggle}
       accessibleLabel={`${label} activity`}
       accessibleSummary={[subject, badge].filter(Boolean).join(" · ") || undefined}
-      header={header}
+      kind={<span className="tool-card__name">{label}</span>}
+      subject={subject ? <FadeText className="tool-card__subject">{subject}</FadeText> : undefined}
+      trailing={badge ? <span className="tool-card__badge">{badge}</span> : undefined}
     >
       {hasRetainedContent ? (
         <section className="tool-card__section">
@@ -1468,12 +1466,10 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
         open={expanded}
         onToggle={toggle}
         accessibleLabel={`${data.customType} extension entry`}
-        header={
-          <>
-            <span className="tool-card__name">extension</span>
-            <FadeText className="tool-card__subject">{data.customType}</FadeText>
-            {rendered?.error && <span className="tool-card__badge">renderer error</span>}
-          </>
+        kind={<span className="tool-card__name">extension</span>}
+        subject={<FadeText className="tool-card__subject">{data.customType}</FadeText>}
+        trailing={
+          rendered?.error ? <span className="tool-card__badge">renderer error</span> : undefined
         }
       >
         <ProvenanceGrid

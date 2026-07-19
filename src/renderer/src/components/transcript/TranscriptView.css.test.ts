@@ -43,8 +43,12 @@ describe("TranscriptView CSS", () => {
     const css = readFileSync(new URL("./TranscriptView.css", import.meta.url), "utf8");
     const diffCss = readFileSync(new URL("./DiffBlock.css", import.meta.url), "utf8");
     const headerRule = css.match(/\.tool-card__header\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
+    const identityRule =
+      css.match(/(?:^|\n)\.tool-card__identity\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
     const chevronRule =
       css.match(/(?:^|\n)\.tool-card__chevron\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
+    const trailingRule =
+      css.match(/(?:^|\n)\.tool-card__header-trailing\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
     const focusRule =
       css.match(/\.tool-card__header:focus-visible\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
     const focusChevronRule =
@@ -55,10 +59,16 @@ describe("TranscriptView CSS", () => {
 
     expect(css).not.toMatch(/\.tool-card:hover\s*{/);
     expect(css).not.toMatch(/\.tool-card__header:hover\s*{/);
-    expect(headerRule).toContain("align-items: baseline;");
-    expect(headerRule).toContain("padding: 0.691rem 0.857rem 0.451rem;");
-    expect(chevronRule).toContain("align-self: center;");
-    expect(chevronRule).toContain("top: -0.12rem;");
+    expect(headerRule).toContain("display: grid;");
+    expect(headerRule).toContain("grid-template-columns: 0.857rem minmax(0, 1fr) max-content;");
+    expect(headerRule).toContain("align-items: center;");
+    expect(headerRule).toContain("padding: 0.571rem 0.857rem;");
+    expect(identityRule).toContain("align-items: baseline;");
+    expect(identityRule).toContain("gap: 0.571rem;");
+    expect(trailingRule).toContain("align-items: center;");
+    expect(trailingRule).toContain("justify-content: flex-end;");
+    expect(chevronRule).not.toContain("position:");
+    expect(chevronRule).not.toContain("top:");
     expect(focusRule).toContain("outline: none;");
     expect(focusRule).toContain("box-shadow: none;");
     expect(focusChevronRule).toContain("stroke-width: 2;");

@@ -270,7 +270,7 @@ test.describe("unified tool card disclosure", () => {
     await expect(card.locator("details")).toHaveCount(0);
   });
 
-  test("header chrome stays neutral, centered, seamless, and keyboard controlled", async ({
+  test("header regions preserve typographic adjacency and geometric alignment", async ({
     page,
   }) => {
     await seedHistory(page, [
@@ -286,35 +286,162 @@ test.describe("unified tool card disclosure", () => {
           isStreaming: false,
         },
       },
+      {
+        id: "alignment-bash",
+        type: "bash",
+        data: {
+          command: "git status --short && git log -1 --oneline",
+          outputText: "clean",
+          isStreaming: false,
+          exitCode: 0,
+        },
+      },
+      {
+        id: "alignment-custom-entry",
+        type: "custom_entry",
+        data: {
+          entryId: "alignment-custom-entry",
+          customType: "plan-mode-state",
+          data: { enabled: true },
+        },
+      },
     ]);
 
     const card = page.locator(".tool-card").filter({ hasText: "chrome_tool" });
+    const bashCard = page.locator(".tool-card").filter({ hasText: "git status --short" });
+    const customEntryCard = page.locator(".custom-entry .tool-card");
     const header = card.getByRole("button", { name: /^chrome_tool tool call details/u });
     const chevron = card.locator(".tool-card__chevron");
     const label = card.locator(".tool-card__name");
     await expect(header).toHaveAttribute("aria-expanded", "false");
+    await expect(customEntryCard).toContainText("plan-mode-state");
 
-    const centeredChevron = async (): Promise<{ viewBoxDelta: number; labelDelta: number }> =>
-      card.evaluate((element) => {
+    await page.evaluate(() => {
+      const state = (
+        window as unknown as { __pivisStore: { getState: () => PreviewStoreState } }
+      ).__pivisStore.getState();
+      state.applyEvent(state.activeSessionId, {
+        type: "tool_execution_start",
+        toolCallId: "alignment-spinner-call",
+        toolName: "grep",
+        args: { pattern: "Luna|Low|guardian|playwright|npx" },
+      });
+      state.applyEvent(state.activeSessionId, {
+        type: "tool_execution_start",
+        toolCallId: "alignment-subjectless-spinner-call",
+        toolName: "ls",
+        args: {},
+      });
+    });
+    const spinnerCard = page.locator(".tool-card").filter({ hasText: "Luna|Low|guardian" });
+    const subjectlessSpinnerCard = page
+      .locator(".tool-card")
+      .filter({ has: page.locator(".tool-card__name", { hasText: /^ls$/u }) });
+    await expect(spinnerCard.locator(".tool-card__spinner")).toBeVisible();
+    await expect(subjectlessSpinnerCard.locator(".tool-card__spinner")).toBeVisible();
+    await expect(subjectlessSpinnerCard.locator(".tool-card__subject")).toHaveCount(0);
+
+    const headerGeometry = async (
+      target: Locator,
+    ): Promise<{
+      viewBoxDelta: number;
+      regionCenterDeltas: number[];
+      trailingChildCenterDeltas: number[];
+      columns: string[];
+      identityAlignment: string;
+      adjacencyDelta?: number | undefined;
+      identityLeft: number;
+      subjectLeft?: number | undefined;
+      trailingRight?: number | undefined;
+      collapsedChromeHeight: number;
+    }> =>
+      target.evaluate((element) => {
+        const headerElement = element.querySelector<HTMLElement>(".tool-card__header");
         const svg = element.querySelector<SVGSVGElement>(".tool-card__chevron");
         const shape = svg?.querySelector<SVGGraphicsElement>("polyline");
+        const identity = element.querySelector<HTMLElement>(".tool-card__identity");
         const name = element.querySelector<HTMLElement>(".tool-card__name");
-        if (!svg || !shape || !name) throw new Error("tool card header geometry is incomplete");
+        const subject = element.querySelector<HTMLElement>(".tool-card__subject");
+        const trailing = element.querySelector<HTMLElement>(".tool-card__header-trailing");
+        if (!headerElement || !svg || !shape || !identity || !name) {
+          throw new Error("tool card header regions are incomplete");
+        }
         const box = shape.getBBox();
         const viewBox = svg.viewBox.baseVal;
-        const svgRect = svg.getBoundingClientRect();
+        const cardRect = element.getBoundingClientRect();
+        const headerRect = headerElement.getBoundingClientRect();
+        const identityRect = identity.getBoundingClientRect();
         const nameRect = name.getBoundingClientRect();
+        const subjectRect = subject?.getBoundingClientRect();
+        const trailingRect = trailing?.getBoundingClientRect();
+        const headerCenter = headerRect.top + headerRect.height / 2;
+        const regions = [svg, identity, trailing].filter((item): item is Element => item !== null);
+        const identityStyle = getComputedStyle(identity);
+        const gap = Number.parseFloat(identityStyle.columnGap);
         return {
           viewBoxDelta: box.y + box.height / 2 - (viewBox.y + viewBox.height / 2),
-          labelDelta: svgRect.top + svgRect.height / 2 - (nameRect.top + nameRect.height / 2),
+          regionCenterDeltas: regions.map((item) => {
+            const rect = item.getBoundingClientRect();
+            return rect.top + rect.height / 2 - headerCenter;
+          }),
+          trailingChildCenterDeltas: trailing
+            ? [...trailing.children].map((item) => {
+                const rect = item.getBoundingClientRect();
+                return rect.top + rect.height / 2 - (trailingRect!.top + trailingRect!.height / 2);
+              })
+            : [],
+          columns: regions.map((item) => getComputedStyle(item).gridColumnStart),
+          identityAlignment: identityStyle.alignItems,
+          adjacencyDelta: subjectRect ? subjectRect.left - nameRect.right - gap : undefined,
+          identityLeft: identityRect.left,
+          subjectLeft: subjectRect?.left,
+          trailingRight: trailingRect?.right,
+          collapsedChromeHeight: cardRect.height - headerRect.height,
         };
       });
 
-    const collapsedCenter = await centeredChevron();
-    expect(collapsedCenter.viewBoxDelta).toBe(0);
-    expect(Math.abs(collapsedCenter.labelDelta)).toBeLessThanOrEqual(0.1);
+    const targets = [card, bashCard, customEntryCard, spinnerCard, subjectlessSpinnerCard];
+    const geometries = await Promise.all(targets.map((target) => headerGeometry(target)));
+    for (const geometry of geometries) {
+      expect(geometry.viewBoxDelta).toBe(0);
+      expect(geometry.regionCenterDeltas.every((delta) => Math.abs(delta) <= 0.1)).toBe(true);
+      expect(geometry.trailingChildCenterDeltas.every((delta) => Math.abs(delta) <= 0.1)).toBe(
+        true,
+      );
+      expect(geometry.identityAlignment).toBe("baseline");
+      if (geometry.adjacencyDelta !== undefined) {
+        expect(Math.abs(geometry.adjacencyDelta)).toBeLessThanOrEqual(0.1);
+      }
+      expect(geometry.identityLeft).toBe(geometries[0].identityLeft);
+      expect(geometry.collapsedChromeHeight).toBe(2);
+      expect(geometry.columns).toEqual(
+        geometry.trailingRight === undefined ? ["1", "2"] : ["1", "2", "3"],
+      );
+    }
+    // Kind width is deliberately local. A shell prompt stays adjacent to its
+    // command even when unrelated cards use much longer identity labels.
+    expect(geometries[1].subjectLeft).toBeLessThan(geometries[2].subjectLeft);
+    expect(geometries[1].trailingRight).toBe(geometries[0].trailingRight);
+    expect(geometries[3].trailingRight).toBe(geometries[0].trailingRight);
+    expect(geometries[4].trailingRight).toBe(geometries[0].trailingRight);
     await expect(chevron).toBeVisible();
     await expect(label).toBeVisible();
+
+    // Narrowing may shrink only the subject. It must remain adjacent to its
+    // local kind, preserve the state anchor, and delegate clipping to FadeText.
+    await page.setViewportSize({ width: 720, height: 820 });
+    await expect(bashCard.locator(".tool-card__subject")).toHaveAttribute("data-overflow", "true");
+    const narrowBashGeometry = await headerGeometry(bashCard);
+    expect(Math.abs(narrowBashGeometry.adjacencyDelta)).toBeLessThanOrEqual(0.1);
+    expect(narrowBashGeometry.regionCenterDeltas.every((delta) => Math.abs(delta) <= 0.1)).toBe(
+      true,
+    );
+    expect(
+      await bashCard
+        .locator(".tool-card__header")
+        .evaluate((element) => element.scrollWidth - element.clientWidth),
+    ).toBeLessThanOrEqual(1);
+    await page.setViewportSize({ width: 1180, height: 820 });
 
     const restingChrome = await card.evaluate((element) => {
       const headerElement = element.querySelector<HTMLElement>(".tool-card__header");
@@ -354,9 +481,9 @@ test.describe("unified tool card disclosure", () => {
     await expect(header).toBeFocused();
     await expect(header).toHaveAttribute("aria-expanded", "true");
     await expect(card.locator(".tool-card__body")).toHaveCSS("border-top-style", "none");
-    const expandedCenter = await centeredChevron();
-    expect(expandedCenter.viewBoxDelta).toBe(0);
-    expect(Math.abs(expandedCenter.labelDelta)).toBeLessThanOrEqual(0.1);
+    const expandedGeometry = await headerGeometry(card);
+    expect(expandedGeometry.regionCenterDeltas.every((delta) => Math.abs(delta) <= 0.1)).toBe(true);
+    expect(Math.abs(expandedGeometry.adjacencyDelta)).toBeLessThanOrEqual(0.1);
 
     await page.keyboard.press("Space");
     await expect(header).toBeFocused();
