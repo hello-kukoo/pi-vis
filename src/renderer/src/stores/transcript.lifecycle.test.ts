@@ -55,6 +55,99 @@ describe("transcript lifecycle invariants", () => {
     expect(state.userMessageSequence).toBe(sequence);
   });
 
+  it("maps lossless tool, bash, compaction, branch, and custom history data", () => {
+    const state = seedFromHistory(createTranscriptState(), [
+      {
+        id: "tool",
+        type: "tool_call",
+        data: {
+          toolCallId: "call",
+          toolName: "image",
+          outputText: "done",
+          outputImages: ["data:image/png;base64,eA=="],
+          resultContent: [{ type: "text", text: "done", textSignature: "signed" }],
+          resultDetails: null,
+          resultMetadata: { terminate: true },
+          isError: false,
+          isStreaming: false,
+        },
+      },
+      {
+        id: "bash",
+        type: "bash",
+        data: {
+          command: "make",
+          outputText: "cancelled",
+          isStreaming: false,
+          exitCode: 130,
+          cancelled: true,
+          truncated: true,
+          fullOutputPath: "/tmp/full.log",
+          excludeFromContext: true,
+          timestamp: 12,
+        },
+      },
+      {
+        id: "compact",
+        type: "compaction",
+        data: {
+          summary: "summary",
+          estimatedTokensAfter: 125,
+          details: ["opaque"],
+          fromHook: true,
+        },
+      },
+      {
+        id: "branch",
+        type: "branch_summary",
+        data: { summary: "recap", fromId: "old-leaf", details: null, fromHook: false },
+      },
+      {
+        id: "custom-message",
+        type: "custom_message",
+        data: {
+          content: "preview",
+          images: ["data:image/webp;base64,eQ=="],
+          rawContent: [{ type: "text", text: "preview", textSignature: "signed-preview" }],
+          customType: "preview",
+          details: 7,
+          timestamp: 13,
+        },
+      },
+      {
+        id: "custom-entry",
+        type: "custom_entry",
+        data: { entryId: "custom-entry", customType: "state", data: { count: 2 } },
+      },
+    ]);
+
+    expect(allTranscriptBlocks(state).map((block) => block.data)).toMatchObject([
+      {
+        outputImages: ["data:image/png;base64,eA=="],
+        resultContent: [{ type: "text", text: "done", textSignature: "signed" }],
+        resultDetails: null,
+        resultMetadata: { terminate: true },
+      },
+      {
+        cancelled: true,
+        truncated: true,
+        fullOutputPath: "/tmp/full.log",
+        excludeFromContext: true,
+        timestamp: 12,
+      },
+      { estimatedTokensAfter: 125, details: ["opaque"], fromHook: true },
+      { fromId: "old-leaf", details: null, fromHook: false },
+      {
+        images: ["data:image/webp;base64,eQ=="],
+        rawContent: [{ type: "text", text: "preview", textSignature: "signed-preview" }],
+        customType: "preview",
+        details: 7,
+        timestamp: 13,
+      },
+      { data: { count: 2 } },
+    ]);
+  });
+
   it.each([
     ["aborted", { aborted: true }],
     ["retrying", { willRetry: true }],

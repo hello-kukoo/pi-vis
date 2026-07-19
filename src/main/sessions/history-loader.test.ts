@@ -65,7 +65,11 @@ describe("loadHistory (real pi v3 nested message format)", () => {
           toolName: "read",
           isError: false,
           content: [{ type: "text", text: "file contents" }],
-          details: { diff: "-old\n+new", fullOutputPath: "/tmp/full-output.log" },
+          details: {
+            diff: "-old\n+new",
+            patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new",
+            fullOutputPath: "/tmp/full-output.log",
+          },
           timestamp: 1_700_000_003_000,
         },
       },
@@ -104,8 +108,10 @@ describe("loadHistory (real pi v3 nested message format)", () => {
     expect(toolData["input"]).toEqual({ path: "a.ts" });
     expect(toolData["outputText"]).toBe("file contents");
     expect(toolData["diff"]).toBe("-old\n+new");
+    expect(toolData["patch"]).toBe("--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new");
     expect(toolData["resultDetails"]).toEqual({
       diff: "-old\n+new",
+      patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new",
       fullOutputPath: "/tmp/full-output.log",
     });
     expect(toolData["isError"]).toBe(false);
@@ -423,12 +429,9 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
     await expect(conversion).resolves.toHaveLength(5_000);
   });
 
-  it("renders branch_summary entries as compaction blocks so the recap actually appears (review B2)", async () => {
+  it("preserves branch_summary as an honest, distinct activity block", async () => {
     // Real pi uses `parentId: null` for the root and serializes the new
-    // branch_summary as a sibling of the new active leaf. The bridge (or
-    // any future caller) MUST coerce `null` parentId → undefined before
-    // handing entries to the schema — see plan §3. We omit parentId
-    // here so the fixture matches the post-coercion shape.
+    // branch_summary as a sibling of the new active leaf.
     const branch = [
       {
         type: "branch_summary",
@@ -436,14 +439,21 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
         timestamp: "2026-01-01T00:00:00Z",
         summary: "User explored a refactor branch and reverted.",
         fromId: "leaf-prev",
+        details: ["extension-owned"],
+        fromHook: true,
       },
     ];
     const blocks = await entriesToTranscript(branch);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toEqual({
       id: "bs-1",
-      type: "compaction",
-      data: { summary: "User explored a refactor branch and reverted." },
+      type: "branch_summary",
+      data: {
+        summary: "User explored a refactor branch and reverted.",
+        fromId: "leaf-prev",
+        details: ["extension-owned"],
+        fromHook: true,
+      },
     });
   });
 
@@ -452,7 +462,7 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
       { type: "branch_summary", id: "bs-x", timestamp: "2026-01-01T00:00:00Z" },
     ]);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.type).toBe("compaction");
+    expect(blocks[0]?.type).toBe("branch_summary");
     expect((blocks[0]?.data as { summary: string }).summary).toMatch(/empty branch summary/i);
   });
 
@@ -505,9 +515,168 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
       {
         id: "custom-1",
         type: "custom_entry",
-        data: { entryId: "custom-1", customType: "status-card" },
+        data: {
+          entryId: "custom-1",
+          customType: "status-card",
+          data: { count: 17 },
+        },
       },
     ]);
+  });
+
+  it("preserves public tool, bash, custom-message, and compaction payloads", async () => {
+    const customEntryTimestamp = "2024-01-01T00:00:04.000Z";
+    const blocks = await entriesToTranscript([
+      {
+        type: "message",
+        id: "tool-result",
+        parentId: null,
+        timestamp: "2024-01-01T00:00:01.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "standalone",
+          toolName: "image",
+          content: [
+            { type: "text", text: "created", textSignature: "signed-created" },
+            {
+              type: "image",
+              data: "aW1hZ2U=",
+              mimeType: "image/png",
+              extensionField: "retained-image-field",
+            },
+            { type: "text", text: "after image", extensionField: { retained: true } },
+          ],
+          output: "distinct direct output",
+          details: 42,
+          addedToolNames: ["inspect_image"],
+          terminate: true,
+          isError: false,
+          timestamp: 1_700_000_001_000,
+        },
+      },
+      {
+        type: "message",
+        id: "bash",
+        timestamp: "2024-01-01T00:00:02.000Z",
+        message: {
+          role: "bashExecution",
+          command: "npm test",
+          output: "cancelled\n",
+          exitCode: 130,
+          cancelled: true,
+          truncated: true,
+          fullOutputPath: "/tmp/pi-bash.log",
+          excludeFromContext: true,
+          timestamp: 1_700_000_002_000,
+        },
+      },
+      {
+        type: "message",
+        id: "custom-role",
+        timestamp: "2024-01-01T00:00:03.000Z",
+        message: {
+          role: "custom",
+          customType: "artifact",
+          display: true,
+          content: [
+            { type: "text", text: "artifact preview", textSignature: "signed-preview" },
+            { type: "image", data: "YXJ0", mimeType: "image/webp" },
+          ],
+          details: ["opaque"],
+          timestamp: 1_700_000_003_000,
+        },
+      },
+      {
+        type: "custom_message",
+        id: "custom-entry",
+        timestamp: customEntryTimestamp,
+        customType: "notice",
+        display: true,
+        content: [
+          { type: "image", data: "bm90aWNl", mimeType: "image/jpeg" },
+          { type: "text", text: "after notice image", textSignature: "signed-notice" },
+        ],
+        details: null,
+      },
+      {
+        type: "compaction",
+        id: "compaction",
+        timestamp: "2024-01-01T00:00:05.000Z",
+        summary: "summary",
+        firstKeptEntryId: "custom-entry",
+        tokensBefore: 500,
+        estimatedTokensAfter: 125,
+        details: "extension-details",
+        fromHook: true,
+      },
+    ]);
+
+    expect(blocks.map((block) => block.type)).toEqual([
+      "tool_call",
+      "bash",
+      "custom_message",
+      "custom_message",
+      "compaction",
+    ]);
+    expect(blocks[0]?.data).toMatchObject({
+      outputText: "created\nafter image",
+      outputImages: ["data:image/png;base64,aW1hZ2U="],
+      resultContent: [
+        { type: "text", text: "created", textSignature: "signed-created" },
+        {
+          type: "image",
+          data: "aW1hZ2U=",
+          mimeType: "image/png",
+          extensionField: "retained-image-field",
+        },
+        { type: "text", text: "after image", extensionField: { retained: true } },
+      ],
+      resultDetails: 42,
+      resultMetadata: {
+        output: "distinct direct output",
+        addedToolNames: ["inspect_image"],
+        terminate: true,
+        timestamp: 1_700_000_001_000,
+      },
+    });
+    expect(blocks[1]?.data).toMatchObject({
+      command: "npm test",
+      outputText: "cancelled\n",
+      exitCode: 130,
+      cancelled: true,
+      truncated: true,
+      fullOutputPath: "/tmp/pi-bash.log",
+      excludeFromContext: true,
+      timestamp: 1_700_000_002_000,
+    });
+    expect(blocks[2]?.data).toEqual({
+      content: "artifact preview",
+      images: ["data:image/webp;base64,YXJ0"],
+      rawContent: [
+        { type: "text", text: "artifact preview", textSignature: "signed-preview" },
+        { type: "image", data: "YXJ0", mimeType: "image/webp" },
+      ],
+      customType: "artifact",
+      details: ["opaque"],
+      timestamp: 1_700_000_003_000,
+    });
+    expect(blocks[3]?.data).toEqual({
+      content: "after notice image",
+      images: ["data:image/jpeg;base64,bm90aWNl"],
+      rawContent: [
+        { type: "image", data: "bm90aWNl", mimeType: "image/jpeg" },
+        { type: "text", text: "after notice image", textSignature: "signed-notice" },
+      ],
+      customType: "notice",
+      details: null,
+      timestamp: Date.parse(customEntryTimestamp),
+    });
+    expect(blocks[4]?.data).toMatchObject({
+      summary: "summary",
+      estimatedTokensAfter: 125,
+      details: "extension-details",
+      fromHook: true,
+    });
   });
 
   it("uses newline-separated text parts and finalizes the matching tool call", async () => {
@@ -532,7 +701,11 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
             { type: "text", text: "first part" },
             { type: "text", text: "second part" },
           ],
-          details: { diff: "-old\n+new", fullOutputPath: "/tmp/output" },
+          details: {
+            diff: "-old\n+new",
+            patch: "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new",
+            fullOutputPath: "/tmp/output",
+          },
         },
       },
     ]);
@@ -544,6 +717,7 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
       outputText: "first part\nsecond part",
       resultDetails: { diff: "-old\n+new", fullOutputPath: "/tmp/output" },
       diff: "-old\n+new",
+      patch: "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new",
       isStreaming: false,
     });
   });
@@ -665,7 +839,10 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
           toolCallId: "missing-call",
           toolName: "edit",
           content: [{ type: "text", text: "Edited a.ts" }],
-          details: { diff: "-before\n+after" },
+          details: {
+            diff: "-before\n+after",
+            patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-before\n+after",
+          },
           isError: false,
         },
       },
@@ -675,7 +852,11 @@ describe("entriesToTranscript (pure helper used by /tree navigate)", () => {
     expect(blocks[0]?.type).toBe("tool_call");
     const data = blocks[0]?.data as Record<string, unknown>;
     expect(data["diff"]).toBe("-before\n+after");
-    expect(data["resultDetails"]).toEqual({ diff: "-before\n+after" });
+    expect(data["patch"]).toBe("--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-before\n+after");
+    expect(data["resultDetails"]).toEqual({
+      diff: "-before\n+after",
+      patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-before\n+after",
+    });
   });
 
   it("renders compaction entries as compaction blocks (pre-compaction trimming is the chain walker's job, not ours)", async () => {

@@ -16,7 +16,7 @@ This table documents the deployed policy/settlement compatibility contract. Unde
 | `get_commands` | read-only | ready-time command discovery | identity-bound catalog update; store tests |
 | `get_state`, `get_session_stats` | read-only | bootstrap, `/session`, reconciliation, header/tree stats | identity-bound read and stale-write fencing; executor/store/header tests |
 | `get_messages`, `get_fork_messages`, `get_last_assistant_text` | read-only | SDK integrations, `/fork`, `/copy` | bridge response plus executor outcome tests |
-| `get_trust_state`, `get_tree`, `render_entry`, `get_cache_miss_notices` | read-only | trust/tree/transcript/history UI | identity-bound continuation; tree/render/cache tests |
+| `get_trust_state`, `get_tree`, `render_entry`, `render_message`, `get_cache_miss_notices` | read-only | trust/tree/transcript/history UI | identity-bound continuation; tree/render/cache tests |
 | `set_model`, `set_scoped_models`, `save_scoped_models` | idempotent | model and scope controls | explicit terminal response plus authoritative read-back |
 | `logout_provider` | idempotent explicit-state | logout picker | terminal credential-store response and model refresh |
 | `set_thinking_level` | idempotent | header/bootstrap | terminal response plus authoritative clamp read-back |

@@ -1667,6 +1667,137 @@ describe("setupCommandBridge — command mapping", () => {
     expect(res).toMatchObject({ success: true, data: { rendered: false } });
   });
 
+  it("renders a unique public custom message through its registered message renderer", async () => {
+    const message = {
+      role: "custom",
+      customType: "status-card",
+      content: "Indexed files",
+      display: true,
+      details: { count: 17 },
+      timestamp: 1_700_000_000_000,
+    };
+    const dispose = vi.fn();
+    const render = vi.fn(() => ["\u001b[32mIndexed files: 17\u001b[0m"]);
+    const renderer = vi.fn(() => ({ render, dispose }));
+    const getMessageRenderer = vi.fn(() => renderer);
+    const { run } = setup({
+      messages: [
+        { ...message, customType: "other-card" },
+        message,
+        { ...message, timestamp: message.timestamp + 1 },
+      ],
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMessageRenderer,
+      },
+    });
+
+    const res = await run({
+      type: "render_message",
+      customType: "status-card",
+      timestamp: message.timestamp,
+      cols: 96,
+      expanded: true,
+    });
+
+    expect(res).toMatchObject({
+      success: true,
+      data: { rendered: true, ansi: "\u001b[32mIndexed files: 17\u001b[0m" },
+    });
+    expect(getMessageRenderer).toHaveBeenCalledWith("status-card");
+    expect(renderer).toHaveBeenCalledWith(message, { expanded: true }, undefined);
+    expect(render).toHaveBeenCalledWith(96);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns renderer failures as ANSI data and still disposes the component", async () => {
+    const message = {
+      role: "custom",
+      customType: "status-card",
+      content: "Indexed files",
+      display: true,
+      timestamp: 1_700_000_000_000,
+    };
+    const dispose = vi.fn();
+    const renderer = vi.fn(() => ({
+      render: vi.fn(() => {
+        throw new Error("render exploded");
+      }),
+      dispose,
+    }));
+    const { run } = setup({
+      messages: [message],
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMessageRenderer: vi.fn(() => renderer),
+      },
+    });
+
+    const res = await run({
+      type: "render_message",
+      customType: "status-card",
+      timestamp: message.timestamp,
+      cols: 80,
+    });
+
+    expect(res).toMatchObject({
+      success: true,
+      data: {
+        rendered: true,
+        ansi: "[status-card] renderer failed: render exploded",
+        error: true,
+      },
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("declines missing, ambiguous, and unregistered custom messages", async () => {
+    const duplicate = {
+      role: "custom",
+      customType: "duplicate-card",
+      content: "duplicate",
+      display: true,
+      timestamp: 1_700_000_000_000,
+    };
+    const getMessageRenderer = vi.fn(() => undefined);
+    const { run } = setup({
+      messages: [
+        duplicate,
+        { ...duplicate },
+        { ...duplicate, customType: "unregistered-card", content: "unique" },
+      ],
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMessageRenderer,
+      },
+    });
+
+    const missing = await run({
+      type: "render_message",
+      customType: "missing-card",
+      timestamp: duplicate.timestamp,
+      cols: 80,
+    });
+    const ambiguous = await run({
+      type: "render_message",
+      customType: "duplicate-card",
+      timestamp: duplicate.timestamp,
+      cols: 80,
+    });
+    const unregistered = await run({
+      type: "render_message",
+      customType: "unregistered-card",
+      timestamp: duplicate.timestamp,
+      cols: 80,
+    });
+
+    expect(missing).toMatchObject({ success: true, data: { rendered: false } });
+    expect(ambiguous).toMatchObject({ success: true, data: { rendered: false } });
+    expect(unregistered).toMatchObject({ success: true, data: { rendered: false } });
+    expect(getMessageRenderer).toHaveBeenCalledOnce();
+    expect(getMessageRenderer).toHaveBeenCalledWith("unregistered-card");
+  });
+
   it("replays non-persisted cache-miss notices with history anchors", async () => {
     const previous = {
       role: "assistant",

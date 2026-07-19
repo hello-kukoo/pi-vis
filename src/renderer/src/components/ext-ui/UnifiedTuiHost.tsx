@@ -108,7 +108,7 @@ export function UnifiedTuiHost({
     renderRevision?: number;
     keyframeReady?: boolean;
     outputSequence?: number;
-    outputKind?: "keyframe" | "delta" | "reset";
+    outputKind?: "keyframe" | "delta" | "reset" | "repaint_required";
     outputAnsi?: string;
     inputAcknowledgedThrough?: number;
     syncState?: "following" | "synchronizing" | "unavailable";
@@ -120,7 +120,15 @@ export function UnifiedTuiHost({
   const replayReadyRef = useRef<string | null>(null);
   const [replayReadyGeneration, setReplayReadyGeneration] = useState(0);
   const authorityAckRef = useRef<string | null>(null);
+  // Mount/reset and input recovery are single-flight per panel identity.
   const authorityRepaintRequestRef = useRef<string | null>(null);
+  // While a terminal identity is mounting, its first measured resize owns the
+  // reconstruction request. Reactive projection updates must not race it with
+  // a default-size force before xterm has measured its actual grid.
+  const initialPanelSizingRef = useRef<string | null>(null);
+  // Unsafe replay replacement is deduplicated per output generation. A newer
+  // unanchored segment needs its own recovery request even if an older request
+  // has not produced a frame.
   const replayRepaintRequestRef = useRef<string | null>(null);
   const dispatchPanelInputRef = useRef<((data: string) => void) | null>(null);
   const panelIpcRetryTimerRef = useRef<number | null>(null);
@@ -223,11 +231,17 @@ export function UnifiedTuiHost({
     const term = termRef.current;
     if (!term || !unifiedPanel) return;
     const repaintKey = `${unifiedPanel.hostInstanceId}:${unifiedPanel.sessionEpoch}:${unifiedPanel.id}`;
-    if (unifiedPanel.syncState === "following") authorityRepaintRequestRef.current = null;
+    if (unifiedPanel.syncState === "following") {
+      authorityRepaintRequestRef.current = null;
+      replayRepaintRequestRef.current = null;
+      authorityAckRef.current = null;
+    }
     if (
       unifiedPanel.authority === true &&
       unifiedPanel.syncState === "synchronizing" &&
       unifiedPanel.keyframeReady === false &&
+      unifiedPanel.outputKind !== "repaint_required" &&
+      initialPanelSizingRef.current !== repaintKey &&
       authorityRepaintRequestRef.current !== repaintKey
     ) {
       authorityRepaintRequestRef.current = repaintKey;
@@ -242,8 +256,9 @@ export function UnifiedTuiHost({
           force: true,
         })
         .catch(() => {
-          if (authorityRepaintRequestRef.current === repaintKey)
+          if (authorityRepaintRequestRef.current === repaintKey) {
             authorityRepaintRequestRef.current = null;
+          }
           schedulePanelIpcRetry();
         });
     }
@@ -278,7 +293,11 @@ export function UnifiedTuiHost({
         case "none":
           break;
       }
-      if (reconciliation.applied.repaintRequired) {
+      // A repaint_required operation means the host's complete frame is
+      // already in flight. Request a repaint here only for a genuinely
+      // unanchored replay replacement; reset/open reconstruction is owned by
+      // the force path above (or by the first measured lifecycle resize).
+      if (reconciliation.action.kind === "request_repaint") {
         const key = `${repaintKey}:${unifiedPanel.outputSequence ?? 0}`;
         if (replayRepaintRequestRef.current !== key) {
           replayRepaintRequestRef.current = key;
@@ -320,7 +339,8 @@ export function UnifiedTuiHost({
           active.hostInstanceId === unifiedPanel.hostInstanceId &&
           active.sessionEpoch === unifiedPanel.sessionEpoch &&
           active.id === unifiedPanel.id &&
-          replayRepaintRequestRef.current === requestReplayRepaint
+          replayRepaintRequestRef.current === requestReplayRepaint &&
+          initialPanelSizingRef.current !== repaintKey
         ) {
           void window.pivis
             .invoke("session.panelResize", {
@@ -450,6 +470,7 @@ export function UnifiedTuiHost({
     const currentPanel = panelRef.current;
     if (!currentPanel) return;
     const currentPanelKey = `${currentPanel.hostInstanceId}:${currentPanel.sessionEpoch}:${currentPanel.id}`;
+    initialPanelSizingRef.current = currentPanelKey;
     // This lifecycle is identity-bound. Never carry blocked or buffered input
     // into a replacement owner that reuses the numeric panel id.
     let disposed = false;
@@ -526,12 +547,28 @@ export function UnifiedTuiHost({
       minimumRows: 6,
       fallbackFontSize: fonts?.code?.sizePx ?? 14,
       onReportSize: (cols, rows) => {
-        const force = forceNextResize;
+        const firstReport = forceNextResize;
         forceNextResize = false;
         const activePanel = panelRef.current ?? currentPanel;
+        if (firstReport && initialPanelSizingRef.current === currentPanelKey) {
+          initialPanelSizingRef.current = null;
+        }
+        const repaintAlreadyInFlight =
+          activePanel.authority === true &&
+          (authorityRepaintRequestRef.current === currentPanelKey ||
+            activePanel.outputKind === "repaint_required");
+        const force = firstReport && !repaintAlreadyInFlight;
+        if (force && activePanel.authority) {
+          // The measured lifecycle force is the one mount-time reconstruction
+          // request. A repaint_required publication means that request is
+          // already in flight and therefore must not be echoed by the
+          // projection effect above.
+          if (authorityRepaintRequestRef.current === currentPanelKey) return;
+          authorityRepaintRequestRef.current = currentPanelKey;
+        }
         if (
           activePanel.authority &&
-          !force &&
+          !firstReport &&
           (activePanel.syncState !== "following" || !activePanel.inputEnabled)
         )
           return;
@@ -545,7 +582,12 @@ export function UnifiedTuiHost({
             rows,
             ...(force ? { force: true } : {}),
           })
-          .catch(() => {});
+          .catch(() => {
+            if (force && authorityRepaintRequestRef.current === currentPanelKey) {
+              authorityRepaintRequestRef.current = null;
+            }
+            schedulePanelIpcRetry();
+          });
       },
     });
     // Expose the (coalesced) sizing pass so the mode-change effect can re-run it.
@@ -706,6 +748,9 @@ export function UnifiedTuiHost({
           active.id !== target.panelId
         )
           return;
+        const repaintKey = `${target.hostInstanceId}:${target.sessionEpoch}:${target.panelId}`;
+        if (authorityRepaintRequestRef.current === repaintKey) return;
+        authorityRepaintRequestRef.current = repaintKey;
         void window.pivis
           .invoke("session.panelResize", {
             sessionId,
@@ -717,6 +762,9 @@ export function UnifiedTuiHost({
             force: true,
           })
           .catch(() => {
+            if (authorityRepaintRequestRef.current === repaintKey) {
+              authorityRepaintRequestRef.current = null;
+            }
             // The queued input is identity-owned and survives this component.
             // Retry the reconstruction request while that exact panel remains
             // live; a session switch must not turn one IPC failure into a
@@ -872,6 +920,9 @@ export function UnifiedTuiHost({
         replayReadyRef.current = null;
         replayRepaintRequestRef.current = null;
         authorityRepaintRequestRef.current = null;
+        if (initialPanelSizingRef.current === currentPanelKey) {
+          initialPanelSizingRef.current = null;
+        }
         authorityAckRef.current = null;
       }
     };

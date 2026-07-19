@@ -1368,6 +1368,49 @@ describe("SessionRegistry direct AgentSession authority", () => {
     h.registry.stopAll();
   });
 
+  it("maps a render_message query to the owner-fenced host command", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    const [hostInstanceId, sessionEpoch] = runtimeIdentity(record);
+    const query = vi.spyOn(record.proc!, "query").mockResolvedValue({
+      type: "response",
+      command: "render_message",
+      success: true,
+      data: { rendered: true, ansi: "rendered" },
+    });
+
+    await expect(
+      h.registry.query({
+        sessionId: id,
+        queryId: "render-custom-message",
+        expectedOwner: { hostInstanceId, sessionEpoch },
+        query: {
+          type: "render_message",
+          customType: "status-card",
+          timestamp: 1_700_000_000_000,
+          cols: 96,
+          expanded: true,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      queryId: "render-custom-message",
+      owner: { hostInstanceId, sessionEpoch },
+      queryType: "render_message",
+    });
+    expect(query).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledWith({
+      type: "render_message",
+      customType: "status-card",
+      timestamp: 1_700_000_000_000,
+      cols: 96,
+      expanded: true,
+    });
+    h.registry.stopAll();
+  });
+
   it("does not dispatch a query with a stale owner", async () => {
     const h = harness();
     const id = h.registry.openSession("/tmp/project");

@@ -83,8 +83,14 @@ export function createPanelReconstruction({ maxRepaintBytes = DEFAULT_MAX_REPAIN
 
   function acknowledge(panelId, revision) {
     const panel = panels.get(panelId);
-    if (!panel || revision !== panel.revision || panel.repaintAnsi === undefined || !panel.sealed)
-      return false;
+    if (!panel || revision !== panel.revision) return false;
+    // Renderer migration/reattach can legitimately deliver the same ACK
+    // through both the compatibility and authority paths. Once this exact
+    // current revision is accepted, make that acknowledgement idempotent;
+    // treating a duplicate as a failed capture would manufacture a needless
+    // successor repaint and re-fence a terminal that is already current.
+    if (panel.acknowledgedRevision === revision) return true;
+    if (panel.repaintAnsi === undefined || !panel.sealed) return false;
     panel.acknowledgedRevision = revision;
     panel.repaintAnsi = undefined;
     panel.repaintBytes = 0;

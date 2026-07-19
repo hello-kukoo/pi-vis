@@ -28,10 +28,12 @@ interface PreviewHooks {
     panelId: number | undefined;
     cols: number | undefined;
     rows: number | undefined;
+    force: boolean;
   }>;
   emitUnifiedPanelBurst: () => void;
   emitUnsafeUnifiedReplay: () => void;
   emitSafeUnifiedReplay: () => void;
+  emitUnifiedPanelResetOnly: () => void;
   emitUnifiedPanelUpdate: () => void;
   openUnifiedPanel: () => void;
 }
@@ -222,6 +224,49 @@ test.describe("Unified-TUI panel (factory setWidget) — renderer", () => {
       store.setState({ sessions });
     });
     await expect.poll(resizeCount).toBeGreaterThan(afterSecondReplay);
+  });
+
+  test("does not echo a host repaint already in flight", async ({ page }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel).toHaveAttribute("data-input-enabled", "true", { timeout: 20_000 });
+
+    await page.evaluate(() => {
+      const preview = (window as unknown as { __pivisPreview?: PreviewHooks }).__pivisPreview;
+      if (!preview) return;
+      preview.panelResizeLog.length = 0;
+      preview.emitUnifiedPanelResetOnly();
+    });
+    await expect(panel).toHaveAttribute("data-sync-state", "synchronizing");
+    await expect(panel).toHaveAttribute("data-input-enabled", "false");
+
+    const forcedResizeCount = () =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as { __pivisPreview?: PreviewHooks }
+          ).__pivisPreview?.panelResizeLog.filter((entry) => entry.force).length ?? 0,
+      );
+    await page.waitForTimeout(300);
+    expect(await forcedResizeCount()).toBe(0);
+  });
+
+  test("requests exactly one measured repaint when the terminal opens", async ({ page }) => {
+    await page.goto("/?unified=1");
+    await page.waitForLoadState("domcontentloaded");
+    const panel = page.locator(".unified-panel");
+    await expect(panel).toHaveAttribute("data-input-enabled", "true", { timeout: 20_000 });
+
+    const forcedResizes = await page.evaluate(
+      () =>
+        (
+          window as unknown as { __pivisPreview?: PreviewHooks }
+        ).__pivisPreview?.panelResizeLog.filter((entry) => entry.force) ?? [],
+    );
+    expect(forcedResizes).toHaveLength(1);
+    expect(forcedResizes[0]?.cols).toBeGreaterThan(1);
+    expect(forcedResizes[0]?.rows).toBeGreaterThanOrEqual(6);
   });
 
   test("does not steal focus from an in-progress session rename when it appears", async ({

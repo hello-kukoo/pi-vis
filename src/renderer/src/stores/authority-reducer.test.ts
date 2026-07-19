@@ -267,6 +267,23 @@ describe("authority reducer", () => {
     expect(state.semantic.state).toBe("following");
     expect(state.panels.get("panel-a")?.sync.state).toBe("synchronizing");
     expect(state.panels.get("panel-a")?.inputEnabled).toBe(false);
+    expect(state.panels.get("panel-a")?.output?.kind).toBe("repaint_required");
+
+    const withEarlyDelta = reduceAuthorityPublication(state, {
+      sessionId: "session-a",
+      rendererGeneration: 7,
+      publicationSequence: 12,
+      plane: "panel",
+      owner,
+      payload: {
+        kind: "ansi_delta",
+        cursor: { ...owner, transportSequence: 3, snapshotSequence: 2 },
+        panelKey: "panel-a",
+        data: "terminal handshake before keyframe",
+        renderRevision: 2,
+      },
+    });
+    expect(withEarlyDelta.panels.get("panel-a")?.output?.kind).toBe("repaint_required");
   });
 
   it("reconstructs a pending extension dialog from its sequenced UI plane", () => {

@@ -30,6 +30,11 @@ test("live compaction preserves earlier GUI scrollback", async ({ page }) => {
   await expect(page.getByRole("button", { name: /earlier messages/i })).toHaveCount(0);
   await expect(page.locator(".transcript-block--user")).toHaveCount(750);
   await expect(page.getByText("before compaction 0", { exact: true })).toBeVisible();
+  const compactionCard = page.locator(".tool-card").filter({ hasText: "Context compacted" });
+  await expect(compactionCard.locator(".tool-card__body")).toHaveCount(0);
+  await compactionCard
+    .getByRole("button", { name: /^context activity details — Context compacted/u })
+    .click();
   await expect(page.getByText("compact summary", { exact: false })).toBeVisible();
 
   await page.evaluate(() => {
@@ -183,7 +188,7 @@ test("streaming history tool calls render as interrupted without a spinner", asy
   await expect(card).not.toHaveClass(/tool-card--error/);
 });
 
-test("compact summaries omit notice counts", async ({ page }) => {
+test("compact summaries account for every hidden activity kind", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
 
@@ -226,11 +231,10 @@ test("compact summaries omit notice counts", async ({ page }) => {
   });
 
   const summary = page.locator(".compact-transcript-group__summary");
-  await expect(summary).toHaveText("Thinking, 1 tool call");
-  await expect(summary).not.toContainText(/notice/i);
+  await expect(summary).toHaveText("Thinking, 1 tool call, 1 notice");
 });
 
-test("expanded compact activity collapses from its hairline", async ({ page }) => {
+test("compact activity uses one summary disclosure for both states", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
 
@@ -270,19 +274,121 @@ test("expanded compact activity collapses from its hairline", async ({ page }) =
   const group = page.locator(".compact-transcript-group");
   const summary = group.locator(".compact-transcript-group__summary");
   await expect(summary).toHaveText("Thinking, 1 tool call");
+  await expect(summary).toHaveAttribute("aria-expanded", "false");
+  const controlledId = await summary.getAttribute("aria-controls");
+  expect(controlledId).toBeTruthy();
   await summary.click();
 
-  const rail = group.locator(".compact-transcript-group__collapse-rail");
-  await expect(rail).toHaveAttribute("aria-expanded", "true");
-  await expect(group.locator(".compact-transcript-group__content")).toBeVisible();
-  await rail.hover();
-  await expect
-    .poll(() => rail.evaluate((element) => getComputedStyle(element, "::before").boxShadow))
-    .not.toBe("none");
-  await rail.click();
+  const content = group.locator(".compact-transcript-group__content");
+  await expect(summary).toHaveAttribute("aria-expanded", "true");
+  await expect(content).toHaveAttribute("id", controlledId!);
+  await expect(content).toBeVisible();
+  await expect(group.locator(".compact-transcript-group__collapse-rail")).toHaveCount(0);
 
+  // The outer disclosure owns the transcript region; the child card keeps its
+  // one independent full-record disclosure inside that region.
+  const childCard = content.locator(".tool-card");
+  const childDisclosure = childCard.getByRole("button", {
+    name: /^read tool call details/u,
+  });
+  await expect(childDisclosure).toHaveAttribute("aria-expanded", "false");
+  await expect(childCard.getByText("hidden output", { exact: true })).toHaveCount(0);
+  await childDisclosure.click();
+  await expect(childDisclosure).toHaveAttribute("aria-expanded", "true");
+  await expect(childCard.getByText("hidden output", { exact: true })).toBeVisible();
+  await childDisclosure.click();
+  await expect(childDisclosure).toHaveAttribute("aria-expanded", "false");
+  await expect(childCard.getByText("hidden output", { exact: true })).toHaveCount(0);
+  await expect(summary).toHaveAttribute("aria-expanded", "true");
+  await summary.click();
+
+  await expect(summary).toHaveAttribute("aria-expanded", "false");
   await expect(group).not.toHaveClass(/compact-transcript-group--open/);
-  await expect(group.locator(".compact-transcript-group__content")).toHaveCount(0);
+  await expect(content).toHaveCount(0);
+});
+
+test("attention-open compact archives mount child cards in bounded batches", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".composer")).toBeVisible({ timeout: 20_000 });
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const transcriptStyle = page.getByRole("group", { name: "Transcript style" });
+  await transcriptStyle.getByRole("button", { name: "Compact" }).click();
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    type BatchRender = {
+      source: "archived" | "live" | "group";
+      itemCount: number;
+      visibleItemCount: number;
+    };
+    type PreviewState = {
+      activeSessionId: string;
+      seedHistory: (sessionId: string, history: Array<Record<string, unknown>>) => void;
+    };
+    const target = window as unknown as {
+      __compactBatchRenders?: BatchRender[];
+      __pivisTestCompactGroupItemsRender?: (detail: BatchRender) => void;
+      __pivisStore: { getState: () => PreviewState };
+    };
+    target.__compactBatchRenders = [];
+    target.__pivisTestCompactGroupItemsRender = (detail) => {
+      target.__compactBatchRenders?.push(detail);
+    };
+
+    const state = target.__pivisStore.getState();
+    state.seedHistory(
+      state.activeSessionId,
+      Array.from({ length: 225 }, (_, index) => ({
+        id: `cooperative-tool-${index}`,
+        type: "tool_call",
+        data: {
+          toolCallId: `cooperative-call-${index}`,
+          toolName: "read",
+          outputText: `cooperative output ${index}`,
+          isError: index === 224,
+          isStreaming: false,
+        },
+      })),
+    );
+  });
+
+  const group = page.locator(".compact-transcript-group");
+  const summary = group.locator(".compact-transcript-group__summary");
+  await expect(summary).toHaveText("225 tool calls, 1 error");
+  await expect(summary).toHaveAttribute("aria-expanded", "true");
+  await expect(group.locator(".compact-transcript-group__content")).toHaveCount(1);
+  await expect(page.locator(".tool-card")).toHaveCount(225);
+
+  const batches = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __compactBatchRenders: Array<{
+          source: "archived" | "live" | "group";
+          itemCount: number;
+          visibleItemCount: number;
+        }>;
+      }
+    ).__compactBatchRenders.filter((render) => render.source === "archived"),
+  );
+  expect(batches.length).toBeGreaterThanOrEqual(3);
+  expect(batches[0]).toEqual({ source: "archived", itemCount: 225, visibleItemCount: 100 });
+  expect(batches.at(-1)?.visibleItemCount).toBe(225);
+  for (let index = 1; index < batches.length; index += 1) {
+    const previous = batches[index - 1]?.visibleItemCount ?? 0;
+    const current = batches[index]?.visibleItemCount ?? 0;
+    expect(current - previous).toBeLessThanOrEqual(100);
+  }
+
+  const transcript = page.locator(".transcript-view");
+  await expect(transcript).toHaveClass(/transcript-view--pinned/u);
+  await expect
+    .poll(() =>
+      transcript.evaluate((element) =>
+        Math.abs(element.scrollHeight - element.scrollTop - element.clientHeight),
+      ),
+    )
+    .toBeLessThanOrEqual(1);
 });
 
 test("large compact activity stays grouped across the archive/live boundary", async ({ page }) => {
@@ -450,7 +556,10 @@ test("terminal archived activity stays active until visible live output", async 
     hasText: "Thinking",
   });
   await expect(boundarySummary).toHaveCount(1);
-  await expect(boundarySummary.locator(".compact-transcript-group__spinner")).toBeVisible();
+  const boundaryGroup = boundarySummary.locator("..");
+  await expect(boundaryGroup).toHaveAttribute("aria-busy", "true");
+  await expect(boundarySummary.locator(".compact-transcript-group__spinner")).toHaveCount(0);
+  await expect(page.locator(".working-row")).toHaveCount(1);
 
   await page.evaluate(() => {
     type PreviewState = {
@@ -468,7 +577,8 @@ test("terminal archived activity stays active until visible live output", async 
   });
 
   await expect(page.getByText("visible answer", { exact: true })).toBeVisible();
-  await expect(boundarySummary.locator(".compact-transcript-group__spinner")).toHaveCount(0);
+  await expect(boundaryGroup).not.toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".working-row")).toHaveCount(1);
 });
 
 test("a pending bubble removes its exact instruction", async ({ page }) => {

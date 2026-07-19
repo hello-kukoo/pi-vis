@@ -529,6 +529,31 @@ export function setupCommandBridge({
     return commands;
   }
 
+  /** Render and dispose one public extension pi-tui component in the SDK host. */
+  function renderExtensionComponent(renderer, value, customType, cols, expanded) {
+    let component;
+    try {
+      component = renderer(value, { expanded: expanded === true }, uiContext?.theme);
+      if (!component || typeof component.render !== "function") return { rendered: false };
+      const lines = component.render(Math.max(20, Math.min(240, Math.floor(cols))));
+      if (!Array.isArray(lines)) return { rendered: false };
+      return { rendered: true, ansi: lines.map((line) => String(line)).join("\n") };
+    } catch (err) {
+      const message = `[${customType}] renderer failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      const ansi =
+        typeof uiContext?.theme?.fg === "function" ? uiContext.theme.fg("error", message) : message;
+      return { rendered: true, ansi, error: true };
+    } finally {
+      try {
+        component?.dispose?.();
+      } catch {
+        /* ignore renderer teardown errors */
+      }
+    }
+  }
+
   /**
    * Render Pi 0.80.4's display-only custom session entry through the
    * extension's public EntryRenderer. Rendering stays in the SDK host because
@@ -546,28 +571,38 @@ export function setupCommandBridge({
     }
     const renderer = runner.getEntryRenderer(entry.customType);
     if (typeof renderer !== "function") return { rendered: false };
+    return renderExtensionComponent(renderer, entry, entry.customType, cols, expanded);
+  }
 
-    let component;
-    try {
-      component = renderer(entry, { expanded: expanded === true }, uiContext?.theme);
-      if (!component || typeof component.render !== "function") return { rendered: false };
-      const lines = component.render(Math.max(20, Math.min(240, Math.floor(cols))));
-      if (!Array.isArray(lines)) return { rendered: false };
-      return { rendered: true, ansi: lines.map((line) => String(line)).join("\n") };
-    } catch (err) {
-      const message = `[${entry.customType}] renderer failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      const ansi =
-        typeof uiContext?.theme?.fg === "function" ? uiContext.theme.fg("error", message) : message;
-      return { rendered: true, ansi, error: true };
-    } finally {
-      try {
-        component?.dispose?.();
-      } catch {
-        /* ignore renderer teardown errors */
-      }
+  /**
+   * Render a uniquely identified public AgentSession custom message through
+   * the extension's public MessageRenderer. Pi messages expose no stable ID,
+   * so customType + timestamp is accepted only when it selects exactly one.
+   */
+  function renderMessage(customType, timestamp, cols, expanded) {
+    const runner = _session.extensionRunner;
+    const messages = _session.messages;
+    if (!Array.isArray(messages) || typeof runner?.getMessageRenderer !== "function") {
+      return { rendered: false };
     }
+
+    let match;
+    for (const message of messages) {
+      if (
+        message?.role !== "custom" ||
+        message.customType !== customType ||
+        message.timestamp !== timestamp
+      ) {
+        continue;
+      }
+      if (match !== undefined) return { rendered: false };
+      match = message;
+    }
+    if (match === undefined) return { rendered: false };
+
+    const renderer = runner.getMessageRenderer(customType);
+    if (typeof renderer !== "function") return { rendered: false };
+    return renderExtensionComponent(renderer, match, customType, cols, expanded);
   }
 
   // ─── Command handler ───────────────────────────────────────────────────
@@ -1651,6 +1686,21 @@ export function setupCommandBridge({
             id,
             success: true,
             data: renderEntry(command.entryId, command.cols, command.expanded),
+          });
+          break;
+        }
+
+        case "render_message": {
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: renderMessage(
+              command.customType,
+              command.timestamp,
+              command.cols,
+              command.expanded,
+            ),
           });
           break;
         }

@@ -249,6 +249,17 @@ export const RenderEntryCommandSchema = BaseCommand.extend({
   expanded: z.boolean().optional(),
 });
 
+// Pi 0.80.10 SDK-host-only rendering for visible custom messages paired with
+// registerMessageRenderer(). Messages have no stable public ID, so the bridge
+// resolves the unique public AgentSession.messages item at this key.
+export const RenderMessageCommandSchema = BaseCommand.extend({
+  type: z.literal("render_message"),
+  customType: z.string().min(1),
+  timestamp: z.number().finite(),
+  cols: z.number().int().min(20).max(240),
+  expanded: z.boolean().optional(),
+});
+
 // SDK-host-only replay for Pi's non-persisted showCacheMissNotices cards.
 export const GetCacheMissNoticesCommandSchema = BaseCommand.extend({
   type: z.literal("get_cache_miss_notices"),
@@ -296,6 +307,7 @@ export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   NavigateTreeCommandSchema,
   SetLabelCommandSchema,
   RenderEntryCommandSchema,
+  RenderMessageCommandSchema,
   GetCacheMissNoticesCommandSchema,
 ]);
 
@@ -355,6 +367,7 @@ export const PI_COMMAND_POLICY = {
   navigate_tree: { class: "effectful" },
   set_label: { class: "idempotent" },
   render_entry: { class: "read_only" },
+  render_message: { class: "read_only" },
   get_cache_miss_notices: { class: "read_only" },
 } as const satisfies Record<PiRpcCommand["type"], PiCommandPolicy>;
 

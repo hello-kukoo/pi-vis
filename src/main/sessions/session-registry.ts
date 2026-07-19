@@ -265,6 +265,14 @@ function commandForSessionQuery(query: SessionQuery): PiReadOnlyCommand {
         cols: query.cols,
         ...(query.expanded !== undefined ? { expanded: query.expanded } : {}),
       };
+    case "render_message":
+      return {
+        type: "render_message",
+        customType: query.customType,
+        timestamp: query.timestamp,
+        cols: query.cols,
+        ...(query.expanded !== undefined ? { expanded: query.expanded } : {}),
+      };
   }
 }
 

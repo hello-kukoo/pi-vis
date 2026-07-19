@@ -1,6 +1,6 @@
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
 import type { KnownPiEvent } from "@shared/pi-protocol/events.js";
-import { extractToolResult } from "@shared/pi-protocol/tool-result.js";
+import { extractTextAndImages, extractToolResult } from "@shared/pi-protocol/tool-result.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { assertNever } from "@shared/result.js";
 
@@ -48,9 +48,13 @@ export interface ToolCallBlockData {
   toolName: string;
   input?: Record<string, unknown> | undefined;
   outputText: string;
+  outputImages?: string[] | undefined;
+  /** Complete ordered Pi result content, before text/image convenience projection. */
+  resultContent?: unknown;
   diff?: string | undefined;
   patch?: string | undefined;
-  resultDetails?: Record<string, unknown> | undefined;
+  resultDetails?: unknown;
+  resultMetadata?: Record<string, unknown> | undefined;
   isError: boolean;
   isStreaming: boolean;
   interrupted?: boolean | undefined;
@@ -62,25 +66,47 @@ export interface BashBlockData {
   isStreaming: boolean;
   interrupted?: boolean | undefined;
   exitCode?: number | undefined;
+  cancelled?: boolean | undefined;
+  truncated?: boolean | undefined;
+  fullOutputPath?: string | undefined;
+  excludeFromContext?: boolean | undefined;
+  timestamp?: number | undefined;
 }
 
 export interface CompactionBlockData {
   summary?: string | undefined;
   reason?: "manual" | "threshold" | "overflow" | undefined;
   tokensBefore?: number | undefined;
+  estimatedTokensAfter?: number | undefined;
   firstKeptEntryId?: string | undefined;
   aborted?: boolean | undefined;
   willRetry?: boolean | undefined;
   errorMessage?: string | undefined;
+  details?: unknown;
+  fromHook?: boolean | undefined;
+}
+
+export interface BranchSummaryBlockData {
+  summary?: string | undefined;
+  fromId?: string | undefined;
+  details?: unknown;
+  fromHook?: boolean | undefined;
 }
 
 export interface CustomMessageBlockData {
   content: string;
+  images?: string[] | undefined;
+  /** Complete public message content, including mixed parts and extension fields. */
+  rawContent?: unknown;
+  customType?: string | undefined;
+  details?: unknown;
+  timestamp?: number | undefined;
 }
 
 export interface CustomEntryBlockData {
   entryId: string;
   customType: string;
+  data?: unknown;
 }
 
 /**
@@ -103,6 +129,7 @@ export type TypedTranscriptBlock =
   | { id: string; type: "tool_call"; data: ToolCallBlockData }
   | { id: string; type: "bash"; data: BashBlockData }
   | { id: string; type: "compaction"; data: CompactionBlockData }
+  | { id: string; type: "branch_summary"; data: BranchSummaryBlockData }
   | { id: string; type: "custom_message"; data: CustomMessageBlockData }
   | { id: string; type: "custom_entry"; data: CustomEntryBlockData }
   | { id: string; type: "error"; data: ErrorBlockData };
@@ -116,6 +143,50 @@ function formatCompactTokens(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
   return Math.round(tokens).toLocaleString();
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((item): item is string => typeof item === "string");
+  return strings.length > 0 ? strings : undefined;
+}
+
+function timestampNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function mergeResultDetails(previous: unknown, next: unknown, hasNext: boolean): unknown {
+  if (!hasNext) return previous;
+  if (isUnknownRecord(previous) && isUnknownRecord(next)) return { ...previous, ...next };
+  return next;
+}
+
+function mergeResultMetadata(
+  previous: Record<string, unknown> | undefined,
+  next: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!next) return previous;
+  return previous ? { ...previous, ...next } : next;
+}
+
+function mergeResultContent(
+  previous: unknown,
+  next: unknown,
+  hasNext: boolean,
+  appendStrings = false,
+): unknown {
+  if (!hasNext) return previous;
+  if (appendStrings && typeof previous === "string" && typeof next === "string") {
+    return previous + next;
+  }
+  return next;
 }
 
 export interface TranscriptState {
@@ -353,9 +424,12 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
             toolName: (d.toolName as string) ?? "",
             input: d.input as Record<string, unknown> | undefined,
             outputText: (d.outputText as string) ?? "",
+            outputImages: stringArray(d.outputImages),
+            ...(Object.hasOwn(d, "resultContent") ? { resultContent: d.resultContent } : {}),
             diff: d.diff as string | undefined,
             patch: d.patch as string | undefined,
-            resultDetails: d.resultDetails as Record<string, unknown> | undefined,
+            resultDetails: d.resultDetails,
+            resultMetadata: isUnknownRecord(d.resultMetadata) ? d.resultMetadata : undefined,
             isError: (d.isError as boolean) ?? false,
             // History is an idle baseline, so a persisted streaming claim is
             // an interrupted operation rather than a live tool call.
@@ -376,6 +450,11 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
             isStreaming: false,
             interrupted: d.interrupted === true || d.isStreaming === true ? true : undefined,
             exitCode: d.exitCode as number | undefined,
+            cancelled: d.cancelled as boolean | undefined,
+            truncated: d.truncated as boolean | undefined,
+            fullOutputPath: d.fullOutputPath as string | undefined,
+            excludeFromContext: d.excludeFromContext as boolean | undefined,
+            timestamp: timestampNumber(d.timestamp),
           },
         };
       }
@@ -387,20 +466,54 @@ export function mapHistoryBlocks(history: TranscriptBlock[]): TypedTranscriptBlo
             summary: d.summary as string | undefined,
             reason: d.reason as CompactionBlockData["reason"],
             tokensBefore: d.tokensBefore as number | undefined,
+            estimatedTokensAfter: d.estimatedTokensAfter as number | undefined,
             firstKeptEntryId: d.firstKeptEntryId as string | undefined,
             aborted: d.aborted as boolean | undefined,
             willRetry: d.willRetry as boolean | undefined,
             errorMessage: d.errorMessage as string | undefined,
+            details: d.details,
+            fromHook: d.fromHook as boolean | undefined,
+          },
+        };
+      }
+      if (b.type === "branch_summary") {
+        return {
+          id: b.id,
+          type: "branch_summary",
+          data: {
+            summary: d.summary as string | undefined,
+            fromId: d.fromId as string | undefined,
+            details: d.details,
+            fromHook: d.fromHook as boolean | undefined,
           },
         };
       }
       if (b.type === "custom_message") {
-        return { id: b.id, type: "custom_message", data: { content: (d.content as string) ?? "" } };
+        return {
+          id: b.id,
+          type: "custom_message",
+          data: {
+            content: (d.content as string) ?? "",
+            images: stringArray(d.images),
+            ...(Object.hasOwn(d, "rawContent") ? { rawContent: d.rawContent } : {}),
+            customType: d.customType as string | undefined,
+            details: d.details,
+            timestamp: timestampNumber(d.timestamp),
+          },
+        };
       }
       if (b.type === "custom_entry") {
         const entryId = typeof d.entryId === "string" ? d.entryId : b.id;
         if (typeof d.customType !== "string") return null;
-        return { id: b.id, type: "custom_entry", data: { entryId, customType: d.customType } };
+        return {
+          id: b.id,
+          type: "custom_entry",
+          data: {
+            entryId,
+            customType: d.customType,
+            ...(d.data !== undefined ? { data: d.data } : {}),
+          },
+        };
       }
       if (b.type === "error") {
         return {
@@ -733,7 +846,11 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
       const block: TypedTranscriptBlock = {
         id: entry.id,
         type: "custom_entry",
-        data: { entryId: entry.id, customType: entry.customType },
+        data: {
+          entryId: entry.id,
+          customType: entry.customType,
+          ...(entry.data !== undefined ? { data: entry.data } : {}),
+        },
       };
       // Pi persists the assistant message only after message_end. If an
       // extension appends an entry while that message is streaming, file order
@@ -825,6 +942,109 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         }
         return addUserBlock(authoritativeState, echoed.content, echoed.images, false);
       }
+      if (role === "toolResult") {
+        const message = event.message;
+        const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+        const result = extractToolResult(message);
+        let matchingBlock: TypedTranscriptBlock | undefined;
+        for (let index = blocks.length - 1; index >= 0; index -= 1) {
+          const candidate = blocks[index];
+          if (candidate?.type === "tool_call" && candidate.data.toolCallId === toolCallId) {
+            matchingBlock = candidate;
+            break;
+          }
+        }
+        if (matchingBlock) {
+          return {
+            ...state,
+            blocks: updateBlock(matchingBlock.id, (block) =>
+              block.type === "tool_call"
+                ? {
+                    ...block,
+                    data: {
+                      ...block.data,
+                      outputText: result.text || block.data.outputText,
+                      outputImages: result.images ?? block.data.outputImages,
+                      resultContent: mergeResultContent(
+                        block.data.resultContent,
+                        result.content,
+                        result.hasContent,
+                      ),
+                      diff: result.diff ?? block.data.diff,
+                      patch: result.patch ?? block.data.patch,
+                      resultDetails: mergeResultDetails(
+                        block.data.resultDetails,
+                        result.details,
+                        result.hasDetails,
+                      ),
+                      resultMetadata: mergeResultMetadata(
+                        block.data.resultMetadata,
+                        result.metadata,
+                      ),
+                      isError:
+                        typeof message.isError === "boolean" ? message.isError : block.data.isError,
+                    },
+                  }
+                : block,
+            ),
+          };
+        }
+        const blockId = newBlockId();
+        return {
+          ...state,
+          blocks: [
+            ...blocks,
+            {
+              id: blockId,
+              type: "tool_call",
+              data: {
+                toolCallId,
+                toolName: typeof message.toolName === "string" ? message.toolName : "",
+                outputText: result.text,
+                outputImages: result.images,
+                ...(result.hasContent ? { resultContent: result.content } : {}),
+                diff: result.diff,
+                patch: result.patch,
+                resultDetails: result.details,
+                resultMetadata: result.metadata,
+                isError: message.isError === true,
+                isStreaming: false,
+              },
+            },
+          ],
+        };
+      }
+      if (role === "bashExecution") {
+        const message = event.message;
+        const data: BashBlockData = {
+          command: typeof message.command === "string" ? message.command : "",
+          outputText: typeof message.output === "string" ? message.output : "",
+          isStreaming: false,
+          exitCode: typeof message.exitCode === "number" ? message.exitCode : undefined,
+          cancelled: typeof message.cancelled === "boolean" ? message.cancelled : undefined,
+          truncated: typeof message.truncated === "boolean" ? message.truncated : undefined,
+          fullOutputPath:
+            typeof message.fullOutputPath === "string" ? message.fullOutputPath : undefined,
+          excludeFromContext:
+            typeof message.excludeFromContext === "boolean"
+              ? message.excludeFromContext
+              : undefined,
+          timestamp: timestampNumber(message.timestamp),
+        };
+        if (activeBashId) {
+          return {
+            ...state,
+            blocks: updateBlock(activeBashId, (block) =>
+              block.type === "bash" ? { ...block, data: { ...block.data, ...data } } : block,
+            ),
+            activeBashId: null,
+          };
+        }
+        return {
+          ...state,
+          blocks: [...blocks, { id: newBlockId(), type: "bash", data }],
+        };
+      }
       if (role === "custom") {
         // Match pi's TUI (interactive-mode.js `addMessageToChat` →
         // `case "custom"`): a custom message is rendered ONLY when `display`
@@ -836,36 +1056,38 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
         // exactly the bug that surfaced when an extension sent a custom
         // message with `content: true` and no `display` (the old fallback
         // JSON-stringified `content` → "true").
-        const msg = event.message as { display?: unknown; content?: unknown } | undefined;
+        const msg = event.message;
         if (!msg?.display) return state;
-        const content = msg.content;
-        let text: string | undefined;
-        if (typeof content === "string") {
-          text = content;
-        } else if (Array.isArray(content)) {
-          // Mirror pi's CustomMessageComponent: join text blocks.
-          text = content
-            .filter(
-              (c): c is { type: "text"; text: string } =>
-                !!c &&
-                typeof c === "object" &&
-                (c as { type?: unknown }).type === "text" &&
-                typeof (c as { text?: unknown }).text === "string",
-            )
-            .map((c) => c.text)
-            .join("\n");
+        const content = extractTextAndImages(msg.content);
+        const hasRawContent = Object.hasOwn(msg, "content");
+        const hasDetails = Object.hasOwn(msg, "details");
+        const customType = typeof msg.customType === "string" ? msg.customType : undefined;
+        // Keep image-only and details-only public custom messages inspectable.
+        // A malformed value with no usable payload or identity remains hidden.
+        if (!content.text && !content.images && !hasDetails && !customType && !hasRawContent) {
+          return state;
         }
-        // Non-string/non-array content (e.g. a boolean) has no renderable
-        // text — skip, matching pi which would likewise produce nothing.
-        if (!text) return state;
         const blockId = newBlockId();
         return {
           ...state,
-          blocks: [...blocks, { id: blockId, type: "custom_message", data: { content: text } }],
+          blocks: [
+            ...blocks,
+            {
+              id: blockId,
+              type: "custom_message",
+              data: {
+                content: content.text,
+                images: content.images,
+                ...(hasRawContent ? { rawContent: msg.content } : {}),
+                customType,
+                details: hasDetails ? msg.details : undefined,
+                timestamp: timestampNumber(msg.timestamp),
+              },
+            },
+          ],
         };
       }
-      // Unknown role (toolResult, bashExecution, etc.) — ignore for now;
-      // these have their own dedicated event types in the wire.
+      // Unknown extension-defined role.
       return state;
     }
 
@@ -1087,10 +1309,21 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
                   ? partial.text
                   : b.data.outputText + partial.text
                 : b.data.outputText,
+              outputImages: partial.images ?? b.data.outputImages,
+              resultContent: mergeResultContent(
+                b.data.resultContent,
+                partial.content,
+                partial.hasContent,
+                !replacesOutput,
+              ),
               diff: b.data.diff ?? partial.diff,
-              resultDetails: partial.details
-                ? { ...b.data.resultDetails, ...partial.details }
-                : b.data.resultDetails,
+              patch: b.data.patch ?? partial.patch,
+              resultDetails: mergeResultDetails(
+                b.data.resultDetails,
+                partial.details,
+                partial.hasDetails,
+              ),
+              resultMetadata: mergeResultMetadata(b.data.resultMetadata, partial.metadata),
             },
           };
         }),
@@ -1114,10 +1347,20 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
               isStreaming: false,
               isError: event.isError,
               outputText: result.text || b.data.outputText,
+              outputImages: result.images ?? b.data.outputImages,
+              resultContent: mergeResultContent(
+                b.data.resultContent,
+                result.content,
+                result.hasContent,
+              ),
               diff: result.diff ?? b.data.diff,
-              resultDetails: result.details
-                ? { ...b.data.resultDetails, ...result.details }
-                : b.data.resultDetails,
+              patch: result.patch ?? b.data.patch,
+              resultDetails: mergeResultDetails(
+                b.data.resultDetails,
+                result.details,
+                result.hasDetails,
+              ),
+              resultMetadata: mergeResultMetadata(b.data.resultMetadata, result.metadata),
             },
           };
         }),
@@ -1137,10 +1380,13 @@ export function applyPiEvent(state: TranscriptState, event: KnownPiEvent): Trans
           summary: event.result?.summary,
           reason: event.reason,
           tokensBefore: event.result?.tokensBefore,
+          estimatedTokensAfter: event.result?.estimatedTokensAfter,
           firstKeptEntryId: event.result?.firstKeptEntryId,
           aborted: event.aborted,
           willRetry: event.willRetry,
           errorMessage: event.errorMessage,
+          details: event.result?.details,
+          fromHook: typeof event.result?.fromHook === "boolean" ? event.result.fromHook : undefined,
         },
       };
       // A successful compaction is an immutable archive boundary: preserve

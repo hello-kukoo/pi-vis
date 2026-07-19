@@ -1,7 +1,7 @@
 export interface PanelOutputProjection {
   buffer: readonly string[];
   outputSequence?: number;
-  outputKind?: "keyframe" | "delta" | "reset";
+  outputKind?: "keyframe" | "delta" | "reset" | "repaint_required";
   renderRevision?: number;
 }
 
@@ -41,7 +41,9 @@ export function initialAppliedPanelOutput(panel: PanelOutputProjection): Applied
   const replayRequired =
     authorityReplayPresent &&
     panel.outputKind !== "keyframe" &&
-    (panel.outputKind === "reset" || !hasReplayAnchor(panel));
+    (panel.outputKind === "reset" ||
+      panel.outputKind === "repaint_required" ||
+      !hasReplayAnchor(panel));
   return {
     chunks: panel.buffer,
     sequence: panel.outputSequence ?? null,
@@ -60,8 +62,12 @@ function isPrefix(prefix: readonly string[], value: readonly string[]): boolean 
 
 function hasReplayAnchor(panel: PanelOutputProjection): boolean {
   if (panel.outputKind === "keyframe") return true;
-  const first = panel.buffer[0];
-  return first?.includes("\x1bc") === true || first?.includes("\x1b[2J") === true;
+  // One forced paint may be published as several ordered chunks. In
+  // particular, terminal-mode renegotiation can precede the TUI's hard-clear
+  // frame, and React may coalesce that keyframe with its following delta. The
+  // authority segment was emptied by repaint_required, so an anchor anywhere
+  // in this bounded segment reconstructs the current generation safely.
+  return panel.buffer.some((chunk) => chunk.includes("\x1bc") || chunk.includes("\x1b[2J"));
 }
 
 /**
@@ -92,7 +98,7 @@ export function reconcilePanelOutput(
     repaintRequired: current.repaintRequired,
   };
 
-  if (panel.outputKind === "reset") {
+  if (panel.outputKind === "reset" || panel.outputKind === "repaint_required") {
     return {
       applied: { ...nextBase, repaintRequired: true },
       action: { kind: "clear" },
@@ -117,8 +123,9 @@ export function reconcilePanelOutput(
   if (current.repaintRequired) {
     // The keyframe publication itself may be coalesced with a later delta.
     // In that case `outputKind` describes the latest delta, while the replay
-    // buffer still begins at the complete hard-clear frame and is sufficient
-    // to leave the reconstruction fence safely.
+    // segment still contains the complete hard-clear frame and is sufficient
+    // to leave the reconstruction fence safely. Protocol-negotiation bytes may
+    // be an earlier chunk in that same repaint generation.
     if (hasReplayAnchor(panel)) {
       return {
         applied: { ...nextBase, repaintRequired: false },
@@ -127,7 +134,12 @@ export function reconcilePanelOutput(
     }
     return {
       applied: nextBase,
-      action: { kind: "none" },
+      // This is a newer unsafe replay generation, not a duplicate render of
+      // the generation already requested above. Ask again so a dropped or
+      // teardown-raced recovery request cannot leave the terminal fenced
+      // forever. Sequenced repaint_required remains handled by the clear case
+      // above and is never echoed here.
+      action: { kind: "request_repaint" },
     };
   }
 

@@ -93,7 +93,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     renderRevision?: number;
     keyframeReady?: boolean;
     outputSequence?: number;
-    outputKind?: "keyframe" | "delta" | "reset";
+    outputKind?: "keyframe" | "delta" | "reset" | "repaint_required";
     outputAnsi?: string;
     inputAcknowledgedThrough?: number;
     syncState?: "following" | "synchronizing" | "unavailable";
@@ -102,6 +102,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
   const renderedKeyframeRevisionRef = useRef<number | null>(null);
   const authorityAckRef = useRef<string | null>(null);
   const authorityRepaintRequestRef = useRef<string | null>(null);
+  const initialPanelSizingRef = useRef<string | null>(null);
   const dispatchPanelInputRef = useRef<((data: string) => void) | null>(null);
   const panelInputTailRef = useRef<Promise<void>>(Promise.resolve());
   const panelInputBlockedRef = useRef<PanelInputIdentity | null>(null);
@@ -151,6 +152,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
       panel.authority === true &&
       panel.syncState === "synchronizing" &&
       panel.keyframeReady === false &&
+      panel.outputKind !== "repaint_required" &&
+      initialPanelSizingRef.current !== repaintKey &&
       authorityRepaintRequestRef.current !== repaintKey
     ) {
       authorityRepaintRequestRef.current = repaintKey;
@@ -176,7 +179,7 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
         outputSequence > renderedOutputSequenceRef.current) &&
       panel.outputKind
     ) {
-      if (panel.outputKind === "reset") {
+      if (panel.outputKind === "reset" || panel.outputKind === "repaint_required") {
         term.reset();
         term.clear();
         renderedKeyframeRevisionRef.current = null;
@@ -331,6 +334,8 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
     if (!container) return;
     const currentPanel = panelRef.current;
     if (!currentPanel) return;
+    const currentPanelKey = `${currentPanel.hostInstanceId}:${currentPanel.sessionEpoch}:${currentPanel.id}`;
+    initialPanelSizingRef.current = currentPanelKey;
     panelInputTailRef.current = Promise.resolve();
     panelInputBlockedRef.current = null;
     pendingInputRef.current = null;
@@ -409,12 +414,23 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
       getHeightFraction: () => fractionGetterRef.current(),
       fallbackFontSize: fonts?.code?.sizePx ?? 14,
       onReportSize: (cols, rows) => {
-        const force = forceNextResize;
+        const firstReport = forceNextResize;
         forceNextResize = false;
         const activePanel = panelRef.current ?? currentPanel;
+        if (firstReport && initialPanelSizingRef.current === currentPanelKey) {
+          initialPanelSizingRef.current = null;
+        }
+        const repaintAlreadyInFlight =
+          activePanel.authority === true &&
+          (authorityRepaintRequestRef.current === currentPanelKey ||
+            activePanel.outputKind === "repaint_required");
+        const force = firstReport && !repaintAlreadyInFlight;
+        if (force && activePanel.authority) {
+          authorityRepaintRequestRef.current = currentPanelKey;
+        }
         if (
           activePanel.authority &&
-          !force &&
+          !firstReport &&
           (activePanel.syncState !== "following" || !activePanel.inputEnabled)
         )
           return;
@@ -428,7 +444,11 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
             rows,
             ...(force ? { force: true } : {}),
           })
-          .catch(() => {});
+          .catch(() => {
+            if (force && authorityRepaintRequestRef.current === currentPanelKey) {
+              authorityRepaintRequestRef.current = null;
+            }
+          });
       },
     });
     syncRef.current = sizer.scheduleSync;
@@ -711,6 +731,10 @@ export function CustomPanelHost({ sessionId }: CustomPanelHostProps): React.Reac
         termRef.current = null;
         termPanelRef.current = null;
         fitAddonRef.current = null;
+        authorityRepaintRequestRef.current = null;
+        if (initialPanelSizingRef.current === currentPanelKey) {
+          initialPanelSizingRef.current = null;
+        }
       }
     };
   }, [sessionId, panelId, panelHostInstanceId, panelSessionEpoch]); // Full host-bound panel identity; never rebuild on buffer appends

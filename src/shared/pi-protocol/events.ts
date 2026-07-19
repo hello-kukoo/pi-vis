@@ -198,6 +198,7 @@ export const CompactionEndEventSchema = z.object({
       summary: z.string(),
       firstKeptEntryId: z.string().optional(),
       tokensBefore: z.number().optional(),
+      estimatedTokensAfter: z.number().optional(),
     })
     .passthrough()
     .optional(),

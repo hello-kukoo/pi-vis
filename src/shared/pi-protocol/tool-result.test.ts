@@ -17,8 +17,14 @@ describe("extractToolResult", () => {
     expect(TOOL_RESULT_TEXT_SEPARATOR).toBe("\n");
     expect(liveEndResult).toEqual({
       text: "first line\nsecond line",
+      images: undefined,
+      content: result.content,
+      hasContent: true,
       details: { exitCode: 0 },
+      hasDetails: true,
       diff: undefined,
+      patch: undefined,
+      metadata: undefined,
     });
     expect(persistedToolResultMessage).toEqual(liveEndResult);
   });
@@ -26,39 +32,133 @@ describe("extractToolResult", () => {
   it("accepts string results and falls back to output without text parts", () => {
     expect(extractToolResult("plain output")).toEqual({
       text: "plain output",
+      images: undefined,
+      content: "plain output",
+      hasContent: true,
       details: undefined,
+      hasDetails: false,
       diff: undefined,
+      patch: undefined,
+      metadata: undefined,
     });
     expect(extractToolResult({ content: [{ type: "image" }], output: "fallback output" })).toEqual({
       text: "fallback output",
+      images: undefined,
+      content: [{ type: "image" }],
+      hasContent: true,
       details: undefined,
+      hasDetails: false,
       diff: undefined,
+      patch: undefined,
+      metadata: { output: "fallback output" },
     });
   });
 
-  it("preserves deterministic details and diff from a final result", () => {
-    const details = { diff: "-before\n+after", fullOutputPath: "/tmp/result" };
+  it("preserves Pi edit details as dedicated display diff and unified patch fields", () => {
+    const details = {
+      diff: " 1 line changed\n-old\n+new",
+      patch: "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new",
+      fullOutputPath: "/tmp/result",
+    };
     expect(extractToolResult({ content: [], details, diff: "ignored direct diff" })).toEqual({
       text: "",
+      images: undefined,
+      content: [],
+      hasContent: true,
       details,
-      diff: "-before\n+after",
+      hasDetails: true,
+      diff: " 1 line changed\n-old\n+new",
+      patch: "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new",
+      metadata: undefined,
     });
-    expect(extractToolResult({ output: "done", diff: "direct diff" })).toEqual({
+    expect(
+      extractToolResult({ output: "done", diff: "direct diff", patch: "direct patch" }),
+    ).toEqual({
       text: "done",
+      images: undefined,
+      content: undefined,
+      hasContent: false,
       details: undefined,
+      hasDetails: false,
       diff: "direct diff",
+      patch: "direct patch",
+      metadata: { output: "done" },
     });
   });
 
-  it("safely ignores malformed result, content, and details values", () => {
-    expect(extractToolResult(null)).toEqual({ text: "", details: undefined, diff: undefined });
-    expect(extractToolResult([])).toEqual({ text: "", details: undefined, diff: undefined });
+  it("preserves every recognized image plus arbitrary details and result metadata", () => {
+    const content = [
+      { type: "text", text: "caption", textSignature: "signed-caption" },
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png", source: "tool" },
+      { type: "text", text: "after image", extensionField: { retained: true } },
+      { type: "image", data: "d29ybGQ=", mimeType: "image/jpeg" },
+    ];
+    expect(
+      extractToolResult({
+        content,
+        output: "distinct legacy output",
+        details: null,
+        addedToolNames: ["deferred_search"],
+        terminate: true,
+        futureField: { retained: true },
+      }),
+    ).toEqual({
+      text: "caption\nafter image",
+      images: ["data:image/png;base64,aGVsbG8=", "data:image/jpeg;base64,d29ybGQ="],
+      content,
+      hasContent: true,
+      details: null,
+      hasDetails: true,
+      diff: undefined,
+      patch: undefined,
+      metadata: {
+        output: "distinct legacy output",
+        addedToolNames: ["deferred_search"],
+        terminate: true,
+        futureField: { retained: true },
+      },
+    });
+  });
+
+  it("safely ignores malformed results and content while retaining non-object details", () => {
+    expect(extractToolResult(null)).toEqual({
+      text: "",
+      images: undefined,
+      content: undefined,
+      hasContent: false,
+      details: undefined,
+      hasDetails: false,
+      diff: undefined,
+      patch: undefined,
+      metadata: undefined,
+    });
+    expect(extractToolResult([])).toEqual({
+      text: "",
+      images: undefined,
+      content: undefined,
+      hasContent: false,
+      details: undefined,
+      hasDetails: false,
+      diff: undefined,
+      patch: undefined,
+      metadata: undefined,
+    });
     expect(
       extractToolResult({
         content: [null, { type: "text", text: 1 }, { type: "text", text: "valid" }],
         details: ["not details"],
         diff: 1,
       }),
-    ).toEqual({ text: "valid", details: undefined, diff: undefined });
+    ).toEqual({
+      text: "valid",
+      images: undefined,
+      content: [null, { type: "text", text: 1 }, { type: "text", text: "valid" }],
+      hasContent: true,
+      details: ["not details"],
+      hasDetails: true,
+      diff: undefined,
+      patch: undefined,
+      metadata: undefined,
+    });
   });
 });

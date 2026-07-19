@@ -92,7 +92,7 @@ describe("panel output reconciliation", () => {
       outputKind: "delta",
       renderRevision: 1,
     });
-    expect(laterDelta.action).toEqual({ kind: "none" });
+    expect(laterDelta.action).toEqual({ kind: "request_repaint" });
     expect(laterDelta.applied.repaintRequired).toBe(true);
 
     const keyframe = reconcilePanelOutput(laterDelta.applied, {
@@ -120,6 +120,15 @@ describe("panel output reconciliation", () => {
     });
     expect(reset.action).toEqual({ kind: "clear" });
     expect(reset.applied.repaintRequired).toBe(true);
+
+    const repaintRequired = reconcilePanelOutput(current, {
+      buffer: [],
+      outputSequence: 2,
+      outputKind: "repaint_required",
+      renderRevision: 2,
+    });
+    expect(repaintRequired.action).toEqual({ kind: "clear" });
+    expect(repaintRequired.applied.repaintRequired).toBe(true);
   });
 
   it("accepts an anchored replay when a keyframe and its next delta are coalesced", () => {
@@ -147,6 +156,36 @@ describe("panel output reconciliation", () => {
     expect(coalesced.action).toEqual({
       kind: "replace",
       ansi: "\x1b[2J\x1b[Hcomplete framedependent delta",
+    });
+    expect(coalesced.applied.repaintRequired).toBe(false);
+  });
+
+  it("finds a hard-clear anchor after a coalesced terminal handshake", () => {
+    const reset = reconcilePanelOutput(
+      initialAppliedPanelOutput({
+        buffer: ["old"],
+        outputSequence: 1,
+        outputKind: "keyframe",
+        renderRevision: 1,
+      }),
+      {
+        buffer: [],
+        outputSequence: 2,
+        outputKind: "reset",
+        renderRevision: 2,
+      },
+    );
+    const handshake = "\x1b[?2004h\x1b[>7u\x1b[?u\x1b[c";
+    const coalesced = reconcilePanelOutput(reset.applied, {
+      buffer: [handshake, "\x1b[2J\x1b[Hcomplete frame", "dependent delta"],
+      outputSequence: 5,
+      outputKind: "delta",
+      renderRevision: 2,
+    });
+
+    expect(coalesced.action).toEqual({
+      kind: "replace",
+      ansi: `${handshake}\x1b[2J\x1b[Hcomplete framedependent delta`,
     });
     expect(coalesced.applied.repaintRequired).toBe(false);
   });

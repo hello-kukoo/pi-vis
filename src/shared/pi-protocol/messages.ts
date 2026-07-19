@@ -40,6 +40,7 @@ export const CompactionMarkerSchema = z.object({
   summary: z.string().optional(),
   reason: z.enum(["manual", "threshold", "overflow"]).optional(),
   tokensBefore: z.number().optional(),
+  estimatedTokensAfter: z.number().optional(),
   firstKeptEntryId: z.string().optional(),
   aborted: z.boolean().optional(),
   willRetry: z.boolean().optional(),

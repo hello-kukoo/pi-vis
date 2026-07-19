@@ -1,7 +1,16 @@
 import type { SessionId } from "@shared/ids.js";
 import type { TranscriptStyle } from "@shared/settings.js";
 import type React from "react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { AnsiText } from "../../lib/ansi.js";
 import { Markdown } from "../../lib/markdown.js";
 import { querySession } from "../../lib/session-intent.js";
@@ -19,6 +28,7 @@ import {
   type AssistantBlockData,
   type AssistantSegment,
   type BashBlockData,
+  type BranchSummaryBlockData,
   type CompactionBlockData,
   type CustomEntryBlockData,
   type CustomMessageBlockData,
@@ -33,15 +43,16 @@ import {
 import { FadeText } from "../common/FadeText.js";
 import { ScrollFadeFrame } from "../common/ScrollFadeFrame.js";
 import { Spinner } from "../common/Spinner.js";
-import { IconChevronRight } from "../common/icons.js";
+import { IconChevronRight, IconCopy } from "../common/icons.js";
 import { DiffBlock } from "./DiffBlock.js";
 import "./TranscriptView.css";
 
-const OUTPUT_PREVIEW_LINES = 4;
 const OUTPUT_VIRTUAL_OVERSCAN = 8;
 const OUTPUT_DEFAULT_ROW_HEIGHT = 18;
-const DIFF_PREVIEW_LINES = 12;
-const ACTIVITY_PREVIEW_CHARS = 420;
+const LARGE_SINGLE_LINE_CHARS = 24_000;
+const LARGE_STRUCTURED_TEXT_CHARS = 120_000;
+const LARGE_DIFF_CHARS = 240_000;
+const LARGE_DIFF_LINES = 1_500;
 // Treat only the browser's sub-pixel rounding fringe as the bottom. A small
 // intentional scroll must leave bottom-follow immediately instead of sitting
 // in a fuzzy zone that later layout/streaming work can snap back down.
@@ -63,25 +74,36 @@ function splitOutputLines(text: string): string[] {
   return (normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized).split("\n");
 }
 
-const SUBJECT_KEYS = [
-  "file_path",
-  "filePath",
-  "path",
-  "filename",
+const TOOL_SUBJECT_KEYS: Record<string, string[]> = {
+  bash: ["command", "cmd"],
+  edit: ["path", "file_path", "filePath", "filename"],
+  find: ["pattern", "query", "path"],
+  grep: ["pattern", "query", "path"],
+  ls: ["path"],
+  read: ["path", "file_path", "filePath", "filename"],
+  write: ["path", "file_path", "filePath", "filename"],
+};
+const FALLBACK_SUBJECT_KEYS = [
   "command",
   "cmd",
   "pattern",
   "query",
+  "path",
+  "file_path",
+  "filePath",
+  "filename",
   "url",
   "prompt",
   "title",
   "name",
 ];
 
-// One-line summary of a tool call's primary argument, e.g. `read src/main.ts`
-function summarizeInput(input?: Record<string, unknown>): string | null {
+// Collapsed cards carry an authored semantic summary, never a lossy body
+// preview. The complete input is always one click away in the inspector.
+function summarizeInput(toolName: string, input?: Record<string, unknown>): string | null {
   if (!input) return null;
-  for (const key of SUBJECT_KEYS) {
+  const keys = [...(TOOL_SUBJECT_KEYS[toolName] ?? []), ...FALLBACK_SUBJECT_KEYS];
+  for (const key of new Set(keys)) {
     const value = input[key];
     if (typeof value === "string" && value.trim()) {
       return value.split("\n", 1)[0] ?? value;
@@ -90,105 +112,13 @@ function summarizeInput(input?: Record<string, unknown>): string | null {
   return null;
 }
 
-const COMPACT_VALUE_MAX = 80;
-const FULL_JSON_REVEAL_THRESHOLD = 240;
-
-/** Format tool-call args as a compact `key=value key=value` one-liner. */
-function formatArgsCompact(input: Record<string, unknown>): { compact: string; lossy: boolean } {
-  const parts: string[] = [];
-  let lossy = false;
-  for (const [key, value] of Object.entries(input)) {
-    let s: string;
-    if (typeof value === "string") {
-      s = value;
-      if (/\s{2,}|\n/u.test(value)) lossy = true;
-    } else {
-      s = JSON.stringify(value) ?? String(value);
-    }
-    if (s.length > COMPACT_VALUE_MAX) {
-      s = `${s.slice(0, COMPACT_VALUE_MAX - 1)}…`;
-      lossy = true;
-    }
-    parts.push(`${key}=${s}`);
+function stringifyForDisplay(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
   }
-  return { compact: parts.join("  "), lossy };
-}
-
-/** Render tool-call args as a compact one-liner. If the full JSON is
- *  substantially larger than the compact form, wrap it in <details> so
- *  the user can reveal the full input on demand. */
-function renderArgs(input: Record<string, unknown> | undefined): React.ReactNode {
-  if (!input || Object.keys(input).length === 0) return null;
-  const { compact, lossy } = formatArgsCompact(input);
-  const full = JSON.stringify(input, null, 2);
-  const fullNeedsDisclosure =
-    lossy || (full.length > FULL_JSON_REVEAL_THRESHOLD && full.length > compact.length + 80);
-  if (fullNeedsDisclosure) {
-    return (
-      <details className="tool-card__args tool-card__details-disclosure">
-        <summary className="tool-card__args-summary">
-          <IconChevronRight className="tool-card__details-chevron" />
-          <span className="tool-card__args-label">input</span>
-          <span>{compact}</span>
-        </summary>
-        <pre className="tool-card__args-full">{full}</pre>
-      </details>
-    );
-  }
-  return (
-    <div className="tool-card__args tool-card__args--inline">
-      <span className="tool-card__args-label">input</span>
-      <span>{compact}</span>
-    </div>
-  );
-}
-
-function summarizeResultDetails(details?: Record<string, unknown>): string | null {
-  if (!details) return null;
-  const parts: string[] = [];
-  const truncation = isRecord(details.truncation) ? details.truncation : undefined;
-  if (truncation?.truncated === true) {
-    const outputLines = typeof truncation.outputLines === "number" ? truncation.outputLines : null;
-    const totalLines = typeof truncation.totalLines === "number" ? truncation.totalLines : null;
-    if (outputLines !== null && totalLines !== null) {
-      parts.push(
-        `pi retained ${outputLines.toLocaleString()} of ${totalLines.toLocaleString()} lines`,
-      );
-    } else {
-      parts.push("pi returned truncated output");
-    }
-  }
-  if (typeof details.fullOutputPath === "string" && details.fullOutputPath) {
-    parts.push("full output saved on disk");
-  }
-  const extraKeys = Object.keys(details).filter(
-    (key) => !["diff", "truncation", "fullOutputPath"].includes(key),
-  );
-  if (extraKeys.length > 0) {
-    parts.push(
-      `${extraKeys.length.toLocaleString()} metadata ${extraKeys.length === 1 ? "field" : "fields"}`,
-    );
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
-function renderResultDetails(details?: Record<string, unknown>): React.ReactNode {
-  const summary = summarizeResultDetails(details);
-  if (!details || !summary) return null;
-  const displayDetails = { ...details };
-  if (typeof displayDetails.diff === "string") {
-    displayDetails.diff = "[shown in diff section]";
-  }
-  return (
-    <details className="tool-card__metadata tool-card__details-disclosure">
-      <summary className="tool-card__metadata-summary">
-        <IconChevronRight className="tool-card__details-chevron" />
-        <span className="tool-card__metadata-label">result</span>
-        <span>{summary}</span>
-      </summary>
-      <pre className="tool-card__metadata-json">{JSON.stringify(displayDetails, null, 2)}</pre>
-    </details>
-  );
 }
 
 function pluralLines(n: number): string {
@@ -199,8 +129,12 @@ function formatLineCount(n: number): string {
   return `${n.toLocaleString()} ${pluralLines(n)}`;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
+function formatCharCount(n: number): string {
+  return `${n.toLocaleString()} ${n === 1 ? "character" : "characters"}`;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function firstNonEmptyLine(text: string): string | null {
@@ -226,8 +160,7 @@ function stripMarkdownChrome(text: string): string {
 function summarizeActivityContent(text: string): string | null {
   const first = firstNonEmptyLine(text);
   if (!first) return null;
-  const stripped = stripMarkdownChrome(first);
-  return stripped.length > 96 ? `${stripped.slice(0, 96)}…` : stripped;
+  return stripMarkdownChrome(first);
 }
 
 /** Formats a millisecond duration as e.g. "12m 37s", "4s", or "1h 05m". */
@@ -279,78 +212,236 @@ function WorkingRow({ sessionId }: { sessionId: SessionId }): React.ReactElement
   );
 }
 
-function Chevron(): React.ReactElement {
-  return (
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-      <path
-        d="M4 6.5l4 4 4-4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 interface ToolCardShellProps {
   isError: boolean;
   open: boolean;
-  expandable: boolean;
   onToggle: () => void;
+  accessibleLabel: string;
+  accessibleSummary?: string | undefined;
   header: React.ReactNode;
   children?: React.ReactNode;
 }
 
-// Card chrome shared by tool calls and bash blocks: header row, optional
-// body, expand arrow pinned to the bottom-right corner.
+// Every execution/activity card has exactly one disclosure. The collapsed row
+// is an authored summary; one activation reveals the complete retained record.
 function ToolCardShell({
   isError,
   open,
-  expandable,
   onToggle,
+  accessibleLabel,
+  accessibleSummary,
   header,
   children,
 }: ToolCardShellProps): React.ReactElement {
-  const classes = [
-    "tool-card",
-    isError ? "tool-card--error" : "",
-    open ? "tool-card--open" : "",
-    expandable ? "tool-card--expandable" : "",
-  ]
+  const bodyId = useId();
+  const classes = ["tool-card", isError ? "tool-card--error" : "", open ? "tool-card--open" : ""]
     .filter(Boolean)
     .join(" ");
 
   return (
     <div className={classes}>
-      {expandable ? (
-        <button
-          type="button"
-          className="tool-card__header fade-scope"
-          onClick={onToggle}
-          aria-expanded={open}
-        >
-          {header}
-        </button>
-      ) : (
-        <div className="tool-card__header fade-scope">{header}</div>
-      )}
-      {children}
-      {expandable && (
-        <button
-          type="button"
-          className="tool-card__expand"
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-label={open ? "Collapse" : "Expand"}
-        >
-          <Chevron />
-        </button>
+      <button
+        type="button"
+        className="tool-card__header fade-scope"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls={bodyId}
+        aria-label={`${accessibleLabel} details${accessibleSummary ? ` — ${accessibleSummary}` : ""}`}
+      >
+        <IconChevronRight className="tool-card__chevron" />
+        {header}
+      </button>
+      {open && (
+        <div id={bodyId} className="tool-card__body">
+          {children}
+        </div>
       )}
     </div>
   );
 }
+
+function useCardDisclosure(
+  attention: boolean,
+  preserveScroll: (mutate: () => void) => void,
+): { open: boolean; toggle: () => void } {
+  const [open, setOpen] = useState(attention);
+  const userToggled = useRef(false);
+
+  useEffect(() => {
+    if (!attention || userToggled.current) return;
+    setOpen(true);
+  }, [attention]);
+
+  const toggle = useCallback(() => {
+    userToggled.current = true;
+    preserveScroll(() => setOpen((value) => !value));
+  }, [preserveScroll]);
+
+  return { open, toggle };
+}
+
+const CopyButton = memo(function CopyButton({
+  text,
+  label = "Copy all",
+}: {
+  text: string;
+  label?: string;
+}): React.ReactElement {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(async () => {
+    try {
+      await window.pivis.invoke("clipboard.writeText", { text });
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }, [text]);
+
+  return (
+    <button type="button" className="tool-card__copy" onClick={copy}>
+      <IconCopy />
+      <span>{copied ? "Copied" : label}</span>
+    </button>
+  );
+});
+
+function SectionHeader({
+  title,
+  meta,
+  copyText,
+  copyLabel,
+}: {
+  title: string;
+  meta?: string | undefined;
+  copyText?: string | undefined;
+  copyLabel?: string | undefined;
+}): React.ReactElement {
+  return (
+    <div className="tool-card__section-header">
+      <span className="tool-card__section-title">{title}</span>
+      {meta && <span className="tool-card__section-meta">{meta}</span>}
+      {copyText !== undefined && (
+        <CopyButton text={copyText} {...(copyLabel ? { label: copyLabel } : {})} />
+      )}
+    </div>
+  );
+}
+
+function StructuredPayload({
+  label,
+  value,
+}: {
+  label: string;
+  value: unknown;
+}): React.ReactElement {
+  const text = useMemo(() => stringifyForDisplay(value), [value]);
+  const isLarge =
+    text.length >= LARGE_STRUCTURED_TEXT_CHARS ||
+    (!text.includes("\n") && text.length >= LARGE_SINGLE_LINE_CHARS);
+  return (
+    <section className="tool-card__section">
+      <SectionHeader title={label} meta={formatCharCount(text.length)} copyText={text} />
+      {isLarge ? (
+        <textarea
+          className="tool-card__large-payload"
+          aria-label={`${label}, complete value`}
+          readOnly
+          spellCheck={false}
+          value={text}
+        />
+      ) : (
+        <ScrollFadeFrame
+          frameClassName="tool-card__scroll-frame"
+          className="tool-card__scroll tool-card__scroll--structured"
+          aria-label={`${label}, complete value`}
+          role="region"
+          tabIndex={0}
+          horizontalScrollbar
+        >
+          <div className="tool-card__horizontal-scroll">
+            <pre className="tool-card__structured-value">{text}</pre>
+          </div>
+        </ScrollFadeFrame>
+      )}
+    </section>
+  );
+}
+
+function EmptySection({
+  label,
+  children,
+}: { label: string; children: string }): React.ReactElement {
+  return (
+    <section className="tool-card__section">
+      <SectionHeader title={label} />
+      <p className="tool-card__empty">{children}</p>
+    </section>
+  );
+}
+
+function ProvenanceGrid({
+  values,
+}: { values: Array<[string, React.ReactNode]> }): React.ReactElement {
+  return (
+    <dl className="tool-card__provenance">
+      {values.map(([label, value]) => (
+        <div className="tool-card__provenance-item" key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+const ImageArtifacts = memo(function ImageArtifacts({
+  images,
+  label = "Images",
+}: {
+  images: string[];
+  label?: string;
+}): React.ReactElement | null {
+  const openImages = useImageViewerStore((state) => state.openImages);
+  const validImages = useMemo(
+    () => images.filter((src) => /^(data:image\/|file:|https?:)/u.test(src)),
+    [images],
+  );
+  const viewerItems = useMemo(
+    () => validImages.map((src, index) => ({ src, alt: `Tool result image ${index + 1}` })),
+    [validImages],
+  );
+  if (validImages.length === 0) return null;
+  const copyText = validImages.join("\n");
+  return (
+    <section className="tool-card__section">
+      <SectionHeader
+        title={label}
+        meta={`${validImages.length.toLocaleString()} ${validImages.length === 1 ? "image" : "images"}`}
+        copyText={copyText}
+        copyLabel={validImages.length === 1 ? "Copy data" : "Copy all data"}
+      />
+      <div className="tool-card__images">
+        {validImages.map((src, index) => {
+          const mimeType = /^data:([^;,]+)/u.exec(src)?.[1] ?? "image";
+          return (
+            <button
+              // biome-ignore lint/suspicious/noArrayIndexKey: result image order is immutable
+              key={index}
+              type="button"
+              className="tool-card__image-button"
+              onClick={() => openImages(viewerItems, index)}
+              aria-label={`Open tool result image ${index + 1} larger`}
+            >
+              <img className="tool-card__image" src={src} alt={`Tool result ${index + 1}`} />
+              <span className="tool-card__image-meta">{mimeType}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+});
 
 // ── Block renderers ──────────────────────────────────────────────────────
 
@@ -477,7 +568,6 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [rowHeight, setRowHeight] = useState(OUTPUT_DEFAULT_ROW_HEIGHT);
-  const [copied, setCopied] = useState(false);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -501,17 +591,25 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
     if (scrollTop > maxScrollTop) setScrollTop(maxScrollTop);
   }, [lines.length, rowHeight, scrollTop, viewportHeight]);
 
-  const copyOutput = useCallback(async () => {
-    try {
-      await window.pivis.invoke("clipboard.writeText", { text });
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
-    }
-  }, [text]);
-
   if (lines.length === 0) return null;
+  if (lines.length === 1 && text.length >= LARGE_SINGLE_LINE_CHARS) {
+    return (
+      <div className="tool-card__output-panel">
+        <SectionHeader
+          title={label}
+          meta={`${formatLineCount(1)} · ${formatCharCount(text.length)}`}
+          copyText={text}
+        />
+        <textarea
+          className="tool-card__large-payload"
+          aria-label={`${label}, complete value`}
+          readOnly
+          spellCheck={false}
+          value={text}
+        />
+      </div>
+    );
+  }
 
   const visibleCount = Math.max(1, Math.ceil((viewportHeight || 360) / rowHeight));
   const start = Math.max(0, Math.floor(scrollTop / rowHeight) - OUTPUT_VIRTUAL_OVERSCAN);
@@ -520,13 +618,7 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
   const afterHeight = Math.max(0, (lines.length - end) * rowHeight);
   return (
     <div className="tool-card__output-panel">
-      <div className="tool-card__section-header">
-        <span className="tool-card__section-title">{label}</span>
-        <span className="tool-card__section-meta">{formatLineCount(lines.length)}</span>
-        <button type="button" className="tool-card__copy" onClick={copyOutput}>
-          {copied ? "Copied" : "Copy all"}
-        </button>
-      </div>
+      <SectionHeader title={label} meta={formatLineCount(lines.length)} copyText={text} />
       <ScrollFadeFrame
         frameClassName="tool-card__output-frame"
         scrollerRef={scrollRef}
@@ -557,17 +649,42 @@ const VirtualizedOutput = memo(function VirtualizedOutput({
 function ToolScrollWell({
   children,
   diff = false,
+  label = "Complete content",
 }: {
   children: React.ReactNode;
   diff?: boolean | undefined;
+  label?: string | undefined;
 }): React.ReactElement {
   return (
     <ScrollFadeFrame
       frameClassName="tool-card__scroll-frame"
       className={`tool-card__scroll${diff ? " tool-card__scroll--diff" : ""}`}
+      aria-label={label}
+      role="region"
+      tabIndex={0}
+      horizontalScrollbar
     >
       {children}
     </ScrollFadeFrame>
+  );
+}
+
+function DiffPayload({ text, lines }: { text: string; lines: string[] }): React.ReactElement {
+  if (text.length >= LARGE_DIFF_CHARS || lines.length >= LARGE_DIFF_LINES) {
+    return (
+      <textarea
+        className="tool-card__large-payload tool-card__large-payload--diff"
+        aria-label="Complete diff"
+        readOnly
+        spellCheck={false}
+        value={text}
+      />
+    );
+  }
+  return (
+    <ToolScrollWell diff label="Complete diff">
+      <DiffBlock diff={text} />
+    </ToolScrollWell>
   );
 }
 
@@ -578,23 +695,37 @@ const ToolCallBlock = memo(function ToolCallBlock({
   data: ToolCallBlockData;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => preserveScroll(() => setOpen((v) => !v)), [preserveScroll]);
-
-  const diff = data.diff ?? data.patch;
-  const diffLines = useMemo(() => (diff ? splitOutputLines(diff) : []), [diff]);
+  const { open, toggle } = useCardDisclosure(data.isError || !!data.interrupted, preserveScroll);
   const outputLines = useMemo(() => splitOutputLines(data.outputText), [data.outputText]);
-  const hiddenOutput = Math.max(0, outputLines.length - OUTPUT_PREVIEW_LINES);
-  const hiddenDiff = Math.max(0, diffLines.length - DIFF_PREVIEW_LINES);
-
   const isBash = data.toolName === "bash";
-  const subject = summarizeInput(data.input);
-  const hasResultDetails = summarizeResultDetails(data.resultDetails) !== null;
-  const expandable =
-    data.input !== undefined ||
-    hasResultDetails ||
-    hiddenDiff > 0 ||
-    (diff ? outputLines.length > 0 : hiddenOutput > 0);
+  const subject = summarizeInput(data.toolName, data.input);
+  const diffLines = useMemo(() => (data.diff ? splitOutputLines(data.diff) : []), [data.diff]);
+  const patchLines = useMemo(() => (data.patch ? splitOutputLines(data.patch) : []), [data.patch]);
+  const hasDistinctResultContent =
+    Object.hasOwn(data, "resultContent") &&
+    !(
+      typeof data.resultContent === "string" &&
+      data.resultContent.length > 0 &&
+      data.resultContent === data.outputText
+    );
+  const truncation = isObjectRecord(data.resultDetails) ? data.resultDetails.truncation : undefined;
+  const resultSummary = [
+    outputLines.length > 0 ? formatLineCount(outputLines.length) : null,
+    data.outputImages?.length
+      ? `${data.outputImages.length.toLocaleString()} ${data.outputImages.length === 1 ? "image" : "images"}`
+      : null,
+    data.diff !== undefined || data.patch !== undefined ? "changes" : null,
+    isObjectRecord(truncation) && truncation.truncated === true ? "truncated" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const status = data.isStreaming
+    ? "running"
+    : data.isError
+      ? "error"
+      : data.interrupted
+        ? "interrupted"
+        : "complete";
 
   const header = (
     <>
@@ -606,83 +737,85 @@ const ToolCallBlock = memo(function ToolCallBlock({
           {subject}
         </FadeText>
       )}
-      {data.isStreaming && <Spinner className="tool-card__spinner" />}
-      {data.isError && <span className="tool-card__badge">error</span>}
-      {data.interrupted && !data.isError && (
-        <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+      {(resultSummary || data.isStreaming || data.isError || data.interrupted) && (
+        <span className="tool-card__header-trailing">
+          {resultSummary && <span className="tool-card__summary-meta">{resultSummary}</span>}
+          {data.isStreaming && <Spinner className="tool-card__spinner" />}
+          {data.isError && <span className="tool-card__badge">error</span>}
+          {data.interrupted && !data.isError && (
+            <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+          )}
+        </span>
       )}
     </>
   );
-
-  let body: React.ReactNode = null;
-  if (open) {
-    const argsNode = renderArgs(data.input);
-    const metadataNode = renderResultDetails(data.resultDetails);
-    const diffNode = diff ? (
-      <div className="tool-card__section">
-        <div className="tool-card__section-header">
-          <span className="tool-card__section-title">diff</span>
-          <span className="tool-card__section-meta">{formatLineCount(diffLines.length)}</span>
-        </div>
-        <ToolScrollWell diff>
-          <DiffBlock diff={diff} />
-        </ToolScrollWell>
-      </div>
-    ) : null;
-    const outputNode = outputLines.length > 0 ? <VirtualizedOutput text={data.outputText} /> : null;
-    body = (
-      <div className="tool-card__body tool-card__body--open">
-        <div className="tool-card__detail">
-          {argsNode}
-          {metadataNode}
-          {diffNode}
-          {outputNode}
-        </div>
-      </div>
-    );
-  } else if (diff) {
-    // Diffs truncate from the bottom — the head is the interesting part
-    body = (
-      <div className="tool-card__body">
-        <ToolScrollWell>
-          <DiffBlock
-            diff={hiddenDiff > 0 ? diffLines.slice(0, DIFF_PREVIEW_LINES).join("\n") : diff}
-          />
-        </ToolScrollWell>
-        {hiddenDiff > 0 && (
-          <div className="tool-card__more">
-            … {hiddenDiff} more {pluralLines(hiddenDiff)}
-          </div>
-        )}
-      </div>
-    );
-  } else if (outputLines.length > 0) {
-    // Output truncates from the top — the tail is the interesting part
-    body = (
-      <div className="tool-card__body">
-        {hiddenOutput > 0 && (
-          <div className="tool-card__more">
-            … {hiddenOutput} earlier {pluralLines(hiddenOutput)}
-          </div>
-        )}
-        <ToolScrollWell>
-          <pre className="tool-card__output">
-            {outputLines.slice(-OUTPUT_PREVIEW_LINES).join("\n")}
-          </pre>
-        </ToolScrollWell>
-      </div>
-    );
-  }
 
   return (
     <ToolCardShell
       isError={data.isError}
       open={open}
-      expandable={expandable}
       onToggle={toggle}
+      accessibleLabel={`${data.toolName} tool call`}
+      accessibleSummary={
+        [
+          subject,
+          resultSummary,
+          data.isStreaming ? "running" : null,
+          data.isError ? "error" : null,
+          data.interrupted && !data.isError ? "interrupted" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined
+      }
       header={header}
     >
-      {body}
+      <ProvenanceGrid
+        values={[
+          ["Tool", data.toolName],
+          ["Tool call ID", data.toolCallId],
+          ["Status", status],
+        ]}
+      />
+      {data.input === undefined ? (
+        <EmptySection label="Input">No input was supplied.</EmptySection>
+      ) : (
+        <StructuredPayload label="Input" value={data.input} />
+      )}
+      {data.diff !== undefined && (
+        <section className="tool-card__section">
+          <SectionHeader
+            title={data.patch === data.diff ? "Changes" : "Diff"}
+            meta={formatLineCount(diffLines.length)}
+            copyText={data.diff}
+          />
+          <DiffPayload text={data.diff} lines={diffLines} />
+        </section>
+      )}
+      {data.patch !== undefined && data.patch !== data.diff && (
+        <section className="tool-card__section">
+          <SectionHeader
+            title="Patch"
+            meta={formatLineCount(patchLines.length)}
+            copyText={data.patch}
+          />
+          <DiffPayload text={data.patch} lines={patchLines} />
+        </section>
+      )}
+      {outputLines.length > 0 ? (
+        <VirtualizedOutput text={data.outputText} />
+      ) : (
+        <EmptySection label="Output">The tool returned no text output.</EmptySection>
+      )}
+      {data.outputImages && <ImageArtifacts images={data.outputImages} />}
+      {hasDistinctResultContent && (
+        <StructuredPayload label="Result content" value={data.resultContent} />
+      )}
+      {data.resultDetails !== undefined && (
+        <StructuredPayload label="Result metadata" value={data.resultDetails} />
+      )}
+      {data.resultMetadata !== undefined && (
+        <StructuredPayload label="Result fields" value={data.resultMetadata} />
+      )}
     </ToolCardShell>
   );
 });
@@ -710,13 +843,17 @@ const BashBlock = memo(function BashBlock({
   data: BashBlockData;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => preserveScroll(() => setOpen((v) => !v)), [preserveScroll]);
-
   const outputLines = useMemo(() => splitOutputLines(data.outputText), [data.outputText]);
-  const hiddenOutput = Math.max(0, outputLines.length - OUTPUT_PREVIEW_LINES);
   const isError = data.exitCode != null && data.exitCode !== 0;
-  const expandable = hiddenOutput > 0;
+  const wasInterrupted = !!data.interrupted || !!data.cancelled;
+  const { open, toggle } = useCardDisclosure(isError || wasInterrupted, preserveScroll);
+  const status = data.isStreaming
+    ? "running"
+    : isError
+      ? `exited with code ${data.exitCode}`
+      : wasInterrupted
+        ? "interrupted"
+        : "complete";
 
   const header = (
     <>
@@ -724,10 +861,24 @@ const BashBlock = memo(function BashBlock({
       <FadeText className="tool-card__subject tool-card__subject--command" title={data.command}>
         {data.command}
       </FadeText>
-      {data.isStreaming && <Spinner className="tool-card__spinner" />}
-      {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
-      {data.interrupted && !isError && (
-        <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+      {(outputLines.length > 0 ||
+        data.isStreaming ||
+        isError ||
+        wasInterrupted ||
+        data.truncated) && (
+        <span className="tool-card__header-trailing">
+          {outputLines.length > 0 && (
+            <span className="tool-card__summary-meta">{formatLineCount(outputLines.length)}</span>
+          )}
+          {data.isStreaming && <Spinner className="tool-card__spinner" />}
+          {isError && <span className="tool-card__badge">exit {data.exitCode}</span>}
+          {wasInterrupted && !isError && (
+            <span className="tool-card__badge tool-card__badge--interrupted">interrupted</span>
+          )}
+          {data.truncated && !isError && !wasInterrupted && (
+            <span className="tool-card__badge tool-card__badge--neutral">truncated</span>
+          )}
+        </span>
       )}
     </>
   );
@@ -736,27 +887,51 @@ const BashBlock = memo(function BashBlock({
     <ToolCardShell
       isError={isError}
       open={open}
-      expandable={expandable}
       onToggle={toggle}
+      accessibleLabel="shell command"
+      accessibleSummary={
+        [
+          firstNonEmptyLine(data.command),
+          outputLines.length > 0 ? formatLineCount(outputLines.length) : null,
+          data.isStreaming ? "running" : null,
+          isError ? `exit ${data.exitCode}` : null,
+          wasInterrupted && !isError ? "interrupted" : null,
+          data.truncated && !isError && !wasInterrupted ? "truncated" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined
+      }
       header={header}
     >
-      {outputLines.length > 0 && (
-        <div className={`tool-card__body${open ? " tool-card__body--open" : ""}`}>
-          {!open && hiddenOutput > 0 && (
-            <div className="tool-card__more">
-              … {hiddenOutput} earlier {pluralLines(hiddenOutput)}
-            </div>
-          )}
-          {open ? (
-            <VirtualizedOutput text={data.outputText} />
-          ) : (
-            <ToolScrollWell>
-              <pre className="tool-card__output">
-                {outputLines.slice(-OUTPUT_PREVIEW_LINES).join("\n")}
-              </pre>
-            </ToolScrollWell>
-          )}
-        </div>
+      <ProvenanceGrid
+        values={[
+          ["Kind", "Direct shell command"],
+          ["Status", status],
+          ...(data.timestamp !== undefined
+            ? [["Timestamp", data.timestamp] as [string, React.ReactNode]]
+            : []),
+        ]}
+      />
+      <StructuredPayload label="Command" value={data.command} />
+      {outputLines.length > 0 ? (
+        <VirtualizedOutput text={data.outputText} />
+      ) : (
+        <EmptySection label="Output">The command produced no output.</EmptySection>
+      )}
+      {(data.truncated ||
+        data.fullOutputPath !== undefined ||
+        data.excludeFromContext !== undefined ||
+        data.cancelled !== undefined) && (
+        <StructuredPayload
+          label="Execution metadata"
+          value={{
+            cancelled: data.cancelled ?? false,
+            truncated: data.truncated ?? false,
+            fullOutputPath: data.fullOutputPath ?? null,
+            excludeFromContext: data.excludeFromContext ?? false,
+            timestamp: data.timestamp ?? null,
+          }}
+        />
       )}
     </ToolCardShell>
   );
@@ -768,6 +943,10 @@ interface ActivityCardProps {
   content?: string | undefined;
   badge?: string | undefined;
   isError?: boolean | undefined;
+  attention?: boolean | undefined;
+  metadata?: unknown;
+  images?: string[] | undefined;
+  additionalContent?: React.ReactNode;
   preserveScroll: (mutate: () => void) => void;
 }
 
@@ -777,23 +956,18 @@ const ActivityCard = memo(function ActivityCard({
   content,
   badge,
   isError = false,
+  attention = false,
+  metadata,
+  images,
+  additionalContent,
   preserveScroll,
 }: ActivityCardProps): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => preserveScroll(() => setOpen((v) => !v)), [preserveScroll]);
-
-  const text = content?.trim() ?? "";
-  const lines = useMemo(() => splitOutputLines(text), [text]);
-  const hiddenLines = Math.max(0, lines.length - OUTPUT_PREVIEW_LINES);
-  const expandable = text.length > 0;
-  const linePreview = lines.slice(0, OUTPUT_PREVIEW_LINES).join("\n");
-  const preview =
-    linePreview.length > ACTIVITY_PREVIEW_CHARS
-      ? `${linePreview.slice(0, ACTIVITY_PREVIEW_CHARS - 1)}…`
-      : linePreview;
-  const hasHiddenPreview = hiddenLines > 0 || preview !== text;
-  const showCollapsedBody = label === "context" || lines.length > 1 || text.length > 120;
-  const showBody = text.length > 0 && (open || showCollapsedBody);
+  const text = content ?? "";
+  const hasRetainedContent = content !== undefined;
+  const whitespaceOnly = hasRetainedContent && text.trim().length === 0;
+  const { open, toggle } = useCardDisclosure(isError || attention, preserveScroll);
+  const largeContent =
+    text.length >= LARGE_STRUCTURED_TEXT_CHARS || splitOutputLines(text).length >= LARGE_DIFF_LINES;
 
   const header = (
     <>
@@ -807,26 +981,43 @@ const ActivityCard = memo(function ActivityCard({
     <ToolCardShell
       isError={isError}
       open={open}
-      expandable={expandable}
       onToggle={toggle}
+      accessibleLabel={`${label} activity`}
+      accessibleSummary={[subject, badge].filter(Boolean).join(" · ") || undefined}
       header={header}
     >
-      {showBody && (
-        <div className="tool-card__body">
-          <ToolScrollWell>
-            <div className="transcript-block__content activity-card__markdown markdown-body">
-              <Markdown>{open ? text : preview}</Markdown>
-            </div>
-          </ToolScrollWell>
-          {!open && hasHiddenPreview && (
-            <div className="tool-card__more">
-              {hiddenLines > 0
-                ? `… ${hiddenLines} more ${pluralLines(hiddenLines)}`
-                : "… more details"}
-            </div>
+      {hasRetainedContent ? (
+        <section className="tool-card__section">
+          <SectionHeader
+            title={label === "context" ? "Summary" : "Message"}
+            meta={formatCharCount(text.length)}
+            copyText={text}
+          />
+          {largeContent ? (
+            <textarea
+              className="tool-card__large-payload"
+              aria-label="Complete activity message"
+              readOnly
+              value={text}
+            />
+          ) : whitespaceOnly ? (
+            <ToolScrollWell label="Complete activity message">
+              <pre className="tool-card__structured-value activity-card__raw">{text}</pre>
+            </ToolScrollWell>
+          ) : (
+            <ToolScrollWell label="Complete activity message">
+              <div className="transcript-block__content activity-card__markdown markdown-body">
+                <Markdown>{text}</Markdown>
+              </div>
+            </ToolScrollWell>
           )}
-        </div>
+        </section>
+      ) : (
+        <EmptySection label="Message">No message content was retained.</EmptySection>
       )}
+      {images && <ImageArtifacts images={images} label="Message images" />}
+      {metadata !== undefined && <StructuredPayload label="Metadata" value={metadata} />}
+      {additionalContent}
     </ToolCardShell>
   );
 });
@@ -839,6 +1030,10 @@ const CompactionBlock = memo(function CompactionBlock({
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
   const tokens = typeof data.tokensBefore === "number" ? data.tokensBefore.toLocaleString() : null;
+  const estimatedTokensAfter =
+    typeof data.estimatedTokensAfter === "number"
+      ? data.estimatedTokensAfter.toLocaleString()
+      : null;
   const reason = data.reason ? data.reason : null;
   const badge = data.aborted ? "aborted" : data.errorMessage ? "error" : undefined;
   const outcome = data.errorMessage
@@ -846,9 +1041,24 @@ const CompactionBlock = memo(function CompactionBlock({
     : data.aborted
       ? "Compaction aborted"
       : "Context compacted";
-  const subjectParts = [outcome, reason, tokens ? `${tokens} tokens summarized` : null];
+  const subjectParts = [
+    outcome,
+    reason,
+    tokens ? `${tokens} tokens summarized` : null,
+    estimatedTokensAfter ? `≈${estimatedTokensAfter} tokens after` : null,
+  ];
   const subject = subjectParts.filter(Boolean).join(" · ");
   const content = data.errorMessage ? data.errorMessage : data.summary;
+  const metadata = {
+    reason: data.reason ?? null,
+    tokensBefore: data.tokensBefore ?? null,
+    estimatedTokensAfter: data.estimatedTokensAfter ?? null,
+    firstKeptEntryId: data.firstKeptEntryId ?? null,
+    aborted: data.aborted ?? false,
+    willRetry: data.willRetry ?? false,
+    fromHook: data.fromHook ?? false,
+    ...(data.details !== undefined ? { details: data.details } : {}),
+  };
 
   return (
     <ActivityCard
@@ -857,24 +1067,79 @@ const CompactionBlock = memo(function CompactionBlock({
       content={content}
       badge={badge ?? undefined}
       isError={!!data.errorMessage}
+      attention={!!data.aborted || !!data.willRetry}
+      metadata={metadata}
+      preserveScroll={preserveScroll}
+    />
+  );
+});
+
+const BranchSummaryBlock = memo(function BranchSummaryBlock({
+  data,
+  preserveScroll,
+}: {
+  data: BranchSummaryBlockData;
+  preserveScroll: (mutate: () => void) => void;
+}): React.ReactElement {
+  const subject = data.fromId ? `Branch summarized · from ${data.fromId}` : "Branch summarized";
+  return (
+    <ActivityCard
+      label="branch"
+      subject={subject}
+      content={data.summary}
+      metadata={{
+        fromId: data.fromId ?? null,
+        fromHook: data.fromHook ?? false,
+        ...(data.details !== undefined ? { details: data.details } : {}),
+      }}
       preserveScroll={preserveScroll}
     />
   );
 });
 
 const CustomMessageBlock = memo(function CustomMessageBlock({
+  sessionId,
   data,
   preserveScroll,
 }: {
+  sessionId: SessionId;
   data: CustomMessageBlockData;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const subject = summarizeActivityContent(data.content);
+  const contentSummary = summarizeActivityContent(data.content);
+  const subject = [data.customType, contentSummary].filter(Boolean).join(" · ") || null;
+  const canRenderExtension =
+    !!data.customType && typeof data.timestamp === "number" && Number.isFinite(data.timestamp);
+  const hasDistinctRawContent =
+    Object.hasOwn(data, "rawContent") &&
+    !(typeof data.rawContent === "string" && data.rawContent === data.content);
   return (
     <ActivityCard
-      label="notice"
+      label={data.customType ? "extension" : "notice"}
       subject={subject}
       content={data.content}
+      images={data.images}
+      metadata={{
+        customType: data.customType ?? null,
+        timestamp: data.timestamp ?? null,
+        ...(data.details !== undefined ? { details: data.details } : {}),
+      }}
+      additionalContent={
+        hasDistinctRawContent || canRenderExtension ? (
+          <>
+            {hasDistinctRawContent && (
+              <StructuredPayload label="Raw content" value={data.rawContent} />
+            )}
+            {canRenderExtension && (
+              <ExtensionMessageRender
+                sessionId={sessionId}
+                customType={data.customType as string}
+                timestamp={data.timestamp as number}
+              />
+            )}
+          </>
+        ) : undefined
+      }
       preserveScroll={preserveScroll}
     />
   );
@@ -965,6 +1230,111 @@ function observeCustomEntryResize(element: Element | null, callback: () => void)
   };
 }
 
+const ExtensionMessageRender = memo(function ExtensionMessageRender({
+  sessionId,
+  customType,
+  timestamp,
+}: {
+  sessionId: SessionId;
+  customType: string;
+  timestamp: number;
+}): React.ReactElement {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [cols, setCols] = useState(100);
+  const [rendered, setRendered] = useState<RenderedEntry>();
+  const hostInstanceId = useSessionsStore(
+    (state) => authoritySnapshotFor(state.sessions.get(sessionId))?.owner.hostInstanceId,
+  );
+  const sessionEpoch =
+    useSessionsStore(
+      (state) => authoritySnapshotFor(state.sessions.get(sessionId))?.owner.sessionEpoch,
+    ) ?? 0;
+  const runtime = useMemo(
+    () => (hostInstanceId ? { hostInstanceId, sessionEpoch } : undefined),
+    [hostInstanceId, sessionEpoch],
+  );
+
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host || typeof ResizeObserver === "undefined") return;
+    const update = (): void => {
+      const width = host.getBoundingClientRect().width;
+      if (width <= 0) return;
+      const next = Math.max(20, Math.min(240, Math.floor(width / 8)));
+      setCols((current) => (current === next ? current : next));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!runtime) {
+      setRendered(undefined);
+      return;
+    }
+    const session = useSessionsStore.getState().sessions.get(sessionId);
+    const semantic = session?.authorityProjection?.semantic;
+    const cursor =
+      semantic?.state === "following" &&
+      semantic.cursor.hostInstanceId === runtime.hostInstanceId &&
+      semantic.cursor.sessionEpoch === runtime.sessionEpoch
+        ? semantic.cursor
+        : undefined;
+    void querySession(
+      sessionId,
+      { type: "render_message", customType, timestamp, cols, expanded: true },
+      { owner: runtime, ...(cursor ? { cursor } : {}) },
+    )
+      .then((result) => {
+        if (
+          cancelled ||
+          result.status !== "ok" ||
+          result.owner.hostInstanceId !== runtime.hostInstanceId ||
+          result.owner.sessionEpoch !== runtime.sessionEpoch ||
+          !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+        )
+          return;
+        const next = result.response.success
+          ? (result.response.data as RenderedEntry | undefined)
+          : undefined;
+        setRendered(next && typeof next.rendered === "boolean" ? next : undefined);
+      })
+      .catch(() => {
+        if (
+          !cancelled &&
+          sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
+        ) {
+          setRendered(undefined);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cols, customType, runtime, sessionId, timestamp]);
+
+  return (
+    <div ref={hostRef} className="tool-card__extension-host">
+      {rendered?.rendered && (
+        <section className="tool-card__section">
+          <SectionHeader
+            title="Extension view"
+            meta={rendered.error ? "renderer error" : "custom rendering"}
+            copyText={rendered.ansi ?? ""}
+          />
+          <pre
+            className={`tool-card__extension-render${rendered.error ? " tool-card__extension-render--error" : ""}`}
+          >
+            <AnsiText text={rendered.ansi ?? ""} />
+          </pre>
+        </section>
+      )}
+    </div>
+  );
+});
+
 const CustomEntryBlock = memo(function CustomEntryBlock({
   sessionId,
   data,
@@ -998,7 +1368,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
   const [expanded, setExpanded] = useState(false);
   const [rendered, setRendered] = useState<RenderedEntry>();
 
-  const visible = rendered?.rendered === true;
+  const rendererVisible = rendered?.rendered === true;
 
   useLayoutEffect(() => {
     const host = hostRef.current;
@@ -1008,7 +1378,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
     const scheduleMeasure = (): void => {
       queueCustomEntryMeasurement({
         host,
-        content: visible ? (contentRef.current ?? undefined) : undefined,
+        content: rendererVisible ? (contentRef.current ?? undefined) : undefined,
         measurementBox,
         probe,
         applyColumns: (next) => setCols((current) => (current === next ? current : next)),
@@ -1030,7 +1400,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
       stopContentObservation();
       cancelCustomEntryMeasurement(host);
     };
-  }, [visible]);
+  }, [rendererVisible]);
 
   useEffect(() => {
     renderedEpochRef.current = sessionEpoch;
@@ -1039,7 +1409,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
 
   useEffect(() => {
     let cancelled = false;
-    if (!runtime) {
+    if (!runtime || !expanded) {
       setRendered(undefined);
       return;
     }
@@ -1084,7 +1454,7 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
           !sessionMatchesRuntime(useSessionsStore.getState().sessions.get(sessionId), runtime)
         )
           return;
-        // Hide entries without a renderer rather than showing stale extension data.
+        // The app-owned raw record remains visible if extension rendering fails.
         setRendered(undefined);
       });
     return () => {
@@ -1092,35 +1462,59 @@ const CustomEntryBlock = memo(function CustomEntryBlock({
     };
   }, [sessionId, data.entryId, cols, expanded, sessionEpoch, runtime]);
 
+  const toggle = useCallback(
+    () => preserveScroll(() => setExpanded((value) => !value)),
+    [preserveScroll],
+  );
+
   return (
-    <>
+    <div ref={hostRef} className="custom-entry">
       <span ref={measurementBoxRef} className="custom-entry__measurement-box" aria-hidden="true">
         <span ref={measureRef} className="custom-entry__measure">
           0000000000
         </span>
       </span>
-      <div
-        ref={hostRef}
-        className={`custom-entry${visible ? " custom-entry--visible" : ""}${rendered?.error ? " custom-entry--error" : ""}`}
-      >
-        {visible && (
+      <ToolCardShell
+        isError={!!rendered?.error}
+        open={expanded}
+        onToggle={toggle}
+        accessibleLabel={`${data.customType} extension entry`}
+        header={
           <>
-            <button
-              type="button"
-              className="custom-entry__toggle icon-btn"
-              aria-label={`${expanded ? "Collapse" : "Expand"} ${data.customType} extension entry`}
-              title={expanded ? "Collapse extension entry" : "Expand extension entry"}
-              onClick={() => preserveScroll(() => setExpanded((value) => !value))}
-            >
-              <IconChevronRight className="custom-entry__chevron" />
-            </button>
-            <pre ref={contentRef} className="custom-entry__content">
-              <AnsiText text={rendered.ansi ?? ""} />
-            </pre>
+            <span className="tool-card__name">extension</span>
+            <FadeText className="tool-card__subject">{data.customType}</FadeText>
+            {rendered?.error && <span className="tool-card__badge">renderer error</span>}
           </>
+        }
+      >
+        <ProvenanceGrid
+          values={[
+            ["Custom type", data.customType],
+            ["Entry ID", data.entryId],
+          ]}
+        />
+        {rendererVisible && (
+          <section className="tool-card__section">
+            <SectionHeader
+              title="Extension view"
+              meta={rendered?.error ? "renderer error" : "custom rendering"}
+              copyText={rendered?.ansi ?? ""}
+            />
+            <pre
+              ref={contentRef}
+              className={`tool-card__extension-render${rendered?.error ? " tool-card__extension-render--error" : ""}`}
+            >
+              <AnsiText text={rendered?.ansi ?? ""} />
+            </pre>
+          </section>
         )}
-      </div>
-    </>
+        {data.data === undefined ? (
+          <EmptySection label="Raw data">No raw entry data was retained.</EmptySection>
+        ) : (
+          <StructuredPayload label="Raw data" value={data.data} />
+        )}
+      </ToolCardShell>
+    </div>
   );
 });
 
@@ -1137,6 +1531,12 @@ type TranscriptRenderItem =
 interface CompactGroupStats {
   hasThinking: boolean;
   toolCalls: number;
+  compactions: number;
+  branchSummaries: number;
+  notices: number;
+  extensionEntries: number;
+  errors: number;
+  interrupted: number;
 }
 
 type CompactRenderItem =
@@ -1171,14 +1571,51 @@ function renderItemStreaming(item: TranscriptRenderItem): boolean {
 }
 
 function compactGroupStats(items: readonly TranscriptRenderItem[]): CompactGroupStats {
-  const stats: CompactGroupStats = { hasThinking: false, toolCalls: 0 };
+  const stats: CompactGroupStats = {
+    hasThinking: false,
+    toolCalls: 0,
+    compactions: 0,
+    branchSummaries: 0,
+    notices: 0,
+    extensionEntries: 0,
+    errors: 0,
+    interrupted: 0,
+  };
   for (const item of items) {
     if (item.kind === "assistant_segment") {
       if (item.segment.kind === "thinking") stats.hasThinking = true;
       continue;
     }
-    if (item.block.type === "tool_call" || item.block.type === "bash") {
-      stats.toolCalls += 1;
+    switch (item.block.type) {
+      case "tool_call":
+        stats.toolCalls += 1;
+        if (item.block.data.isError) stats.errors += 1;
+        if (item.block.data.interrupted) stats.interrupted += 1;
+        break;
+      case "bash":
+        stats.toolCalls += 1;
+        if (item.block.data.exitCode != null && item.block.data.exitCode !== 0) stats.errors += 1;
+        if (item.block.data.interrupted || item.block.data.cancelled) stats.interrupted += 1;
+        break;
+      case "compaction":
+        stats.compactions += 1;
+        if (item.block.data.errorMessage) stats.errors += 1;
+        if (item.block.data.aborted) stats.interrupted += 1;
+        break;
+      case "branch_summary":
+        stats.branchSummaries += 1;
+        break;
+      case "custom_message":
+        stats.notices += 1;
+        break;
+      case "custom_entry":
+        stats.extensionEntries += 1;
+        break;
+      case "error":
+        stats.errors += 1;
+        break;
+      default:
+        break;
     }
   }
   return stats;
@@ -1192,6 +1629,12 @@ function mergeCompactGroupStats(
   return {
     hasThinking: archived.hasThinking || live.hasThinking,
     toolCalls: archived.toolCalls + live.toolCalls,
+    compactions: archived.compactions + live.compactions,
+    branchSummaries: archived.branchSummaries + live.branchSummaries,
+    notices: archived.notices + live.notices,
+    extensionEntries: archived.extensionEntries + live.extensionEntries,
+    errors: archived.errors + live.errors,
+    interrupted: archived.interrupted + live.interrupted,
   };
 }
 
@@ -1200,6 +1643,26 @@ function summarizeCompactGroup(stats: CompactGroupStats): string {
   if (stats.hasThinking) parts.push("Thinking");
   if (stats.toolCalls > 0)
     parts.push(`${stats.toolCalls.toLocaleString()} tool call${stats.toolCalls === 1 ? "" : "s"}`);
+  if (stats.compactions > 0)
+    parts.push(
+      `${stats.compactions.toLocaleString()} compaction${stats.compactions === 1 ? "" : "s"}`,
+    );
+  if (stats.branchSummaries > 0)
+    parts.push(
+      `${stats.branchSummaries.toLocaleString()} branch ${stats.branchSummaries === 1 ? "summary" : "summaries"}`,
+    );
+  if (stats.notices > 0)
+    parts.push(`${stats.notices.toLocaleString()} notice${stats.notices === 1 ? "" : "s"}`);
+  if (stats.extensionEntries > 0)
+    parts.push(
+      `${stats.extensionEntries.toLocaleString()} extension ${stats.extensionEntries === 1 ? "entry" : "entries"}`,
+    );
+  if (stats.errors > 0)
+    parts.push(`${stats.errors.toLocaleString()} ${stats.errors === 1 ? "error" : "errors"}`);
+  if (stats.interrupted > 0)
+    parts.push(
+      `${stats.interrupted.toLocaleString()} interrupted ${stats.interrupted === 1 ? "item" : "items"}`,
+    );
   return parts.length > 0 ? parts.join(", ") : "Activity";
 }
 
@@ -1291,8 +1754,16 @@ function TranscriptItemView({
       return <BashBlock data={block.data} preserveScroll={preserveScroll} />;
     case "compaction":
       return <CompactionBlock data={block.data} preserveScroll={preserveScroll} />;
+    case "branch_summary":
+      return <BranchSummaryBlock data={block.data} preserveScroll={preserveScroll} />;
     case "custom_message":
-      return <CustomMessageBlock data={block.data} preserveScroll={preserveScroll} />;
+      return (
+        <CustomMessageBlock
+          sessionId={sessionId}
+          data={block.data}
+          preserveScroll={preserveScroll}
+        />
+      );
     case "custom_entry":
       return (
         <CustomEntryBlock sessionId={sessionId} data={block.data} preserveScroll={preserveScroll} />
@@ -1306,6 +1777,12 @@ function TranscriptItemView({
 
 const EMPTY_COMPACT_GROUP_ITEMS: TranscriptRenderItem[] = [];
 const EMPTY_COMPACT_RENDER_ITEMS: CompactRenderItem[] = [];
+
+// Bound both archive presentation commits and the child-card commits inside
+// an expanded compact group. A compact group can represent thousands of
+// archived blocks while remaining a single transcript disclosure, so counting
+// only the outer render item would otherwise bypass cooperative mounting.
+const TRANSCRIPT_RENDER_BATCH_SIZE = 100;
 
 // The archive/live boundary group keeps its archived portion behind this memo
 // boundary. Live streaming can update the disclosure summary and live items
@@ -1321,22 +1798,46 @@ const CompactTranscriptGroupItems = memo(function CompactTranscriptGroupItems({
   source: "archived" | "live" | "group";
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  // Render tests install this dev-only probe to enforce the archive memo
-  // invariant while a boundary disclosure is open. Production builds erase
-  // the branch, and normal development has no hook installed.
+  const [visibleItemCount, setVisibleItemCount] = useState(() =>
+    Math.min(items.length, TRANSCRIPT_RENDER_BATCH_SIZE),
+  );
+  const effectiveVisibleItemCount = Math.min(visibleItemCount, items.length);
+
+  useEffect(() => {
+    if (visibleItemCount > items.length) {
+      setVisibleItemCount(items.length);
+      return;
+    }
+    if (visibleItemCount >= items.length) return;
+    const frame = requestAnimationFrame(() => {
+      setVisibleItemCount((current) =>
+        Math.min(items.length, current + TRANSCRIPT_RENDER_BATCH_SIZE),
+      );
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [items.length, visibleItemCount]);
+
+  // Render tests install this dev-only probe to enforce both the archive memo
+  // invariant and the bounded child-mount invariant while a disclosure is
+  // open. Production builds erase the branch, and normal development has no
+  // hook installed.
   if (import.meta.env.DEV) {
     const hook = (
       window as unknown as {
         __pivisTestCompactGroupItemsRender?:
-          | ((detail: { source: "archived" | "live" | "group"; itemCount: number }) => void)
+          | ((detail: {
+              source: "archived" | "live" | "group";
+              itemCount: number;
+              visibleItemCount: number;
+            }) => void)
           | undefined;
       }
     ).__pivisTestCompactGroupItemsRender;
-    hook?.({ source, itemCount: items.length });
+    hook?.({ source, itemCount: items.length, visibleItemCount: effectiveVisibleItemCount });
   }
   return (
     <>
-      {items.map((item) => (
+      {items.slice(0, effectiveVisibleItemCount).map((item) => (
         <TranscriptItemView
           key={renderItemKey(item)}
           sessionId={sessionId}
@@ -1354,6 +1855,7 @@ const CompactTranscriptGroup = memo(function CompactTranscriptGroup({
   items,
   summary,
   streaming,
+  attention = false,
   preserveScroll,
 }: {
   sessionId: SessionId;
@@ -1361,33 +1863,29 @@ const CompactTranscriptGroup = memo(function CompactTranscriptGroup({
   items: TranscriptRenderItem[];
   summary: string;
   streaming: boolean;
+  attention?: boolean | undefined;
   preserveScroll: (mutate: () => void) => void;
 }): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const toggle = useCallback(() => preserveScroll(() => setOpen((v) => !v)), [preserveScroll]);
+  const { open, toggle } = useCardDisclosure(attention, preserveScroll);
+  const contentId = useId();
 
   return (
-    <div className={`compact-transcript-group${open ? " compact-transcript-group--open" : ""}`}>
+    <div
+      className={`compact-transcript-group${open ? " compact-transcript-group--open" : ""}`}
+      aria-busy={streaming || undefined}
+    >
       <button
         type="button"
         className="compact-transcript-group__summary"
         onClick={toggle}
         aria-expanded={open}
+        aria-controls={contentId}
       >
         <IconChevronRight className="compact-transcript-group__chevron" />
         <span>{summary}</span>
-        {streaming && <Spinner className="compact-transcript-group__spinner" />}
       </button>
       {open && (
-        <div className="compact-transcript-group__content">
-          <button
-            type="button"
-            className="compact-transcript-group__collapse-rail"
-            onClick={toggle}
-            aria-expanded={open}
-            aria-label="Collapse activity"
-            title="Collapse activity"
-          />
+        <div id={contentId} className="compact-transcript-group__content">
           {archivedItems.length > 0 && (
             <CompactTranscriptGroupItems
               sessionId={sessionId}
@@ -1430,12 +1928,10 @@ interface ArchivedTranscriptProps {
 // history pagination: every block is already in renderer state and all chunks
 // are mounted automatically. Keeping each commit bounded prevents one large
 // React/DOM/layout task from freezing the renderer.
-const ARCHIVE_RENDER_BATCH_SIZE = 100;
-
 function chunkArchiveItems<T>(items: T[]): T[][] {
   const chunks: T[][] = [];
-  for (let start = 0; start < items.length; start += ARCHIVE_RENDER_BATCH_SIZE) {
-    chunks.push(items.slice(start, start + ARCHIVE_RENDER_BATCH_SIZE));
+  for (let start = 0; start < items.length; start += TRANSCRIPT_RENDER_BATCH_SIZE) {
+    chunks.push(items.slice(start, start + TRANSCRIPT_RENDER_BATCH_SIZE));
   }
   return chunks;
 }
@@ -1489,6 +1985,7 @@ const ArchivedCompactChunk = memo(function ArchivedCompactChunk({
             items={item.items}
             summary={item.summary}
             streaming={item.streaming}
+            attention={item.stats.errors > 0 || item.stats.interrupted > 0}
             preserveScroll={preserveScroll}
           />
         ),
@@ -1602,6 +2099,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   const prevScrollHeightRef = useRef(0);
   const prevClientHeightRef = useRef(0);
   const prevScrollTopRef = useRef(0);
+  const disclosureAnchorRef = useRef<number | null>(null);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
 
   const updateScrollFades = useCallback(() => {
@@ -1637,22 +2135,24 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_MS;
   }, []);
 
-  // Preserve scroll position during expand/collapse toggles.
-  // When the user is scrolled up (not pinned), we snapshot
-  // scrollTop before the mutation and restore it after layout commits.
-  const preserveScroll = useCallback((mutate: () => void) => {
-    const el = scrollRef.current;
-    if (!el || pinnedRef.current) {
+  // Disclosure actions are reading navigation, not streaming output. Anchor
+  // the current viewport even when it was following the bottom so expanding a
+  // card does not move the clicked header off-screen. Normal output deltas and
+  // automatic attention expansion still retain bottom-follow behavior.
+  const preserveScroll = useCallback(
+    (mutate: () => void) => {
+      const el = scrollRef.current;
+      if (!el) {
+        mutate();
+        return;
+      }
+      const prevTop = el.scrollTop;
+      disclosureAnchorRef.current = prevTop;
+      setPinned(false);
       mutate();
-      return;
-    }
-    const prevTop = el.scrollTop;
-    mutate();
-    requestAnimationFrame(() => {
-      el.scrollTop = prevTop;
-      prevScrollTopRef.current = el.scrollTop;
-    });
-  }, []);
+    },
+    [setPinned],
+  );
 
   const capturePrependScroll = useCallback((): ArchiveScrollSnapshot | undefined => {
     const el = scrollRef.current;
@@ -1861,6 +2361,18 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const disclosureAnchor = disclosureAnchorRef.current;
+    if (disclosureAnchor !== null) {
+      disclosureAnchorRef.current = null;
+      setPinned(false);
+      el.scrollTop = disclosureAnchor;
+      prevScrollHeightRef.current = el.scrollHeight;
+      prevClientHeightRef.current = el.clientHeight;
+      prevScrollTopRef.current = el.scrollTop;
+      prevBlockCountRef.current = blockCount;
+      updateScrollFades();
+      return;
+    }
     const prevHeight = prevScrollHeightRef.current;
     const prevClientHeight = prevClientHeightRef.current;
     const prevScrollTop = prevScrollTopRef.current;
@@ -1975,6 +2487,10 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
             items={leadingLiveCompactGroup?.items ?? EMPTY_COMPACT_GROUP_ITEMS}
             summary={compactBoundarySummary}
             streaming={compactBoundaryStreaming}
+            attention={
+              (compactBoundaryStats?.errors ?? 0) > 0 ||
+              (compactBoundaryStats?.interrupted ?? 0) > 0
+            }
             preserveScroll={preserveScroll}
           />
         )}
@@ -1994,6 +2510,7 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
                   items={item.items}
                   summary={item.summary}
                   streaming={item.streaming}
+                  attention={item.stats.errors > 0 || item.stats.interrupted > 0}
                   preserveScroll={preserveScroll}
                 />
               ),

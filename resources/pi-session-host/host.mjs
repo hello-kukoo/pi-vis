@@ -945,6 +945,7 @@ process.on("message", async (msg) => {
           !result.acknowledged &&
           panel &&
           panelReconstruction.baseline(msg.panelId)?.revision === msg.revision &&
+          panelReconstruction.baseline(msg.panelId)?.repaintRequired === true &&
           !panelReconstruction.pendingKeyframe(msg.panelId)
         ) {
           // The bounded image overflowed (or was otherwise invalidated). Never

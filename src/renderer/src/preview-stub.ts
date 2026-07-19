@@ -92,6 +92,7 @@ const previewHooks = {
     panelId: number | undefined;
     cols: number | undefined;
     rows: number | undefined;
+    force: boolean;
   }>,
   /** Open a unified panel on demand for focus-ownership regression tests. */
   openUnifiedPanel(): void {
@@ -155,6 +156,13 @@ const previewHooks = {
       },
     });
     useSessionsStore.setState({ sessions });
+  },
+  /** Hold the host between repaint_required and its following keyframe. */
+  emitUnifiedPanelResetOnly(): void {
+    const rec = panelFrames.get(2);
+    if (!rec || typeof rec.sessionId !== "string") return;
+    suppressUnifiedPanelResize = true;
+    resetPreviewPanelAuthority(rec.sessionId as SessionId, 2, "repaint_required");
   },
   /** Supply a complete anchor after emitUnsafeUnifiedReplay(). */
   emitSafeUnifiedReplay(): void {
@@ -420,21 +428,35 @@ function publishPreviewPanel(sessionId: SessionId, payload: Record<string, unkno
   } as unknown as RendererPublication);
 }
 
-function resetPreviewPanelAuthority(sessionId: SessionId, panelId: number): void {
+function resetPreviewPanelAuthority(
+  sessionId: SessionId,
+  panelId: number,
+  kind: "reset" | "repaint_required" = "reset",
+): void {
   const panel = previewPanels.get(previewPanelKey(sessionId, panelId));
   if (!panel) return;
   panel.revision++;
   panel.ansi = "";
   panel.following = false;
-  publishPreviewPanel(sessionId, {
-    kind: "reset",
-    panelKey: `panel:${panelId}`,
-    panelId,
-    overlay: panel.overlay,
-    unified: panel.unified,
-    mode: panel.mode,
-    renderRevision: panel.revision,
-  });
+  publishPreviewPanel(
+    sessionId,
+    kind === "reset"
+      ? {
+          kind,
+          panelKey: `panel:${panelId}`,
+          panelId,
+          overlay: panel.overlay,
+          unified: panel.unified,
+          mode: panel.mode,
+          renderRevision: panel.revision,
+        }
+      : {
+          kind,
+          panelKey: `panel:${panelId}`,
+          reason: "repaint_required",
+          renderRevision: panel.revision,
+        },
+  );
 }
 
 function emitPreviewPanelEvent(sessionIdValue: unknown, event: Record<string, unknown>): void {
@@ -713,6 +735,9 @@ function seedDemoSession(): void {
       data: {
         content:
           "**Session Info**\n\nName: Config loader fix\nFile: ~/.pi/agent/sessions/demo.jsonl\nID: demo-session",
+        customType: "session-info",
+        timestamp: 1784390400000,
+        details: { source: "preview-extension", durable: true },
       },
     },
     {
@@ -985,6 +1010,13 @@ async function handlePreviewRequest(command: Record<string, unknown>): Promise<u
       return response("render_entry", {
         rendered: true,
         ansi: `\u001b[1;35mIndexed files\u001b[0m: 17 (renderer v${customEntryRendererVersion})${detail}`,
+      });
+    }
+    case "render_message": {
+      const cols = Number(command.cols ?? 80);
+      return response("render_message", {
+        rendered: true,
+        ansi: `\u001b[1;36mExtension status\u001b[0m · rendered at ${cols} columns`,
       });
     }
     case "get_session_stats":
@@ -1910,13 +1942,22 @@ const stub = {
           force?: boolean;
           rows?: number;
         };
-        previewHooks.panelResizeLog.push({ panelId, cols: (req as { cols?: number }).cols, rows });
+        previewHooks.panelResizeLog.push({
+          panelId,
+          cols: (req as { cols?: number }).cols,
+          rows,
+          force: force === true,
+        });
         const rec = panelId !== undefined ? panelFrames.get(panelId) : undefined;
         if (panelId === 2 && suppressUnifiedPanelResize) return undefined;
         if (rec && panelId !== undefined) {
           const activePanelId = panelId;
           if (force === true && typeof rec.sessionId === "string")
-            resetPreviewPanelAuthority(rec.sessionId as SessionId, activePanelId);
+            resetPreviewPanelAuthority(
+              rec.sessionId as SessionId,
+              activePanelId,
+              "repaint_required",
+            );
           setTimeout(() => {
             // A force resize = a freshly-(re)mounted xterm with no negotiated
             // modes. Mirror the real host's renegotiate(): re-push the kitty

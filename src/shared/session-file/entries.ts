@@ -15,7 +15,8 @@ export type SessionHeader = z.infer<typeof SessionHeaderSchema>;
 
 const BaseEntrySchema = z.object({
   id: z.string(), // 8-hex
-  parentId: z.string().optional(),
+  // Pi uses null for the first entry in a session branch.
+  parentId: z.string().nullable().optional(),
   timestamp: z.string().or(z.number()).optional(),
 });
 
@@ -24,8 +25,10 @@ const BaseEntrySchema = z.object({
 // timestamp) live on the envelope.
 const MessageBodySchema = z
   .object({
-    role: z.enum(["user", "assistant", "toolResult"]),
-    content: z.unknown(),
+    role: z.enum(["user", "assistant", "toolResult", "bashExecution", "custom"]),
+    // bashExecution has no content field. Other public roles retain their
+    // content as unknown so text/image arrays survive schema validation.
+    content: z.unknown().optional(),
     toolCallId: z.string().optional(),
     toolName: z.string().optional(),
     isError: z.boolean().optional(),
@@ -53,22 +56,36 @@ export const CompactionEntrySchema = BaseEntrySchema.extend({
   summary: z.string().optional(),
   reason: z.enum(["manual", "threshold", "overflow"]).optional(),
   tokensBefore: z.number().optional(),
+  estimatedTokensAfter: z.number().optional(),
   firstKeptEntryId: z.string().optional(),
+  details: z.unknown().optional(),
+  fromHook: z.boolean().optional(),
 });
 
 export const BranchSummaryEntrySchema = BaseEntrySchema.extend({
   type: z.literal("branch_summary"),
   summary: z.string().optional(),
+  fromId: z.string().optional(),
+  details: z.unknown().optional(),
+  fromHook: z.boolean().optional(),
 });
 
 export const CustomEntrySchema = BaseEntrySchema.extend({
   type: z.literal("custom"),
+  customType: z.string().optional(),
+  data: z.unknown().optional(),
 }).passthrough();
 
 export const CustomMessageEntrySchema = BaseEntrySchema.extend({
   type: z.literal("custom_message"),
-  content: z.string().optional(),
-  display: z.boolean().optional(),
+  customType: z.string().optional(),
+  // Retain the public value without normalizing it so ordered mixed parts and
+  // extension-owned fields remain available to the inspector.
+  content: z.unknown().optional(),
+  details: z.unknown().optional(),
+  // The public contract is boolean. Keeping the gate permissive here matches
+  // Pi's runtime truthiness check for older extension-authored session rows.
+  display: z.unknown().optional(),
 }).passthrough();
 
 export const LabelEntrySchema = BaseEntrySchema.extend({

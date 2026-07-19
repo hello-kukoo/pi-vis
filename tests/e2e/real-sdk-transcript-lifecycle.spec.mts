@@ -180,11 +180,29 @@ test.describe("Pinned real Pi transcript lifecycle", () => {
 
       await test.step("custom records render, errors are surfaced, and host editor mutation wins", async () => {
         await submitSlash(textarea, "/e2e-custom-message");
-        await expect(window.getByText("e2e visible custom message", { exact: true })).toBeVisible();
+        const customMessageCard = window
+          .locator(".tool-card")
+          .filter({ hasText: "e2e-lifecycle-message" })
+          .first();
+        const customMessageDisclosure = customMessageCard.getByRole("button", {
+          name: /^extension activity details — e2e-lifecycle-message/u,
+        });
+        await expect(customMessageDisclosure).toContainText("e2e visible custom message");
+        await customMessageDisclosure.click();
+        await expect(
+          customMessageCard.getByText("e2e visible custom message", { exact: true }),
+        ).toBeVisible();
 
         await submitSlash(textarea, "/e2e-custom-entry");
+        const customEntryCard = window
+          .locator(".tool-card")
+          .filter({ hasText: "e2e-lifecycle-entry" })
+          .first();
+        await customEntryCard
+          .getByRole("button", { name: "e2e-lifecycle-entry extension entry details" })
+          .click();
         await expect(
-          window.getByText(/E2E persisted entry: e2e persisted lifecycle entry/),
+          customEntryCard.getByText(/E2E persisted entry: e2e persisted lifecycle entry/),
         ).toBeVisible({ timeout: 30_000 });
 
         allowInvariant("error-toast", "e2e lifecycle command error");

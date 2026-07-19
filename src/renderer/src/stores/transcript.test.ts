@@ -184,6 +184,7 @@ describe("transcript reducer", () => {
     expect(block?.type).toBe("tool_call");
     if (block?.type === "tool_call") {
       expect(block.data.outputText).toBe("line1\nline2\n");
+      expect(block.data.resultContent).toBe("line1\nline2\n");
       expect(block.data.isStreaming).toBe(false);
       expect(block.data.isError).toBe(false);
     }
@@ -220,8 +221,84 @@ describe("transcript reducer", () => {
     expect(block?.type).toBe("tool_call");
     if (block?.type === "tool_call") {
       expect(block.data.outputText).toBe('{\n  "name": "pi-vis"\n}');
+      expect(block.data.resultContent).toEqual([
+        { type: "text", text: '{\n  "name": "pi-vis"\n}' },
+      ]);
       expect(block.data.resultDetails).toEqual({ truncation: { truncated: false } });
       expect(block.data.isStreaming).toBe(false);
+    }
+  });
+
+  it("preserves mixed output, arbitrary details, and all public result metadata", () => {
+    let state = applyPiEvent(
+      createTranscriptState(),
+      e({
+        type: "tool_execution_start",
+        toolCallId: "t-rich",
+        toolName: "generated_image",
+        args: { prompt: "sunset" },
+      }),
+    );
+    state = applyPiEvent(
+      state,
+      e({
+        type: "tool_execution_end",
+        toolCallId: "t-rich",
+        toolName: "generated_image",
+        result: {
+          content: [
+            { type: "text", text: "created", textSignature: "signed-created" },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png", source: "tool" },
+            { type: "text", text: "after image", extensionField: 1 },
+          ],
+          output: "legacy output kept separately",
+          details: ["extension", "owned"],
+          addedToolNames: ["inspect_image"],
+          terminate: true,
+        },
+        isError: false,
+      }),
+    );
+    // Pi's following toolResult message contributes persisted-envelope fields
+    // (notably timestamp) without creating a duplicate card.
+    state = applyPiEvent(
+      state,
+      e({
+        type: "message_start",
+        message: {
+          role: "toolResult",
+          toolCallId: "t-rich",
+          toolName: "generated_image",
+          content: [
+            { type: "text", text: "created", textSignature: "signed-created" },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png", source: "tool" },
+            { type: "text", text: "after image", extensionField: 1 },
+          ],
+          details: ["extension", "owned"],
+          addedToolNames: ["inspect_image"],
+          isError: false,
+          timestamp: 1_700_000_000_000,
+        },
+      }),
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0];
+    if (block?.type === "tool_call") {
+      expect(block.data.outputText).toBe("created\nafter image");
+      expect(block.data.outputImages).toEqual(["data:image/png;base64,aW1hZ2U="]);
+      expect(block.data.resultContent).toEqual([
+        { type: "text", text: "created", textSignature: "signed-created" },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png", source: "tool" },
+        { type: "text", text: "after image", extensionField: 1 },
+      ]);
+      expect(block.data.resultDetails).toEqual(["extension", "owned"]);
+      expect(block.data.resultMetadata).toEqual({
+        output: "legacy output kept separately",
+        addedToolNames: ["inspect_image"],
+        terminate: true,
+        timestamp: 1_700_000_000_000,
+      });
     }
   });
 
@@ -266,6 +343,7 @@ describe("transcript reducer", () => {
     const block = state.blocks[0];
     if (block?.type === "tool_call") {
       expect(block.data.outputText).toBe("step 1\nstep 2\n");
+      expect(block.data.resultContent).toEqual([{ type: "text", text: "step 1\nstep 2\n" }]);
       expect(block.data.resultDetails).toEqual({
         truncation: { truncated: false },
         fullOutputPath: "/tmp/pi-bash.log",
@@ -305,7 +383,10 @@ describe("transcript reducer", () => {
         toolName: "edit",
         result: {
           content: [{ type: "text", text: "Edited a.ts" }],
-          details: { diff: "-old\n+new" },
+          details: {
+            diff: "-old\n+new",
+            patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new",
+          },
         },
         isError: false,
       }),
@@ -315,6 +396,11 @@ describe("transcript reducer", () => {
     if (block?.type === "tool_call") {
       expect(block.data.outputText).toBe("Edited a.ts");
       expect(block.data.diff).toBe("-old\n+new");
+      expect(block.data.patch).toBe("--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new");
+      expect(block.data.resultDetails).toMatchObject({
+        diff: "-old\n+new",
+        patch: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new",
+      });
     }
   });
 
@@ -410,12 +496,16 @@ describe("transcript reducer", () => {
     let state = createTranscriptState();
     state = applyPiEvent(
       state,
-      e({ type: "compaction_end", result: { summary: "Compacted 500 tokens" } }),
+      e({
+        type: "compaction_end",
+        result: { summary: "Compacted 500 tokens", estimatedTokensAfter: 1_250 },
+      }),
     );
     expect(state.blocks).toHaveLength(1);
     expect(state.blocks[0]?.type).toBe("compaction");
     if (state.blocks[0]?.type === "compaction") {
       expect(state.blocks[0].data.summary).toBe("Compacted 500 tokens");
+      expect(state.blocks[0].data.estimatedTokensAfter).toBe(1_250);
     }
   });
 });
@@ -620,6 +710,95 @@ describe("transcript reducer — role-based message_start", () => {
     }
   });
 
+  it("preserves image/details/timestamp fields on public custom messages", () => {
+    const state = applyPiEvent(
+      createTranscriptState(),
+      e({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "artifact-preview",
+          display: true,
+          content: [
+            { type: "text", text: "preview" },
+            { type: "image", data: "cHJldmlldw==", mimeType: "image/webp" },
+          ],
+          details: null,
+          timestamp: 1_700_000_000_123,
+        },
+      }),
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0];
+    if (block?.type === "custom_message") {
+      expect(block.data).toEqual({
+        content: "preview",
+        images: ["data:image/webp;base64,cHJldmlldw=="],
+        rawContent: [
+          { type: "text", text: "preview" },
+          { type: "image", data: "cHJldmlldw==", mimeType: "image/webp" },
+        ],
+        customType: "artifact-preview",
+        details: null,
+        timestamp: 1_700_000_000_123,
+      });
+    }
+  });
+
+  it("retains otherwise non-renderable custom content for inspection", () => {
+    const state = applyPiEvent(
+      createTranscriptState(),
+      e({
+        type: "message_start",
+        message: { role: "custom", display: true, content: { extensionPayload: true } },
+      }),
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0];
+    if (block?.type === "custom_message") {
+      expect(block.data.rawContent).toEqual({ extensionPayload: true });
+      expect(block.data.content).toBe("");
+    }
+  });
+
+  it("materializes every public bashExecution field", () => {
+    const state = applyPiEvent(
+      createTranscriptState(),
+      e({
+        type: "message_start",
+        message: {
+          role: "bashExecution",
+          command: "npm test",
+          output: "partial output\n",
+          exitCode: 130,
+          cancelled: true,
+          truncated: true,
+          fullOutputPath: "/tmp/pi-bash-full.log",
+          excludeFromContext: true,
+          timestamp: 1_700_000_000_456,
+        },
+      }),
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0];
+    if (block?.type === "bash") {
+      expect(block.data).toEqual({
+        command: "npm test",
+        outputText: "partial output\n",
+        isStreaming: false,
+        exitCode: 130,
+        cancelled: true,
+        truncated: true,
+        fullOutputPath: "/tmp/pi-bash-full.log",
+        excludeFromContext: true,
+        timestamp: 1_700_000_000_456,
+      });
+    }
+  });
+
   it("renders Pi 0.80.4 opt-in cache-miss notices", () => {
     const state = applyPiEvent(
       createTranscriptState(),
@@ -711,7 +890,11 @@ describe("transcript reducer — role-based message_start", () => {
     expect(state.blocks.map((block) => block.type)).toEqual(["custom_entry", "assistant"]);
     const first = state.blocks[0];
     if (first?.type === "custom_entry") {
-      expect(first.data).toEqual({ entryId: "entry-1", customType: "status-card" });
+      expect(first.data).toEqual({
+        entryId: "entry-1",
+        customType: "status-card",
+        data: { count: 2 },
+      });
     }
   });
 

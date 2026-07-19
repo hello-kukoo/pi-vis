@@ -37,6 +37,7 @@ describe("panel reconstruction fence", () => {
     });
     expect(panels.acknowledge(9, repaint.revision - 1)).toBe(false);
     expect(panels.acknowledge(9, repaint.revision)).toBe(true);
+    expect(panels.acknowledge(9, repaint.revision)).toBe(true);
     expect(panels.acceptsInput(9, repaint.revision)).toBe(true);
     // The acknowledged frame belongs to the authority publication, not a
     // retained host framebuffer. A later remount must capture fresh bytes.

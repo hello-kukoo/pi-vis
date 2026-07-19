@@ -26,7 +26,7 @@ export interface AuthorityPanelProjection {
   /** Latest accepted render operation; mounted terminals consume this incrementally. */
   output?:
     | {
-        kind: "keyframe" | "delta" | "reset";
+        kind: "keyframe" | "delta" | "reset" | "repaint_required";
         sequence: number;
         renderRevision: number;
         ansi: string;
@@ -566,7 +566,7 @@ function reducePanel(
       sync: synchronizing(cursor, payload.kind === "reset" ? "panel_reset" : payload.reason),
       ansi: [],
       output: {
-        kind: "reset",
+        kind: payload.kind,
         sequence: cursor.transportSequence,
         renderRevision: payload.renderRevision,
         ansi: "",

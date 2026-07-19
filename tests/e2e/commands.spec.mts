@@ -400,9 +400,14 @@ test.describe("Slash commands", () => {
 
     await card.locator("button.tool-card__header").click();
     await expect(card.locator(".tool-card__output-panel")).toBeVisible({ timeout: 5_000 });
-    await expect(card.locator(".tool-card__metadata-summary")).toContainText(
-      "pi retained 240 of 6,400 lines",
-    );
+    const resultMetadata = card
+      .locator(".tool-card__section-title")
+      .filter({ hasText: /^Result metadata$/ })
+      .locator("..")
+      .locator("..");
+    await expect(resultMetadata).toContainText('"outputLines": 240');
+    await expect(resultMetadata).toContainText('"totalLines": 6400');
+    await expect(resultMetadata).toContainText("fake-pi-long-output.log");
     await expect(
       card.locator(".tool-card__section-meta").filter({ hasText: "240 lines" }),
     ).toBeVisible();

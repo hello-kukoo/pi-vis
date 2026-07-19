@@ -484,13 +484,19 @@ test.describe("Pinned real Pi 0.80.10 regressions", () => {
       });
 
       await test.step("settlement is one success, one persisted compaction, and no duplicate request", async () => {
-        await expect(window.getByText("Context compacted", { exact: false }).first()).toBeVisible({
-          timeout: 60_000,
+        const compactionCard = window
+          .locator(".tool-card")
+          .filter({ hasText: "Context compacted" })
+          .first();
+        const compactionDisclosure = compactionCard.getByRole("button", {
+          name: /^context activity details — Context compacted/u,
         });
-        // The summary must materialize in the live transcript; no session
-        // switch/reopen is allowed to repair the presentation first.
+        await expect(compactionDisclosure).toBeVisible({ timeout: 60_000 });
+        await compactionDisclosure.click();
+        // The summary must materialize in the live transcript inspector; no
+        // session switch/reopen is allowed to repair the presentation first.
         await expect(
-          window.getByText("REAL-REGRESSION-COMPACT-SUMMARY", { exact: false }).first(),
+          compactionCard.getByText("REAL-REGRESSION-COMPACT-SUMMARY", { exact: false }).first(),
         ).toBeVisible({ timeout: 60_000 });
         await expect(window.locator(".working-row")).toHaveCount(0);
         await expect(

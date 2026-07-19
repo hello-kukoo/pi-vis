@@ -22,4 +22,18 @@ describe("PiEventSchema", () => {
       __unknown: true,
     });
   });
+
+  it("retains Pi's estimated post-compaction token count", () => {
+    expect(
+      PiEventSchema.parse({
+        type: "compaction_end",
+        reason: "threshold",
+        result: {
+          summary: "summary",
+          tokensBefore: 12_000,
+          estimatedTokensAfter: 3_250,
+        },
+      }),
+    ).toMatchObject({ result: { estimatedTokensAfter: 3_250 } });
+  });
 });

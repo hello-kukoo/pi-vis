@@ -8,6 +8,7 @@ Audited against upstream `v0.80.3` through `v0.80.10` on 2026-07-16. Production 
 |---|---|
 | `agent_settled` | Preserved as a transcript event. Runtime liveness comes from direct `AgentSession` snapshots, not settlement/event inference. |
 | `entry_appended` / `registerEntryRenderer()` | The SDK host renders the public component to ANSI; custom entries remain ordered transcript blocks. |
+| `sendMessage()` / `registerMessageRenderer()` | An owner-fenced read uniquely resolves the public `AgentSession.messages` custom message by `customType` plus `timestamp`, then the SDK host renders and disposes its public component. Missing, ambiguous, and unregistered matches return `rendered:false` without invoking an extension component. |
 | Extension command errors | `bindExtensions().onError` enters the owner-scoped transcript presentation plane and becomes one session-local error notification; throwing extensions cannot disappear behind Pi's internal command catch. |
 | `showCacheMissNotices` | The host derives and replays non-persisted notices against the active runtime/history. |
 | Optional session name metadata | `session_info_changed.name` remains optional and can clear renderer state. |

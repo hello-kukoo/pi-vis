@@ -371,8 +371,8 @@
   background: var(--surface-raised);
   border: 1px solid var(--border-faint);
   border-radius: var(--radius-lg);
-  padding: 0.643rem 0.857rem; /* ≈9/12 */
-  transition: border-color 0.15s ease;
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .tool-card:hover {
@@ -390,25 +390,44 @@
 
 .tool-card__header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.571rem;
   width: 100%;
-  padding: 0;
+  min-height: 2.714rem;
+  padding: 0.571rem 0.857rem;
   background: none;
   border: none;
   text-align: left;
   color: inherit;
   min-width: 0;
-  /* Children carry their own type: tool name = label, subject = code. */
-}
-
-button.tool-card__header {
   cursor: pointer;
 }
 
-/* Reserve the bottom-right corner for the expand arrow */
-.tool-card--expandable .tool-card__header {
-  padding-right: 1.857rem;
+.tool-card__header:hover {
+  background: color-mix(in srgb, var(--surface-2) 44%, transparent);
+}
+
+.tool-card__header:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tool-card__chevron {
+  width: 0.857rem;
+  height: 0.857rem;
+  flex: none;
+  color: var(--text-ghost);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.tool-card__header:hover .tool-card__chevron {
+  color: var(--text-muted);
+}
+
+.tool-card--open .tool-card__chevron {
+  transform: rotate(90deg);
 }
 
 .tool-card__name {
@@ -442,6 +461,22 @@ button.tool-card__header {
   font-size: 0.786em; /* ≈11px @ 14px root */
 }
 
+.tool-card__header-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.429rem;
+  margin-left: auto;
+  flex: none;
+}
+
+.tool-card__summary-meta {
+  color: var(--text-ghost);
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  line-height: var(--leading-code);
+  white-space: nowrap;
+}
+
 .tool-card__badge {
   margin-left: auto;
   flex-shrink: 0;
@@ -458,16 +493,21 @@ button.tool-card__header {
   background: color-mix(in srgb, var(--text-muted) 12%, var(--bg-sunken));
 }
 
-.tool-card__body {
-  margin-top: 0.429rem;
-  padding-right: 1.714rem; /* leave room for the absolute-positioned expand button */
-  display: flex;
-  flex-direction: column;
-  gap: 0.429rem;
+.tool-card__badge--neutral {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, var(--bg-sunken));
 }
 
-.tool-card__body--open {
-  margin-top: 0.714rem;
+.tool-card__header-trailing .tool-card__badge {
+  margin-left: 0;
+}
+
+.tool-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.857rem;
+  padding: 0.143rem 0.857rem 0.857rem 2.286rem;
+  border-top: 1px solid var(--border-faint);
 }
 
 .tool-card__detail,
@@ -475,7 +515,7 @@ button.tool-card__header {
 .tool-card__output-panel {
   display: flex;
   flex-direction: column;
-  gap: 0.429rem;
+  gap: 0.5rem;
   min-width: 0;
 }
 
@@ -490,7 +530,7 @@ button.tool-card__header {
 .tool-card__section-header {
   display: flex;
   align-items: center;
-  gap: 0.714rem;
+  gap: 0.571rem;
   min-width: 0;
   font-family: var(--font-display);
   font-size: var(--font-size-small);
@@ -499,8 +539,9 @@ button.tool-card__header {
 }
 
 .tool-card__section-title {
-  color: var(--text-muted);
+  color: var(--text-faint);
   font-weight: 600;
+  letter-spacing: 0.025em;
 }
 
 .tool-card__section-meta {
@@ -511,10 +552,13 @@ button.tool-card__header {
 
 .tool-card__copy {
   margin-left: auto;
-  padding: 0.143rem 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.286rem;
+  padding: 0.143rem 0.429rem;
   border: 1px solid var(--border-faint);
   border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  background: transparent;
   color: var(--text-faint);
   font-family: var(--font-display);
   font-size: var(--font-size-small);
@@ -526,6 +570,43 @@ button.tool-card__header {
   background: var(--surface-2);
   border-color: var(--border-strong);
   color: var(--text);
+}
+
+.tool-card__copy svg {
+  width: 0.786rem;
+  height: 0.786rem;
+}
+
+.tool-card__provenance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
+  gap: 0.429rem 1rem;
+  margin: 0;
+  padding: 0.571rem 0.714rem;
+  background: color-mix(in srgb, var(--bg-sunken) 70%, transparent);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
+}
+
+.tool-card__provenance-item {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.429rem;
+  min-width: 0;
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  line-height: var(--leading-code);
+}
+
+.tool-card__provenance dt {
+  color: var(--text-ghost);
+}
+
+.tool-card__provenance dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 /* Terminal-style wells. The well uses the transcript base (--bg) so the code
@@ -555,72 +636,124 @@ button.tool-card__header {
   max-height: 40rem;
 }
 
-/* Args/metadata: compact summary cards above the heavy output well. The header
-   already shows the most important arg (subject), so long JSON stays behind a
-   disclosure while the output inspector gets the visual weight. */
-.tool-card__args,
-.tool-card__metadata {
-  color: var(--text-faint);
+.tool-card__structured-value {
+  margin: 0;
+  min-width: max-content;
+  color: var(--text-muted);
   font-family: var(--font-code);
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
-  word-break: break-word;
-  margin: 0;
-  padding: 0.571rem 0.857rem;
+  white-space: pre;
+}
+
+.tool-card__horizontal-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.tool-card__scroll--structured {
+  max-height: min(36vh, 24rem);
+}
+
+.tool-card__large-payload {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 12rem;
+  max-height: min(45vh, 30rem);
+  resize: vertical;
+  padding: 0.714rem 0.857rem;
+  color: var(--text-muted);
   background: var(--bg);
   border: 1px solid var(--border-faint);
   border-radius: var(--radius-md);
-}
-
-.tool-card__args-label,
-.tool-card__metadata-label {
-  color: var(--text-ghost);
-  flex-shrink: 0;
-}
-
-.tool-card__args--inline {
-  display: flex;
-  align-items: baseline;
-  gap: 0.429rem;
-}
-
-.tool-card__args-summary,
-.tool-card__metadata-summary {
-  cursor: pointer;
-  display: flex;
-  align-items: baseline;
-  gap: 0.429rem;
-  list-style: none;
-}
-
-.tool-card__args-summary::-webkit-details-marker,
-.tool-card__metadata-summary::-webkit-details-marker {
-  display: none;
-}
-
-.tool-card__details-chevron {
-  color: var(--text-ghost);
-  flex-shrink: 0;
-  transition: transform 0.15s ease;
-  transform: translateY(0.071rem);
-}
-
-.tool-card__details-disclosure[open] > summary .tool-card__details-chevron {
-  transform: rotate(90deg) translateX(0.071rem);
-}
-
-.tool-card__args-full,
-.tool-card__metadata-json {
-  margin: 0.429rem 0 0;
-  padding: 0.429rem 0.571rem;
-  background: var(--bg-sunken);
-  border-radius: var(--radius-sm);
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-disabled);
   font-family: var(--font-code);
   font-size: var(--font-size-code);
   line-height: var(--leading-code);
+  white-space: pre;
+  tab-size: 2;
+}
+
+.tool-card__large-payload--diff {
+  min-height: min(45vh, 30rem);
+}
+
+.tool-card__empty {
+  margin: 0;
+  padding: 0.571rem 0.714rem;
+  color: var(--text-ghost);
+  background: color-mix(in srgb, var(--bg-sunken) 60%, transparent);
+  border: 1px dashed var(--border-faint);
+  border-radius: var(--radius-md);
+  font-family: var(--font-display);
+  font-size: var(--font-size-small);
+}
+
+.tool-card__images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--space-2);
+}
+
+.tool-card__image-button {
+  min-width: 0;
+  padding: var(--space-1);
+  overflow: hidden;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
+  cursor: zoom-in;
+  text-align: left;
+}
+
+.tool-card__image-button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+.tool-card__image {
+  display: block;
+  width: 100%;
+  height: 8rem;
+  object-fit: contain;
+  background: var(--bg-sunken);
+  border-radius: calc(var(--radius-md) - var(--space-1));
+}
+
+.tool-card__image-meta {
+  display: block;
+  padding: var(--space-1) var(--space-1) 0;
+  font-family: var(--font-code);
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.tool-card__extension-host:empty {
+  display: none;
+}
+
+.tool-card__extension-render {
+  box-sizing: border-box;
+  max-height: min(40vh, 28rem);
+  margin: 0;
+  padding: 0.714rem 0.857rem;
+  overflow: auto;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-md);
+  font-family: var(--font-code);
+  font-size: var(--font-size-code);
+  line-height: var(--leading-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-card__extension-render--error {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  box-shadow: inset 2px 0 0 var(--danger);
 }
 
 .tool-card__output {
@@ -657,42 +790,18 @@ button.tool-card__header {
   padding-block: 0.036rem;
 }
 
-.tool-card__more {
-  font-family: var(--font-code);
-  font-size: var(--font-size-small);
-  font-style: italic; /* True italic variant for "more" notes */
-  color: var(--text-ghost);
-}
+@media (max-width: 40rem) {
+  .tool-card__summary-meta {
+    display: none;
+  }
 
-.tool-card__expand {
-  position: absolute;
-  right: 0.357rem;
-  bottom: 0.357rem;
-  width: 1.571em; /* ≈22px @ 14px root */
-  height: 1.571em;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
-  border: none;
-  border-radius: 0.286em;
-  color: var(--text-faint);
-  cursor: pointer;
-  padding: 0;
-}
+  .tool-card__body {
+    padding-left: 0.857rem;
+  }
 
-.tool-card__expand:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.tool-card__expand svg {
-  display: block;
-  transition: transform 0.15s ease;
-}
-
-.tool-card--open .tool-card__expand svg {
-  transform: rotate(180deg);
+  .tool-card__provenance {
+    grid-template-columns: 1fr;
+  }
 }
 
 .restored-attachments {
@@ -826,10 +935,6 @@ button.tool-card__header {
   transform: translateY(-0.071rem) rotate(90deg);
 }
 
-.compact-transcript-group__spinner {
-  font-size: 0.786em;
-}
-
 .compact-transcript-group__content {
   position: relative;
   display: flex;
@@ -838,38 +943,6 @@ button.tool-card__header {
   margin-left: 0.429rem;
   padding-left: 0.857rem;
   border-left: 1px solid var(--border-faint);
-}
-
-/* The disclosure rail is a deliberately wider, invisible hit target around
-   the hairline. It keeps the expanded cards' layout untouched while making
-   the visual edge an obvious second collapse affordance. */
-.compact-transcript-group__collapse-rail {
-  position: absolute;
-  inset: 0 auto 0 -0.429rem;
-  z-index: 1;
-  width: 0.857rem;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-}
-
-.compact-transcript-group__collapse-rail::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 calc(0.429rem - 1px);
-  width: 1px;
-  background: var(--border-faint);
-  transition: background 0.15s ease, box-shadow 0.15s ease;
-}
-
-.compact-transcript-group__collapse-rail:is(:hover, :focus-visible)::before {
-  background: var(--accent);
-  box-shadow: 0 0 0.571rem color-mix(in srgb, var(--accent) 42%, transparent);
-}
-
-.compact-transcript-group__collapse-rail:focus-visible {
-  outline: none;
 }
 
 /* Working indicator shown while the agent is running */
@@ -1066,26 +1139,13 @@ button.tool-card__header {
   width: max-content;
 }
 
-/* Pi >= 0.80.4 extension entry renderers produce ANSI-styled pi-tui rows.
-   Keep the host-rendered content selectable and width-responsive; the small
-   chevron is app chrome for the renderer's expanded option. */
+/* Extension entries use the same app-owned inspector as every other activity
+   card. Custom ANSI rendering is additive; raw entry data remains available
+   even when an extension renderer is absent or fails. */
 .custom-entry {
-  display: none;
   position: relative;
   min-width: 0;
-}
-
-.custom-entry--visible {
-  display: block;
   margin: var(--space-2) 0;
-  border-radius: var(--radius-lg);
-  background: var(--surface-raised);
-  box-shadow: var(--elevation-1);
-  overflow: hidden;
-}
-
-.custom-entry--error {
-  box-shadow: inset 2px 0 0 var(--danger), var(--elevation-1);
 }
 
 .custom-entry__measurement-box {
@@ -1103,29 +1163,6 @@ button.tool-card__header {
 
 .custom-entry__measure {
   white-space: pre;
-}
-
-.custom-entry__content {
-  margin: 0;
-  padding: var(--space-3) calc(var(--space-8) + var(--space-2)) var(--space-3) var(--space-4);
-  color: var(--text);
-  font-family: var(--font-code);
-  font-size: var(--font-size-code-root);
-  line-height: var(--leading-code);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
-.custom-entry__toggle {
-  position: absolute;
-  z-index: 1;
-  top: var(--space-2);
-  right: var(--space-2);
-}
-
-.custom-entry__toggle[aria-label^="Collapse"] .custom-entry__chevron {
-  transform: rotate(90deg);
 }
 
 .transcript-block__content th,

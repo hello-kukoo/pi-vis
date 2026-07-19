@@ -3,11 +3,21 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import type { TranscriptBlock } from "@shared/ipc-contract.js";
-import { extractToolResult } from "@shared/pi-protocol/tool-result.js";
+import { extractTextAndImages, extractToolResult } from "@shared/pi-protocol/tool-result.js";
 import { detectTurnError } from "@shared/pi-protocol/turn-error.js";
 import { SessionEntrySchema, SessionHeaderSchema } from "@shared/session-file/entries.js";
 
 type EntryMap = Map<string, Record<string, unknown>>;
+
+function messageTimestamp(primary: unknown, fallback: unknown): number | undefined {
+  for (const value of [primary, fallback]) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value !== "string") continue;
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return undefined;
+}
 
 /**
  * Convert an ordered list of session-tree entries (root→leaf, the shape
@@ -69,22 +79,26 @@ export async function entriesToTranscript(
             summary: entry.summary,
             reason: entry.reason,
             tokensBefore: entry.tokensBefore,
+            estimatedTokensAfter: entry.estimatedTokensAfter,
             firstKeptEntryId: entry.firstKeptEntryId,
+            ...(entry.details !== undefined ? { details: entry.details } : {}),
+            ...(entry.fromHook !== undefined ? { fromHook: entry.fromHook } : {}),
           },
         });
         break;
       }
       case "branch_summary": {
-        // Pi synthesizes a branch_summary entry on the new active leaf
-        // whenever the user navigates away from a branch with the
-        // summarize toggle on. Render the summary text using the existing
-        // compaction renderer — the user-facing distinction ("you left
-        // this branch; here's a recap") isn't worth a new block type or a
-        // transcript.ts change just to expose it (review B2 in the plan).
+        // A branch recap is not a successful compaction and must remain
+        // distinguishable in renderer state and presentation.
         pushBlock({
           id: entry.id,
-          type: "compaction",
-          data: { summary: entry.summary ?? "(empty branch summary)" },
+          type: "branch_summary",
+          data: {
+            summary: entry.summary ?? "(empty branch summary)",
+            ...(entry.fromId !== undefined ? { fromId: entry.fromId } : {}),
+            ...(entry.details !== undefined ? { details: entry.details } : {}),
+            ...(entry.fromHook !== undefined ? { fromHook: entry.fromHook } : {}),
+          },
         });
         break;
       }
@@ -103,8 +117,12 @@ export async function entriesToTranscript(
           if (matchingBlock) {
             const data = matchingBlock.data as Record<string, unknown>;
             data["outputText"] = result.text;
+            data["outputImages"] = result.images;
+            if (result.hasContent) data["resultContent"] = result.content;
             data["resultDetails"] = result.details;
+            data["resultMetadata"] = result.metadata;
             data["diff"] = result.diff;
+            data["patch"] = result.patch;
             data["isError"] = msg.isError ?? false;
             data["isStreaming"] = false;
           } else {
@@ -117,13 +135,68 @@ export async function entriesToTranscript(
                 toolName: msg.toolName ?? "",
                 input: undefined,
                 outputText: result.text,
+                outputImages: result.images,
+                ...(result.hasContent ? { resultContent: result.content } : {}),
                 resultDetails: result.details,
+                resultMetadata: result.metadata,
                 diff: result.diff,
+                patch: result.patch,
                 isError: msg.isError ?? false,
                 isStreaming: false,
               },
             });
           }
+          break;
+        }
+
+        if (role === "bashExecution") {
+          pushBlock({
+            id: entry.id,
+            type: "bash",
+            data: {
+              command: typeof msg.command === "string" ? msg.command : "",
+              outputText: typeof msg.output === "string" ? msg.output : "",
+              isStreaming: false,
+              exitCode: typeof msg.exitCode === "number" ? msg.exitCode : undefined,
+              cancelled: typeof msg.cancelled === "boolean" ? msg.cancelled : undefined,
+              truncated: typeof msg.truncated === "boolean" ? msg.truncated : undefined,
+              fullOutputPath:
+                typeof msg.fullOutputPath === "string" ? msg.fullOutputPath : undefined,
+              excludeFromContext:
+                typeof msg.excludeFromContext === "boolean" ? msg.excludeFromContext : undefined,
+              timestamp: messageTimestamp(msg.timestamp, entry.timestamp),
+            },
+          });
+          break;
+        }
+
+        if (role === "custom") {
+          if (!msg.display) break;
+          const extracted = extractTextAndImages(msg.content);
+          const hasRawContent = Object.hasOwn(msg, "content");
+          const customType = typeof msg.customType === "string" ? msg.customType : undefined;
+          const hasDetails = Object.hasOwn(msg, "details");
+          if (
+            !extracted.text &&
+            !extracted.images &&
+            !customType &&
+            !hasDetails &&
+            !hasRawContent
+          ) {
+            break;
+          }
+          pushBlock({
+            id: entry.id,
+            type: "custom_message",
+            data: {
+              content: extracted.text,
+              images: extracted.images,
+              ...(hasRawContent ? { rawContent: msg.content } : {}),
+              customType,
+              details: hasDetails ? msg.details : undefined,
+              timestamp: messageTimestamp(msg.timestamp, entry.timestamp),
+            },
+          });
           break;
         }
 
@@ -227,11 +300,30 @@ export async function entriesToTranscript(
         // entries pi's own TUI hides (display absent). Truthy (not
         // `=== true`) so a truthy non-boolean `display` from an extension is
         // handled the same as in the live path.
-        if (entry.display && entry.content) {
+        if (entry.display) {
+          const extracted = extractTextAndImages(entry.content);
+          const hasRawContent = Object.hasOwn(entry, "content");
+          const hasDetails = Object.hasOwn(entry, "details");
+          if (
+            !extracted.text &&
+            !extracted.images &&
+            !entry.customType &&
+            !hasDetails &&
+            !hasRawContent
+          ) {
+            break;
+          }
           pushBlock({
             id: entry.id,
             type: "custom_message",
-            data: { content: entry.content },
+            data: {
+              content: extracted.text,
+              images: extracted.images,
+              ...(hasRawContent ? { rawContent: entry.content } : {}),
+              customType: entry.customType,
+              details: hasDetails ? entry.details : undefined,
+              timestamp: messageTimestamp(undefined, entry.timestamp),
+            },
           });
         }
         break;
@@ -245,7 +337,11 @@ export async function entriesToTranscript(
           pushBlock({
             id: entry.id,
             type: "custom_entry",
-            data: { entryId: entry.id, customType: entry.customType },
+            data: {
+              entryId: entry.id,
+              customType: entry.customType,
+              ...(entry.data !== undefined ? { data: entry.data } : {}),
+            },
           });
         }
         break;

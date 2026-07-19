@@ -497,6 +497,15 @@ export const SessionQuerySchema = z.discriminatedUnion("type", [
       expanded: z.boolean().optional(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("render_message"),
+      customType: NonEmptyIdSchema,
+      timestamp: z.number().finite(),
+      cols: z.number().int().min(20).max(240),
+      expanded: z.boolean().optional(),
+    })
+    .strict(),
   z.object({ type: z.literal("get_cache_miss_notices") }).strict(),
 ]);
 export type SessionQuery = z.infer<typeof SessionQuerySchema>;
@@ -515,6 +524,7 @@ export const SessionQueryTypeSchema = z.enum([
   "get_trust_state",
   "get_tree",
   "render_entry",
+  "render_message",
   "get_cache_miss_notices",
 ]);
 export type SessionQueryType = z.infer<typeof SessionQueryTypeSchema>;
@@ -541,6 +551,7 @@ export const SESSION_QUERY_POLICY = {
   get_trust_state: { retry: "same_owner" },
   get_tree: { retry: "same_owner" },
   render_entry: { retry: "same_owner" },
+  render_message: { retry: "same_owner" },
   get_cache_miss_notices: { retry: "same_owner" },
 } as const satisfies Record<SessionQuery["type"], QueryPolicy>;
 

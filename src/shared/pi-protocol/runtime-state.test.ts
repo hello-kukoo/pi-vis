@@ -304,6 +304,29 @@ describe("authority protocol schemas", () => {
   it("admits only explicit read operations as owner-bound queries", () => {
     const query = { type: "render_entry", entryId: "entry-a", cols: 80, expanded: true };
     expect(SessionQuerySchema.safeParse(query).success).toBe(true);
+    expect(
+      SessionQuerySchema.safeParse({
+        type: "render_message",
+        customType: "status-card",
+        timestamp: 1_700_000_000_000,
+        cols: 96,
+        expanded: false,
+      }).success,
+    ).toBe(true);
+    for (const invalid of [
+      { type: "render_message", customType: "", timestamp: 1, cols: 80 },
+      { type: "render_message", customType: "status-card", cols: 80 },
+      { type: "render_message", customType: "status-card", timestamp: 1, cols: 19 },
+      { type: "render_message", customType: "status-card", timestamp: 1, cols: 241 },
+      {
+        type: "render_message",
+        customType: "status-card",
+        timestamp: Number.POSITIVE_INFINITY,
+        cols: 80,
+      },
+    ]) {
+      expect(SessionQuerySchema.safeParse(invalid).success).toBe(false);
+    }
     for (const effect of [
       { type: "compact" },
       { type: "set_model", provider: "openai", modelId: "gpt" },
@@ -328,6 +351,7 @@ describe("authority protocol schemas", () => {
       "get_tree",
       "get_trust_state",
       "render_entry",
+      "render_message",
     ]);
 
     const envelope = {
@@ -362,6 +386,15 @@ describe("authority protocol schemas", () => {
         response: { type: "response", command: "compact", success: true },
       }).success,
     ).toBe(false);
+    expect(
+      SessionQueryResultSchema.safeParse({
+        status: "ok",
+        queryId: "query-message",
+        owner,
+        queryType: "render_message",
+        response: { type: "response", command: "render_message", success: true },
+      }).success,
+    ).toBe(true);
   });
 
   it("keeps per-intent terminal results discriminated", () => {

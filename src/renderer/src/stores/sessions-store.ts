@@ -279,7 +279,7 @@ export interface SessionViewState {
         /** Complete authority keyframe rendered and awaiting acknowledgement. */
         keyframeReady?: boolean;
         outputSequence?: number;
-        outputKind?: "keyframe" | "delta" | "reset";
+        outputKind?: "keyframe" | "delta" | "reset" | "repaint_required";
         outputAnsi?: string;
         inputAcknowledgedThrough?: number;
         syncState?: "following" | "synchronizing" | "unavailable";
@@ -309,7 +309,7 @@ export interface SessionViewState {
         /** Complete authority keyframe rendered and awaiting acknowledgement. */
         keyframeReady?: boolean;
         outputSequence?: number;
-        outputKind?: "keyframe" | "delta" | "reset";
+        outputKind?: "keyframe" | "delta" | "reset" | "repaint_required";
         outputAnsi?: string;
         inputAcknowledgedThrough?: number;
         syncState?: "following" | "synchronizing" | "unavailable";

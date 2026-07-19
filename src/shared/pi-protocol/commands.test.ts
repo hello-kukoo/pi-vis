@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PI_COMMAND_POLICY, type PiRpcCommand } from "./commands.js";
+import { PI_COMMAND_POLICY, type PiRpcCommand, PiRpcCommandSchema } from "./commands.js";
 
 const COMMAND_TYPES = [
   "prompt",
@@ -43,6 +43,7 @@ const COMMAND_TYPES = [
   "navigate_tree",
   "set_label",
   "render_entry",
+  "render_message",
   "get_cache_miss_notices",
 ] as const satisfies readonly PiRpcCommand["type"][];
 
@@ -62,6 +63,32 @@ describe("Pi command admission policy", () => {
         class: "effectful",
         submissionOnly: true,
       });
+    }
+  });
+
+  it("validates the public-message renderer selectors and dimensions", () => {
+    expect(
+      PiRpcCommandSchema.safeParse({
+        type: "render_message",
+        customType: "status-card",
+        timestamp: 1_700_000_000_000,
+        cols: 96,
+        expanded: true,
+      }).success,
+    ).toBe(true);
+    for (const invalid of [
+      { type: "render_message", customType: "", timestamp: 1, cols: 80 },
+      { type: "render_message", customType: "status-card", cols: 80 },
+      {
+        type: "render_message",
+        customType: "status-card",
+        timestamp: Number.POSITIVE_INFINITY,
+        cols: 80,
+      },
+      { type: "render_message", customType: "status-card", timestamp: 1, cols: 19 },
+      { type: "render_message", customType: "status-card", timestamp: 1, cols: 241 },
+    ]) {
+      expect(PiRpcCommandSchema.safeParse(invalid).success).toBe(false);
     }
   });
 });
