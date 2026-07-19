@@ -381,11 +381,13 @@
 
 .tool-card__header {
   display: flex;
-  align-items: center;
+  /* Keep the call type and its monospace input on one text baseline. */
+  align-items: baseline;
   gap: 0.571rem;
   width: 100%;
   min-height: 2.714rem;
-  padding: 0.571rem 0.857rem;
+  /* Baseline-aligned text sits slightly high in its line box; balance the row. */
+  padding: 0.691rem 0.857rem 0.451rem;
   background: none;
   border: none;
   text-align: left;
@@ -405,6 +407,10 @@
 }
 
 .tool-card__chevron {
+  /* The disclosure mark remains optically centered while text uses a baseline. */
+  align-self: center;
+  position: relative;
+  top: -0.12rem;
   width: 0.857rem;
   height: 0.857rem;
   flex: none;
