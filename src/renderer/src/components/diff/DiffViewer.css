@@ -504,7 +504,9 @@
 }
 
 .diff-tree__row--dir {
-  color: var(--text-secondary);
+  /* Match the dirname token in diff card headers so directories remain
+     visually distinct from file names in the rail. */
+  color: var(--text-faint);
   font-weight: 500;
 }
 
