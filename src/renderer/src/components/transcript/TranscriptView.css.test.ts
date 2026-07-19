@@ -42,6 +42,9 @@ describe("TranscriptView CSS", () => {
   it("keeps tool disclosure chrome quiet and gives each payload one scroll owner", () => {
     const css = readFileSync(new URL("./TranscriptView.css", import.meta.url), "utf8");
     const diffCss = readFileSync(new URL("./DiffBlock.css", import.meta.url), "utf8");
+    const headerRule = css.match(/\.tool-card__header\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
+    const chevronRule =
+      css.match(/(?:^|\n)\.tool-card__chevron\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
     const focusRule =
       css.match(/\.tool-card__header:focus-visible\s*{(?<body>[^}]*)}/s)?.groups?.body ?? "";
     const focusChevronRule =
@@ -52,6 +55,10 @@ describe("TranscriptView CSS", () => {
 
     expect(css).not.toMatch(/\.tool-card:hover\s*{/);
     expect(css).not.toMatch(/\.tool-card__header:hover\s*{/);
+    expect(headerRule).toContain("align-items: baseline;");
+    expect(headerRule).toContain("padding: 0.691rem 0.857rem 0.451rem;");
+    expect(chevronRule).toContain("align-self: center;");
+    expect(chevronRule).toContain("top: -0.12rem;");
     expect(focusRule).toContain("outline: none;");
     expect(focusRule).toContain("box-shadow: none;");
     expect(focusChevronRule).toContain("stroke-width: 2;");
