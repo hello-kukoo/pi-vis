@@ -25,6 +25,7 @@ import {
   chooseHostExecPath,
   clearNodeLocationCache,
   compareNodeVersions,
+  resolveHostExecPath,
   resolvePackagedPtyHostExecOverride,
   resolveSystemNode,
 } from "./locate-node.js";
@@ -162,6 +163,24 @@ describe("resolvePackagedPtyHostExecOverride", () => {
         PIVIS_TEST_HOST_EXEC_PATH: "node",
       }),
     ).toThrow("requires an absolute PIVIS_TEST_HOST_EXEC_PATH");
+  });
+});
+
+describe("resolveHostExecPath", () => {
+  it("keeps deterministic fake hosts on Electron without starting a login shell", async () => {
+    const previous = process.env.PIVIS_TEST_HOST_SCRIPT;
+    process.env.PIVIS_TEST_HOST_SCRIPT = "/tmp/fake-session-host.mjs";
+    try {
+      await expect(resolveHostExecPath()).resolves.toEqual({
+        execPath: undefined,
+        reason: "electron-node-test-host",
+      });
+      expect(h.execFileImpl).not.toHaveBeenCalled();
+      expect(h.getSubprocessEnv).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.PIVIS_TEST_HOST_SCRIPT;
+      else process.env.PIVIS_TEST_HOST_SCRIPT = previous;
+    }
   });
 });
 

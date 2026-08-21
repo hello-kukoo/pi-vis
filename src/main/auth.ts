@@ -43,6 +43,22 @@ let cachedLoginShellEnv: Record<string, string> | null = null;
  * session. Cleared by clearLoginShellEnvCache().
  */
 export async function getLoginShellEnv(): Promise<Record<string, string>> {
+  // Deterministic fake-host E2E must not execute a developer or CI user's
+  // interactive startup files. Besides making the fixture environment
+  // non-hermetic, a background process started by shell initialization can
+  // retain execFile's stdio after its timeout and strand session activation
+  // before SessionHost is constructed. The launched Electron process already
+  // carries the complete fixture environment, and SessionHost merges it again
+  // at fork time, so use that exact inherited environment for this test-only
+  // host seam.
+  if (process.env.PIVIS_TEST_HOST_SCRIPT) {
+    cachedLoginShellEnv = Object.fromEntries(
+      Object.entries(process.env).filter((entry): entry is [string, string] => {
+        return typeof entry[1] === "string";
+      }),
+    );
+    return cachedLoginShellEnv;
+  }
   if (cachedLoginShellEnv) return cachedLoginShellEnv;
 
   const shell = process.env["SHELL"] ?? "/bin/bash";

@@ -104,6 +104,8 @@ export function clearNodeLocationCache(): void {
  * Surfaced as a `reason` for diagnostics; the caller logs it once.
  */
 export type HostExecDecision =
+  /** Deterministic fake-host E2E stays on Electron and skips user-shell lookup. */
+  | "electron-node-test-host"
   /** System Node found and is newer than Electron's bundled Node → use it. */
   | "system-node"
   /** No usable system Node on PATH → stay on Electron's bundled Node. */
@@ -192,6 +194,15 @@ export async function resolveHostExecPath(): Promise<{
 }> {
   const testExecPath = resolvePackagedPtyHostExecOverride();
   if (testExecPath) return { execPath: testExecPath, reason: "packaged-pty-test" };
+
+  // PIVIS_TEST_HOST_SCRIPT substitutes a deterministic direct-protocol child,
+  // not the user's Pi runtime. Resolving a newer system Node would needlessly
+  // source the user's login shell and can make an otherwise isolated E2E suite
+  // depend on shell startup side effects. The real SDK and packaged journeys
+  // deliberately clear this seam and continue through production discovery.
+  if (process.env.PIVIS_TEST_HOST_SCRIPT) {
+    return { execPath: undefined, reason: "electron-node-test-host" };
+  }
 
   const systemNode = await resolveSystemNode();
   const electronNode = process.versions.node; // the Node Electron was built with
