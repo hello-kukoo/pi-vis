@@ -179,7 +179,7 @@ function modelsMatch(left, right) {
  * Pi's CLI resolves saved `enabledModels` settings before constructing the
  * session. The public SDK intentionally does not do that on its own, so SDK
  * embedders must pass the resolved scope explicitly. Doing this here also
- * makes Pi 0.83's `ctx.scopedModels` available to `session_start` handlers,
+ * makes `ctx.scopedModels` available to `session_start` handlers,
  * before extensions are bound.
  *
  * Existing branch metadata and a resolvable non-null model from a same-session
@@ -463,8 +463,11 @@ export function initHostTheme(pi, themeName) {
 }
 
 /**
- * Build a local pi Theme from stable ANSI role indices. If Pi's PUBLIC root
- * exports a setter, install it. Otherwise return an explicit capability
+ * Build a local pi Theme from the complete stable ANSI role-index maps required
+ * by Pi's public constructor. Pi derives optional `scrollbarThumb` from
+ * `selectedBg`; 0.84.2 likewise derives `searchMatchText` from `text` and
+ * `searchMatchBg` from `selectedBg`. If Pi's PUBLIC
+ * root exports a setter, install it. Otherwise return an explicit capability
  * failure together with the usable local theme; callers must surface the
  * diagnostic and must not mutate undocumented global symbols.
  */

@@ -281,7 +281,7 @@ export interface TranscriptState {
   activeAssistantId: string | null;
   activeToolCallIds: Map<string, string>; // toolCallId → blockId
   activeBashId: string | null;
-  /** Pi 0.83 direct-bash event ID owning activeBashId. */
+  /** Direct-bash event ID owning activeBashId. */
   activeBashExecutionId: string | null;
   /** Error block created by the current failed assistant turn, awaiting the
    * following agent_end to tell us whether it will be retried. This scopes

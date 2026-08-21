@@ -3,7 +3,11 @@ import path from "node:path";
 import type { SessionId } from "@shared/ids.js";
 import type { SessionStatus, WorktreeIdentity } from "@shared/ipc-contract.js";
 import type { PiEvent } from "@shared/pi-protocol/events.js";
-import type { ExtensionUiRequest, ExtensionUiResponse } from "@shared/pi-protocol/extension-ui.js";
+import {
+  type ExtensionUiRequest,
+  type ExtensionUiResponse,
+  ExtensionUiResponseSchema,
+} from "@shared/pi-protocol/extension-ui.js";
 import type { PanelEvent } from "@shared/pi-protocol/panel-events.js";
 import type { SessionTreeEntry } from "@shared/pi-protocol/responses.js";
 import type {
@@ -1337,6 +1341,7 @@ export function initIpc(win: BrowserWindow): void {
         response: ExtensionUiResponse;
       },
     ) => {
+      const response = ExtensionUiResponseSchema.parse(args.response);
       const acknowledged =
         (await registry?.respondToUiRequest(
           args.sessionId,
@@ -1344,7 +1349,7 @@ export function initIpc(win: BrowserWindow): void {
           args.expectedHostInstanceId,
           args.expectedSessionEpoch,
           args.operationId,
-          args.response,
+          response,
         )) ?? false;
       return { acknowledged };
     },

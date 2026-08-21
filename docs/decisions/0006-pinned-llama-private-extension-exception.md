@@ -6,13 +6,18 @@ Accepted
 
 ## Context
 
-Pi 0.83.0 implements local llama.cpp router discovery, load/unload, download,
+Pi 0.84.2 implements local llama.cpp router discovery, load/unload, download,
 connection recovery, provider registration, and its interactive manager as a
 hidden CLI built-in extension. The package ships that extension, but its public
 SDK entry does not export either the built-in registry or the llama factory.
 Consequently, an SDK-only host cannot provide the feature through public imports
 alone even though Pi's public resource loader supports inline extension
 factories and Pi-Vis already supports Pi-TUI custom panels.
+
+The 0.84.2 audit found the aggregate hidden-registry entry and executable llama
+factory subtree unchanged from the preceding pin (source maps excluded), while
+the factory remains absent from every public coding-agent export. The exception
+therefore renews without expanding its path, shape, or runtime authority.
 
 Omitting the manager creates a material feature difference from the pinned Pi
 CLI. Copying the implementation would create a larger fork and make Pi-Vis
@@ -28,7 +33,7 @@ the public `InlineExtension` fields `{ name, factory, hidden }`.
 
 The exception has these boundaries:
 
-- It is approved only for exact Pi version 0.83.0.
+- It is approved only for exact Pi version 0.84.2.
 - It imports the aggregate built-in registry, never a llama implementation
   submodule, and never automatically injects any other built-in.
 - The resulting factory is injected through public
@@ -47,7 +52,7 @@ The exception has these boundaries:
 
 ## Consequences
 
-Pi-Vis has feature parity with Pi 0.83.0's local llama.cpp manager without
+Pi-Vis has feature parity with Pi 0.84.2's local llama.cpp manager without
 forking its implementation. The cost is a deliberately accepted package-layout
 dependency: a repackaged or changed private registry can disable the feature
 until Pi-Vis is updated. Structural tests catch that in development, and the
@@ -59,7 +64,7 @@ private Pi import remains prohibited.
 
 ## References
 
-- [Pi 0.83.0 compatibility audit](../compatibility/pi-0.83.0.md)
+- [Pi 0.84.2 compatibility audit](../compatibility/pi-0.84.2.md)
 - [Runtime services](../architecture/runtime-services.md)
 - [Processes and IPC](../architecture/processes-and-ipc.md)
 - [Testing](../testing.md)

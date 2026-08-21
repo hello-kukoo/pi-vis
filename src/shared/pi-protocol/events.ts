@@ -242,9 +242,9 @@ export const SummarizationRetryFinishedEventSchema = z.object({
   type: z.literal("summarization_retry_finished"),
 });
 
-// Pi 0.83 emits the update variant from AgentSession.executeBash(). Pi-Vis
-// brackets it with start/end records so the native transcript has a complete,
-// correlated streaming lifecycle rather than waiting for final persistence.
+// AgentSession.executeBash() emits the update variant. Pi-Vis brackets it with
+// start/end records so the native transcript has a complete, correlated
+// streaming lifecycle rather than waiting for final persistence.
 export const BashExecutionStartEventSchema = z.object({
   type: z.literal("bash_execution_start"),
   id: z.string(),

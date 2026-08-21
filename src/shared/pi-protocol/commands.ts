@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MarkdownTransformBatchSchema } from "./markdown-transform.js";
 import { ThinkingLevelSchema } from "./thinking.js";
 
 const BaseCommand = z.object({
@@ -262,6 +263,14 @@ export const RenderMessageCommandSchema = BaseCommand.extend({
   expanded: z.boolean().optional(),
 });
 
+// Pi >= 0.84 display-only extension Markdown transformers. The SDK host owns
+// extension functions; the renderer sends bounded batches with Pi's public
+// rendering context and receives only transformed strings.
+export const TransformMarkdownCommandSchema = BaseCommand.extend({
+  type: z.literal("transform_markdown"),
+  items: MarkdownTransformBatchSchema,
+});
+
 // SDK-host-only replay for Pi's non-persisted showCacheMissNotices cards.
 export const GetCacheMissNoticesCommandSchema = BaseCommand.extend({
   type: z.literal("get_cache_miss_notices"),
@@ -310,6 +319,7 @@ export const PiRpcCommandSchema = z.discriminatedUnion("type", [
   SetLabelCommandSchema,
   RenderEntryCommandSchema,
   RenderMessageCommandSchema,
+  TransformMarkdownCommandSchema,
   GetCacheMissNoticesCommandSchema,
 ]);
 
@@ -370,6 +380,7 @@ export const PI_COMMAND_POLICY = {
   set_label: { class: "idempotent" },
   render_entry: { class: "read_only" },
   render_message: { class: "read_only" },
+  transform_markdown: { class: "read_only" },
   get_cache_miss_notices: { class: "read_only" },
 } as const satisfies Record<PiRpcCommand["type"], PiCommandPolicy>;
 

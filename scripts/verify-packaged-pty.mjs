@@ -4,13 +4,15 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { NODE_PTY_PACKAGE, NODE_PTY_VERSION, patchNodePty } from "./patch-node-pty.mjs";
+import { PINNED_PI_PATCH_VERSION, patchPinnedPi } from "./patch-pinned-pi.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptPath), "..");
 const require = createRequire(import.meta.url);
-const PINNED_PI_VERSION = "0.83.0";
+const PINNED_PI_VERSION = "0.84.2";
+const PACKAGED_PI_PACKAGES = ["pi-coding-agent", "pi-agent-core", "pi-ai", "pi-tui"];
 
 function packagedPaths(appBundle) {
   const resources = path.join(appBundle, "Contents", "Resources");
@@ -21,19 +23,26 @@ function packagedPaths(appBundle) {
     "@homebridge",
     "node-pty-prebuilt-multiarch",
   );
-  const piPackageDirectory = path.join(
-    unpacked,
-    "node_modules",
-    "@earendil-works",
-    "pi-coding-agent",
+  const piPackagesRoot = path.join(unpacked, "node_modules", "@earendil-works");
+  const piPackageDirectories = Object.fromEntries(
+    PACKAGED_PI_PACKAGES.map((name) => [name, path.join(piPackagesRoot, name)]),
   );
+  const piPackageDirectory = piPackageDirectories["pi-coding-agent"];
   return {
     executable: path.join(appBundle, "Contents", "MacOS", "Pi-Vis"),
     asar: path.join(resources, "app.asar"),
     hostScript: path.join(unpacked, "out", "resources", "pi-session-host", "host.mjs"),
+    privateAdapter: path.join(
+      unpacked,
+      "out",
+      "resources",
+      "pi-session-host",
+      "pinned-pi-private.mjs",
+    ),
     packageDirectory,
     helper: path.join(packageDirectory, "build", "Release", "spawn-helper"),
-    piManifest: path.join(piPackageDirectory, "package.json"),
+    piCli: path.join(piPackageDirectory, "dist", "cli.js"),
+    piPackageDirectories,
   };
 }
 
@@ -63,7 +72,7 @@ function runPackagedJourney(executable) {
   }
 }
 
-function verifyPackagedApp(appBundle) {
+async function verifyPackagedApp(appBundle) {
   if (process.platform !== "darwin") {
     throw new Error("The packaged PTY verifier currently supports macOS application bundles only.");
   }
@@ -72,21 +81,48 @@ function verifyPackagedApp(appBundle) {
     paths.executable,
     paths.asar,
     paths.hostScript,
+    paths.privateAdapter,
     paths.helper,
-    paths.piManifest,
+    paths.piCli,
+    ...Object.values(paths.piPackageDirectories).map((directory) =>
+      path.join(directory, "package.json"),
+    ),
   ]) {
     if (!fs.existsSync(required)) throw new Error(`Missing packaged artifact: ${required}`);
   }
-  const packagedPiVersion = JSON.parse(fs.readFileSync(paths.piManifest, "utf8")).version;
-  if (packagedPiVersion !== PINNED_PI_VERSION) {
-    throw new Error(
-      `Packaged Pi version mismatch: expected ${PINNED_PI_VERSION}, found ${String(packagedPiVersion)}.`,
-    );
+  for (const [name, directory] of Object.entries(paths.piPackageDirectories)) {
+    const version = JSON.parse(
+      fs.readFileSync(path.join(directory, "package.json"), "utf8"),
+    ).version;
+    if (version !== PINNED_PI_VERSION) {
+      throw new Error(
+        `Packaged ${name} version mismatch: expected ${PINNED_PI_VERSION}, found ${String(version)}.`,
+      );
+    }
+  }
+  if (PINNED_PI_PATCH_VERSION !== PINNED_PI_VERSION) {
+    throw new Error(`Packaged Pi patch version drift: ${PINNED_PI_PATCH_VERSION}.`);
+  }
+  patchPinnedPi({
+    packageDirectory: paths.piPackageDirectories["pi-coding-agent"],
+    piAiPackageDirectory: paths.piPackageDirectories["pi-ai"],
+    verifyOnly: true,
+  });
+
+  const adapter = await import(pathToFileURL(paths.privateAdapter).href);
+  const llamaExtension = await adapter.importPinnedLlamaExtension(paths.piCli, PINNED_PI_VERSION);
+  if (
+    llamaExtension?.name !== "llama.cpp" ||
+    typeof llamaExtension.factory !== "function" ||
+    llamaExtension.hidden !== true ||
+    !Object.isFrozen(llamaExtension)
+  ) {
+    throw new Error("Packaged private llama.cpp adapter returned an unexpected entry.");
   }
   fs.accessSync(paths.helper, fs.constants.X_OK);
   patchNodePty({ packageDirectory: paths.packageDirectory, verifyOnly: true });
   console.log(
-    `[packaged-pty] Verified Pi ${PINNED_PI_VERSION}, patched ${NODE_PTY_PACKAGE}@${NODE_PTY_VERSION}, and executable spawn-helper in ${appBundle}`,
+    `[packaged-pty] Verified packaged Pi ${PINNED_PI_VERSION} runtime closure, exact runtime patches, private llama.cpp adapter, patched ${NODE_PTY_PACKAGE}@${NODE_PTY_VERSION}, and executable spawn-helper in ${appBundle}`,
   );
 
   // The journey launches the completed app. pty.start resolves from Electron's
@@ -99,4 +135,4 @@ const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json
 const appBundle = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.resolve(projectRoot, `release/${manifest.version}/mac-arm64/Pi-Vis.app`);
-verifyPackagedApp(appBundle);
+await verifyPackagedApp(appBundle);

@@ -190,6 +190,13 @@ export async function launchElectron(options: LaunchOptions): Promise<LaunchedEl
     PIVIS_TEST_REMOTE_DEBUGGING_PORT: String(packagedCdpPort ?? 0),
     ...(options.executablePath ? { PIVIS_TEST_ALLOW_MULTIPLE_INSTANCES: "1" } : {}),
   };
+  if (options.executablePath) {
+    // The final packaged-app journey must exercise production resolution even
+    // if the invoking shell happens to carry the source E2E seam.
+    delete env.PIVIS_TEST_ALLOW_PI_BINARY_OVERRIDE;
+  } else {
+    env.PIVIS_TEST_ALLOW_PI_BINARY_OVERRIDE ??= "1";
+  }
   env.PIVIS_TEST_HIDE_WINDOW ??= env.PIVIS_TEST_SHOW_WINDOW === "1" ? "0" : "1";
   // pi runs tools under Electron's bundled Node mode. A child Electron app must
   // not inherit that flag, or the app's main process runs as plain Node and

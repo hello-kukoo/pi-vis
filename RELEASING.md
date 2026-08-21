@@ -77,35 +77,60 @@ npm run release -- --version 0.4.0 --notes-file docs/releases/v0.4.0.md --yes
 npm run release -- --patch --generate-notes --dry-run
 ```
 
-The command bumps `package.json`/`package-lock.json`, runs typecheck, lint, unit
-tests, and E2E tests, builds signed/notarized artifacts, runs the final packaged
-PTY smoke through both the plain-Node SDK-host and Electron-main resolution paths,
-verifies codesigning, Gatekeeper acceptance, and notarization stapling, commits the version bump, tags
+The command bumps `package.json`/`package-lock.json`, recreates dependencies with
+`npm ci`, requires a clean production `npm audit`, runs typecheck, lint, unit,
+render, E2E, and `npm ls --all`, builds
+signed/notarized artifacts, runs the final packaged runtime and PTY smoke
+through both the plain-Node SDK-host and Electron-main resolution paths,
+verifies codesigning, Gatekeeper acceptance, and notarization stapling, commits
+the version bump, tags
 `vX.Y.Z`, pushes the tag, and creates the GitHub Release with the zip and dmg
 assets. Public GitHub Releases require release notes: create and commit a curated notes
 file under `docs/releases/vX.Y.Z.md`, then pass `--notes-file <path>`
 (preferred), or pass `--generate-notes` to use GitHub's auto-generated notes. If
 both are passed, the curated notes file is used. Useful options: `--draft`
-creates a draft GitHub Release, `--no-push` stops after creating the local
-release commit/tag (skipping both git push and GitHub Release creation), and
-`--skip-tests` is available only for emergency reruns after the exact same commit
-has already passed verification.
+creates a draft GitHub Release, and `--no-push` stops after creating the local
+release commit/tag (skipping both git push and GitHub Release creation). There
+is no supported test-skip path: a rerun must pass the same checks again.
 
 ### Mandatory pre-release checks
 
-The automated suite (`typecheck`, `lint`, `test`, `test:render`, `test:e2e`) is
-run by `npm run release`; its Electron lane includes the isolated, repository-pinned
-Pi 0.83.0 SDK-host compatibility journeys described in `docs/testing.md`. The
-subsequent `dist` step also runs `verify:packaged-pty` against the completed app;
-it must not be skipped or replaced by a repository-tree native smoke. Two
-behavior contracts are NOT covered by that suite and MUST be verified manually
-before publishing:
+The ordered `npm run release` check list begins with `npm ci`; the pinned Pi
+postinstall patch must apply from its known pre-patch hashes, and `prebuild`
+must verify the known post-patch hashes. The automated suite
+(`npm audit --omit=dev`, typecheck, `lint`, `test`, `test:render`, `test:e2e`,
+`npm ls --all`) then runs; its
+Electron lane includes the isolated,
+repository-pinned Pi 0.84.2 SDK-host compatibility journeys described in
+`docs/testing.md`. The subsequent `dist` step runs `verify:packaged-pty` against
+the completed app. It checks the exact packaged Pi production closure, pinned
+runtime-patch hashes, private llama registry adapter, bundled CLI, and native
+PTY paths before the packaged Electron journey; it must not be skipped or
+replaced by a repository-tree smoke.
+
+For a pinned-Pi release candidate, retain successful output for this clean
+reproduction sequence before the signed release run:
+
+```bash
+npm ci
+npm run test:full
+npm run dist
+```
+
+The unsigned `dist` rehearsal is additive: `npm run release` repeats the
+automated checks and creates the signed/notarized final artifacts from the clean
+commit. A repository-tree pass does not waive final-bundle verification.
+
+Two behavior contracts are NOT covered by that suite and MUST be verified
+manually before publishing:
 
 1. **Real-pi end-to-end (Kitty keyboard protocol)**: Shift+Enter inserts a
    newline (not a submit) in the unified editor; Enter submits; a multiline
    paste inserts lines without submitting; session-switch keeps Shift+Enter
-   working. Run the gated spec against a real `pi` + provider auth (real API
-   spend):
+   working. The gated spec defaults to the repository-local pinned Pi, rejects
+   any version other than 0.84.2 before launch, and requires provider auth
+   (real API spend). `PIVIS_TEST_PI_BIN` is an explicit alternate-path override,
+   not a `PATH` search:
 
    ```bash
    PI_E2E=1 npx playwright test -c tests/e2e/playwright.config.mts --grep kitty-real
@@ -181,4 +206,7 @@ builds can update themselves.
 
 ### CI
 
-See `.github/workflows/ci.yml` for the current CI pipeline (typecheck → lint → test → build on push/PR). Notarization credentials should be stored as repository secrets and injected in a release workflow.
+See `.github/workflows/ci.yml` for the current CI pipeline (`npm ci` →
+typecheck → lint → unit → render → Electron E2E on push/PR). Notarization
+credentials should be stored as repository secrets and injected in a release
+workflow.

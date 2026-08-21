@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "./support/invariants.mjs";
 import {
   PINNED_PI_VERSION,
@@ -20,6 +22,13 @@ test.describe("packaged macOS PTY", () => {
     });
     let launch: RealSdkLaunch | undefined;
     const nonce = `PIVIS_PACKAGED_SHELL_${process.pid}_${Date.now()}`;
+
+    // Simulate a stale/hand-edited production setting that points at a real,
+    // executable non-Pi binary. The packaged app must ignore it and report the
+    // audited bundled runtime below.
+    const settingsPath = join(fixture.dirs.settings, "settings.json");
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(settingsPath, JSON.stringify({ ...settings, piBinaryPath: process.execPath }));
 
     try {
       launch = await fixture.launch();

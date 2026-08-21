@@ -38,7 +38,7 @@ async function closeFixture(
 }
 
 test.describe("Pinned real Pi Shell Turns", () => {
-  test("Pi 0.83 user_bash result and operations handlers produce one non-PTY Shell Turn each", async () => {
+  test("pinned Pi user_bash result and operations handlers produce one non-PTY Shell Turn each", async () => {
     test.setTimeout(120_000);
     const fixtureSeed = "Create the persisted shell-turn fixture.";
     const persistencePrompt = "Persist the extension-handled Shell Turns.";

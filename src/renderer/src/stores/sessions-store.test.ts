@@ -1093,6 +1093,21 @@ describe("sessions store - extension UI clear payloads", () => {
     });
     expect(widgetClear.success).toBe(true);
   });
+
+  it("accepts a credential-committed provider-auth synchronization warning", () => {
+    expect(
+      ExtensionUiRequestSchema.safeParse({
+        type: "extension_ui_request",
+        id: "provider-auth-warning",
+        operationId: "provider-auth-warning:2",
+        method: "providerAuth",
+        providerName: "Dynamic Provider",
+        authType: "api_key",
+        phase: "warning",
+        message: "Sign-in was saved, but models could not be refreshed.",
+      }).success,
+    ).toBe(true);
+  });
 });
 
 /**

@@ -1330,7 +1330,7 @@ function outcomeFor(
       return {
         ...base,
         kind: "loginProvider",
-        result: { providerId: intent.providerId, authType: intent.authType },
+        result: { providerId: intent.providerId, authType: intent.authType, synchronized: true },
       };
   }
 }
@@ -1689,7 +1689,7 @@ const stub = {
   invoke: async (channel: string, req?: unknown) => {
     switch (channel) {
       case "pi.info":
-        return { version: "0.83.0-stub" };
+        return { version: "0.84.2-stub" };
       case "extensionUpdates.status":
         return previewExtensionUpdateStatus;
       case "extensionUpdates.check": {

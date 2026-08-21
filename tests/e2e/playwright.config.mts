@@ -12,6 +12,7 @@ const optInIgnores = [
 const workers = Number.parseInt(process.env["PIVIS_E2E_WORKERS"] ?? "1", 10);
 
 export default defineConfig({
+  forbidOnly: true,
   testDir: __dirname,
   testMatch: "*.spec.mts",
   testIgnore: optInIgnores,

@@ -297,6 +297,8 @@ function commandForSessionQuery(query: SessionQuery): PiReadOnlyCommand {
         cols: query.cols,
         ...(query.expanded !== undefined ? { expanded: query.expanded } : {}),
       };
+    case "transform_markdown":
+      return { type: "transform_markdown", items: query.items };
   }
 }
 

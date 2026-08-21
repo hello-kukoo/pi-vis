@@ -101,9 +101,14 @@ export function ProviderLoginDialog({
         <h2>Sign in to {request.providerName}</h2>
       </div>
 
-      {request.phase === "error" ? (
-        <p className="provider-login-dialog__message provider-login-dialog__message--error">
-          {request.message ?? "Sign in could not be completed. Try again."}
+      {request.phase === "error" || request.phase === "warning" ? (
+        <p
+          className={`provider-login-dialog__message provider-login-dialog__message--${request.phase}`}
+        >
+          {request.message ??
+            (request.phase === "warning"
+              ? "Sign-in was saved, but models could not be refreshed."
+              : "Sign in could not be completed. Try again.")}
         </p>
       ) : (
         request.message && <p className="provider-login-dialog__message">{request.message}</p>
@@ -202,7 +207,7 @@ export function ProviderLoginDialog({
           disabled={busy}
           onClick={() => void respond({ cancelled: true })}
         >
-          {request.phase === "error" ? "Close" : "Cancel"}
+          {request.phase === "error" || request.phase === "warning" ? "Close" : "Cancel"}
         </button>
       </div>
     </div>

@@ -6,4 +6,13 @@ export default function (pi) {
       ctx.ui.notify("Real SDK host command completed", "info");
     },
   });
+  pi.registerCommand("smoke-ai-agent-e2e", {
+    description: "Verify SDK-host child-process attribution",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(
+        `AI_AGENT=${process.env.AI_AGENT ?? "<unset>"} PI_CODING_AGENT=${process.env.PI_CODING_AGENT ?? "<unset>"}`,
+        "info",
+      );
+    },
+  });
 }

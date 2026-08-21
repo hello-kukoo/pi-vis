@@ -1,6 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants as osConstants } from "node:os";
 import { basename } from "node:path";
+import {
+  MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES,
+  MARKDOWN_TRANSFORM_MAX_RESPONSE_BATCH_BYTES,
+  markdownTransformJsonBytes,
+  markdownTransformUtf8Bytes,
+} from "./markdown-transform-limits.mjs";
 import { SHELL_ADMISSION_CANCELLED_CODE, createStateAuthority } from "./state-authority.mjs";
 
 function exitSignalName(value) {
@@ -39,7 +45,7 @@ function modelAccess(session) {
     return {
       getAvailable: () => runtime.getAvailable(),
       getModel: (provider, modelId) => runtime.getModel(provider, modelId),
-      refresh: () => runtime.refresh(),
+      refresh: (options) => runtime.refresh(options),
       logout: (provider) => runtime.logout(provider),
       listCredentials: () => runtime.listCredentials(),
       getProviders: () => runtime.getProviders?.() ?? [],
@@ -103,6 +109,31 @@ function hasNativeProviderLogin(session) {
 }
 
 /**
+ * Pi 0.84 refreshes can complete with provider-scoped errors or cancellation.
+ * Keep those details inside the child authority (they can contain provider
+ * URLs or headers), while refusing to publish a false successful refresh.
+ * An undefined result remains the compatibility success shape for the public
+ * pre-0.84 ModelRegistry adapter above.
+ */
+function completedModelRefresh(result) {
+  if (result === undefined) return { refreshed: true };
+  if (result?.aborted === true || (result?.errors && result.errors.size > 0)) {
+    throw new Error("Model catalog refresh could not be completed");
+  }
+  return { refreshed: true };
+}
+
+function isCommittedCredentialSynchronizationError(pi, error, providerId, operation) {
+  const ErrorType = pi?.CredentialSynchronizationError;
+  return (
+    typeof ErrorType === "function" &&
+    error instanceof ErrorType &&
+    error.operation === operation &&
+    error.providerId === providerId
+  );
+}
+
+/**
  * Fail fast if the installed pi is missing any SDK surface this bridge calls.
  *
  * The host is plain .mjs (not type-checked against pi's .d.ts), so a method
@@ -129,7 +160,14 @@ export function assertHostCapabilities(session, runtime, pi) {
     "clearQueue",
     "navigateTree",
     "setModel",
+    "cycleModel",
     "setThinkingLevel",
+    "cycleThinkingLevel",
+    "setSteeringMode",
+    "setFollowUpMode",
+    "setScopedModels",
+    "setAutoCompactionEnabled",
+    "setAutoRetryEnabled",
     "executeBash",
     "recordBashResult",
     "compact",
@@ -283,6 +321,24 @@ export function setupCommandBridge({
   const lifecycleContext = new AsyncLocalStorage();
   const admissionContext = new AsyncLocalStorage();
   const inputEmissionContext = new AsyncLocalStorage();
+
+  async function logoutProvider(providerId) {
+    try {
+      await modelAccess(_session).logout(providerId);
+      return { provider: providerId, synchronized: true };
+    } catch (error) {
+      if (!isCommittedCredentialSynchronizationError(pi, error, providerId, "logout")) {
+        // Provider logout errors may contain endpoints, headers, or credential
+        // material. The app boundary needs only the mutation failure.
+        throw new Error("Credential could not be removed");
+      }
+      uiContext?.notify?.(
+        "Credential removed, but the local model catalog could not be refreshed. Refresh models before selecting another model.",
+        "warning",
+      );
+      return { provider: providerId, synchronized: false };
+    }
+  }
   const observedInputRunners = new WeakMap();
   const lifecycleBlockers = new Map();
   let nextLifecycleId = 0;
@@ -326,6 +382,9 @@ export function setupCommandBridge({
     },
     getCatalog: () => ({
       ...uiState.catalogSnapshot(),
+      ...(registeredMarkdownTransformers().length > 0
+        ? { markdownTransformersAvailable: true }
+        : {}),
       pendingDialogs: uiState.pendingDialogCount?.() ?? 0,
     }),
     getEditor: () => uiState.editorSnapshot(),
@@ -1335,6 +1394,56 @@ export function setupCommandBridge({
     });
   }
 
+  /** Keep extension functions in the child and return display-only strings. */
+  function registeredMarkdownTransformers() {
+    try {
+      const transformers = _session.extensionRunner?.getMarkdownTransformers?.();
+      return Array.isArray(transformers)
+        ? transformers.filter((transformer) => typeof transformer === "function")
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function transformMarkdown(items) {
+    const transformers = registeredMarkdownTransformers();
+    const rawItems = items.map((item) => ({ requestId: item.requestId, markdown: item.markdown }));
+    let projectedBytes = markdownTransformJsonBytes({ items: rawItems });
+    const transformedItems = [];
+    for (const [index, item] of items.entries()) {
+      let markdown = item.markdown;
+      const context = {
+        messageType: item.messageType,
+        isStreaming: item.isStreaming,
+        availableWidth: item.availableWidth,
+      };
+      for (const transformer of transformers) {
+        try {
+          const transformed = transformer(markdown, context);
+          if (
+            typeof transformed === "string" &&
+            markdownTransformUtf8Bytes(transformed) <= MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES
+          ) {
+            markdown = transformed;
+          }
+        } catch {
+          // Match Pi: preserve the current value and continue the chain.
+        }
+      }
+      const transformedItem = { requestId: item.requestId, markdown };
+      projectedBytes +=
+        markdownTransformJsonBytes(transformedItem) - markdownTransformJsonBytes(rawItems[index]);
+      if (projectedBytes > MARKDOWN_TRANSFORM_MAX_RESPONSE_BATCH_BYTES) {
+        // Stop invoking extension code and return the complete raw batch. This
+        // avoids retaining or emitting a partially transformed oversized batch.
+        return { items: rawItems };
+      }
+      transformedItems.push(transformedItem);
+    }
+    return { items: transformedItems };
+  }
+
   // ─── Command handler ───────────────────────────────────────────────────
 
   const LIFECYCLE_TIMEOUT_MS = 60_000;
@@ -1702,8 +1811,7 @@ export function setupCommandBridge({
             result: { response: { providers: await collectLogoutProviders(_session) } },
           };
         if (words.length !== 1) throw new Error("Usage: /logout <provider>");
-        await modelAccess(_session).logout(words[0]);
-        return { handled: true, result: { response: { provider: words[0] } } };
+        return { handled: true, result: { response: await logoutProvider(words[0]) } };
       case "label": {
         const targetId = words.shift();
         if (!targetId) throw new Error("Usage: /label <entry-id> [label]");
@@ -1818,9 +1926,14 @@ export function setupCommandBridge({
           // off-scheduler so provider network refresh cannot freeze ingress;
           // the renderer owner-fenced read obtains the catalog afterward.
           return {
-            deferredOutcome: Promise.resolve(modelAccess(_session).refresh()).then(() => ({
-              refreshed: true,
-            })),
+            deferredOutcome: Promise.resolve()
+              .then(() => modelAccess(_session).refresh({ signal: AbortSignal.timeout(15_000) }))
+              .then(completedModelRefresh, () => {
+                // A thrown provider/config error can contain endpoints,
+                // headers, or credential hints. Publish only the bounded
+                // app-owned failure used for resolved error maps above.
+                throw new Error("Model catalog refresh could not be completed");
+              }),
           };
         case "loginProvider": {
           // Re-read the live runtime immediately before crossing the SDK
@@ -1862,8 +1975,26 @@ export function setupCommandBridge({
                   surface.interaction,
                 );
                 surface.complete();
-                return { providerId: intent.providerId, authType: intent.authType };
-              } catch {
+                return {
+                  providerId: intent.providerId,
+                  authType: intent.authType,
+                  synchronized: true,
+                };
+              } catch (error) {
+                if (
+                  isCommittedCredentialSynchronizationError(pi, error, intent.providerId, "login")
+                ) {
+                  // Pi 0.84 deliberately distinguishes a committed credential
+                  // from a failed local model/auth snapshot refresh. Do not
+                  // call the completed write a failed sign-in, and never let
+                  // the Credential carried by the SDK error cross authority.
+                  surface.warn?.();
+                  return {
+                    providerId: intent.providerId,
+                    authType: intent.authType,
+                    synchronized: false,
+                  };
+                }
                 if (controller.signal.aborted) surface.complete();
                 else surface.fail();
                 // Never forward provider-native errors: they can include a URL,
@@ -1916,7 +2047,7 @@ export function setupCommandBridge({
         }
         case "runBash": {
           return {
-            // Pi 0.83 user_bash handlers may await arbitrary work. The
+            // user_bash handlers may await arbitrary work. The
             // authority awaits this preparation outside its scheduler, then
             // calls startShell in a fresh serialized slot after revalidating
             // owner, editor, lifecycle, and foreground-work fences.
@@ -2284,7 +2415,7 @@ export function setupCommandBridge({
           //   2. settingsManager.getEnabledModels() — a defensive fallback
           //      for a legacy/custom runtime that did not project SAVED scope
           //      into AgentSession at construction. The production host now
-          //      resolves these patterns before construction so Pi 0.83's
+          //      resolves these patterns before construction so
           //      ctx.scopedModels is populated for session_start hooks too.
           const scoped = _session.scopedModels;
           if (Array.isArray(scoped) && scoped.length > 0) {
@@ -2315,11 +2446,10 @@ export function setupCommandBridge({
         // These mirror pi's TUI /scoped-models and /logout flows through
         // the SDK host's public session APIs.
         case "get_scoped_models": {
-          // Refresh so a freshly-added credential (e.g. /login) is reflected
-          // immediately — refresh Pi's public model surface before reading the
-          // current available-model snapshot.
+          // Pi 0.84 deliberately opens scoped-model selection from the cached
+          // snapshot instead of blocking on remote catalogs. Login and the
+          // explicit refresh intent synchronize this public runtime snapshot.
           const modelsApi = modelAccess(_session);
-          await modelsApi.refresh();
           const models = await modelsApi.getAvailable();
           const enabledIds = await resolveEnabledModelIds(_session, resolveModelScope);
           send({ type: "response", id, success: true, data: { models, enabledIds } });
@@ -2360,8 +2490,8 @@ export function setupCommandBridge({
         }
 
         case "logout_provider": {
-          await modelAccess(_session).logout(command.provider);
-          send({ type: "response", id, success: true });
+          const result = await logoutProvider(command.provider);
+          send({ type: "response", id, success: true, data: result });
           break;
         }
 
@@ -2500,6 +2630,16 @@ export function setupCommandBridge({
               command.cols,
               command.expanded,
             ),
+          });
+          break;
+        }
+
+        case "transform_markdown": {
+          send({
+            type: "response",
+            id,
+            success: true,
+            data: transformMarkdown(command.items),
           });
           break;
         }

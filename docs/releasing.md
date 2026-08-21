@@ -11,6 +11,14 @@ runs verification, builds signed/notarized macOS artifacts, verifies the
 resulting `.app`, commits/tags the release, pushes the tag, and creates the
 GitHub Release with the zip and dmg assets.
 
+The automated contract is fail-closed: clean `npm ci`, a zero-advisory
+production `npm audit`, typecheck, lint, unit, render, Electron E2E, and
+`npm ls --all`, followed by the signed `dist` and its
+final-app verifier. There is no supported test-skip path. For a pinned-Pi
+candidate, also rehearse `npm ci`, `npm run test:full`, and `npm run dist`, then
+complete the provider-spending Kitty journey and manual GUI/IME checks in the
+root release guide before publishing.
+
 Common forms:
 
 ```bash

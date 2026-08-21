@@ -16,6 +16,21 @@ export const CUSTOM_DONE_SENTINEL = "REAL-REGRESSION-CUSTOM-DONE";
 export const NAME_SENTINEL = "REAL-REGRESSION-EXACT-SESSION-NAME";
 export const WRONG_COMPACT_SENTINEL = "REAL-REGRESSION-WRONG-COMPACT-COLLISION";
 export const SCOPED_MODELS_SENTINEL = "REAL-REGRESSION-SCOPED-MODELS";
+export const TERMINATING_TOOL_SENTINEL = "REAL-REGRESSION-TERMINATE-BLOCKED";
+export const TERMINATING_TOOL_REASON = "REAL-REGRESSION-TERMINATING-POLICY";
+export const MARKDOWN_SOURCE_SENTINEL = "REAL-REGRESSION-MARKDOWN-SOURCE";
+export const MARKDOWN_TRANSFORMED_SENTINEL = "REAL-REGRESSION-MARKDOWN-TRANSFORMED";
+export const EXPANDED_COMMAND_SENTINEL = "REAL-REGRESSION-EXPANDED-COMMAND";
+export const DEFERRED_CUSTOM_SENTINEL = "REAL-REGRESSION-DEFERRED-CUSTOM";
+export const DEFERRED_CUSTOM_TOOL_COMMAND = "REAL-REGRESSION-DEFER-CUSTOM-DURING-TOOL";
+
+// Keep the copied fixture dependency-free at runtime. This is the ordinary
+// TypeBox empty-object record shape Pi expects for a no-argument tool.
+const EMPTY_TOOL_PARAMETERS = {
+  type: "object",
+  properties: {},
+  "~kind": "Object",
+} as never;
 
 const staticWidget = (ctx: ExtensionContext) => {
   ctx.ui.setWidget("real-regression-static-dock", [STATIC_DOCK_SENTINEL]);
@@ -37,6 +52,43 @@ const installFactories = (ctx: ExtensionContext) => {
 };
 
 export default function realSdkRegressions(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "regression-custom-tool",
+    label: "Regression custom tool",
+    description: "Deterministic custom tool used to verify defaultTools preservation.",
+    parameters: EMPTY_TOOL_PARAMETERS,
+    async execute() {
+      return {
+        content: [{ type: "text", text: "REAL-REGRESSION-CUSTOM-TOOL-RESULT" }],
+        details: {},
+      };
+    },
+  });
+
+  pi.registerMarkdownTransformer((markdown, context) =>
+    markdown.replace(
+      MARKDOWN_SOURCE_SENTINEL,
+      `${MARKDOWN_TRANSFORMED_SENTINEL}:${context.messageType}`,
+    ),
+  );
+
+  pi.on("tool_call", (event) => {
+    const command = (event.input as { command?: unknown }).command;
+    if (event.toolName === "bash" && command === DEFERRED_CUSTOM_TOOL_COMMAND) {
+      pi.sendMessage(
+        {
+          customType: "real-regression-deferred-custom",
+          content: DEFERRED_CUSTOM_SENTINEL,
+          display: true,
+        },
+        { triggerTurn: false },
+      );
+    }
+    if (event.toolName === "bash" && command === TERMINATING_TOOL_SENTINEL) {
+      return { block: true, reason: TERMINATING_TOOL_REASON, terminate: true };
+    }
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (!ctx.hasUI) return;
     staticWidget(ctx);
@@ -93,6 +145,16 @@ export default function realSdkRegressions(pi: ExtensionAPI) {
   pi.registerCommand("regression-name", {
     description: "Set the exact real regression session name",
     handler: async () => pi.setSessionName(NAME_SENTINEL),
+  });
+  pi.registerCommand("regression-expand-target", {
+    description: "Notify when expandPromptTemplates dispatches this command",
+    handler: async (_args, ctx) => ctx.ui.notify(EXPANDED_COMMAND_SENTINEL, "info"),
+  });
+  pi.registerCommand("regression-expand-source", {
+    description: "Dispatch another extension command through sendUserMessage expansion",
+    handler: async () => {
+      pi.sendUserMessage("/regression-expand-target", { expandPromptTemplates: true });
+    },
   });
   // Pi's native /compact must win this discovered collision.
   pi.registerCommand("compact", {

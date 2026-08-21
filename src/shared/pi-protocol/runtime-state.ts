@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PiEventSchema } from "./events.js";
 import { ExtensionUiRequestSchema } from "./extension-ui.js";
+import { MarkdownTransformBatchSchema } from "./markdown-transform.js";
 import { PanelEventSchema } from "./panel-events.js";
 import { PiRpcResponseSchema, SessionTreeEntrySchema } from "./responses.js";
 import { ThinkingLevelSchema } from "./thinking.js";
@@ -173,6 +174,8 @@ export const RuntimeCatalogSchema = z.object({
   workingVisible: z.boolean().optional(),
   hiddenThinkingLabel: z.string().optional(),
   toolsExpanded: z.boolean().optional(),
+  /** Public extension Markdown transformers registered for this host owner. */
+  markdownTransformersAvailable: z.boolean().optional(),
   capabilityDiagnostics: z.array(z.string()).default([]),
 });
 export type RuntimeCatalog = z.infer<typeof RuntimeCatalogSchema>;
@@ -567,6 +570,12 @@ export const SessionQuerySchema = z.discriminatedUnion("type", [
       expanded: z.boolean().optional(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("transform_markdown"),
+      items: MarkdownTransformBatchSchema,
+    })
+    .strict(),
   z.object({ type: z.literal("get_cache_miss_notices") }).strict(),
 ]);
 export type SessionQuery = z.infer<typeof SessionQuerySchema>;
@@ -586,6 +595,7 @@ export const SessionQueryTypeSchema = z.enum([
   "get_tree",
   "render_entry",
   "render_message",
+  "transform_markdown",
   "get_cache_miss_notices",
 ]);
 export type SessionQueryType = z.infer<typeof SessionQueryTypeSchema>;
@@ -613,6 +623,7 @@ export const SESSION_QUERY_POLICY = {
   get_tree: { retry: "same_owner" },
   render_entry: { retry: "same_owner" },
   render_message: { retry: "same_owner" },
+  transform_markdown: { retry: "same_owner" },
   get_cache_miss_notices: { retry: "same_owner" },
 } as const satisfies Record<SessionQuery["type"], QueryPolicy>;
 
@@ -1108,7 +1119,12 @@ export const ExportIntentResultSchema = z.object({ path: z.string().min(1) }).st
 export const RefreshModelsIntentResultSchema = z.object({ refreshed: z.literal(true) }).strict();
 /** Credentials and provider errors never cross the authority boundary. */
 export const LoginProviderIntentResultSchema = z
-  .object({ providerId: NonEmptyIdSchema, authType: z.enum(["oauth", "api_key"]) })
+  .object({
+    providerId: NonEmptyIdSchema,
+    authType: z.enum(["oauth", "api_key"]),
+    /** False means Pi committed the credential but its local snapshot refresh failed. */
+    synchronized: z.boolean().optional(),
+  })
   .strict();
 
 export const IntentOutcomeSchema = z.discriminatedUnion("kind", [

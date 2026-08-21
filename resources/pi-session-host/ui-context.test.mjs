@@ -86,6 +86,29 @@ describe("createDialogResolver", () => {
     expect(acknowledged).toContain(current.id);
   });
 
+  it("keeps a committed-login synchronization warning visible without retaining credentials", () => {
+    const controller = new AbortController();
+    const resolver = createDialogResolver(() => {});
+    const surface = resolver.createProviderAuthSurface(
+      "Dynamic Provider",
+      "api_key",
+      controller.signal,
+      () => controller.abort(),
+    );
+
+    surface.warn();
+
+    const snapshot = resolver.pendingSnapshot()[0].request;
+    expect(snapshot).toMatchObject({
+      method: "providerAuth",
+      phase: "warning",
+      message: expect.stringContaining("Sign-in was saved"),
+    });
+    expect(snapshot).not.toHaveProperty("credential");
+    expect(snapshot).not.toHaveProperty("error");
+    expect(resolver.pendingCount).toBe(1);
+  });
+
   it("keeps OAuth launch details on a subsequent manual-code prompt revision", async () => {
     const sent = [];
     const controller = new AbortController();
@@ -281,10 +304,10 @@ describe("uiContext fire-and-forget + no-op methods", () => {
 
 // ─── Unified-TUI harness ──────────────────────────────────────────────────────
 //
-// Fakes for the pi-tui modules. ensureUnifiedTui() builds a TUI/Editor/layout
-// from these; we capture the instances and control KeybindingsManager.matches so
-// the submit/clipboard/paste logic can be driven deterministically without a
-// real pi-tui render loop.
+// Fakes for the pi-tui modules. ensureUnifiedTui() builds a main-screen
+// TUI/Editor/layout from these; we capture the instances and control
+// KeybindingsManager.matches so the submit/clipboard/paste logic can be driven
+// deterministically without a real pi-tui render loop.
 
 /** A 1×1 PNG (base64) so resolveClipboardImage writes valid bytes to a temp file. */
 const PNG_1X1 =
@@ -306,7 +329,7 @@ function makeHarness(tuiModuleOverrides = {}) {
   };
 
   const tuis = [];
-  class FakeTUI {
+  class FakeTuiMainScreen {
     constructor(terminal) {
       this.terminal = terminal;
       this.children = [];
@@ -379,7 +402,7 @@ function makeHarness(tuiModuleOverrides = {}) {
   const KeybindingsManager = vi.fn(() => ({ matches }));
 
   const tuiModules = {
-    TUI: FakeTUI,
+    TuiMainScreen: FakeTuiMainScreen,
     Container: FakeContainer,
     Editor,
     KeybindingsManager,

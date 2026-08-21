@@ -8,8 +8,9 @@
  * audited pin rather than whatever `pi` happens to be on PATH.
  *
  * `overridePath` is a TEST-ONLY seam (settings.piBinaryPath, never exposed in
- * the UI): e2e fixtures point it at fake-pi scripts or the dev-dependency pi.
- * If the override doesn't exist on disk, resolution falls back to the bundle.
+ * the UI). It is honored only when the E2E launcher sets the explicit test
+ * activation environment variable below; stale or hand-edited production
+ * settings can therefore never bypass the audited bundle.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -19,7 +20,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PI_PACKAGE_SEGMENTS = ["node_modules", "@earendil-works", "pi-coding-agent"] as const;
-export const PINNED_PI_VERSION = "0.83.0";
+export const PINNED_PI_VERSION = "0.84.2";
+export const TEST_PI_BINARY_OVERRIDE_ENV = "PIVIS_TEST_ALLOW_PI_BINARY_OVERRIDE";
 
 // The bundled package must live on the real filesystem — the SDK host is
 // forked (possibly under system Node) and pty spawns cli.js directly, neither
@@ -68,7 +70,11 @@ let cached: { path: string; version: string } | null = null;
 export function getPinnedPi(
   overridePath?: string | null,
 ): { path: string; version: string } | null {
-  if (overridePath && existsSync(overridePath)) {
+  if (
+    process.env[TEST_PI_BINARY_OVERRIDE_ENV] === "1" &&
+    overridePath &&
+    existsSync(overridePath)
+  ) {
     return { path: overridePath, version: "test-override" };
   }
   if (cached) return cached;

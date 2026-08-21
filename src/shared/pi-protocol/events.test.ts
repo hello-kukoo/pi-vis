@@ -66,7 +66,7 @@ describe("PiEventSchema", () => {
     ).toMatchObject({ result: { usage } });
   });
 
-  it("accepts Pi 0.83 direct bash execution updates as known events", () => {
+  it("accepts pinned-Pi direct bash execution updates as known events", () => {
     expect(
       PiEventSchema.parse({
         type: "bash_execution_update",
@@ -78,6 +78,29 @@ describe("PiEventSchema", () => {
       id: "bash-1",
       delta: "streamed output",
     });
+  });
+
+  it("preserves Pi 0.84.2 assistant endTurn and tool-call namespace metadata", () => {
+    const message = {
+      role: "assistant",
+      endTurn: true,
+      content: [
+        {
+          type: "toolCall",
+          id: "call-namespace",
+          name: "search",
+          namespace: "provider.tools",
+          arguments: { query: "pi-vis" },
+        },
+      ],
+    };
+    expect(
+      PiEventSchema.parse({
+        type: "message_update",
+        message,
+        assistantMessageEvent: { type: "toolcall_end", contentIndex: 0 },
+      }),
+    ).toMatchObject({ message });
   });
 
   it("accepts the complete PTY Shell Turn lifecycle without treating raw bytes as unknown", () => {

@@ -20,6 +20,7 @@ const renderPort = scopedPort({
  * (UnifiedTuiHost → xterm.js, store reducer, App slot logic) is exercised.
  */
 export default defineConfig({
+  forbidOnly: true,
   testDir: __dirname,
   testMatch: "*.spec.mts",
   timeout: 60_000,
