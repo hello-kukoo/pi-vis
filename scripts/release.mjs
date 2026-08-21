@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { RELEASE_CHECKS } from "./release-checks.mjs";
 import { configureSigningEnvironment, resolveNotaryProfile } from "./signing-env.mjs";
 
 const args = parseArgs(process.argv.slice(2));
@@ -10,7 +11,6 @@ const root = process.cwd();
 const dryRun = args.has("dry-run");
 const noPush = args.has("no-push");
 const draft = args.has("draft");
-const skipTests = args.has("skip-tests");
 const notesFile = args.get("notes-file");
 const generateNotes = args.has("generate-notes");
 const yes = args.has("yes");
@@ -40,12 +40,7 @@ function main() {
 
   run("npm", ["version", nextVersion, "--no-git-tag-version"]);
 
-  if (!skipTests) {
-    run("npm", ["run", "typecheck"]);
-    run("npm", ["run", "lint"]);
-    run("npm", ["test"]);
-    run("npm", ["run", "test:e2e"]);
-  }
+  for (const [command, commandArgs] of RELEASE_CHECKS) run(command, commandArgs);
 
   run("npm", ["run", "dist"]);
   verifyArtifacts(nextVersion);
@@ -65,7 +60,10 @@ function main() {
     return;
   }
 
-  run("git", ["push", "origin", "HEAD", "--follow-tags"]);
+  // Push only this release commit and tag. --follow-tags can publish unrelated
+  // annotated tags that happen to be reachable from the branch.
+  run("git", ["push", "origin", "HEAD"]);
+  run("git", ["push", "origin", tag]);
 
   const assets = [
     `release/${nextVersion}/Pi-Vis-${nextVersion}-arm64-mac.zip`,

@@ -53,6 +53,10 @@
   color: var(--color-error);
 }
 
+.provider-login-dialog__message--warning {
+  color: var(--warning);
+}
+
 .provider-login-dialog__primary,
 .provider-login-dialog__cancel,
 .provider-login-dialog__link,

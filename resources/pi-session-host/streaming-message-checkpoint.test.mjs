@@ -16,7 +16,7 @@ function capturedEvents(name) {
 
 describe("streaming assistant attach checkpoint", () => {
   it.each(["prompt_stream.jsonl", "tool_call.jsonl"])(
-    "materializes every Pi 0.83 cumulative boundary exactly from %s",
+    "materializes every pinned-Pi cumulative boundary exactly from %s",
     (capture) => {
       let checkpoint;
       let assistantUpdates = 0;
@@ -231,5 +231,29 @@ describe("streaming assistant attach checkpoint", () => {
       content: [{ type: "thinking", thinking: "private" }],
       usage: { output: 1 },
     });
+  });
+
+  it("retains Pi 0.84.2 endTurn and tool-call namespace metadata", () => {
+    const message = {
+      role: "assistant",
+      endTurn: true,
+      content: [
+        {
+          type: "toolCall",
+          id: "call-namespace",
+          name: "search",
+          namespace: "provider.tools",
+          arguments: { query: "pi-vis" },
+          partialArgs: '{"query":"pi-vis"}',
+        },
+      ],
+    };
+    const checkpoint = updateStreamingMessageCheckpoint(
+      createStreamingMessageCheckpoint({ role: "assistant", content: [] }),
+      message,
+      { type: "toolcall_end", contentIndex: 0 },
+    );
+
+    expect(materializeStreamingMessageCheckpoint(checkpoint)).toEqual(message);
   });
 });

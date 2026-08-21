@@ -28,6 +28,15 @@ const CUSTOM_DONE = "REAL-REGRESSION-CUSTOM-DONE";
 const NAME = "REAL-REGRESSION-EXACT-SESSION-NAME";
 const WRONG_COMPACT = "REAL-REGRESSION-WRONG-COMPACT-COLLISION";
 const SCOPED_MODELS = "REAL-REGRESSION-SCOPED-MODELS";
+const BASE_CONTEXT = "REAL-REGRESSION-BASE-CONTEXT-MUST-BE-REPLACED";
+const OVERRIDE_CONTEXT = "REAL-REGRESSION-OVERRIDE-CONTEXT-ACTIVE";
+const TERMINATING_TOOL = "REAL-REGRESSION-TERMINATE-BLOCKED";
+const TERMINATING_TOOL_REASON = "REAL-REGRESSION-TERMINATING-POLICY";
+const MARKDOWN_SOURCE = "REAL-REGRESSION-MARKDOWN-SOURCE";
+const MARKDOWN_TRANSFORMED = "REAL-REGRESSION-MARKDOWN-TRANSFORMED:assistant";
+const EXPANDED_COMMAND = "REAL-REGRESSION-EXPANDED-COMMAND";
+const DEFERRED_CUSTOM = "REAL-REGRESSION-DEFERRED-CUSTOM";
+const DEFERRED_CUSTOM_TOOL_COMMAND = "REAL-REGRESSION-DEFER-CUSTOM-DURING-TOOL";
 
 async function closeFixture(
   launch: RealSdkLaunch | undefined,
@@ -115,7 +124,7 @@ async function assertDockNeverFlashed(page: Page): Promise<void> {
     .toBe(false);
 }
 
-test.describe("Pinned real Pi 0.83.0 regressions", () => {
+test.describe("Pinned real Pi 0.84.2 regressions", () => {
   test("real factory widgets, unified draft custody, and custom Escape share one live authority", async () => {
     test.setTimeout(180_000);
     const fixture = createRealSdkFixture({ extensionFiles: [EXTENSION] });
@@ -196,6 +205,15 @@ test.describe("Pinned real Pi 0.83.0 regressions", () => {
         await expect(restoredComposer).toHaveValue("");
         await assertDockNeverFlashed(window);
       });
+
+      await test.step("sendUserMessage can opt into extension-command expansion", async () => {
+        const textarea = window.locator(".composer__textarea");
+        await slash(textarea, "/regression-expand-source");
+        await expect(window.getByText(EXPANDED_COMMAND, { exact: true })).toBeVisible({
+          timeout: 30_000,
+        });
+        await expect(window.locator(".transcript-block--user")).toHaveCount(0);
+      });
     } catch (error) {
       throw await withDiagnostics(error, fixture, launch);
     } finally {
@@ -205,14 +223,25 @@ test.describe("Pinned real Pi 0.83.0 regressions", () => {
 
   test("saved enabledModels initialize the fresh model and session_start ctx.scopedModels", async () => {
     test.setTimeout(180_000);
-    const provider = await createScriptedOpenAIProvider([], {
-      latency: REAL_SDK_PROVIDER_LATENCY,
-    });
+    const provider = await createScriptedOpenAIProvider(
+      [
+        {
+          expect: {
+            promptIncludes: "verify the configured default tool set",
+            toolNames: ["read", "regression-custom-tool"],
+            compaction: false,
+          },
+          response: { type: "text", chunks: ["REAL-REGRESSION-DEFAULT-TOOLS-OK"] },
+        },
+      ],
+      { latency: REAL_SDK_PROVIDER_LATENCY },
+    );
     const fixture = createRealSdkFixture({
       providerBaseUrl: provider.baseUrl,
       extensionFiles: [EXTENSION],
       localModelIds: ["pivis-test-model", "pivis-scoped-model"],
       enabledModels: ["pivis-local/pivis-scoped-model:high", "pivis-local/pivis-test-model"],
+      defaultTools: ["read"],
     });
     let launch: RealSdkLaunch | undefined;
     try {
@@ -232,7 +261,208 @@ test.describe("Pinned real Pi 0.83.0 regressions", () => {
       await expect(
         window.locator(".session-header__thinking > .session-header__picker-btn"),
       ).toContainText("high");
+
+      const textarea = await inputView(window);
+      await textarea.fill("verify the configured default tool set");
+      await textarea.press("Enter");
+      await expect(
+        window.getByText("REAL-REGRESSION-DEFAULT-TOOLS-OK", { exact: true }),
+      ).toBeVisible({
+        timeout: 60_000,
+      });
+      await provider.waitForRequestCount(1);
+      const body = provider.requests[0]!.parsedBody as {
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      const toolNames = body.tools?.map((tool) => tool.function?.name).filter(Boolean) ?? [];
+      expect(toolNames).toEqual(expect.arrayContaining(["read", "regression-custom-tool"]));
+      expect(toolNames).not.toEqual(expect.arrayContaining(["bash", "edit", "write"]));
       provider.assertExhausted();
+    } catch (error) {
+      throw await withDiagnostics(error, fixture, launch, provider);
+    } finally {
+      await closeFixture(launch, fixture, provider);
+    }
+  });
+
+  test("triggerTurn-false custom messages settle after tool results and keep the next strict request valid", async () => {
+    test.setTimeout(180_000);
+    const provider = await createScriptedOpenAIProvider(
+      [
+        {
+          expect: {
+            promptIncludes: "request a tool call with a deferred custom message",
+            toolNames: ["bash"],
+            compaction: false,
+          },
+          response: {
+            type: "tool_call",
+            name: "bash",
+            argumentChunks: [JSON.stringify({ command: DEFERRED_CUSTOM_TOOL_COMMAND })],
+          },
+        },
+        {
+          expect: { compaction: false },
+          response: { type: "text", chunks: ["REAL-REGRESSION-DEFERRED-TURN-DONE"] },
+        },
+        {
+          expect: {
+            promptIncludes: "continue after the deferred custom message",
+            compaction: false,
+          },
+          response: { type: "text", chunks: ["REAL-REGRESSION-DEFERRED-FOLLOWUP-OK"] },
+        },
+      ],
+      { latency: REAL_SDK_PROVIDER_LATENCY },
+    );
+    const fixture = createRealSdkFixture({
+      providerBaseUrl: provider.baseUrl,
+      extensionFiles: [EXTENSION],
+    });
+    let launch: RealSdkLaunch | undefined;
+    try {
+      launch = await fixture.launch();
+      const { window } = launch;
+      await openNewRegressionSession(window);
+      const textarea = await inputView(window);
+      await selectLocalTestModel(window, textarea);
+
+      await textarea.fill("request a tool call with a deferred custom message");
+      await textarea.press("Enter");
+      await expect(
+        window.getByText("REAL-REGRESSION-DEFERRED-TURN-DONE", { exact: true }),
+      ).toBeVisible({
+        timeout: 60_000,
+      });
+      await provider.waitForRequestCount(2);
+
+      const entries = fixture.sessionFiles().flatMap(parseSessionEntries);
+      const assistantIndex = entries.findIndex(
+        (entry) =>
+          entry.type === "message" &&
+          (entry.message as { role?: string } | undefined)?.role === "assistant" &&
+          JSON.stringify(entry).includes(DEFERRED_CUSTOM_TOOL_COMMAND),
+      );
+      const toolResultIndex = entries.findIndex(
+        (entry, index) =>
+          index > assistantIndex &&
+          entry.type === "message" &&
+          (entry.message as { role?: string } | undefined)?.role === "toolResult",
+      );
+      const customIndex = entries.findIndex(
+        (entry, index) =>
+          index > assistantIndex &&
+          entry.type === "custom_message" &&
+          JSON.stringify(entry).includes(DEFERRED_CUSTOM),
+      );
+      expect(assistantIndex).toBeGreaterThanOrEqual(0);
+      expect(toolResultIndex).toBeGreaterThan(assistantIndex);
+      expect(customIndex).toBeGreaterThan(toolResultIndex);
+
+      await textarea.fill("continue after the deferred custom message");
+      await textarea.press("Enter");
+      await expect(
+        window.getByText("REAL-REGRESSION-DEFERRED-FOLLOWUP-OK", { exact: true }),
+      ).toBeVisible({
+        timeout: 60_000,
+      });
+      await provider.waitForRequestCount(3);
+      const nextBody = provider.requests[2]!.parsedBody as {
+        messages?: Array<{ role?: string; content?: unknown; tool_calls?: unknown[] }>;
+      };
+      const messages = nextBody.messages ?? [];
+      const toolCallMessage = messages.findIndex(
+        (message) => message.role === "assistant" && (message.tool_calls?.length ?? 0) > 0,
+      );
+      expect(toolCallMessage).toBeGreaterThanOrEqual(0);
+      expect(messages[toolCallMessage + 1]?.role).toBe("tool");
+      const customMessage = messages.findIndex(
+        (message) =>
+          message.role === "user" && JSON.stringify(message.content).includes(DEFERRED_CUSTOM),
+      );
+      expect(customMessage).toBeGreaterThan(toolCallMessage + 1);
+      provider.assertExhausted();
+    } catch (error) {
+      throw await withDiagnostics(error, fixture, launch, provider);
+    } finally {
+      await closeFixture(launch, fixture, provider);
+    }
+  });
+
+  test("AGENTS.override.md replaces same-directory context and a terminating blocked tool ends the turn", async () => {
+    test.setTimeout(180_000);
+    const provider = await createScriptedOpenAIProvider(
+      [
+        {
+          expect: {
+            promptIncludes: ["verify the loaded project context", OVERRIDE_CONTEXT],
+            compaction: false,
+          },
+          response: { type: "text", chunks: [MARKDOWN_SOURCE] },
+        },
+        {
+          expect: {
+            promptIncludes: "request one terminating blocked tool call",
+            toolNames: ["bash"],
+            compaction: false,
+          },
+          response: {
+            type: "tool_call",
+            name: "bash",
+            argumentChunks: [JSON.stringify({ command: TERMINATING_TOOL })],
+          },
+        },
+      ],
+      { latency: REAL_SDK_PROVIDER_LATENCY },
+    );
+    const fixture = createRealSdkFixture({
+      providerBaseUrl: provider.baseUrl,
+      extensionFiles: [EXTENSION],
+    });
+    fs.writeFileSync(join(fixture.dirs.workspace, "AGENTS.md"), `${BASE_CONTEXT}\n`);
+    fs.writeFileSync(join(fixture.dirs.workspace, "AGENTS.override.md"), `${OVERRIDE_CONTEXT}\n`);
+    let launch: RealSdkLaunch | undefined;
+    try {
+      launch = await fixture.launch();
+      const { window } = launch;
+      await openNewRegressionSession(window);
+      const textarea = await inputView(window);
+      await selectLocalTestModel(window, textarea);
+
+      await test.step("the provider receives only the same-directory override", async () => {
+        await textarea.fill("verify the loaded project context");
+        await textarea.press("Enter");
+        await expect(window.getByText(MARKDOWN_TRANSFORMED, { exact: true })).toBeVisible({
+          timeout: 60_000,
+        });
+        await expect(window.getByText(MARKDOWN_SOURCE, { exact: true })).toHaveCount(0);
+        await provider.waitForRequestCount(1);
+        const requestBody = JSON.stringify(provider.requests[0]!.parsedBody);
+        expect(requestBody).toContain(OVERRIDE_CONTEXT);
+        expect(requestBody).not.toContain(BASE_CONTEXT);
+      });
+
+      await test.step("an all-terminating blocked batch settles without a follow-up request", async () => {
+        await textarea.fill("request one terminating blocked tool call");
+        await textarea.press("Enter");
+        await provider.waitForRequestCount(2);
+
+        const toolCard = window.locator(".tool-card").filter({ hasText: TERMINATING_TOOL });
+        await expect(toolCard).toBeVisible({ timeout: 60_000 });
+        await expect(toolCard).toHaveClass(/tool-card--error/u);
+        await toolCard.locator("button.tool-card__header").click();
+        await expect(toolCard).toContainText(TERMINATING_TOOL_REASON);
+        await expect(toolCard).toContainText("terminate");
+        await expect(window.locator(".working-row")).toHaveCount(0, { timeout: 30_000 });
+        await expect(
+          window.locator(".sidebar__session--active .status-dot--streaming"),
+        ).toHaveCount(0);
+        await expect(textarea).toBeEnabled();
+
+        expect(provider.requests).toHaveLength(2);
+        expect(provider.unexpectedRequests).toEqual([]);
+        provider.assertExhausted();
+      });
     } catch (error) {
       throw await withDiagnostics(error, fixture, launch, provider);
     } finally {

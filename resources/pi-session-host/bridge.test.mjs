@@ -1,7 +1,14 @@
 import fs from "node:fs";
-import { resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
+import {
+  CredentialSynchronizationError,
+  resolveModelScopeWithDiagnostics,
+} from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { PI_COMMAND_POLICY } from "../../src/shared/pi-protocol/commands.ts";
+import {
+  MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES,
+  MARKDOWN_TRANSFORM_MAX_RESPONSE_BATCH_BYTES,
+} from "../../src/shared/pi-protocol/markdown-transform.ts";
 import {
   AuthorityAttachBaselineResponseSchema,
   AuthorityFrameSchema,
@@ -10,6 +17,7 @@ import {
 import { assertHostCapabilities, setupCommandBridge } from "./bridge.mjs";
 
 const MODEL_SCOPE_PI = {
+  CredentialSynchronizationError,
   resolveModelScopeWithDiagnostics,
   getShellConfig: vi.fn(() => ({ shell: "/bin/bash", args: ["-c"] })),
 };
@@ -96,7 +104,7 @@ function makeSession(overrides = {}) {
         { provider: "anthropic", id: "claude-x", name: "Claude X" },
       ]),
       getModel: vi.fn(),
-      refresh: vi.fn(async () => {}),
+      refresh: vi.fn(async () => ({ aborted: false, errors: new Map() })),
       logout: vi.fn(async () => {}),
       listCredentials: vi.fn(async () => []),
       getProvider: vi.fn(),
@@ -820,6 +828,7 @@ describe("setupCommandBridge — target intent dispatch", () => {
       }),
     ).resolves.toMatchObject({ status: "admitted" });
     await vi.waitFor(() => expect(session.modelRuntime.refresh).toHaveBeenCalledTimes(1));
+    expect(session.modelRuntime.refresh).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "intent_outcome",
@@ -831,6 +840,71 @@ describe("setupCommandBridge — target intent dispatch", () => {
         }),
       }),
     );
+  });
+
+  it.each([
+    ["an aborted refresh", { aborted: true, errors: new Map() }],
+    [
+      "provider refresh errors",
+      {
+        aborted: false,
+        errors: new Map([["secret-provider", new Error("secret-provider-url-and-header")]]),
+      },
+    ],
+  ])("does not publish success for %s or leak its details", async (_label, refreshResult) => {
+    const refresh = vi.fn(async () => refreshResult);
+    const { send, dispatchIntent } = setup({
+      modelRuntime: { ...makeSession().modelRuntime, refresh },
+    });
+    await dispatchIntent({
+      intentId: "failed-refresh",
+      expectedOwner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+      intent: { kind: "refreshModels" },
+    });
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "failed-refresh",
+            kind: "refreshModels",
+            state: "failed",
+            error: "Model catalog refresh could not be completed",
+          }),
+        }),
+      ),
+    );
+    expect(JSON.stringify(send.mock.calls)).not.toContain("secret-provider");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("secret-provider-url-and-header");
+  });
+
+  it("sanitizes a rejected model refresh", async () => {
+    const refresh = vi.fn(async () => {
+      throw new Error("secret-provider-refresh-url-and-header");
+    });
+    const { send, dispatchIntent } = setup({
+      modelRuntime: { ...makeSession().modelRuntime, refresh },
+    });
+    await dispatchIntent({
+      intentId: "rejected-refresh",
+      expectedOwner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+      intent: { kind: "refreshModels" },
+    });
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "intent_outcome",
+          outcome: expect.objectContaining({
+            intentId: "rejected-refresh",
+            state: "failed",
+            error: "Model catalog refresh could not be completed",
+          }),
+        }),
+      ),
+    );
+    expect(JSON.stringify(send.mock.calls)).not.toContain("secret-provider-refresh-url-and-header");
   });
 
   it("lists dynamic runtime login methods and ambient auth without hardcoding providers", async () => {
@@ -920,9 +994,75 @@ describe("setupCommandBridge — target intent dispatch", () => {
       );
     expect(outcome.outcome).toMatchObject({
       state: "completed",
-      result: { providerId: "project-dynamic", authType: "api_key" },
+      result: {
+        providerId: "project-dynamic",
+        authType: "api_key",
+        synchronized: true,
+      },
     });
     expect(JSON.stringify(outcome)).not.toContain("never-publish-this");
+  });
+
+  it("treats a committed credential with failed local synchronization as a safe warning", async () => {
+    const credential = { type: "api_key", key: "never-publish-committed-key" };
+    const login = vi.fn(async () => {
+      throw new CredentialSynchronizationError("sync-warning", "login", credential, {
+        cause: new Error("never-publish-provider-sync-detail"),
+      });
+    });
+    const modelRuntime = {
+      ...makeSession().modelRuntime,
+      getProviders: vi.fn(() => [
+        {
+          id: "sync-warning",
+          name: "Sync Warning",
+          auth: { apiKey: { login: vi.fn() } },
+        },
+      ]),
+      checkAuth: vi.fn(async () => undefined),
+      login,
+    };
+    const surface = {
+      interaction: { signal: new AbortController().signal, prompt: vi.fn(), notify: vi.fn() },
+      complete: vi.fn(),
+      warn: vi.fn(),
+      fail: vi.fn(),
+    };
+    const { send, dispatchIntent } = setup(
+      { modelRuntime },
+      { createProviderAuthSurface: vi.fn(() => surface) },
+    );
+
+    await dispatchIntent({
+      intentId: "committed-login",
+      expectedOwner: { hostInstanceId: "test-host", sessionEpoch: 0 },
+      intent: { kind: "loginProvider", providerId: "sync-warning", authType: "api_key" },
+    });
+    await vi.waitFor(() => expect(surface.warn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(
+        send.mock.calls
+          .map(([message]) => message)
+          .some(
+            (message) =>
+              message.type === "intent_outcome" && message.outcome.intentId === "committed-login",
+          ),
+      ).toBe(true),
+    );
+    const outcome = send.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message) =>
+          message.type === "intent_outcome" && message.outcome.intentId === "committed-login",
+      );
+    expect(outcome.outcome).toMatchObject({
+      state: "completed",
+      result: { providerId: "sync-warning", authType: "api_key", synchronized: false },
+    });
+    expect(surface.complete).not.toHaveBeenCalled();
+    expect(surface.fail).not.toHaveBeenCalled();
+    expect(JSON.stringify(send.mock.calls)).not.toContain("never-publish-committed-key");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("never-publish-provider-sync-detail");
   });
 
   it("aborts the active public login without publishing provider errors", async () => {
@@ -1146,7 +1286,7 @@ describe("setupCommandBridge — target intent dispatch", () => {
     expect(runtime.newSession).not.toHaveBeenCalled();
   });
 
-  it("lets a 0.83 user_bash handler replace a Shell Turn result exactly once without a PTY", async () => {
+  it("lets a pinned-Pi user_bash handler replace a Shell Turn result exactly once without a PTY", async () => {
     const replacement = {
       output: "extension replacement\n",
       exitCode: 23,
@@ -1233,7 +1373,7 @@ describe("setupCommandBridge — target intent dispatch", () => {
     );
   });
 
-  it("streams 0.83 user_bash replacement operations exactly once without constructing a PTY", async () => {
+  it("streams pinned-Pi user_bash replacement operations exactly once without constructing a PTY", async () => {
     const gate = deferred();
     const operations = { exec: vi.fn() };
     let listener;
@@ -1362,7 +1502,7 @@ describe("setupCommandBridge — target intent dispatch", () => {
     );
   });
 
-  it("emits an unhandled 0.83 user_bash event once before using the existing PTY path", async () => {
+  it("emits an unhandled pinned-Pi user_bash event once before using the existing PTY path", async () => {
     const gate = deferred();
     const controller = makeShellController();
     const createShellController = vi.fn(() => controller);
@@ -1449,7 +1589,7 @@ describe("setupCommandBridge — target intent dispatch", () => {
       reason: "cancelled",
     });
 
-    // A handler has no public AbortSignal in Pi 0.83, so it may reject late.
+    // A handler has no public AbortSignal, so it may reject late.
     // The host consumes that loser but must never start or persist its result.
     preparation.reject(new Error("late extension rejection"));
     await Promise.resolve();
@@ -2607,6 +2747,43 @@ describe("setupCommandBridge — target intent dispatch", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
+  it("treats a committed logout with failed local synchronization as success with a warning", async () => {
+    const credential = { type: "oauth", access: "never-publish-removed-credential" };
+    const logout = vi.fn(async () => {
+      throw new CredentialSynchronizationError("anthropic", "logout", credential, {
+        cause: new Error("never-publish-logout-sync-detail"),
+      });
+    });
+    const notify = vi.fn();
+    const { send, run } = setup(
+      { modelRuntime: { ...makeSession().modelRuntime, logout } },
+      { uiContext: { notify } },
+    );
+
+    await expect(run({ type: "logout_provider", provider: "anthropic" })).resolves.toMatchObject({
+      success: true,
+      data: { provider: "anthropic", synchronized: false },
+    });
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("Credential removed"), "warning");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("never-publish-removed-credential");
+    expect(JSON.stringify(send.mock.calls)).not.toContain("never-publish-logout-sync-detail");
+  });
+
+  it("sanitizes provider-native logout failures", async () => {
+    const logout = vi.fn(async () => {
+      throw new Error("never-publish-logout-url-header-secret");
+    });
+    const { send, run } = setup({
+      modelRuntime: { ...makeSession().modelRuntime, logout },
+    });
+
+    await expect(run({ type: "logout_provider", provider: "anthropic" })).resolves.toMatchObject({
+      success: false,
+      error: "Credential could not be removed",
+    });
+    expect(JSON.stringify(send.mock.calls)).not.toContain("never-publish-logout-url-header-secret");
+  });
+
   it("leaves a template that shadows a builtin on Pi's prompt path", async () => {
     const { session, runtime, dispatchIntent } = setup(
       { promptTemplates: [{ name: "new" }] },
@@ -3152,6 +3329,152 @@ describe("setupCommandBridge — command mapping", () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
+  it("chains Pi 0.84 Markdown transformers with the public render context", async () => {
+    const first = vi.fn(
+      (markdown, context) =>
+        `${markdown}|${context.messageType}:${context.isStreaming}:${context.availableWidth}`,
+    );
+    const failing = vi.fn(() => {
+      throw new Error("extension bug");
+    });
+    const last = vi.fn((markdown) => `${markdown}|last`);
+    const { run } = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMarkdownTransformers: vi.fn(() => [first, failing, last]),
+      },
+    });
+
+    await expect(
+      run({
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "assistant-a",
+            markdown: "before",
+            messageType: "assistant",
+            isStreaming: true,
+            availableWidth: 96,
+          },
+          {
+            requestId: "thinking-a",
+            markdown: "thought",
+            messageType: "assistant-thinking",
+            isStreaming: false,
+            availableWidth: 72,
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      data: {
+        items: [
+          { requestId: "assistant-a", markdown: "before|assistant:true:96|last" },
+          {
+            requestId: "thinking-a",
+            markdown: "thought|assistant-thinking:false:72|last",
+          },
+        ],
+      },
+    });
+    expect(first).toHaveBeenNthCalledWith(1, "before", {
+      messageType: "assistant",
+      isStreaming: true,
+      availableWidth: 96,
+    });
+    expect(last).toHaveBeenNthCalledWith(1, "before|assistant:true:96", {
+      messageType: "assistant",
+      isStreaming: true,
+      availableWidth: 96,
+    });
+    expect(failing).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts the output byte boundary and rejects multibyte extension expansion", async () => {
+    const exact = "🙂".repeat(MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES / 4);
+    const accepted = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMarkdownTransformers: vi.fn(() => [vi.fn(() => exact)]),
+      },
+    });
+    await expect(
+      accepted.run({
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "exact",
+            markdown: "raw",
+            messageType: "assistant",
+            isStreaming: false,
+            availableWidth: 80,
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ data: { items: [{ requestId: "exact", markdown: exact }] } });
+
+    const oversized = `${exact}🙂`;
+    const expanding = vi.fn(() => oversized);
+    const safeTail = vi.fn((markdown) => `${markdown}|safe`);
+    const rejected = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMarkdownTransformers: vi.fn(() => [expanding, safeTail]),
+      },
+    });
+    await expect(
+      rejected.run({
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "oversized",
+            markdown: "raw",
+            messageType: "assistant-thinking",
+            isStreaming: true,
+            availableWidth: 72,
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      data: { items: [{ requestId: "oversized", markdown: "raw|safe" }] },
+    });
+    expect(safeTail).toHaveBeenCalledWith("raw", {
+      messageType: "assistant-thinking",
+      isStreaming: true,
+      availableWidth: 72,
+    });
+  });
+
+  it("falls back atomically and stops extension expansion at the response byte bound", async () => {
+    expect(MARKDOWN_TRANSFORM_MAX_RESPONSE_BATCH_BYTES).toBe(
+      4 * MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES,
+    );
+    const expansion = "x".repeat(MARKDOWN_TRANSFORM_MAX_OUTPUT_BYTES);
+    const transformer = vi.fn(() => expansion);
+    const { run } = setup({
+      extensionRunner: {
+        getRegisteredCommands: vi.fn(() => []),
+        getMarkdownTransformers: vi.fn(() => [transformer]),
+      },
+    });
+    const items = Array.from({ length: 6 }, (_, index) => ({
+      requestId: `aggregate-${index}`,
+      markdown: `raw-${index}`,
+      messageType: "assistant",
+      isStreaming: false,
+      availableWidth: 80,
+    }));
+
+    const result = await run({ type: "transform_markdown", items });
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        items: items.map(({ requestId, markdown }) => ({ requestId, markdown })),
+      },
+    });
+    expect(transformer.mock.calls.length).toBeLessThan(items.length);
+  });
+
   it("returns renderer failures as ANSI data and still disposes the component", async () => {
     const message = {
       role: "custom",
@@ -3326,7 +3649,7 @@ describe("setupCommandBridge — command mapping", () => {
     expect(res.data).toMatchObject({ output: "ok", exitCode: 0 });
   });
 
-  it("bash honors a 0.83 user_bash full result once without canonical duplication", async () => {
+  it("bash honors a pinned-Pi user_bash full result once without canonical duplication", async () => {
     const replacement = {
       output: "public replacement\n",
       exitCode: 0,
@@ -4277,6 +4600,22 @@ describe("assertHostCapabilities", () => {
     );
   });
 
+  it.each([
+    "cycleModel",
+    "cycleThinkingLevel",
+    "setSteeringMode",
+    "setFollowUpMode",
+    "setScopedModels",
+    "setAutoCompactionEnabled",
+    "setAutoRetryEnabled",
+  ])("gates the bridge method session.%s", (method) => {
+    const session = makeSession();
+    session[method] = undefined;
+    expect(() => assertHostCapabilities(session, makeRuntime(session), MODEL_SCOPE_PI)).toThrow(
+      `session.${method}`,
+    );
+  });
+
   it("throws when Pi's canonical Bash failure recorder is missing", () => {
     const session = makeSession();
     session.recordBashResult = undefined;
@@ -4286,7 +4625,7 @@ describe("assertHostCapabilities", () => {
     );
   });
 
-  it("throws when Pi 0.83's public user_bash emitter is missing", () => {
+  it("throws when Pi's public user_bash emitter is missing", () => {
     const session = makeSession();
     session.extensionRunner.emitUserBash = undefined;
     const runtime = makeRuntime(session);

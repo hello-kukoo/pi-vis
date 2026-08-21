@@ -44,6 +44,7 @@ const COMMAND_TYPES = [
   "set_label",
   "render_entry",
   "render_message",
+  "transform_markdown",
   "get_cache_miss_notices",
 ] as const satisfies readonly PiRpcCommand["type"][];
 
@@ -87,6 +88,52 @@ describe("Pi command admission policy", () => {
       },
       { type: "render_message", customType: "status-card", timestamp: 1, cols: 19 },
       { type: "render_message", customType: "status-card", timestamp: 1, cols: 241 },
+    ]) {
+      expect(PiRpcCommandSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+
+  it("validates bounded Pi 0.84 Markdown transformation batches", () => {
+    expect(
+      PiRpcCommandSchema.safeParse({
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "markdown-a",
+            markdown: "**before**",
+            messageType: "assistant",
+            isStreaming: true,
+            availableWidth: 96,
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    for (const invalid of [
+      { type: "transform_markdown", items: [] },
+      {
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "",
+            markdown: "text",
+            messageType: "assistant",
+            isStreaming: false,
+            availableWidth: 80,
+          },
+        ],
+      },
+      {
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "markdown-a",
+            markdown: "text",
+            messageType: "tool",
+            isStreaming: false,
+            availableWidth: 80,
+          },
+        ],
+      },
     ]) {
       expect(PiRpcCommandSchema.safeParse(invalid).success).toBe(false);
     }

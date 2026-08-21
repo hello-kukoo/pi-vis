@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+export const EXTENSION_UI_RESPONSE_ID_MAX_BYTES = 128;
+export const EXTENSION_UI_RESPONSE_VALUE_MAX_BYTES = 64 * 1024;
+
+const utf8Encoder = new TextEncoder();
+const boundedUtf8String = (maxBytes: number, label: string) =>
+  z
+    .string()
+    .refine(
+      (value) => utf8Encoder.encode(value).byteLength <= maxBytes,
+      `${label} exceeds byte limit`,
+    );
+
 const BaseUiRequest = z.object({
   type: z.literal("extension_ui_request"),
   id: z.string(),
@@ -76,7 +88,7 @@ export const ProviderAuthUiRequestSchema = BaseUiRequest.extend({
   method: z.literal("providerAuth"),
   providerName: z.string().max(160),
   authType: z.enum(["oauth", "api_key"]),
-  phase: z.enum(["waiting", "oauth", "device", "info", "prompt", "error"]),
+  phase: z.enum(["waiting", "oauth", "device", "info", "prompt", "warning", "error"]),
   authUrl: z.string().max(4096).optional(),
   deviceCode: z.string().max(512).optional(),
   message: z.string().max(1000).optional(),
@@ -129,24 +141,39 @@ export function isDialogRequest(req: ExtensionUiRequest): req is DialogUiRequest
 }
 
 export const ExtensionUiResponseSchema = z.union([
-  z.object({
-    type: z.literal("extension_ui_response"),
-    id: z.string(),
-    operationId: z.string().optional(),
-    value: z.string(),
-  }),
-  z.object({
-    type: z.literal("extension_ui_response"),
-    id: z.string(),
-    operationId: z.string().optional(),
-    confirmed: z.boolean(),
-  }),
-  z.object({
-    type: z.literal("extension_ui_response"),
-    id: z.string(),
-    operationId: z.string().optional(),
-    cancelled: z.literal(true),
-  }),
+  z
+    .object({
+      type: z.literal("extension_ui_response"),
+      id: boundedUtf8String(EXTENSION_UI_RESPONSE_ID_MAX_BYTES, "response id"),
+      operationId: boundedUtf8String(
+        EXTENSION_UI_RESPONSE_ID_MAX_BYTES,
+        "response operation id",
+      ).optional(),
+      value: boundedUtf8String(EXTENSION_UI_RESPONSE_VALUE_MAX_BYTES, "response value"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("extension_ui_response"),
+      id: boundedUtf8String(EXTENSION_UI_RESPONSE_ID_MAX_BYTES, "response id"),
+      operationId: boundedUtf8String(
+        EXTENSION_UI_RESPONSE_ID_MAX_BYTES,
+        "response operation id",
+      ).optional(),
+      confirmed: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("extension_ui_response"),
+      id: boundedUtf8String(EXTENSION_UI_RESPONSE_ID_MAX_BYTES, "response id"),
+      operationId: boundedUtf8String(
+        EXTENSION_UI_RESPONSE_ID_MAX_BYTES,
+        "response operation id",
+      ).optional(),
+      cancelled: z.literal(true),
+    })
+    .strict(),
 ]);
 
 export type ExtensionUiResponse = z.infer<typeof ExtensionUiResponseSchema>;

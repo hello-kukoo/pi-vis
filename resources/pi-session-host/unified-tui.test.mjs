@@ -20,39 +20,33 @@
  *
  * This test drives the REAL `createUIContext` → REAL pi-tui Editor render with
  * the REAL pi theme, and asserts the editor actually paints (panel_data frames
- * are produced). It needs a real pi install; when pi can't be resolved it
- * SKIPS (like the PI_E2E gate) rather than failing.
+ * are produced). It always uses the repository-pinned runtime that the app
+ * ships; a missing install is a failed compatibility gate, not a skip.
  */
-import { execSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { importPi, importPiTui, initHostTheme } from "./bootstrap.mjs";
 import { buildEditorTheme } from "./editor-theme.mjs";
 import { createUIContext } from "./ui-context.mjs";
 
-// ── Locate a real pi binary (skip the suite if absent) ──────────────────────
-function locatePiBin() {
-  const candidates = [];
-  if (process.env.PIVIS_TEST_PI_BIN) candidates.push(process.env.PIVIS_TEST_PI_BIN);
-  try {
-    candidates.push(execSync("command -v pi", { encoding: "utf8" }).trim());
-  } catch {
-    /* pi not on PATH */
+const PINNED_PI_VERSION = "0.84.2";
+const REPOSITORY_PINNED_PI_CLI = fileURLToPath(
+  new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+);
+
+function resolvePinnedPiCli() {
+  const override = process.env.PIVIS_TEST_PINNED_PI_CLI;
+  const candidate = override?.trim() || REPOSITORY_PINNED_PI_CLI;
+  if (!existsSync(candidate)) {
+    throw new Error(
+      `Pinned Pi CLI not found at ${candidate}; install repository dependencies or set PIVIS_TEST_PINNED_PI_CLI`,
+    );
   }
-  candidates.push("/opt/homebrew/bin/pi", "/usr/local/bin/pi");
-  for (const c of candidates) {
-    if (c && existsSync(c)) {
-      try {
-        return realpathSync(c);
-      } catch {
-        /* dangling symlink */
-      }
-    }
-  }
-  return null;
+  return realpathSync(candidate);
 }
 
-const PI_BIN = locatePiBin();
+const PI_BIN = resolvePinnedPiCli();
 
 // A capturing panel bridge: records the wire messages ensureUnifiedTui() emits,
 // AND wires input routing so a test can feed keystrokes through the real
@@ -115,9 +109,7 @@ function makeCapturingBridge() {
   };
 }
 
-const describeOrSkip = PI_BIN ? describe : describe.skip;
-
-describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
+describe("unified-TUI host render (repository-pinned pi-tui + pi theme)", () => {
   let pi;
   let piTui;
   let theme;
@@ -138,13 +130,15 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
   async function setup() {
     pi = await importPi(PI_BIN);
     piTui = await importPiTui(PI_BIN);
+    expect(pi.VERSION).toBe(PINNED_PI_VERSION);
+    expect(typeof piTui.TuiMainScreen).toBe("function");
     theme = initHostTheme(pi);
     controllers = [];
   }
 
   function tuiModules() {
     return {
-      TUI: piTui.TUI,
+      TuiMainScreen: piTui.TuiMainScreen,
       KeybindingsManager: piTui.KeybindingsManager,
       TUI_KEYBINDINGS: piTui.TUI_KEYBINDINGS,
       Container: piTui.Container,
@@ -566,12 +560,3 @@ describeOrSkip("unified-TUI host render (real pi-tui + pi theme)", () => {
     expect(piTui.isKittyProtocolActive(), "closing the last panel deactivates kitty").toBe(false);
   });
 });
-
-// Surface, at import time, why the suite skipped — so a CI run without pi
-// doesn't look like silent green.
-if (!PI_BIN) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    "[unified-tui.test] skipped: no pi binary found (set PIVIS_TEST_PI_BIN to run the host-render gate)",
-  );
-}

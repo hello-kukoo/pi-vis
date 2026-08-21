@@ -118,6 +118,11 @@ test.describe("Real SDK-host smoke", () => {
       await expect(
         launch.window.getByText("Real SDK host command completed", { exact: true }),
       ).toBeVisible({ timeout: 30_000 });
+      await textarea.fill("/smoke-ai-agent-e2e");
+      await textarea.press("Enter");
+      await expect(
+        launch.window.getByText("AI_AGENT=pi PI_CODING_AGENT=true", { exact: true }),
+      ).toBeVisible({ timeout: 30_000 });
       await expect(launch.window.getByText(/Host process exited/)).toHaveCount(0);
     } catch (error) {
       const mainInvocations = fs.existsSync(ipcLog) ? fs.readFileSync(ipcLog, "utf8") : "<none>";

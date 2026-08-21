@@ -1898,6 +1898,44 @@ describe("SessionRegistry direct AgentSession authority", () => {
     h.registry.stopAll();
   });
 
+  it("maps a batched Markdown transform query to the owner-fenced host command", async () => {
+    const h = harness();
+    const id = h.registry.openSession("/tmp/project");
+    await h.registry.activateSession(id, "/tmp/pi", {});
+    const record = h.registry.getSession(id)!;
+    const [hostInstanceId, sessionEpoch] = runtimeIdentity(record);
+    const items = [
+      {
+        requestId: "markdown-a",
+        markdown: "before",
+        messageType: "assistant" as const,
+        isStreaming: false,
+        availableWidth: 80,
+      },
+    ];
+    const query = vi.spyOn(record.proc!, "query").mockResolvedValue({
+      type: "response",
+      command: "transform_markdown",
+      success: true,
+      data: { items: [{ requestId: "markdown-a", markdown: "after" }] },
+    });
+
+    await expect(
+      h.registry.query({
+        sessionId: id,
+        queryId: "transform-markdown",
+        expectedOwner: { hostInstanceId, sessionEpoch },
+        query: { type: "transform_markdown", items },
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      queryType: "transform_markdown",
+      owner: { hostInstanceId, sessionEpoch },
+    });
+    expect(query).toHaveBeenCalledWith({ type: "transform_markdown", items });
+    h.registry.stopAll();
+  });
+
   it("does not dispatch a query with a stale owner", async () => {
     const h = harness();
     const id = h.registry.openSession("/tmp/project");

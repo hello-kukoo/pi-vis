@@ -55,6 +55,14 @@ import {
 import { createShellPtyController } from "./shell-pty.mjs";
 import { createDialogResolver, createUIContext } from "./ui-context.mjs";
 
+// Pi's CLI sets this marker for every command and tool subprocess. The SDK
+// host is an equivalent entry point, so establish the same public contract
+// before extensions or shell tools can observe/inherit the environment.
+// Match Pi's SDK/CLI host markers before loading any extension. Generic agent
+// integrations use AI_AGENT; Pi-specific extensions use PI_CODING_AGENT.
+process.env.AI_AGENT = "pi";
+process.env.PI_CODING_AGENT = "true";
+
 // --- State ---
 
 let runtime = null;
@@ -487,7 +495,12 @@ async function handleInit(msg) {
 
     const piTui = await importPiTui(piPath);
     const tuiModules = {
-      TUI: piTui.TUI,
+      // Pi 0.84 split the former concrete `TUI` class into a public `TUI`
+      // interface plus regular/fullscreen implementations. Pi-Vis panels are
+      // content-hugging main-screen surfaces, so TuiMainScreen is the exact
+      // behavior-compatible implementation; TuiAltScreen would seize the
+      // whole host terminal and break the panel reconstruction protocol.
+      TuiMainScreen: piTui.TuiMainScreen,
       KeybindingsManager: piTui.KeybindingsManager,
       TUI_KEYBINDINGS: piTui.TUI_KEYBINDINGS,
       Container: piTui.Container,
@@ -621,6 +634,9 @@ async function handleInit(msg) {
       const services = await pi.createAgentSessionServices({
         cwd: sc,
         agentDir: ad,
+        // Match Pi 0.84's CLI startup bound. Each runtime/session swap calls
+        // this factory anew and therefore receives a fresh timeout signal.
+        modelRuntimeSignal: AbortSignal.timeout(15_000),
         ...(pinnedLlamaExtension
           ? { resourceLoaderOptions: { extensionFactories: [pinnedLlamaExtension] } }
           : {}),

@@ -420,7 +420,11 @@ describe("authority protocol schemas", () => {
       owner,
       kind: "loginProvider",
       state: "completed",
-      result: { providerId: "project-provider", authType: "api_key" },
+      result: {
+        providerId: "project-provider",
+        authType: "api_key",
+        synchronized: false,
+      },
     };
     expect(IntentOutcomeSchema.safeParse(outcome).success).toBe(true);
     expect(
@@ -473,6 +477,20 @@ describe("authority protocol schemas", () => {
         expanded: false,
       }).success,
     ).toBe(true);
+    expect(
+      SessionQuerySchema.safeParse({
+        type: "transform_markdown",
+        items: [
+          {
+            requestId: "markdown-a",
+            markdown: "before",
+            messageType: "assistant-thinking",
+            isStreaming: false,
+            availableWidth: 80,
+          },
+        ],
+      }).success,
+    ).toBe(true);
     for (const invalid of [
       { type: "render_message", customType: "", timestamp: 1, cols: 80 },
       { type: "render_message", customType: "status-card", cols: 80 },
@@ -512,6 +530,7 @@ describe("authority protocol schemas", () => {
       "get_trust_state",
       "render_entry",
       "render_message",
+      "transform_markdown",
     ]);
 
     const envelope = {

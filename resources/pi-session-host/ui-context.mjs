@@ -293,6 +293,14 @@ export function createDialogResolver(sendToMain, onAcknowledged = () => {}) {
     return {
       interaction: { signal, prompt, notify },
       complete: close,
+      warn: () => {
+        rejectPrompt();
+        publish({
+          phase: "warning",
+          message:
+            "Sign-in was saved, but the local model catalog could not be refreshed. Close this message, then refresh models and try again.",
+        });
+      },
       fail: () => {
         rejectPrompt();
         publish({ phase: "error", message: "Sign in could not be completed. Try again." });
@@ -344,7 +352,7 @@ export function createUIContext({
   tuiModules,
 }) {
   const {
-    TUI,
+    TuiMainScreen,
     KeybindingsManager,
     TUI_KEYBINDINGS,
     Container,
@@ -717,7 +725,7 @@ export function createUIContext({
 
     const panelId = panelBridge.openPanel({ overlay: false, unified: true });
     const hostTerminal = createHostTerminal(panelId, panelBridge, hostTerminalDeps);
-    const tui = new TUI(hostTerminal);
+    const tui = new TuiMainScreen(hostTerminal);
     // Local manager used ONLY by the paste input-listener below to detect the
     // paste-image key. Not installed globally — the base Editor keeps using
     // pi-tui's default keybindings for its own tui.* handling.
@@ -1745,12 +1753,12 @@ export function createUIContext({
       const isOverlay = options?.overlay ?? false;
       const panelId = panelBridge.openPanel({ overlay: isOverlay });
       const hostTerminal = createHostTerminal(panelId, panelBridge, hostTerminalDeps);
-      // TUI / KeybindingsManager / TUI_KEYBINDINGS come from the createUIContext
+      // TuiMainScreen / KeybindingsManager / TUI_KEYBINDINGS come from the createUIContext
       // scope destructure above — do NOT redeclare them here: a `const` in this
       // arrow body would shadow the outer binding for the WHOLE body and put it
       // in the temporal dead zone, so the reuse path's `new KeybindingsManager`
       // (which runs before this line textually) would throw ReferenceError.
-      const tui = new TUI(hostTerminal);
+      const tui = new TuiMainScreen(hostTerminal);
       const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
       // Start the TUI: wires HostTerminal.start (input handler) + begins the
       // render loop that composites overlays and writes ANSI to hostTerminal.

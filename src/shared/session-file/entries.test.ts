@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SessionEntrySchema } from "./entries.js";
 
-describe("SessionEntrySchema Pi 0.83.0 public payloads", () => {
+describe("SessionEntrySchema pinned-Pi public payloads", () => {
   it.each([
     {
       role: "bashExecution",
@@ -85,5 +85,29 @@ describe("SessionEntrySchema Pi 0.83.0 public payloads", () => {
         : { type, id: "summary", summary: "summary", fromId: "old-leaf", usage };
 
     expect(SessionEntrySchema.parse(entry)).toMatchObject({ usage });
+  });
+
+  it("preserves Pi 0.84.2 endTurn and namespaced tool calls in persisted messages", () => {
+    const message = {
+      role: "assistant",
+      endTurn: true,
+      content: [
+        {
+          type: "toolCall",
+          id: "call-namespace",
+          name: "search",
+          namespace: "provider.tools",
+          arguments: { query: "pi-vis" },
+        },
+      ],
+    };
+    expect(
+      SessionEntrySchema.parse({
+        type: "message",
+        id: "assistant-metadata",
+        parentId: null,
+        message,
+      }),
+    ).toMatchObject({ message });
   });
 });

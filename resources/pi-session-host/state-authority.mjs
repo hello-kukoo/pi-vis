@@ -1574,7 +1574,13 @@ export function createStateAuthority({
         return typeof value.providerId === "string" &&
           value.providerId.length > 0 &&
           ["oauth", "api_key"].includes(value.authType)
-          ? { providerId: value.providerId, authType: value.authType }
+          ? {
+              providerId: value.providerId,
+              authType: value.authType,
+              ...(typeof value.synchronized === "boolean"
+                ? { synchronized: value.synchronized }
+                : {}),
+            }
           : undefined;
       default:
         return undefined;
@@ -4035,7 +4041,7 @@ export function createStateAuthority({
           };
         }
       } else if (session.isBashRunning || hasPendingBashPreparation()) {
-        // A Pi 0.83 user_bash handler may still be resolving before
+        // A user_bash handler may still be resolving before
         // AgentSession creates its Bash AbortController. Fence that pending
         // preparation only after higher-priority ESC targets have been ruled
         // out, then abort any Bash operation that already crossed the SDK

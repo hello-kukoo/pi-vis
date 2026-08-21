@@ -53,6 +53,22 @@ export const PROVIDERS: readonly ProviderDef[] = [
   { key: "cerebras", displayName: "Cerebras", envVar: "CEREBRAS_API_KEY" },
   { key: "fireworks", displayName: "Fireworks", envVar: "FIREWORKS_API_KEY" },
   { key: "together", displayName: "Together", envVar: "TOGETHER_API_KEY" },
+  { key: "baseten", displayName: "Baseten", envVar: "BASETEN_API_KEY" },
+  {
+    key: "qwen-token-plan",
+    displayName: "Qwen Token Plan",
+    envVar: "QWEN_TOKEN_PLAN_API_KEY",
+  },
+  {
+    key: "qwen-token-plan-individual",
+    displayName: "Qwen Token Plan (Individual)",
+    envVar: "QWEN_TOKEN_PLAN_API_KEY",
+  },
+  {
+    key: "qwen-token-plan-cn",
+    displayName: "Qwen Token Plan (China)",
+    envVar: "QWEN_TOKEN_PLAN_CN_API_KEY",
+  },
   { key: "nvidia", displayName: "NVIDIA", envVar: "NVIDIA_API_KEY" },
   { key: "kimi-coding", displayName: "Kimi Coding", envVar: "KIMI_API_KEY" },
   { key: "minimax", displayName: "MiniMax", envVar: "MINIMAX_API_KEY" },

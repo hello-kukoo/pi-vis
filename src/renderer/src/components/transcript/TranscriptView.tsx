@@ -1,4 +1,6 @@
 import type { SessionId } from "@shared/ids.js";
+import type { MarkdownTransformMessageType } from "@shared/pi-protocol/markdown-transform.js";
+import type { RuntimeIdentity } from "@shared/pi-protocol/runtime-state.js";
 import type { TranscriptStyle } from "@shared/settings.js";
 import type React from "react";
 import {
@@ -14,6 +16,7 @@ import {
   useState,
 } from "react";
 import { AnsiText } from "../../lib/ansi.js";
+import { requestExtensionMarkdownTransform } from "../../lib/extension-markdown.js";
 import { Markdown } from "../../lib/markdown.js";
 import { querySession } from "../../lib/session-intent.js";
 import { transcriptSelectionToMarkdown } from "../../lib/turndown.js";
@@ -74,6 +77,12 @@ type CompactCustomEntryVisibilityReporter = (
 
 const CompactCustomEntryVisibilityContext =
   createContext<CompactCustomEntryVisibilityReporter | null>(null);
+interface MarkdownTransformRuntime {
+  sessionId: SessionId;
+  owner: RuntimeIdentity;
+  availableWidth: number;
+}
+const MarkdownTransformRuntimeContext = createContext<MarkdownTransformRuntime | null>(null);
 const EMPTY_CUSTOM_ENTRY_VISIBILITY: ReadonlyMap<string, boolean> = new Map();
 
 // ── Label visibility ─────────────────────────────────────────────────────
@@ -476,6 +485,55 @@ const ImageArtifacts = memo(function ImageArtifacts({
 
 // ── Block renderers ──────────────────────────────────────────────────────
 
+const ExtensionMarkdown = memo(function ExtensionMarkdown({
+  content,
+  messageType,
+  streaming,
+  className,
+  plainWithoutTransformer = false,
+}: {
+  content: string;
+  messageType: MarkdownTransformMessageType;
+  streaming: boolean;
+  className: string;
+  plainWithoutTransformer?: boolean | undefined;
+}): React.ReactElement {
+  const runtime = useContext(MarkdownTransformRuntimeContext);
+  const renderKey = runtime
+    ? `${runtime.owner.hostInstanceId}\0${runtime.owner.sessionEpoch}\0${runtime.availableWidth}\0${messageType}\0${streaming}\0${content}`
+    : "";
+  const [transformed, setTransformed] = useState<{ key: string; markdown: string }>();
+
+  useEffect(() => {
+    if (!runtime) return;
+    let cancelled = false;
+    const run = (): void => {
+      void requestExtensionMarkdownTransform(runtime.sessionId, runtime.owner, {
+        markdown: content,
+        messageType,
+        isStreaming: streaming,
+        availableWidth: runtime.availableWidth,
+      }).then((markdown) => {
+        if (!cancelled) setTransformed({ key: renderKey, markdown });
+      });
+    };
+    const timer = streaming ? window.setTimeout(run, 100) : undefined;
+    if (timer === undefined) run();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [content, messageType, renderKey, runtime, streaming]);
+
+  const markdown = transformed?.key === renderKey ? transformed.markdown : content;
+  if (plainWithoutTransformer && !runtime) return <div className={className}>{content}</div>;
+  return (
+    <div className={`${className} markdown-body`}>
+      <Markdown streaming={streaming}>{markdown}</Markdown>
+    </div>
+  );
+});
+
 // Memoized on the `data` prop: the transcript reducer (patchBlock) creates a
 // new `data` object only for the one block a streaming delta touches, leaving
 // every other block's `data` reference stable. Complete persisted/compacted
@@ -523,7 +581,13 @@ const UserBlock = memo(function UserBlock({ data }: { data: UserBlockData }): Re
             ))}
           </div>
         )}
-        <div className="transcript-block__content">{data.content}</div>
+        <ExtensionMarkdown
+          className="transcript-block__content"
+          content={data.content}
+          messageType="user"
+          streaming={false}
+          plainWithoutTransformer
+        />
       </div>
     </div>
   );
@@ -537,9 +601,12 @@ const ThinkingSegment = memo(function ThinkingSegment({
   streaming: boolean;
 }): React.ReactElement {
   return (
-    <div className="thinking-block markdown-body">
-      <Markdown streaming={streaming}>{content}</Markdown>
-    </div>
+    <ExtensionMarkdown
+      className="thinking-block"
+      content={content}
+      messageType="assistant-thinking"
+      streaming={streaming}
+    />
   );
 });
 
@@ -551,9 +618,12 @@ const TextSegment = memo(function TextSegment({
   streaming: boolean;
 }): React.ReactElement {
   return (
-    <div className="transcript-block__content markdown-body">
-      <Markdown streaming={streaming}>{content}</Markdown>
-    </div>
+    <ExtensionMarkdown
+      className="transcript-block__content"
+      content={content}
+      messageType="assistant"
+      streaming={streaming}
+    />
   );
 });
 
@@ -2313,7 +2383,12 @@ interface CustomEntryVisibilityState {
 export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactElement {
   const session = useSessionsStore((s) => s.sessions.get(sessionId));
   const transcriptStyle = useSettingsStore((s) => s.settings.transcriptStyle);
-  const customEntryOwner = authoritySnapshotFor(session)?.owner;
+  const authoritySnapshot = authoritySnapshotFor(session);
+  const customEntryOwner = authoritySnapshot?.owner;
+  const markdownTransformersAvailable =
+    authoritySnapshot?.catalog.markdownTransformersAvailable === true;
+  const markdownOwnerHostId = customEntryOwner?.hostInstanceId;
+  const markdownOwnerEpoch = customEntryOwner?.sessionEpoch;
   const customEntryGeneration = [
     sessionId,
     session?.historyGeneration ?? 0,
@@ -2421,6 +2496,44 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const [markdownAvailableWidth, setMarkdownAvailableWidth] = useState(80);
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const update = (): void => {
+      const width = content.getBoundingClientRect().width;
+      if (width <= 0) return;
+      const next = Math.max(20, Math.min(240, Math.floor(width / 8)));
+      setMarkdownAvailableWidth((current) => (current === next ? current : next));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+  const markdownTransformRuntime = useMemo<MarkdownTransformRuntime | null>(() => {
+    if (
+      !markdownTransformersAvailable ||
+      markdownOwnerHostId === undefined ||
+      markdownOwnerEpoch === undefined
+    ) {
+      return null;
+    }
+    return {
+      sessionId,
+      owner: {
+        hostInstanceId: markdownOwnerHostId,
+        sessionEpoch: markdownOwnerEpoch,
+      },
+      availableWidth: markdownAvailableWidth,
+    };
+  }, [
+    markdownAvailableWidth,
+    markdownTransformersAvailable,
+    markdownOwnerEpoch,
+    markdownOwnerHostId,
+    sessionId,
+  ]);
   // Single source of truth for "follow the bottom". Only a genuine
   // user scroll away from the bottom clears it; reaching the bottom
   // (by any means) sets it back. Compared against `lastPinnedTopRef`
@@ -2815,89 +2928,93 @@ export function TranscriptView({ sessionId }: TranscriptViewProps): React.ReactE
     .join(" ");
 
   return (
-    <CompactCustomEntryVisibilityContext.Provider value={compactCustomEntryVisibility}>
-      <div
-        className={transcriptClassName}
-        ref={scrollRef}
-        onScroll={handleScroll}
-        onWheelCapture={markUserScrollIntent}
-        onTouchMoveCapture={markUserScrollIntent}
-        onKeyDownCapture={(e) => {
-          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
-            markUserScrollIntent();
-          }
-        }}
-        onCopy={handleClipboard}
-      >
-        <div className="transcript-blocks" ref={contentRef}>
-          <ArchivedTranscript
-            key={`${sessionId}:${session?.historyGeneration ?? 0}:${transcriptStyle}`}
-            blocks={archivedBlocks}
-            compactItems={archivedCompactPrefix}
-            style={transcriptStyle}
-            sessionId={sessionId}
-            preserveScroll={preserveScroll}
-            capturePrependScroll={capturePrependScroll}
-            restorePrependScroll={restorePrependScroll}
-          />
-          {transcriptStyle === "compact" && archivedBoundaryGroup && compactBoundarySummary && (
-            <CompactTranscriptGroup
-              key={archivedBoundaryGroup.key}
+    <MarkdownTransformRuntimeContext.Provider value={markdownTransformRuntime}>
+      <CompactCustomEntryVisibilityContext.Provider value={compactCustomEntryVisibility}>
+        <div
+          className={transcriptClassName}
+          ref={scrollRef}
+          onScroll={handleScroll}
+          onWheelCapture={markUserScrollIntent}
+          onTouchMoveCapture={markUserScrollIntent}
+          onKeyDownCapture={(e) => {
+            if (
+              ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)
+            ) {
+              markUserScrollIntent();
+            }
+          }}
+          onCopy={handleClipboard}
+        >
+          <div className="transcript-blocks" ref={contentRef}>
+            <ArchivedTranscript
+              key={`${sessionId}:${session?.historyGeneration ?? 0}:${transcriptStyle}`}
+              blocks={archivedBlocks}
+              compactItems={archivedCompactPrefix}
+              style={transcriptStyle}
               sessionId={sessionId}
-              archivedItems={archivedBoundaryGroup.items}
-              items={leadingLiveCompactGroup?.items ?? EMPTY_COMPACT_GROUP_ITEMS}
-              summary={compactBoundarySummary}
-              streaming={compactBoundaryStreaming}
               preserveScroll={preserveScroll}
+              capturePrependScroll={capturePrependScroll}
+              restorePrependScroll={restorePrependScroll}
             />
-          )}
-          {transcriptStyle === "compact"
-            ? compactLiveItems.map((item) =>
-                item.kind === "item" ? (
+            {transcriptStyle === "compact" && archivedBoundaryGroup && compactBoundarySummary && (
+              <CompactTranscriptGroup
+                key={archivedBoundaryGroup.key}
+                sessionId={sessionId}
+                archivedItems={archivedBoundaryGroup.items}
+                items={leadingLiveCompactGroup?.items ?? EMPTY_COMPACT_GROUP_ITEMS}
+                summary={compactBoundarySummary}
+                streaming={compactBoundaryStreaming}
+                preserveScroll={preserveScroll}
+              />
+            )}
+            {transcriptStyle === "compact"
+              ? compactLiveItems.map((item) =>
+                  item.kind === "item" ? (
+                    <TranscriptItemView
+                      key={compactRenderItemKey(item)}
+                      sessionId={sessionId}
+                      item={item.item}
+                      preserveScroll={preserveScroll}
+                      customEntryKnownVisible
+                      customEntryVisibilityScope="live"
+                    />
+                  ) : item.kind === "probe" ? (
+                    <CustomEntryVisibilityProbe
+                      key={compactRenderItemKey(item)}
+                      sessionId={sessionId}
+                      block={item.block}
+                      scope="live"
+                      preserveScroll={preserveScroll}
+                    />
+                  ) : (
+                    <CompactTranscriptGroup
+                      key={compactRenderItemKey(item)}
+                      sessionId={sessionId}
+                      items={item.items}
+                      summary={item.summary}
+                      streaming={item.streaming}
+                      preserveScroll={preserveScroll}
+                    />
+                  ),
+                )
+              : liveBlocks.map((block) => (
                   <TranscriptItemView
-                    key={compactRenderItemKey(item)}
+                    key={block.id}
                     sessionId={sessionId}
-                    item={item.item}
-                    preserveScroll={preserveScroll}
-                    customEntryKnownVisible
-                    customEntryVisibilityScope="live"
-                  />
-                ) : item.kind === "probe" ? (
-                  <CustomEntryVisibilityProbe
-                    key={compactRenderItemKey(item)}
-                    sessionId={sessionId}
-                    block={item.block}
-                    scope="live"
+                    item={{ kind: "block", block }}
                     preserveScroll={preserveScroll}
                   />
-                ) : (
-                  <CompactTranscriptGroup
-                    key={compactRenderItemKey(item)}
-                    sessionId={sessionId}
-                    items={item.items}
-                    summary={item.summary}
-                    streaming={item.streaming}
-                    preserveScroll={preserveScroll}
-                  />
-                ),
-              )
-            : liveBlocks.map((block) => (
-                <TranscriptItemView
-                  key={block.id}
-                  sessionId={sessionId}
-                  item={{ kind: "block", block }}
-                  preserveScroll={preserveScroll}
-                />
-              ))}
-          {showWorking && <WorkingRow sessionId={sessionId} />}
-          {showHistoryLoading && (
-            <div className="history-loading-row" role="status">
-              <Spinner />
-              <span>Loading conversation history…</span>
-            </div>
-          )}
+                ))}
+            {showWorking && <WorkingRow sessionId={sessionId} />}
+            {showHistoryLoading && (
+              <div className="history-loading-row" role="status">
+                <Spinner />
+                <span>Loading conversation history…</span>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-    </CompactCustomEntryVisibilityContext.Provider>
+      </CompactCustomEntryVisibilityContext.Provider>
+    </MarkdownTransformRuntimeContext.Provider>
   );
 }

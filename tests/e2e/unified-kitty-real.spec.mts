@@ -11,14 +11,15 @@
  *
  *   PI_E2E=1 npx playwright test -c tests/e2e/playwright.config.mts --grep kitty-real
  *
- * Requires: a real `pi` on PATH and valid provider auth (real API spend — the
- * Enter→submit assertion drives one prompt). Uses a THROWAWAY agent dir via
+ * Requires: the repository-pinned Pi (or an explicit PIVIS_TEST_PI_BIN) and
+ * valid provider auth (real API spend — the Enter→submit assertion drives one
+ * prompt). Uses a THROWAWAY agent dir via
  * `PI_CODING_AGENT_DIR` so the fixture extension loads as a GLOBAL extension
  * (no project-trust prompt) and the user's real env is untouched. Per the
  * change's release gate, this spec MUST be run (and pass) before a release if
  * the CI `PI_E2E` lane is not available — see RELEASING.md.
  */
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
@@ -35,28 +36,30 @@ const __dirname = dirname(__filename);
 const APP_ENTRY = join(__dirname, "../../out/main/index.js");
 const FIXTURE_EXT = join(__dirname, "../fixtures/unified-widget-extension/unified-widget-e2e.ts");
 
-function locatePiBin(): string | null {
-  const candidates = [process.env.PIVIS_TEST_PI_BIN];
-  try {
-    candidates.push(execSync("command -v pi", { encoding: "utf8" }).trim());
-  } catch {
-    /* pi not on PATH */
-  }
-  candidates.push("/opt/homebrew/bin/pi", "/usr/local/bin/pi");
-  for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
-  }
-  return null;
-}
+const PINNED_PI_VERSION = "0.84.2";
+const PI_BIN =
+  process.env.PIVIS_TEST_PI_BIN ??
+  join(__dirname, "../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
 
-const PI_BIN = locatePiBin();
+if (process.env.PI_E2E === "1") {
+  if (!fs.existsSync(PI_BIN)) {
+    throw new Error(`Pinned Pi ${PINNED_PI_VERSION} is missing at ${PI_BIN}. Run npm ci.`);
+  }
+  const version = execFileSync(PI_BIN, ["--version"], { encoding: "utf8" })
+    .trim()
+    .replace(/^v/u, "");
+  if (version !== PINNED_PI_VERSION) {
+    throw new Error(
+      `The kitty release gate requires Pi ${PINNED_PI_VERSION}, but ${PI_BIN} reported ${version}.`,
+    );
+  }
+}
 
 test.describe("Unified TUI Kitty keyboard (real pi, full chain)", () => {
   test.skip(
     process.env["PI_E2E"] !== "1",
     "Opt-in: set PI_E2E=1 (requires real pi + provider auth; real API spend)",
   );
-  test.skip(!PI_BIN, "no `pi` binary found (set PIVIS_TEST_PI_BIN)");
 
   function rmrf(p: string): void {
     try {
