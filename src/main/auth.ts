@@ -7,17 +7,15 @@
  * own token refresh).
  */
 
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { lock, unlock } from "proper-lockfile";
 
 import type { AuthCredential, ProviderAuthStatus, ProviderDef } from "@shared/auth.js";
 import { PROVIDERS, findProvider, getProviderDisplayName } from "@shared/auth.js";
-
-const execFileAsync = promisify(execFile);
+import { boundedProcessFailureKind, captureProcessOutput } from "./bounded-process.js";
+import { appendDiagnostic } from "./diagnostics.js";
 
 // ── Paths ────────────────────────────────────────────────────────────────
 
@@ -32,6 +30,7 @@ export function getAuthPath(): string {
 // ── Login shell env (cached) ─────────────────────────────────────────────
 
 let cachedLoginShellEnv: Record<string, string> | null = null;
+let loginShellEnvInFlight: Promise<Record<string, string>> | null = null;
 
 /**
  * Read environment variables from the user's login shell. GUI apps on
@@ -46,11 +45,10 @@ export async function getLoginShellEnv(): Promise<Record<string, string>> {
   // Deterministic fake-host E2E must not execute a developer or CI user's
   // interactive startup files. Besides making the fixture environment
   // non-hermetic, a background process started by shell initialization can
-  // retain execFile's stdio after its timeout and strand session activation
-  // before SessionHost is constructed. The launched Electron process already
-  // carries the complete fixture environment, and SessionHost merges it again
-  // at fork time, so use that exact inherited environment for this test-only
-  // host seam.
+  // retain capture pipes and strand session activation before SessionHost is
+  // constructed. The launched Electron process already carries the complete
+  // fixture environment, and SessionHost merges it again at fork time, so use
+  // that exact inherited environment for this test-only host seam.
   if (process.env.PIVIS_TEST_HOST_SCRIPT) {
     cachedLoginShellEnv = Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => {
@@ -60,28 +58,43 @@ export async function getLoginShellEnv(): Promise<Record<string, string>> {
     return cachedLoginShellEnv;
   }
   if (cachedLoginShellEnv) return cachedLoginShellEnv;
+  if (loginShellEnvInFlight) return loginShellEnvInFlight;
 
-  const shell = process.env["SHELL"] ?? "/bin/bash";
-  try {
-    const { stdout } = await execFileAsync(shell, ["-ilc", "env"], {
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-    });
-    const env: Record<string, string> = {};
-    for (const line of stdout.split("\n")) {
-      const eqIdx = line.indexOf("=");
-      if (eqIdx > 0) {
-        const key = line.slice(0, eqIdx);
-        const val = line.slice(eqIdx + 1);
-        env[key] = val;
+  const configuredShell = process.env["SHELL"];
+  // Never ask spawn() to resolve an environment-controlled shell through PATH;
+  // that lookup happens before the capture timer can begin.
+  const shell = configuredShell && path.isAbsolute(configuredShell) ? configuredShell : "/bin/bash";
+  const operation = (async (): Promise<Record<string, string>> => {
+    try {
+      const { stdout } = await captureProcessOutput(shell, ["-ilc", "env"], {
+        timeoutMs: 5_000,
+        maxBufferBytes: 1024 * 1024,
+      });
+      const env: Record<string, string> = {};
+      for (const line of stdout.split("\n")) {
+        const eqIdx = line.indexOf("=");
+        if (eqIdx > 0) {
+          const key = line.slice(0, eqIdx);
+          const val = line.slice(eqIdx + 1);
+          env[key] = val;
+        }
       }
+      cachedLoginShellEnv = env;
+      return env;
+    } catch (error) {
+      appendDiagnostic("host-startup", "login-shell-env-failed", undefined, {
+        reason: boundedProcessFailureKind(error),
+        timeoutMs: 5_000,
+      });
+      const env = {};
+      cachedLoginShellEnv = env;
+      return env;
     }
-    cachedLoginShellEnv = env;
-    return env;
-  } catch {
-    cachedLoginShellEnv = {};
-    return cachedLoginShellEnv;
-  }
+  })().finally(() => {
+    if (loginShellEnvInFlight === operation) loginShellEnvInFlight = null;
+  });
+  loginShellEnvInFlight = operation;
+  return operation;
 }
 
 export function clearLoginShellEnvCache(): void {

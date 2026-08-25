@@ -1,26 +1,18 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// locate-node resolves the user's system `node` (the same Node pi runs under)
-// and decides whether to retarget the SDK-host subprocess onto it. The parity
-// gap: the host is forked from Electron's main process and so defaults to
-// Electron's bundled Node (Electron 31 → 20.14), which lacks `node:sqlite`
-// (Node ≥ 22.5) — breaking @cursor/sdk's default SqliteLocalAgentStore in
-// Pi-Vis while it works in terminal pi (which runs under the user's Node).
-//
-// These tests mirror locate-pi.test.ts for the resolution/cache behavior and
-// pin the decision logic (chooseHostExecPath) that gates the retarget.
-
 const h = vi.hoisted(() => ({
-  execFileImpl: vi.fn(),
-  getSubprocessEnv: vi.fn(async () => ({ PATH: "/login/bin", FROM_LOGIN: "yes" })),
+  appendDiagnostic: vi.fn(),
+  getSubprocessEnv: vi.fn(),
 }));
 
-vi.mock("node:child_process", () => ({
-  // biome-ignore lint/suspicious/noExplicitAny: thin callback-style passthrough for promisify.
-  execFile: (...args: any[]) => h.execFileImpl(...args),
-}));
 vi.mock("../auth.js", () => ({ getSubprocessEnv: h.getSubprocessEnv }));
+vi.mock("../diagnostics.js", () => ({ appendDiagnostic: h.appendDiagnostic }));
 
+import { captureProcessOutput } from "../bounded-process.js";
 import {
   chooseHostExecPath,
   clearNodeLocationCache,
@@ -30,102 +22,214 @@ import {
   resolveSystemNode,
 } from "./locate-node.js";
 
-type ExecCb = (err: Error | null, result?: { stdout: string }) => void;
+const DEFAULT_SHIM_VERSION = "v22.19.0";
 
-let shellResolution: { shell: string | null; which: string | null };
-let validation: Record<string, string | null>;
+let previousHostScript: string | undefined;
+const testRoots: string[] = [];
 
-function installExecFileMock() {
-  h.execFileImpl.mockImplementation((file: string, args: unknown, _opts: unknown, cb: ExecCb) => {
-    const argv = Array.isArray(args) ? args : [];
-    if (argv[0] === "-ilc" && argv[1] === "command -v node") {
-      return cb(null, { stdout: shellResolution.shell ? `${shellResolution.shell}\n` : "" });
-    }
-    if (file === "which" && argv[0] === "node") {
-      return cb(null, { stdout: shellResolution.which ? `${shellResolution.which}\n` : "" });
-    }
-    const v = validation[file];
-    if (v) return cb(null, { stdout: `${v}\n` });
-    return cb(new Error("env: node: No such file or directory"));
-  });
+function inheritedStringEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => {
+      return typeof entry[1] === "string";
+    }),
+  );
 }
 
-/** Make safe execFile resolution answer the login-shell / which probes. */
-function setShellResolution(next: { shell: string | null; which: string | null }) {
-  shellResolution = next;
-  installExecFileMock();
+function makeTestRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pivis-locate-node-"));
+  testRoots.push(root);
+  return root;
 }
 
-/** Make `execFile` validate specific candidates: map path → version|null(fail). */
-function setValidation(map: Record<string, string | null>) {
-  validation = map;
-  installExecFileMock();
+function installPosixNodeShim(root: string): string {
+  const shimPath = path.join(root, "node");
+  fs.writeFileSync(
+    shimPath,
+    [
+      "#!/bin/sh",
+      'if [ -n "$PIVIS_NODE_PROBE_COUNT_FILE" ]; then',
+      '  printf x >> "$PIVIS_NODE_PROBE_COUNT_FILE"',
+      "fi",
+      'if [ -n "$PIVIS_NODE_PROBE_DELAY_SECONDS" ]; then',
+      '  /bin/sleep "$PIVIS_NODE_PROBE_DELAY_SECONDS"',
+      "fi",
+      'if [ -f ".pivis-node-workspace" ]; then',
+      '  printf "%s\\n" "$PIVIS_NODE_PROBE_WORKSPACE_VERSION"',
+      "else",
+      '  printf "%s\\n" "$PIVIS_NODE_PROBE_DEFAULT_VERSION"',
+      "fi",
+    ].join("\n"),
+    "utf8",
+  );
+  fs.chmodSync(shimPath, 0o755);
+  return shimPath;
+}
+
+function useProbeEnv(root: string, extra: Record<string, string> = {}): Record<string, string> {
+  const env = {
+    ...inheritedStringEnv(),
+    PATH: root,
+    PIVIS_NODE_PROBE_DEFAULT_VERSION: DEFAULT_SHIM_VERSION,
+    ...extra,
+  };
+  h.getSubprocessEnv.mockResolvedValue(env);
+  return env;
 }
 
 beforeEach(() => {
   clearNodeLocationCache();
-  h.execFileImpl.mockReset();
-  h.getSubprocessEnv.mockClear();
-  shellResolution = { shell: null, which: null };
-  validation = {};
-  installExecFileMock();
+  previousHostScript = process.env.PIVIS_TEST_HOST_SCRIPT;
+  delete process.env.PIVIS_TEST_HOST_SCRIPT;
+  h.appendDiagnostic.mockReset();
+  h.getSubprocessEnv.mockReset();
 });
 
 afterEach(() => {
   clearNodeLocationCache();
+  vi.restoreAllMocks();
+  for (const root of testRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  if (previousHostScript === undefined) delete process.env.PIVIS_TEST_HOST_SCRIPT;
+  else process.env.PIVIS_TEST_HOST_SCRIPT = previousHostScript;
 });
 
-describe("resolveSystemNode", () => {
-  it("resolves node via the login shell and validates --version under the login-shell env", async () => {
-    setShellResolution({ shell: "/usr/local/bin/node", which: null });
-    setValidation({ "/usr/local/bin/node": "v22.19.0" });
+describe.skipIf(process.platform === "win32")("resolveSystemNode with real PATH shims", () => {
+  it("returns the selected shim path so workspace cwd can still select a Node version", async () => {
+    const root = makeTestRoot();
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, ".pivis-node-workspace"), "", "utf8");
+    const shimPath = installPosixNodeShim(root);
+    const env = useProbeEnv(root, {
+      PIVIS_NODE_PROBE_WORKSPACE_VERSION: "v23.4.0",
+    });
 
-    const result = await resolveSystemNode();
-    expect(result).toEqual({ path: "/usr/local/bin/node", version: "v22.19.0" });
+    await expect(resolveSystemNode()).resolves.toEqual({
+      path: shimPath,
+      version: DEFAULT_SHIM_VERSION,
+    });
 
-    // Regression guard (mirrors locate-pi): execFile must run with
-    // getSubprocessEnv()'s env, not the bare process env — a GUI-launched app
-    // has a stripped PATH.
-    expect(h.getSubprocessEnv).toHaveBeenCalled();
-    const validateCall = h.execFileImpl.mock.calls.find((c) => c[0] === "/usr/local/bin/node");
-    if (!validateCall) throw new Error("expected execFile validation to have been called");
-    const opts = validateCall[2] as { env?: Record<string, string> };
-    expect(opts.env).toMatchObject({ FROM_LOGIN: "yes" });
+    // SessionHost later forks this exact path with the workspace as cwd. If the
+    // resolver cached process.execPath instead, this project-sensitive choice
+    // would be lost.
+    await expect(
+      captureProcessOutput(shimPath, ["--version"], {
+        timeoutMs: 2_000,
+        cwd: workspace,
+        env,
+      }),
+    ).resolves.toEqual({ stdout: "v23.4.0\n", stderr: "" });
   });
 
-  it("falls through to the next candidate when one fails --version", async () => {
-    setShellResolution({ shell: "/a/node", which: "/b/node" });
-    setValidation({ "/a/node": null, "/b/node": "v22.5.0" });
+  it("shares one real shim probe across concurrent callers", async () => {
+    const root = makeTestRoot();
+    const countPath = path.join(root, "probe-count");
+    const shimPath = installPosixNodeShim(root);
+    useProbeEnv(root, {
+      PIVIS_NODE_PROBE_COUNT_FILE: countPath,
+      PIVIS_NODE_PROBE_DELAY_SECONDS: "0.05",
+    });
 
-    const result = await resolveSystemNode();
-    expect(result).toEqual({ path: "/b/node", version: "v22.5.0" });
-    expect(
-      h.execFileImpl.mock.calls.filter((c) => Array.isArray(c[1]) && c[1][0] === "--version"),
-    ).toHaveLength(2);
+    await expect(
+      Promise.all([resolveSystemNode(), resolveSystemNode(), resolveSystemNode()]),
+    ).resolves.toEqual([
+      { path: shimPath, version: DEFAULT_SHIM_VERSION },
+      { path: shimPath, version: DEFAULT_SHIM_VERSION },
+      { path: shimPath, version: DEFAULT_SHIM_VERSION },
+    ]);
+    expect(h.getSubprocessEnv).toHaveBeenCalledOnce();
+    expect(fs.readFileSync(countPath, "utf8")).toBe("x");
   });
 
-  it("returns null when no candidate can be resolved", async () => {
-    setShellResolution({ shell: null, which: null });
-    const result = await resolveSystemNode();
-    expect(result).toBeNull();
-    expect(h.getSubprocessEnv).not.toHaveBeenCalled();
+  it("shares one aggregate five-second deadline across lookup and version probes", async () => {
+    const root = makeTestRoot();
+    const countPath = path.join(root, "probe-count");
+    installPosixNodeShim(root);
+    useProbeEnv(root, { PIVIS_NODE_PROBE_COUNT_FILE: countPath });
+    let clockRead = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => {
+      clockRead++;
+      return clockRead < 3 ? 0 : 5_001;
+    });
+
+    await expect(resolveSystemNode()).resolves.toBeNull();
+    expect(fs.existsSync(countPath)).toBe(false);
+    expect(h.appendDiagnostic).toHaveBeenCalledWith(
+      "host-startup",
+      "node-resolution-failed",
+      undefined,
+      { stage: "version", reason: "timeout" },
+    );
   });
 
-  it("caches a successful result and does not re-run resolution", async () => {
-    setShellResolution({ shell: "/a/node", which: null });
-    setValidation({ "/a/node": "v22.19.0" });
+  it("caches success until explicitly cleared", async () => {
+    const root = makeTestRoot();
+    const countPath = path.join(root, "probe-count");
+    installPosixNodeShim(root);
+    useProbeEnv(root, { PIVIS_NODE_PROBE_COUNT_FILE: countPath });
 
     const first = await resolveSystemNode();
-    expect(first).toEqual({ path: "/a/node", version: "v22.19.0" });
-    const execCallsAfterFirst = h.execFileImpl.mock.calls.length;
-
-    const second = await resolveSystemNode();
-    expect(second).toEqual(first);
-    expect(h.execFileImpl.mock.calls.length).toBe(execCallsAfterFirst);
+    await expect(resolveSystemNode()).resolves.toEqual(first);
+    expect(fs.readFileSync(countPath, "utf8")).toBe("x");
 
     clearNodeLocationCache();
     await resolveSystemNode();
-    expect(h.execFileImpl.mock.calls.length).toBeGreaterThan(execCallsAfterFirst);
+    expect(fs.readFileSync(countPath, "utf8")).toBe("xx");
+  });
+
+  it("retries a failure on the next call without logging environment values", async () => {
+    const root = makeTestRoot();
+    useProbeEnv(root, { API_TOKEN: "must-not-appear-in-diagnostics" });
+
+    await expect(resolveSystemNode()).resolves.toBeNull();
+    await expect(resolveSystemNode()).resolves.toBeNull();
+    expect(h.getSubprocessEnv).toHaveBeenCalledTimes(2);
+    expect(h.appendDiagnostic).toHaveBeenCalledTimes(2);
+    expect(h.appendDiagnostic).toHaveBeenLastCalledWith(
+      "host-startup",
+      "node-resolution-failed",
+      undefined,
+      { stage: "locate", reason: "nonzero-exit" },
+    );
+    expect(JSON.stringify(h.appendDiagnostic.mock.calls)).not.toContain(
+      "must-not-appear-in-diagnostics",
+    );
+  });
+
+  it("rejects invalid version output and retries that probe", async () => {
+    const root = makeTestRoot();
+    installPosixNodeShim(root);
+    useProbeEnv(root, { PIVIS_NODE_PROBE_DEFAULT_VERSION: "not-a-node-version" });
+
+    await expect(resolveSystemNode()).resolves.toBeNull();
+    await expect(resolveSystemNode()).resolves.toBeNull();
+    expect(h.getSubprocessEnv).toHaveBeenCalledTimes(2);
+    expect(h.appendDiagnostic).toHaveBeenCalledWith(
+      "host-startup",
+      "node-resolution-failed",
+      undefined,
+      { stage: "version", reason: "invalid-output" },
+    );
+  });
+});
+
+describe.runIf(process.platform === "win32")("resolveSystemNode on Windows", () => {
+  it("uses host SystemRoot and the captured PATH to resolve a real node executable", async () => {
+    const env = inheritedStringEnv();
+    delete env.SystemRoot;
+    delete env.SYSTEMROOT;
+    env.PATH = [path.dirname(process.execPath), env.PATH].filter(Boolean).join(path.delimiter);
+    h.getSubprocessEnv.mockResolvedValue(env);
+
+    const result = await resolveSystemNode();
+
+    expect(process.env.SystemRoot ?? process.env.SYSTEMROOT).toMatch(/^[A-Za-z]:[\\/]/u);
+    expect(result).not.toBeNull();
+    expect(path.isAbsolute(result?.path ?? "")).toBe(true);
+    expect(result?.path.toLowerCase()).toMatch(/\.exe$/u);
+    expect(result?.version).toMatch(/^v\d+\.\d+\.\d+$/u);
+    expect(h.appendDiagnostic).not.toHaveBeenCalled();
   });
 });
 
@@ -137,7 +241,6 @@ describe("compareNodeVersions", () => {
   });
 
   it("compares component-wise (not lexicographically)", () => {
-    // "9.0.0" must be LOWER than "10.0.0" — lexicographic compare would get this wrong.
     expect(compareNodeVersions("9.0.0", "10.0.0")).toBe(-1);
     expect(compareNodeVersions("22.5.0", "22.10.0")).toBe(-1);
   });
@@ -167,57 +270,45 @@ describe("resolvePackagedPtyHostExecOverride", () => {
 });
 
 describe("resolveHostExecPath", () => {
-  it("keeps deterministic fake hosts on Electron without starting a login shell", async () => {
-    const previous = process.env.PIVIS_TEST_HOST_SCRIPT;
+  it("keeps deterministic fake hosts on Electron without reading PATH", async () => {
     process.env.PIVIS_TEST_HOST_SCRIPT = "/tmp/fake-session-host.mjs";
-    try {
-      await expect(resolveHostExecPath()).resolves.toEqual({
-        execPath: undefined,
-        reason: "electron-node-test-host",
-      });
-      expect(h.execFileImpl).not.toHaveBeenCalled();
-      expect(h.getSubprocessEnv).not.toHaveBeenCalled();
-    } finally {
-      if (previous === undefined) delete process.env.PIVIS_TEST_HOST_SCRIPT;
-      else process.env.PIVIS_TEST_HOST_SCRIPT = previous;
-    }
+
+    await expect(resolveHostExecPath()).resolves.toEqual({
+      execPath: undefined,
+      reason: "electron-node-test-host",
+    });
+    expect(h.getSubprocessEnv).not.toHaveBeenCalled();
+    expect(h.appendDiagnostic).not.toHaveBeenCalled();
   });
 });
 
 describe("chooseHostExecPath (the retarget decision)", () => {
-  const ELECTRON_31_NODE = "20.14.0"; // Electron 31's bundled Node
+  const ELECTRON_31_NODE = "20.14.0";
 
-  it("retargets to system node when it is strictly NEWER than Electron's", () => {
-    // The cursor-sdk / node:sqlite case: user has 22.19, Electron ships 20.14.
+  it("retargets to system node when it is strictly newer than Electron's", () => {
     const decision = chooseHostExecPath({ path: "/n/node", version: "v22.19.0" }, ELECTRON_31_NODE);
     expect(decision).toEqual({ execPath: "/n/node", reason: "system-node" });
   });
 
-  it("keeps Electron's node when system node is MISSING (the fallback)", () => {
-    // Today's behavior: no node on PATH → host runs under Electron's bundled
-    // Node. Extensions needing newer built-ins still break here, but nothing
-    // regresses — this is exactly the pre-fix state.
-    const decision = chooseHostExecPath(null, ELECTRON_31_NODE);
-    expect(decision).toEqual({ execPath: undefined, reason: "electron-node-no-system" });
+  it("keeps Electron's node when system node is missing", () => {
+    expect(chooseHostExecPath(null, ELECTRON_31_NODE)).toEqual({
+      execPath: undefined,
+      reason: "electron-node-no-system",
+    });
   });
 
-  it("keeps Electron's node when system node is NOT newer (equal or older)", () => {
-    // Equal → no benefit, avoid user-node oddities (nvm shims etc.).
+  it("keeps Electron's node when system node is not newer", () => {
     expect(chooseHostExecPath({ path: "/n/node", version: "v20.14.0" }, ELECTRON_31_NODE)).toEqual({
       execPath: undefined,
       reason: "electron-node-not-newer",
     });
-    // Older → would be a downgrade.
     expect(chooseHostExecPath({ path: "/n/node", version: "v18.20.0" }, ELECTRON_31_NODE)).toEqual({
       execPath: undefined,
       reason: "electron-node-not-newer",
     });
   });
 
-  it("stops retargeting once Electron's bundled node catches up (adapts to a future bump)", () => {
-    // If Pi-Vis ships an Electron whose bundled Node already covers node:sqlite
-    // (Node ≥ 22.5), and the user's node is equal/older, the retarget correctly
-    // goes dormant — no floor constant to maintain.
+  it("stops retargeting once Electron's bundled node catches up", () => {
     const futureElectron = "22.18.0";
     expect(chooseHostExecPath({ path: "/n/node", version: "v22.5.0" }, futureElectron)).toEqual({
       execPath: undefined,

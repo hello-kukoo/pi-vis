@@ -1,19 +1,124 @@
-import { execFile } from "node:child_process";
 import path from "node:path";
-import { promisify } from "node:util";
+import { performance } from "node:perf_hooks";
 import { getSubprocessEnv } from "../auth.js";
+import {
+  boundedProcessFailureKind,
+  captureProcessOutput,
+  resolveWindowsSystemUtilityPath,
+} from "../bounded-process.js";
+import { appendDiagnostic } from "../diagnostics.js";
 
-const execFileAsync = promisify(execFile);
+interface NodeLocation {
+  path: string;
+  version: string;
+}
 
-let cached: { path: string; version: string } | null = null;
+const NODE_RESOLUTION_TIMEOUT_MS = 5_000;
+const NODE_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/u;
 
-async function runCommand(file: string, args: string[]): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(file, args, { timeout: 5000 });
-    return stdout.trim();
-  } catch {
-    return null;
+let cached: NodeLocation | null = null;
+let nodeResolutionInFlight: Promise<NodeLocation | null> | null = null;
+
+function remainingProbeTime(deadline: number): number | null {
+  const remaining = Math.ceil(deadline - performance.now());
+  return remaining > 0 ? remaining : null;
+}
+
+function firstNonEmptyLine(stdout: string): string | null {
+  return (
+    stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? null
+  );
+}
+
+async function locateNodeShim(env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string | null> {
+  if (process.platform === "win32") {
+    const wherePath = resolveWindowsSystemUtilityPath(process.env, "where.exe");
+    if (!wherePath) return null;
+    const { stdout } = await captureProcessOutput(wherePath, ["node"], { timeoutMs, env });
+    return firstNonEmptyLine(stdout);
   }
+
+  // A fixed non-interactive shell performs PATH lookup inside the bounded
+  // process group. The login environment was already captured by auth.ts, so
+  // sourcing user startup files again would only reintroduce launch latency.
+  const { stdout } = await captureProcessOutput("/bin/sh", ["-c", "command -v node"], {
+    timeoutMs,
+    env,
+  });
+  return firstNonEmptyLine(stdout);
+}
+
+async function probeNodeVersion(
+  candidate: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<string | null> {
+  const result =
+    process.platform === "win32"
+      ? await captureProcessOutput(candidate, ["--version"], { timeoutMs, env })
+      : await captureProcessOutput(
+          "/bin/sh",
+          ["-c", 'exec "$1" --version', "pivis-node-probe", candidate],
+          { timeoutMs, env },
+        );
+  return (
+    result.stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => NODE_VERSION_PATTERN.test(line)) ?? null
+  );
+}
+
+function recordNodeResolutionFailure(
+  stage: "environment" | "locate" | "version",
+  reason: string,
+): null {
+  appendDiagnostic("host-startup", "node-resolution-failed", undefined, {
+    stage,
+    reason,
+  });
+  return null;
+}
+
+async function performNodeResolution(): Promise<NodeLocation | null> {
+  const deadline = performance.now() + NODE_RESOLUTION_TIMEOUT_MS;
+  let validateEnv: Record<string, string>;
+  try {
+    validateEnv = await getSubprocessEnv();
+  } catch {
+    return recordNodeResolutionFailure("environment", "environment-failed");
+  }
+
+  let candidate: string | null;
+  try {
+    const timeoutMs = remainingProbeTime(deadline);
+    if (timeoutMs === null) {
+      return recordNodeResolutionFailure("locate", "timeout");
+    }
+    candidate = await locateNodeShim(validateEnv, timeoutMs);
+  } catch (error) {
+    return recordNodeResolutionFailure("locate", boundedProcessFailureKind(error));
+  }
+  if (!candidate) return recordNodeResolutionFailure("locate", "not-found");
+
+  let version: string | null;
+  try {
+    const timeoutMs = remainingProbeTime(deadline);
+    if (timeoutMs === null) {
+      return recordNodeResolutionFailure("version", "timeout");
+    }
+    version = await probeNodeVersion(candidate, validateEnv, timeoutMs);
+  } catch (error) {
+    return recordNodeResolutionFailure("version", boundedProcessFailureKind(error));
+  }
+  if (!version) return recordNodeResolutionFailure("version", "invalid-output");
+
+  const result = { path: candidate, version };
+  cached = result;
+  return result;
 }
 
 /**
@@ -44,55 +149,27 @@ export function compareNodeVersions(a: string, b: string): -1 | 0 | 1 {
  * Resolve the user's system `node` — the same Node that `pi` itself runs under
  * (pi is a `#!/usr/bin/env node` script on the login-shell PATH).
  *
- * Mirrors locate-pi.ts: macOS GUI apps don't inherit shell PATH, so we resolve
- * `node` via the login shell first (`command -v node`), then plain `which`, and
- * validate with `--version` under the login-shell env (getSubprocessEnv).
+ * macOS GUI apps don't inherit shell PATH, so the already-captured login-shell
+ * environment supplies the expected PATH. A bounded non-interactive lookup
+ * retains the selected executable path (including a Volta/mise/asdf shim), and
+ * a second bounded probe validates its version. Retaining the shim matters:
+ * SessionHost later executes it with the workspace as cwd, allowing a version
+ * manager to apply that project's Node selection instead of freezing whatever
+ * `process.execPath` happened to resolve from the app's launch directory.
  *
- * Returns null if no `node` is found or `--version` fails. Cached for the
- * process lifetime (a Node install won't change while the app is open); a null
- * result is NOT cached, matching locate-pi, so a transiently-unresolvable node
- * is retried on the next session activation.
+ * Success is cached for the process lifetime. Concurrent callers share one
+ * lookup; a failed lookup is retried by the next caller, preserving the prior
+ * transient-failure behavior.
  */
-export async function resolveSystemNode(): Promise<{ path: string; version: string } | null> {
+export async function resolveSystemNode(): Promise<NodeLocation | null> {
   if (cached) return cached;
+  if (nodeResolutionInFlight) return nodeResolutionInFlight;
 
-  const candidates: string[] = [];
-
-  // macOS GUI apps don't inherit shell PATH — use login shell to resolve.
-  // execFile avoids interpolating SHELL through a shell (environment values can
-  // contain spaces/metacharacters and must never become shell syntax).
-  const shell = process.env.SHELL || "/bin/bash";
-  const shellPath = await runCommand(shell, ["-ilc", "command -v node"]);
-  if (shellPath) candidates.push(shellPath);
-
-  const whichPath = await runCommand("which", ["node"]);
-  if (whichPath) candidates.push(whichPath);
-
-  if (candidates.length === 0) return null;
-
-  // Validate under the login-shell env (same rationale as locate-pi: a
-  // GUI-launched app has a stripped PATH, and we want the same `node` the
-  // login shell would hand to `pi`'s shebang).
-  const validateEnv = await getSubprocessEnv();
-
-  for (const candidate of candidates) {
-    try {
-      // execFile (not exec) so a path with spaces / shell metachars is safe.
-      const { stdout } = await execFileAsync(candidate, ["--version"], {
-        timeout: 5000,
-        env: validateEnv,
-      });
-      const version = stdout.trim(); // e.g. "v22.19.0"
-      if (version) {
-        cached = { path: candidate, version };
-        return cached;
-      }
-    } catch {
-      // try next candidate
-    }
-  }
-
-  return null;
+  const operation = performNodeResolution().finally(() => {
+    if (nodeResolutionInFlight === operation) nodeResolutionInFlight = null;
+  });
+  nodeResolutionInFlight = operation;
+  return operation;
 }
 
 export function clearNodeLocationCache(): void {
@@ -168,8 +245,8 @@ export function chooseHostExecPath(
  * newer-Node-built-in extensions (like @cursor/sdk's sqlite store) working.
  * Returns `{ execPath: <node path> }` to retarget the host onto the user's Node.
  *
- * Cached transitively via {@link resolveSystemNode} (one login-shell round-trip
- * per app lifetime).
+ * Cached transitively via {@link resolveSystemNode}; Node resolution reuses the
+ * single captured environment and performs no additional login-shell round trip.
  */
 export function resolvePackagedPtyHostExecOverride(
   env: NodeJS.ProcessEnv = process.env,
